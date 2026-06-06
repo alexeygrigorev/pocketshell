@@ -40,6 +40,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
 import com.pocketshell.app.conversation.LocalConversationFontSizeSp
 import com.pocketshell.app.costs.CostsScreen
+import com.pocketshell.app.crash.CrashReportContext
+import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.crash.CrashReportsScreen
 import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
@@ -601,6 +603,7 @@ private fun AppNavigator(
     // navigation, including the initial restored destination.
     LaunchedEffect(current) {
         StartupTiming.mark("app-navigator-current", "destination" to current.timingName())
+        CrashReporter.updateContext(current.crashReportContext())
         onCurrentDestinationChanged(current)
     }
 
@@ -1564,6 +1567,91 @@ internal fun AppDestination.timingName(): String = when (this) {
     is AppDestination.FileViewer -> "FileViewer(hostId=$hostId)"
     is AppDestination.FileExplorer -> "FileExplorer(hostId=$hostId)"
     is AppDestination.RecurringJobs -> "RecurringJobs(session=$sessionName)"
+}
+
+internal fun AppDestination.crashReportContext(): CrashReportContext = when (this) {
+    AppDestination.HostList -> CrashReportContext(screen = "Hosts")
+    AppDestination.AddHost -> CrashReportContext(screen = "Add host")
+    is AppDestination.EditHost -> CrashReportContext(
+        screen = "Edit host",
+        action = "hostId=$hostId",
+    )
+    AppDestination.Scan -> CrashReportContext(screen = "QR scanner")
+    AppDestination.CrashReports -> CrashReportContext(screen = "Crash reports")
+    AppDestination.Settings -> CrashReportContext(screen = "Settings")
+    AppDestination.Usage -> CrashReportContext(screen = "Usage")
+    AppDestination.AiCosts -> CrashReportContext(screen = "AI costs")
+    AppDestination.PortForwardChooser -> CrashReportContext(screen = "Port forwarding chooser")
+    is AppDestination.Session -> CrashReportContext(
+        screen = "SSH session",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+    )
+    is AppDestination.PortForwardPanel -> CrashReportContext(
+        screen = "Port forwarding",
+        action = listOfNotNull(
+            "hostId=$hostId",
+            prefillRemotePort?.let { "port=$it" },
+        ).joinToString(" ").ifBlank { null },
+    )
+    is AppDestination.WatchedFolders -> CrashReportContext(
+        screen = "Watched folders",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+    )
+    is AppDestination.TmuxSession -> CrashReportContext(
+        screen = "Tmux session",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+        sessionName = sessionName,
+        startDirectory = startDirectory,
+    )
+    is AppDestination.FolderList -> CrashReportContext(
+        screen = "Folders",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+    )
+    is AppDestination.RepoBrowser -> CrashReportContext(
+        screen = "Repos",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+        startDirectory = cloneRoot,
+    )
+    is AppDestination.EnvFiles -> CrashReportContext(
+        screen = "Env files",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+        startDirectory = directory,
+        action = folderLabel,
+    )
+    is AppDestination.FileViewer -> CrashReportContext(
+        screen = "File viewer",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+        startDirectory = cwd,
+        action = remotePath,
+    )
+    is AppDestination.FileExplorer -> CrashReportContext(
+        screen = "File explorer",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+        startDirectory = startDir,
+    )
+    is AppDestination.RecurringJobs -> CrashReportContext(
+        screen = "Recurring jobs",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+        sessionName = sessionName,
+    )
 }
 
 private const val DefaultTmuxSessionName = "pocketshell"

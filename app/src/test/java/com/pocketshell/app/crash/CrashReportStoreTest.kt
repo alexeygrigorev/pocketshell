@@ -21,12 +21,22 @@ class CrashReportStoreTest {
             throwable = IllegalArgumentException("bad host"),
             threadName = "worker",
             metadata = metadata,
+            context = context,
         )
 
         assertEquals("20260522-101530-000", report.id)
         assertEquals("IllegalArgumentException: bad host", report.summary)
+        assertEquals(
+            "Tmux session · host=devbox · session=agent-main · cwd=/home/alexey/git/pocketshell",
+            report.contextSummary,
+        )
+        assertEquals("0.1.0", report.appVersion)
+        assertTrue(report.topFrame?.contains("CrashReportStoreTest") == true)
         assertTrue(report.file.exists())
         assertTrue(store.read(report).contains("Thread: worker"))
+        assertTrue(store.read(report).contains("Screen: Tmux session"))
+        assertTrue(store.read(report).contains("Session: agent-main"))
+        assertTrue(store.read(report).contains("Top frame:"))
         assertTrue(store.read(report).contains("IllegalArgumentException: bad host"))
     }
 
@@ -60,6 +70,26 @@ class CrashReportStoreTest {
         assertEquals("RuntimeException: older", reports[1].summary)
     }
 
+    @Test
+    fun listReturnsCapturedContextAppVersionAndTopFrame() {
+        val store = storeAt("2026-05-22T10:15:30Z")
+        store.save(
+            throwable = IllegalStateException("agent pane failed"),
+            threadName = "main",
+            metadata = metadata,
+            context = context,
+        )
+
+        val report = store.list().single()
+
+        assertEquals(
+            "Tmux session · host=devbox · session=agent-main · cwd=/home/alexey/git/pocketshell",
+            report.contextSummary,
+        )
+        assertEquals("0.1.0", report.appVersion)
+        assertTrue(report.topFrame?.contains("CrashReportStoreTest") == true)
+    }
+
     private fun storeAt(instant: String): CrashReportStore =
         CrashReportStore(
             directory = temporaryFolder.newFolder(),
@@ -72,6 +102,14 @@ class CrashReportStoreTest {
             androidRelease = "15",
             sdkInt = 35,
             device = "test-device",
+        )
+        val context = CrashReportContext(
+            screen = "Tmux session",
+            hostName = "devbox",
+            hostname = "dev.example",
+            username = "alexey",
+            sessionName = "agent-main",
+            startDirectory = "/home/alexey/git/pocketshell",
         )
     }
 }

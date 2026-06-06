@@ -15,6 +15,7 @@ class CrashReportStore(
         throwable: Throwable,
         threadName: String,
         metadata: CrashReportMetadata,
+        context: CrashReportContext = CrashReportContext.Unknown,
     ): CrashReport {
         directory.mkdirs()
         val timestamp = Instant.now(clock)
@@ -25,6 +26,7 @@ class CrashReportStore(
             threadName = threadName,
             timestamp = timestamp,
             metadata = metadata,
+            context = context,
         )
         file.writeText(body)
         return CrashReport(
@@ -32,6 +34,9 @@ class CrashReportStore(
             timestamp = timestamp,
             file = file,
             summary = CrashReportFormatter.summary(throwable),
+            contextSummary = context.summary(),
+            appVersion = metadata.appVersion,
+            topFrame = CrashReportFormatter.topFrame(throwable),
         )
     }
 
@@ -47,6 +52,10 @@ class CrashReportStore(
                         ?: Instant.ofEpochMilli(file.lastModified()),
                     file = file,
                     summary = firstExceptionLine(file),
+                    contextSummary = contextSummary(file),
+                    appVersion = firstHeaderValue(file, "App version"),
+                    topFrame = firstHeaderValue(file, "Top frame")
+                        ?.takeUnless { it.equals("unknown", ignoreCase = true) },
                 )
             }
             .sortedByDescending { it.timestamp }
@@ -74,6 +83,32 @@ class CrashReportStore(
             ?.trim()
             ?.toSimpleThrowableName()
             ?: "Crash report"
+
+    private fun contextSummary(file: File): String {
+        val lines = file.readLines()
+        val screen = firstHeaderValue(lines, "Screen") ?: return "Context unavailable"
+        val context = CrashReportContext(
+            screen = screen,
+            hostName = firstHeaderValue(lines, "Host"),
+            hostname = firstHeaderValue(lines, "Hostname"),
+            username = firstHeaderValue(lines, "User"),
+            sessionName = firstHeaderValue(lines, "Session"),
+            startDirectory = firstHeaderValue(lines, "Directory"),
+            action = firstHeaderValue(lines, "Action"),
+        )
+        return context.summary()
+    }
+
+    private fun firstHeaderValue(file: File, key: String): String? =
+        firstHeaderValue(file.readLines(), key)
+
+    private fun firstHeaderValue(lines: List<String>, key: String): String? {
+        val prefix = "$key:"
+        return lines.firstOrNull { it.startsWith(prefix) }
+            ?.removePrefix(prefix)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
 
     private fun String.toSimpleThrowableName(): String {
         val colonIndex = indexOf(':').takeIf { it >= 0 } ?: length

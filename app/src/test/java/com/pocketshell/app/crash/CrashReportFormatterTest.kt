@@ -18,6 +18,14 @@ class CrashReportFormatterTest {
                 sdkInt = 35,
                 device = "Google Pixel",
             ),
+            context = CrashReportContext(
+                screen = "Tmux session",
+                hostName = "devbox",
+                hostname = "dev.example",
+                username = "alexey",
+                sessionName = "agent-main",
+                startDirectory = "/home/alexey/git/pocketshell",
+            ),
         )
 
         assertTrue(report.contains("PocketShell crash report"))
@@ -26,6 +34,15 @@ class CrashReportFormatterTest {
         assertTrue(report.contains("Android: 15 (SDK 35)"))
         assertTrue(report.contains("Device: Google Pixel"))
         assertTrue(report.contains("Thread: main"))
+        assertTrue(report.contains("Context"))
+        assertTrue(report.contains("Screen: Tmux session"))
+        assertTrue(report.contains("Host: devbox"))
+        assertTrue(report.contains("Hostname: dev.example"))
+        assertTrue(report.contains("User: alexey"))
+        assertTrue(report.contains("Session: agent-main"))
+        assertTrue(report.contains("Directory: /home/alexey/git/pocketshell"))
+        assertTrue(report.contains("Exception summary: IllegalStateException: session failed"))
+        assertTrue(report.contains("Top frame:"))
         assertTrue(report.contains("IllegalStateException: session failed"))
         assertTrue(report.contains("not uploaded automatically"))
         assertFalse(report.contains("logcat"))

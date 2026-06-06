@@ -344,7 +344,8 @@ private fun CrashReportRow(
 ) {
     val border = if (selected) PocketShellColors.Accent else PocketShellColors.BorderSoft
     ListRow(
-        title = report.summary,
+        title = crashReportRowTitle(report),
+        subtitle = crashReportRowSubtitle(report),
         modifier = Modifier
             .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
             .border(1.dp, border, RoundedCornerShape(8.dp)),
@@ -383,6 +384,16 @@ private fun CrashReportDetail(
                 )
                 Text(
                     text = report.id,
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                )
+                Text(
+                    text = ReportTimeFormatter.format(report.timestamp.atZone(ZoneId.systemDefault())),
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                )
+                Text(
+                    text = crashReportRowSubtitle(report),
                     color = PocketShellColors.TextMuted,
                     fontSize = 11.sp,
                 )
@@ -481,6 +492,17 @@ private fun ActionButton(
 
 private val ReportTimeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
+
+internal fun crashReportRowTitle(report: CrashReport): String =
+    report.summary
+
+internal fun crashReportRowSubtitle(report: CrashReport): String =
+    listOfNotNull(
+        report.contextSummary.takeIf { it.isNotBlank() },
+        report.appVersion?.takeIf { it.isNotBlank() }?.let { "app=$it" },
+        report.topFrame?.takeIf { it.isNotBlank() }?.let { "top=$it" },
+    ).joinToString(" · ")
+        .ifBlank { "Context unavailable" }
 
 private fun shareReportsArchive(context: android.content.Context, archive: java.io.File) {
     val uri = FileProvider.getUriForFile(

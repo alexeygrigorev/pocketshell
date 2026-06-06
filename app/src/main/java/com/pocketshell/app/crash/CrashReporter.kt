@@ -3,9 +3,11 @@ package com.pocketshell.app.crash
 import android.content.Context
 import android.os.Build
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 
 object CrashReporter {
     private const val DirectoryName = "crash-reports"
+    private val currentContext = AtomicReference(CrashReportContext.Unknown)
 
     fun install(context: Context) {
         val appContext = context.applicationContext
@@ -17,9 +19,14 @@ object CrashReporter {
             ReportingUncaughtExceptionHandler(
                 store = store,
                 metadataProvider = { appContext.crashReportMetadata() },
+                contextProvider = { currentContext.get() },
                 delegate = previous,
             ),
         )
+    }
+
+    fun updateContext(next: CrashReportContext) {
+        currentContext.set(next)
     }
 
     fun store(context: Context): CrashReportStore =
@@ -32,6 +39,7 @@ object CrashReporter {
 class ReportingUncaughtExceptionHandler(
     private val store: CrashReportStore,
     private val metadataProvider: () -> CrashReportMetadata,
+    private val contextProvider: () -> CrashReportContext,
     private val delegate: Thread.UncaughtExceptionHandler?,
 ) : Thread.UncaughtExceptionHandler {
     override fun uncaughtException(thread: Thread, throwable: Throwable) {
@@ -40,6 +48,7 @@ class ReportingUncaughtExceptionHandler(
                 throwable = throwable,
                 threadName = thread.name,
                 metadata = metadataProvider(),
+                context = contextProvider(),
             )
         }
 

@@ -46,6 +46,13 @@ internal class FakeTmuxClient : TmuxClient {
 
     override val events: Flow<ControlEvent> = emittedEvents
 
+    var decoupleOutputForFromEvents: Boolean = false
+
+    val emittedPaneOutputs: MutableSharedFlow<ControlEvent.Output> = MutableSharedFlow(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+
     /**
      * Issue #173: test-controllable disconnection signal so tests can
      * simulate the production [TmuxClient.readerLoop] exit (e.g. socket
@@ -161,9 +168,13 @@ internal class FakeTmuxClient : TmuxClient {
     }
 
     override fun outputFor(paneId: String): Flow<ControlEvent.Output> =
-        emittedEvents
-            .filterIsInstance<ControlEvent.Output>()
-            .filter { it.paneId == paneId }
+        if (decoupleOutputForFromEvents) {
+            emittedPaneOutputs.filter { it.paneId == paneId }
+        } else {
+            emittedEvents
+                .filterIsInstance<ControlEvent.Output>()
+                .filter { it.paneId == paneId }
+        }
 
     var setWindowSizeLatestResponse: CommandResponse = CommandResponse(
         number = 0L,

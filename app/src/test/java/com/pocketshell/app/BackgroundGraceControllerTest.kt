@@ -1,5 +1,7 @@
 package com.pocketshell.app
 
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
@@ -171,7 +173,12 @@ class BackgroundGraceControllerTest {
     @Test
     fun `real app fanout drops deferred network reconnect on within-grace resume`() = runTest {
         val events = mutableListOf<String>()
-        var pendingNetworkChange = true
+        var pendingNetworkChange: TerminalNetworkChange? = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+            current = TerminalNetworkSnapshot.Validated("wifi"),
+            previousValidated = null,
+            reason = "initial-validated-network",
+        )
         val controller = BackgroundGraceController(
             scope = backgroundScope,
             graceMillis = graceMillis,
@@ -183,12 +190,15 @@ class BackgroundGraceControllerTest {
                 events += "ssh:start"
                 if (!resumedWithinGrace) {
                     events += "tmux:foreground"
-                    if (pendingNetworkChange) {
+                    if (pendingNetworkChange != null) {
                         events += "network:dispatch"
-                        pendingNetworkChange = false
+                        pendingNetworkChange = null
                     }
+                } else if (pendingNetworkChange?.isRealValidatedIdentityChange == true) {
+                    events += "network:dispatch"
+                    pendingNetworkChange = null
                 } else {
-                    pendingNetworkChange = false
+                    pendingNetworkChange = null
                 }
             },
         )
@@ -205,7 +215,65 @@ class BackgroundGraceControllerTest {
             listOf("ssh:start"),
             events,
         )
-        assertFalse("pending network change should be consumed", pendingNetworkChange)
+        assertEquals("pending network change should be consumed", null, pendingNetworkChange)
+    }
+
+    @Test
+    fun `real app fanout dispatches deferred real network handoff on within-grace resume`() = runTest {
+        val events = mutableListOf<String>()
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = { events += "tmux:background" },
+                onForeground = { events += "tmux:foreground" },
+                onNetworkChanged = { change -> events += "network:${change.reason}" },
+            ),
+        )
+        var pendingNetworkChange: TerminalNetworkChange? = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "wifi-cellular-handoff",
+        )
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onBackground() }
+                events += "ssh:stop"
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "ssh:start"
+                if (!resumedWithinGrace) {
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                    pendingNetworkChange?.let { change ->
+                        activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(change) }
+                        pendingNetworkChange = null
+                    }
+                } else if (pendingNetworkChange?.isRealValidatedIdentityChange == true) {
+                    val change = pendingNetworkChange!!
+                    pendingNetworkChange = null
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(change) }
+                } else {
+                    pendingNetworkChange = null
+                }
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis / 2)
+        runCurrent()
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            "a real validated handoff during grace must still reach tmux without detach",
+            listOf("ssh:start", "network:wifi-cellular-handoff"),
+            events,
+        )
+        assertEquals("pending network change should be consumed", null, pendingNetworkChange)
     }
 
     @Test
@@ -258,4 +326,21 @@ class BackgroundGraceControllerTest {
                 events += "foreground:resumedWithinGrace=$resumedWithinGrace"
             },
         )
+
+    private fun terminalNetworkChange(
+        previous: TerminalNetworkSnapshot,
+        current: TerminalNetworkSnapshot.Validated,
+        previousValidated: TerminalNetworkSnapshot.Validated?,
+        reason: String,
+    ): TerminalNetworkChange =
+        TerminalNetworkChange(
+            previous = previous,
+            current = current,
+            previousValidated = previousValidated,
+            reason = reason,
+            sequence = 1L,
+        )
+
+    private val TerminalNetworkChange.isRealValidatedIdentityChange: Boolean
+        get() = previousValidated != null && previousValidated != current
 }

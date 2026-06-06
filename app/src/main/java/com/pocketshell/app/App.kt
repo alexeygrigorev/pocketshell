@@ -156,6 +156,8 @@ class App : Application() {
                 dispatchTmuxForeground()
                 drainPendingTerminalNetworkChange()
                 terminalNetworkObserver.refresh("process-foreground")
+            } else if (pendingTerminalNetworkChange?.isRealValidatedIdentityChange == true) {
+                drainPendingTerminalNetworkChange()
             } else {
                 pendingTerminalNetworkChange = null
             }
@@ -240,6 +242,9 @@ class App : Application() {
             }
         }
     }
+
+    private val TerminalNetworkChange.isRealValidatedIdentityChange: Boolean
+        get() = previousValidated != null && previousValidated != current
 
     private fun dispatchTmuxBackground() {
         val hooks = activeTmuxClients.lifecycleHooksSnapshot()

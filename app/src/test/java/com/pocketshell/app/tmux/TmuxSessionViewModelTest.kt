@@ -1156,6 +1156,63 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun outputForOnlyTerminalOutputKeepsNetworkHintFromShowingReconnect() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
+        val client = FakeTmuxClient()
+        client.decoupleOutputForFromEvents = true
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    "%0",
+                    "@0",
+                    "\$0",
+                    "work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        client.emittedPaneOutputs.emit(ControlEvent.Output("%0", "visible via outputFor".toByteArray()))
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                current = TerminalNetworkSnapshot.Validated("wifi"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "same-network-hint-after-outputFor-only-output",
+            ),
+        )
+        runCurrent()
+
+        assertTrue(
+            "visible output delivered without client.events %output must still suppress same-network reconnect",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(0, connector.connectCount)
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+    }
+
+    @Test
     fun realNetworkIdentityChangeDuringActiveTerminalOutputStillReconnects() = runTest {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())

@@ -430,6 +430,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // would also stop them, but we want to release the bridge cleanly
     // mid-lifecycle when a single pane closes.
     private val paneProducerJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    private val paneOutputActivityJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
     // Issue #423: track recent terminal-surface recovery attempts per pane.
     // A single IME/resize/render exception recovers transparently by
@@ -1576,6 +1577,8 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef = null
         paneRows.clear()
         paneProducerJobs.clear()
+        paneOutputActivityJobs.values.forEach { it.cancel() }
+        paneOutputActivityJobs.clear()
         paneInputQueues.clear()
         paneInputJobs.clear()
         paneSurfaceRecoveryTimestamps.clear()
@@ -1608,10 +1611,12 @@ public class TmuxSessionViewModel @Inject constructor(
             val producerActive = paneProducerJobs[paneId]?.isActive == true
             val inputActive = paneInputJobs[paneId]?.isActive == true
             if (producerActive && inputActive && pane.terminalState.isAttached) {
+                startPaneOutputActivityForPane(paneId = paneId, client = client)
                 startPortDetectionForPane(paneId = paneId, client = client)
                 continue
             }
             paneProducerJobs.remove(paneId)?.cancel()
+            paneOutputActivityJobs.remove(paneId)?.cancel()
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             pane.terminalState.detachExternalProducer()
@@ -1657,6 +1662,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneRows.putAll(runtime.paneRows)
         paneProducerJobs.clear()
         paneProducerJobs.putAll(runtime.paneProducerJobs)
+        paneOutputActivityJobs.clear()
         paneInputQueues.clear()
         paneInputQueues.putAll(runtime.paneInputQueues)
         paneInputJobs.clear()
@@ -3051,7 +3057,6 @@ public class TmuxSessionViewModel @Inject constructor(
             is ControlEvent.LayoutChange,
             -> reconcilePanes()
             is ControlEvent.Output -> {
-                lastPaneOutputAtElapsedMs = SystemClock.elapsedRealtime()
                 logFirstPaneOutput(event)
             }
             else -> Unit
@@ -3247,6 +3252,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val gonePaneIds = paneRows.keys - nextById.keys
         for (paneId in gonePaneIds) {
             paneProducerJobs.remove(paneId)?.cancel()
+            paneOutputActivityJobs.remove(paneId)?.cancel()
             // Issue #448: stop the new-port detector for a removed pane.
             panePortDetectorJobs.remove(paneId)?.cancel()
             paneAgentJobs.remove(paneId)?.cancel()
@@ -3287,6 +3293,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }.onSuccess { job ->
             paneProducerJobs[paneId] = job
+            startPaneOutputActivityForPane(paneId = paneId, client = client)
             // Issue #448 (epic #432 slice C): tap the same shared output
             // flow for new-port detection whenever a pane's producer is
             // (re)attached — cold attach, warm switch, surface recreate.
@@ -3298,6 +3305,21 @@ public class TmuxSessionViewModel @Inject constructor(
                 cause,
             )
         }
+    }
+
+    private fun startPaneOutputActivityForPane(paneId: String, client: TmuxClient) {
+        if (paneOutputActivityJobs[paneId]?.isActive == true) return
+        paneOutputActivityJobs[paneId]?.cancel()
+        paneOutputActivityJobs[paneId] = bridgeScope.launch {
+            client.outputFor(paneId).collect { event ->
+                recordVisiblePaneOutput(event)
+            }
+        }
+    }
+
+    private fun recordVisiblePaneOutput(event: ControlEvent.Output) {
+        lastPaneOutputAtElapsedMs = SystemClock.elapsedRealtime()
+        logFirstPaneOutput(event)
     }
 
     /**
@@ -3394,6 +3416,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
         paneProducerJobs.remove(overflow.paneId)?.cancel()
+        paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
         panePortDetectorJobs.remove(overflow.paneId)?.cancel()
         runCatching { existing.terminalState.detachExternalProducer() }
 
@@ -3442,6 +3465,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
         paneProducerJobs.remove(paneId)?.cancel()
+        paneOutputActivityJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
         runCatching { existing.terminalState.detachExternalProducer() }
@@ -3510,6 +3534,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val existing = paneRows[paneId] ?: return
         paneSurfaceRecoveryTimestamps.remove(paneId)
         paneProducerJobs.remove(paneId)?.cancel()
+        paneOutputActivityJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
         runCatching { existing.terminalState.detachExternalProducer() }
@@ -5731,9 +5756,11 @@ public class TmuxSessionViewModel @Inject constructor(
         projectRootsJob = null
         _projectRoots.value = emptyList()
         val producerJobsToJoin = paneProducerJobs.values.toList()
+        val outputActivityJobsToJoin = paneOutputActivityJobs.values.toList()
         val agentJobsToJoin = paneAgentJobs.values.toList()
         val inputJobsToJoin = paneInputJobs.values.toList()
         for (job in producerJobsToJoin) job.cancelAndJoin()
+        for (job in outputActivityJobsToJoin) job.cancelAndJoin()
         for (job in agentJobsToJoin) job.cancelAndJoin()
         for (job in inputJobsToJoin) job.cancelAndJoin()
         for ((_, queue) in paneInputQueues) {
@@ -5747,6 +5774,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
+        paneOutputActivityJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
         }
@@ -5823,9 +5851,11 @@ public class TmuxSessionViewModel @Inject constructor(
         projectRootsJob = null
         _projectRoots.value = emptyList()
         val producerJobsToJoin = paneProducerJobs.values.toList()
+        val outputActivityJobsToJoin = paneOutputActivityJobs.values.toList()
         val agentJobsToJoin = paneAgentJobs.values.toList()
         val inputJobsToJoin = paneInputJobs.values.toList()
         for (job in producerJobsToJoin) job.cancelAndJoin()
+        for (job in outputActivityJobsToJoin) job.cancelAndJoin()
         for (job in agentJobsToJoin) job.cancelAndJoin()
         for (job in inputJobsToJoin) job.cancelAndJoin()
         for ((_, queue) in paneInputQueues) {
@@ -5839,6 +5869,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
+        paneOutputActivityJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
         }
@@ -5947,6 +5978,9 @@ public class TmuxSessionViewModel @Inject constructor(
         for ((_, job) in paneProducerJobs) {
             job.cancel()
         }
+        for ((_, job) in paneOutputActivityJobs) {
+            job.cancel()
+        }
         for ((_, job) in paneAgentJobs) {
             job.cancel()
         }
@@ -5964,6 +5998,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
+        paneOutputActivityJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
         }

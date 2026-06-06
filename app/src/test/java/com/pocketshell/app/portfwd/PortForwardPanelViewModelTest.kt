@@ -27,6 +27,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.advanceTimeBy
@@ -684,6 +685,24 @@ class PortForwardPanelViewModelTest {
             "panel disposal must not unregister the foreground-service-backed host",
             1,
             forwardingController.flowOfActiveHostCount().value,
+        )
+        assertEquals(
+            "notification input must keep the dismissed panel's host name",
+            "dev",
+            forwardingController.flowOfPrimaryHostName().value,
+        )
+        assertEquals(
+            "notification input must keep the dismissed panel's tunnel count",
+            1,
+            forwardingController.flowOfTotalTunnelCount().value,
+        )
+        val chipState = SessionForwardingIndicatorViewModel(forwardingController)
+            .stateFor(hostId)
+            .first { it.visible }
+        assertEquals(
+            "session indicator must remain visible after the panel is dismissed",
+            1,
+            chipState.tunnelCount,
         )
         assertFalse("active forwarding must outlive panel disposal", session.closed)
         assertTrue(session.openedForwards.single().isActive)

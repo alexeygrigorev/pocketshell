@@ -15,6 +15,23 @@ enum class HostDetailViewMode {
 }
 
 /**
+ * Speech-to-text backend used by the prompt composer mic.
+ *
+ * [OpenAiWhisper] is the existing buffered WAV -> OpenAI Whisper path. It
+ * requires a saved OpenAI API key and keeps the local no-speech/silence guard
+ * before upload. [AndroidSpeech] delegates recognition to Android's system
+ * [android.speech.SpeechRecognizer] service, usually backed by Google on GMS
+ * devices. That path does not need an OpenAI key and can surface partial
+ * hypotheses while the user is still speaking, but availability, language
+ * support, network use, and privacy handling depend on the installed recognizer
+ * service.
+ */
+enum class VoiceTranscriptionProvider {
+    OpenAiWhisper,
+    AndroidSpeech,
+}
+
+/**
  * Snapshot of all PocketShell user-tunable settings exposed by the
  * settings surface introduced in issue #112.
  *
@@ -56,6 +73,10 @@ enum class HostDetailViewMode {
  *   Issue #185 raised the minimum bound to 2s; issue #397 makes the
  *   default much more conservative so natural pauses and quieter speech
  *   from a distant phone do not cut dictation off mid-thought.
+ * @property voiceTranscriptionProvider speech-to-text backend for prompt
+ *   composer voice input. Defaults to [VoiceTranscriptionProvider.OpenAiWhisper]
+ *   so existing users keep the current Whisper behaviour until they opt into
+ *   the Android/system recognizer.
  */
 data class AppSettings(
     val terminalFontSizeSp: Float = DEFAULT_TERMINAL_FONT_SP,
@@ -64,6 +85,7 @@ data class AppSettings(
     val defaultHostId: Long? = null,
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,
     val voiceSilenceThresholdSeconds: Float = DEFAULT_VOICE_SILENCE_SECONDS,
+    val voiceTranscriptionProvider: VoiceTranscriptionProvider = DEFAULT_VOICE_TRANSCRIPTION_PROVIDER,
     val showSystemNotes: Boolean = DEFAULT_SHOW_SYSTEM_NOTES,
     val hostDetailViewMode: HostDetailViewMode = HostDetailViewMode.Tree,
     /**
@@ -163,6 +185,9 @@ data class AppSettings(
          */
         const val DEFAULT_VOICE_SILENCE_SECONDS: Float = 30f
         const val VOICE_SILENCE_STEP_SECONDS: Float = 1f
+
+        val DEFAULT_VOICE_TRANSCRIPTION_PROVIDER: VoiceTranscriptionProvider =
+            VoiceTranscriptionProvider.OpenAiWhisper
 
         /**
          * Default for [AppSettings.showSystemNotes] — issue #176. When

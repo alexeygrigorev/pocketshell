@@ -177,6 +177,16 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `setVoiceTranscriptionProvider flows through to repository`() {
+        val vm = newVm()
+        vm.setVoiceTranscriptionProvider(VoiceTranscriptionProvider.AndroidSpeech)
+        assertEquals(
+            VoiceTranscriptionProvider.AndroidSpeech,
+            repo.settings.value.voiceTranscriptionProvider,
+        )
+    }
+
+    @Test
     fun `setVoiceSilenceThresholdSeconds flows through to repository`() {
         val vm = newVm()
         vm.setVoiceSilenceThresholdSeconds(2.0f)

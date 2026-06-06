@@ -5,6 +5,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
@@ -129,12 +130,46 @@ class PromptComposerViewModelTest {
     private class FakeVoiceSettings(
         private var window: Long = PromptComposerViewModel.SILENCE_WINDOW_MS,
         private var language: String? = null,
+        private var provider: VoiceTranscriptionProvider = VoiceTranscriptionProvider.OpenAiWhisper,
     ) : PromptComposerViewModel.VoiceSettingsSnapshot {
         override fun silenceWindowMs(): Long = window
         override fun whisperLanguageHint(): String? = language
+        override fun transcriptionProvider(): VoiceTranscriptionProvider = provider
 
         fun setWindow(ms: Long) { window = ms }
         fun setLanguage(code: String?) { language = code }
+        fun setProvider(value: VoiceTranscriptionProvider) { provider = value }
+    }
+
+    private class FakeSpeechRecognitionProvider(
+        private val available: Boolean = true,
+    ) : PromptComposerViewModel.SpeechRecognitionProvider {
+        var listener: PromptComposerViewModel.SpeechRecognitionListener? = null
+        var startCount = 0
+        var stopCount = 0
+        var cancelCount = 0
+        var language: String? = null
+
+        override fun isAvailable(): Boolean = available
+
+        override fun start(
+            language: String?,
+            listener: PromptComposerViewModel.SpeechRecognitionListener,
+        ): PromptComposerViewModel.SpeechRecognitionSession? {
+            if (!available) return null
+            startCount++
+            this.language = language
+            this.listener = listener
+            return object : PromptComposerViewModel.SpeechRecognitionSession {
+                override fun stopListening() {
+                    stopCount++
+                }
+
+                override fun cancel() {
+                    cancelCount++
+                }
+            }
+        }
     }
 
     private fun newVm(
@@ -144,6 +179,8 @@ class PromptComposerViewModelTest {
         samplerDispatcher: TestDispatcher? = null,
         clock: () -> Long = { System.currentTimeMillis() },
         voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
+        speechRecognitionProvider: PromptComposerViewModel.SpeechRecognitionProvider =
+            UnavailableSpeechRecognitionProvider,
         savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
@@ -152,6 +189,7 @@ class PromptComposerViewModelTest {
             whisperClientFactory = factory,
             apiKeyStorage = storage,
             voiceSettings = voiceSettings,
+            speechRecognitionProvider = speechRecognitionProvider,
             savedStateHandle = savedStateHandle,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
@@ -674,6 +712,193 @@ class PromptComposerViewModelTest {
 
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
         assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun androidSpeechProviderStartsWithoutOpenAiKey() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(
+            provider = VoiceTranscriptionProvider.AndroidSpeech,
+            language = "en",
+        )
+        val vm = newVm(
+            storage = newStorage(),
+            whisper = null,
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertFalse(vm.needsOpenAiKeyForMicTap())
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        assertEquals(1, speech.startCount)
+        assertEquals("en", speech.language)
+        assertNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun androidSpeechPartialUpdatesReplacePreviousHypothesis() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onDraftChange("Run")
+        vm.onMicTap()
+        runCurrent()
+
+        speech.listener!!.onPartial("git")
+        assertEquals("Run git", vm.uiState.value.draft)
+        assertEquals("git", vm.uiState.value.liveTranscript)
+
+        speech.listener!!.onPartial("git status")
+        assertEquals("Run git status", vm.uiState.value.draft)
+        assertEquals("git status", vm.uiState.value.liveTranscript)
+
+        speech.listener!!.onFinal("git status --short")
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("Run git status --short", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.liveTranscript)
+    }
+
+    @Test
+    fun androidSpeechCancelRestoresPreDictationDraftAndIgnoresLateCallbacks() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val savedStateHandle = SavedStateHandle()
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            savedStateHandle = savedStateHandle,
+        )
+
+        vm.onDraftChange("typed before dictation")
+        vm.onMicTap()
+        runCurrent()
+
+        speech.listener!!.onPartial("temporary hypothesis")
+        assertEquals("typed before dictation temporary hypothesis", vm.uiState.value.draft)
+
+        vm.cancelRecording()
+        runCurrent()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("typed before dictation", vm.uiState.value.draft)
+        assertEquals("typed before dictation", savedStateHandle[PromptComposerViewModel.KEY_DRAFT])
+        assertNull(vm.uiState.value.liveTranscript)
+        assertEquals(0, speech.stopCount)
+        assertTrue(speech.cancelCount > 0)
+
+        speech.listener!!.onPartial("late partial")
+        speech.listener!!.onFinal("late final")
+        advanceUntilIdle()
+
+        assertEquals("typed before dictation", vm.uiState.value.draft)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun androidSpeechUnavailableShowsErrorGracefully() = runTest {
+        val speech = FakeSpeechRecognitionProvider(available = false)
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            storage = newStorage(),
+            whisper = null,
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(0, speech.startCount)
+        assertEquals(
+            PromptComposerViewModel.ANDROID_SPEECH_UNAVAILABLE_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
+    fun androidSpeechSendWhileRecordingStopsThenDispatchesFinalTranscript() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sends = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job = launch { vm.sendRequests.collect { sends += it } }
+
+        vm.onDraftChange("Please")
+        vm.onMicTap()
+        runCurrent()
+        vm.requestSend(withEnter = true)
+        runCurrent()
+        assertEquals(1, speech.stopCount)
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        speech.listener!!.onFinal("summarize this")
+        advanceUntilIdle()
+
+        assertEquals(listOf(PromptComposerViewModel.SendRequest("Please summarize this", true)), sends)
+        assertEquals("", vm.uiState.value.draft)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun androidSpeechCancelAfterStopIgnoresLateCallbacksAndQueuedSend() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val savedStateHandle = SavedStateHandle()
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            savedStateHandle = savedStateHandle,
+        )
+        val sends = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job = launch { vm.sendRequests.collect { sends += it } }
+
+        vm.onDraftChange("typed before dictation")
+        vm.onMicTap()
+        runCurrent()
+        speech.listener!!.onPartial("live words")
+        assertEquals("typed before dictation live words", vm.uiState.value.draft)
+
+        vm.requestSend(withEnter = true)
+        runCurrent()
+        assertEquals(1, speech.stopCount)
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        vm.cancelRecording()
+        runCurrent()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("typed before dictation", vm.uiState.value.draft)
+        assertEquals("typed before dictation", savedStateHandle[PromptComposerViewModel.KEY_DRAFT])
+        assertNull(vm.uiState.value.liveTranscript)
+        assertTrue(speech.cancelCount > 0)
+
+        speech.listener!!.onPartial("late partial")
+        speech.listener!!.onFinal("late final")
+        advanceUntilIdle()
+
+        assertEquals("typed before dictation", vm.uiState.value.draft)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertTrue(sends.isEmpty())
+        job.cancelAndJoin()
     }
 
     @Test

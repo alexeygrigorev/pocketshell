@@ -19,14 +19,16 @@ For tmux operations (detach, switch sessions, etc.) PocketShell uses native UI c
 
 ### Engine
 
-Whisper via OpenAI Audio Transcriptions API. Existing `openai-transcribe` skill is the integration reference.
+Prompt Composer voice input has two selectable transcription providers:
+
+- OpenAI Whisper via the Audio Transcriptions API. Existing `openai-transcribe` skill is the integration reference.
+- Android / Google Speech via the device's system `SpeechRecognizer`.
 
 Trade-offs accepted:
-- Per-request cost (~$0.006/min)
-- Network round-trip (~200–500ms)
-- Better quality than Android `SpeechRecognizer` for technical content (code, paths, command names)
+- Whisper: per-request cost (~$0.006/min), requires a saved OpenAI API key, uploads a complete recording, and usually handles technical content (code, paths, command names) better.
+- Android/system recognizer: no OpenAI key, can provide partial text while speaking, but availability depends on the device image and installed speech service. Language support, offline packs, network use, and privacy handling are controlled by that service (often Google Speech Services on Play devices), not PocketShell.
 
-Configuration: API key stored in Android Keystore. Future: support self-hosted `whisper.cpp` on one of the user's SSH hosts (out of v1 scope).
+Configuration: provider, API key, language, and silence threshold live in Settings. The OpenAI key is stored in Android Keystore. Future: support self-hosted `whisper.cpp` on one of the user's SSH hosts (out of v1 scope).
 
 ### Prompt Composer (primary voice surface)
 
@@ -57,8 +59,8 @@ Configuration: API key stored in Android Keystore. Future: support self-hosted `
 
 Behaviours:
 - Bottom sheet, modal over terminal (terminal dims behind)
-- Big mic button starts recording on tap and stops on the next tap. It auto-stops after the configured silence window (30s default, adjustable from 2s to 60s)
-- Live partial transcription streams into the text area as you speak
+- Big mic button starts recording on tap and stops on the next tap. Whisper auto-stops after the configured silence window (30s default, adjustable from 2s to 60s); Android/system recognition uses the recognizer service's own endpointing.
+- Android/system recognition streams partial text into the recording panel when the service provides it. Whisper inserts the final transcript after the recording is complete.
 - Text area is editable — tap any word to fix before sending
 - `Insert` writes to PTY without submitting; `Send` submits with Enter; `Snippets` opens the saved-prompt library
 - Sheet dismissed = transcript preserved as draft per session
@@ -157,7 +159,7 @@ Keyboard down:
 ## Settings
 
 Single "Input methods" settings screen with sub-pages:
-- Voice: Whisper API key, language, auto-stop silence threshold (30s default, 2s-60s range)
+- Voice: transcription provider, Whisper API key, language, auto-stop silence threshold for Whisper (30s default, 2s-60s range)
 - Key bar: which keys appear, ordering
 - Snippets: organize, share, per-host
 

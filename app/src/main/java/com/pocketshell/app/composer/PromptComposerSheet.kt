@@ -102,6 +102,7 @@ import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -216,10 +217,10 @@ public fun PromptComposerSheet(
             // ViewModel itself also re-checks before calling start(), but
             // showing the key entry dialog up front beats a silent error
             // banner.
-            if (viewModel.hasApiKey()) {
-                viewModel.onMicTap()
-            } else {
+            if (viewModel.needsOpenAiKeyForMicTap()) {
                 showApiKeyDialog = true
+            } else {
+                viewModel.onMicTap()
             }
         } else {
             // Denied — surface via the inline error banner. The sheet
@@ -282,8 +283,9 @@ public fun PromptComposerSheet(
     // silence and Whisper returns "no speech detected" (the maintainer's
     // lost-recording data loss). [PromptComposerViewModel.cancelRecording]
     // cancels the sampler job, stops + releases the recorder, and discards
-    // the partial buffer; it is a no-op when the FSM is not Recording, so
-    // dismissing an Idle / Transcribing composer is unaffected.
+    // the partial buffer. It also expires Android speech after stop-listening
+    // has moved the UI into Transcribing; Whisper dismissal behavior remains
+    // unchanged.
     val dismissComposer = {
         viewModel.cancelRecording()
         onDismiss()
@@ -333,16 +335,16 @@ public fun PromptComposerSheet(
                     permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     return@SheetContent
                 }
-                if (!viewModel.hasApiKey()) {
+                if (viewModel.needsOpenAiKeyForMicTap()) {
                     showApiKeyDialog = true
                     return@SheetContent
                 }
                 viewModel.onMicTap()
             },
             // Recording discard and transcription cancel are deliberately
-            // separate. Discard stops the mic and drops the buffer before
-            // Whisper; cancel-transcription aborts an already-started
-            // Whisper round-trip.
+            // separate. Discard stops the mic/recognizer and drops the live
+            // buffer; cancel-transcription aborts the already-started
+            // transcribe/final-result wait.
             onCancelRecording = viewModel::cancelRecording,
             onCancelTranscription = viewModel::cancelTranscription,
             onSend = { withEnter ->
@@ -452,8 +454,8 @@ internal fun SheetContent(
     // ViewModel keep compiling.
     onCancelRecording: () -> Unit = {},
     // Issue #453: dispatched by the "Cancel" control in Transcribing state.
-    // Separate from recording discard because the audio has already left the
-    // recorder and Whisper may already be in flight.
+    // Separate from recording discard because the audio/recognizer session
+    // has already moved out of active capture.
     onCancelTranscription: () -> Unit = {},
     // Issue #180: queued failed / offline transcriptions. Defaults to
     // an empty list so older previews + tests that pre-date the queue
@@ -591,6 +593,7 @@ internal fun SheetContent(
                     amplitude = state.amplitude,
                     capturing = state.hasDetectedSpeech,
                     elapsedLabel = formatElapsed(state.recordingElapsedMs),
+                    liveTranscript = state.liveTranscript,
                     onCancel = onCancelRecording,
                 )
             }
@@ -736,12 +739,12 @@ internal fun SheetContent(
         //  - Left: 📎 attach (paperclip) + `{}` snippets — always present.
         //  - Right, Idle / Text-inserted: a single primary Send button with
         //    a send-arrow glyph (the old Insert/Send pair collapses to one).
-        //  - Recording surface: explicit "Discard" stops the mic and drops
-        //    the buffer without Whisper.
-        //  - Right, Recording: two explicit stop+transcribe actions —
-        //    "Insert" (into the editable field, nothing sent) and "Send"
-        //    (transcribe + send). The old persistent Auto-send toggle is gone
-        //    (#508): the choice is made per-recording.
+        //  - Recording surface: explicit "Discard" stops the mic/recognizer
+        //    and drops the buffer without transcription/final insertion.
+        //  - Right, Recording: two explicit stop actions — "Insert"
+        //    (stop + transcribe into the editable field, nothing sent) and
+        //    "Send" (stop + transcribe + send). The old persistent Auto-send
+        //    toggle is gone (#508): the choice is made per-recording.
         //  - Right, Transcribing: Cancel + "Send" (arms the queued send for
         //    the in-flight round-trip).
         val attachmentBusy = attachmentUploading != null
@@ -871,13 +874,14 @@ private fun RecordingSurface(
     amplitude: Float,
     capturing: Boolean,
     elapsedLabel: String,
+    liveTranscript: String?,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(56.dp)
+            .height(if (liveTranscript.isNullOrBlank()) 68.dp else 112.dp)
             .background(
                 color = PocketShellColors.SurfaceElev,
                 shape = RoundedCornerShape(12.dp),
@@ -887,34 +891,50 @@ private fun RecordingSurface(
                 color = PocketShellColors.Border,
                 shape = RoundedCornerShape(12.dp),
             )
-            .padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.Center,
     ) {
-        Text(
-            text = elapsedLabel,
-            color = PocketShellColors.Accent,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.testTag(COMPOSER_TIMER_TAG),
-        )
-        Waveform(
-            amplitude = amplitude,
-            active = capturing,
-            transcribing = false,
-            modifier = Modifier
-                .weight(1f)
-                .height(32.dp)
-                .testTag(COMPOSER_WAVEFORM_TAG)
-                .semantics {
-                    contentDescription = if (capturing) {
-                        "Prompt composer capturing speech"
-                    } else {
-                        "Prompt composer waiting for speech"
-                    }
-                },
-        )
-        DiscardRecordingButton(onClick = onCancel)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = elapsedLabel,
+                color = PocketShellColors.Accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(COMPOSER_TIMER_TAG),
+            )
+            Waveform(
+                amplitude = amplitude,
+                active = capturing,
+                transcribing = false,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(32.dp)
+                    .testTag(COMPOSER_WAVEFORM_TAG)
+                    .semantics {
+                        contentDescription = if (capturing) {
+                            "Prompt composer capturing speech"
+                        } else {
+                            "Prompt composer waiting for speech"
+                        }
+                    },
+            )
+            DiscardRecordingButton(onClick = onCancel)
+        }
+        if (!liveTranscript.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = liveTranscript,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.testTag(COMPOSER_LIVE_TRANSCRIPT_TAG),
+            )
+        }
     }
 }
 
@@ -994,7 +1014,7 @@ private fun TranscribingSurface(
  * Issue #174: explicit recording-only discard control. It lives inside the
  * active recording panel, next to the waveform, so it reads as "discard this
  * captured audio" rather than the header close `×` that dismisses the whole
- * composer. Tapping it stops the mic and drops the buffer without Whisper.
+ * composer. Tapping it stops the mic/recognizer and drops the live buffer.
  */
 @Composable
 private fun DiscardRecordingButton(
@@ -2032,6 +2052,7 @@ internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"
 
 /** Issue #453: elapsed mm:ss recording timer rendered next to the waveform. */
 internal const val COMPOSER_TIMER_TAG = "prompt-composer-timer"
+internal const val COMPOSER_LIVE_TRANSCRIPT_TAG = "prompt-composer-live-transcript"
 
 /**
  * Issue #508: the two explicit stop actions shown in the Recording row,

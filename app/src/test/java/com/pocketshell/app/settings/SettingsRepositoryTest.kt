@@ -52,6 +52,10 @@ class SettingsRepositoryTest {
             snap.voiceSilenceThresholdSeconds,
             0f,
         )
+        assertEquals(
+            AppSettings.DEFAULT_VOICE_TRANSCRIPTION_PROVIDER,
+            snap.voiceTranscriptionProvider,
+        )
         // Issue #176: system notes are visible-but-muted by default so
         // fresh installs see the same conversation events the pre-#176
         // build did, just visually de-emphasized.
@@ -247,6 +251,20 @@ class SettingsRepositoryTest {
         assertEquals("ru", repo.settings.value.voiceLanguage)
         repo.setVoiceLanguage("")
         assertEquals(AppSettings.VOICE_LANGUAGE_AUTO, repo.settings.value.voiceLanguage)
+    }
+
+    @Test
+    fun `setVoiceTranscriptionProvider persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setVoiceTranscriptionProvider(VoiceTranscriptionProvider.AndroidSpeech)
+        assertEquals(
+            VoiceTranscriptionProvider.AndroidSpeech,
+            repo.settings.value.voiceTranscriptionProvider,
+        )
+        assertEquals(
+            VoiceTranscriptionProvider.AndroidSpeech,
+            SettingsRepository(context).settings.value.voiceTranscriptionProvider,
+        )
     }
 
     @Test

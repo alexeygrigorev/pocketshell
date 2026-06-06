@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.app.voice.ConnectivityObserver
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.app.voice.PendingTranscriptionStore
@@ -86,6 +87,8 @@ public class PromptComposerViewModel @Inject constructor(
     internal val whisperClientFactory: WhisperClientFactory,
     internal val apiKeyStorage: ApiKeyVault,
     internal val voiceSettings: VoiceSettingsSnapshot,
+    internal val speechRecognitionProvider: SpeechRecognitionProvider =
+        UnavailableSpeechRecognitionProvider,
     // Issue #180: optional dependencies for the failed-transcription
     // retry queue. Both default to no-op stubs so the rich library of
     // existing unit + connected tests that construct the ViewModel
@@ -142,6 +145,11 @@ public class PromptComposerViewModel @Inject constructor(
 
     private var recordingJob: Job? = null
     private var transcribeJob: Job? = null
+    private var speechRecognitionSession: SpeechRecognitionSession? = null
+    private var speechRecognitionGeneration: Long = 0L
+    private var activeProvider: VoiceTranscriptionProvider? = null
+    private var liveSpeechBaseDraft: String = ""
+    private var liveSpeechLastTranscript: String = ""
 
     /**
      * Issue #211 / #254: one-shot Send dispatch surface. The composer
@@ -504,6 +512,14 @@ public class PromptComposerViewModel @Inject constructor(
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startRecording() {
+        when (voiceSettings.transcriptionProvider()) {
+            VoiceTranscriptionProvider.OpenAiWhisper -> startWhisperRecording()
+            VoiceTranscriptionProvider.AndroidSpeech -> startAndroidSpeechRecognition()
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun startWhisperRecording() {
         // Guard: the user must have a stored API key before we burn cycles
         // on a recording the upload can't consume. The screen surfaces the
         // key entry dialog separately; here we just bail with an error so
@@ -516,9 +532,11 @@ public class PromptComposerViewModel @Inject constructor(
             return
         }
 
+        activeProvider = VoiceTranscriptionProvider.OpenAiWhisper
         try {
             audioRecorder.start()
         } catch (e: AudioRecorderException) {
+            activeProvider = null
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -567,6 +585,75 @@ public class PromptComposerViewModel @Inject constructor(
 
         recordingJob = viewModelScope.launch(samplerDispatcher) {
             sampleAmplitudeAndAutoStopOnSilence()
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun startAndroidSpeechRecognition() {
+        if (!speechRecognitionProvider.isAvailable()) {
+            _uiState.update {
+                it.copy(error = ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
+            }
+            return
+        }
+
+        liveSpeechBaseDraft = _uiState.value.draft
+        liveSpeechLastTranscript = ""
+        recordingStartedAtMs = clock()
+        val generation = ++speechRecognitionGeneration
+
+        val listener = object : SpeechRecognitionListener {
+            override fun onPartial(text: String) {
+                if (isCurrentAndroidSpeechRecognition(generation)) {
+                    applyLiveSpeechTranscript(text)
+                }
+            }
+
+            override fun onFinal(text: String) {
+                if (isCurrentAndroidSpeechRecognition(generation)) {
+                    finishAndroidSpeechRecognition(text)
+                }
+            }
+
+            override fun onError(message: String) {
+                if (isCurrentAndroidSpeechRecognition(generation)) {
+                    failAndroidSpeechRecognition(message)
+                }
+            }
+        }
+
+        val session = try {
+            speechRecognitionProvider.start(
+                language = voiceSettings.recognitionLanguageTag(),
+                listener = listener,
+            )
+        } catch (t: Throwable) {
+            null
+        }
+
+        if (session == null) {
+            speechRecognitionGeneration++
+            liveSpeechBaseDraft = ""
+            liveSpeechLastTranscript = ""
+            _uiState.update {
+                it.copy(error = ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
+            }
+            return
+        }
+
+        speechRecognitionSession = session
+        activeProvider = VoiceTranscriptionProvider.AndroidSpeech
+        savedStateHandle[KEY_WAS_RECORDING] = true
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Recording,
+                amplitude = 0.12f,
+                hasDetectedSpeech = false,
+                silenceThresholdSeconds = 0f,
+                recordingElapsedMs = 0L,
+                liveTranscript = null,
+                error = null,
+            )
         }
     }
 
@@ -642,6 +729,11 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     private fun stopAndTranscribe() {
+        if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
+            stopAndroidSpeechRecognition()
+            return
+        }
+
         recordingJob?.cancel()
         recordingJob = null
 
@@ -660,6 +752,7 @@ public class PromptComposerViewModel @Inject constructor(
             // re-record or send manually.
             pendingSendOnTranscribeSuccess = false
             pendingSendWithEnter = false
+            activeProvider = null
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -679,6 +772,7 @@ public class PromptComposerViewModel @Inject constructor(
             // branch — no audio means no transcript to send.
             pendingSendOnTranscribeSuccess = false
             pendingSendWithEnter = false
+            activeProvider = null
             _uiState.update {
                 it.copy(recording = RecordingState.Idle, amplitude = 0f)
             }
@@ -717,10 +811,12 @@ public class PromptComposerViewModel @Inject constructor(
                             },
                         )
                     }
+                    activeProvider = null
                 }
                 return
             }
             savedStateHandle[KEY_WAS_RECORDING] = false
+            activeProvider = null
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -745,6 +841,7 @@ public class PromptComposerViewModel @Inject constructor(
                 // nothing to send.
                 pendingSendOnTranscribeSuccess = false
                 pendingSendWithEnter = false
+                activeProvider = null
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -799,6 +896,7 @@ public class PromptComposerViewModel @Inject constructor(
                 // Send manually then.
                 pendingSendOnTranscribeSuccess = false
                 pendingSendWithEnter = false
+                activeProvider = null
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -829,6 +927,7 @@ public class PromptComposerViewModel @Inject constructor(
                         }
                         pendingSendOnTranscribeSuccess = false
                         pendingSendWithEnter = false
+                        activeProvider = null
                         _uiState.update {
                             it.copy(
                                 recording = RecordingState.Idle,
@@ -861,6 +960,7 @@ public class PromptComposerViewModel @Inject constructor(
                         }
                         pendingSendOnTranscribeSuccess = false
                         pendingSendWithEnter = false
+                        activeProvider = null
                         _uiState.update {
                             it.copy(
                                 recording = RecordingState.Idle,
@@ -907,6 +1007,7 @@ public class PromptComposerViewModel @Inject constructor(
                         // so the next composer open starts blank.
                         dispatchSendNow(pendingWithEnter)
                     }
+                    activeProvider = null
                 },
                 onFailure = { t ->
                     val msg = userFacingWhisperError(t)
@@ -922,12 +1023,136 @@ public class PromptComposerViewModel @Inject constructor(
                     // retry from the banner.
                     pendingSendOnTranscribeSuccess = false
                     pendingSendWithEnter = false
+                    activeProvider = null
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, error = msg)
                     }
                 },
             )
         }
+    }
+
+    private fun isCurrentAndroidSpeechRecognition(generation: Long): Boolean =
+        activeProvider == VoiceTranscriptionProvider.AndroidSpeech &&
+            speechRecognitionSession != null &&
+            speechRecognitionGeneration == generation
+
+    private fun stopAndroidSpeechRecognition() {
+        val session = speechRecognitionSession ?: run {
+            failAndroidSpeechRecognition(ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
+            return
+        }
+        runCatching { session.stopListening() }.onFailure {
+            failAndroidSpeechRecognition(it.message ?: ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
+            return
+        }
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Transcribing,
+                amplitude = 0f,
+                error = null,
+            )
+        }
+    }
+
+    private fun applyLiveSpeechTranscript(rawText: String): String {
+        val text = rawText.trim()
+        if (text.isEmpty()) return _uiState.value.draft
+
+        var newDraft = ""
+        _uiState.update { current ->
+            val expectedCurrent = appendTranscript(liveSpeechBaseDraft, liveSpeechLastTranscript)
+            val base = if (current.draft == expectedCurrent) {
+                liveSpeechBaseDraft
+            } else {
+                current.draft
+            }
+            liveSpeechBaseDraft = base
+            liveSpeechLastTranscript = text
+            newDraft = appendTranscript(base, text)
+            current.copy(
+                draft = newDraft,
+                amplitude = 0.35f,
+                hasDetectedSpeech = true,
+                liveTranscript = text,
+                error = null,
+            )
+        }
+        savedStateHandle[KEY_DRAFT] = newDraft
+        return newDraft
+    }
+
+    private fun finishAndroidSpeechRecognition(rawText: String) {
+        val text = rawText.trim()
+        if (text.isEmpty()) {
+            failAndroidSpeechRecognition(NO_SPEECH_DETECTED_MESSAGE)
+            return
+        }
+
+        applyLiveSpeechTranscript(text)
+        val pendingSend = pendingSendOnTranscribeSuccess
+        val pendingWithEnter = pendingSendWithEnter
+        pendingSendOnTranscribeSuccess = false
+        pendingSendWithEnter = false
+        clearAndroidSpeechSession()
+
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                hasDetectedSpeech = false,
+                liveTranscript = null,
+                error = null,
+            )
+        }
+
+        if (pendingSend) {
+            dispatchSendNow(pendingWithEnter)
+        }
+    }
+
+    private fun failAndroidSpeechRecognition(message: String) {
+        pendingSendOnTranscribeSuccess = false
+        pendingSendWithEnter = false
+        clearAndroidSpeechSession()
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                hasDetectedSpeech = false,
+                liveTranscript = null,
+                error = message.ifBlank { ANDROID_SPEECH_FAILED_MESSAGE },
+            )
+        }
+    }
+
+    private fun cancelAndroidSpeechRecognition() {
+        val restoredDraft = liveSpeechBaseDraft
+        pendingSendOnTranscribeSuccess = false
+        pendingSendWithEnter = false
+        clearAndroidSpeechSession()
+        savedStateHandle[KEY_DRAFT] = restoredDraft
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                hasDetectedSpeech = false,
+                liveTranscript = null,
+                draft = restoredDraft,
+                error = null,
+            )
+        }
+    }
+
+    private fun clearAndroidSpeechSession() {
+        val session = speechRecognitionSession
+        speechRecognitionSession = null
+        speechRecognitionGeneration++
+        runCatching { session?.cancel() }
+        activeProvider = null
+        liveSpeechBaseDraft = ""
+        liveSpeechLastTranscript = ""
+        savedStateHandle[KEY_WAS_RECORDING] = false
     }
 
     /**
@@ -1158,14 +1383,27 @@ public class PromptComposerViewModel @Inject constructor(
      *    preserved verbatim — the user explicitly chose to abandon the
      *    new dictation, not the prompt they had already typed.
      *
-     * No-op when the FSM is not in [RecordingState.Recording]: cancelling
-     * during [RecordingState.Idle] has nothing to undo, and cancelling
-     * during [RecordingState.Transcribing] is a separate UX surface that
-     * this method intentionally does not handle (the audio has already
-     * been sent — Whisper round-trip is in flight and the cost is paid).
+     * No-op for Idle and for Whisper Transcribing, where dismiss historically
+     * left the in-flight round-trip alone. Android speech is the exception:
+     * once stop-listening moves the UI into [RecordingState.Transcribing],
+     * the recognizer session still exists and can deliver late final/partial
+     * callbacks, so dismiss uses this method to expire that session too.
      */
     public fun cancelRecording() {
+        if (
+            _uiState.value.recording == RecordingState.Transcribing &&
+            activeProvider == VoiceTranscriptionProvider.AndroidSpeech
+        ) {
+            cancelAndroidSpeechRecognition()
+            return
+        }
+
         if (_uiState.value.recording != RecordingState.Recording) {
+            return
+        }
+
+        if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
+            cancelAndroidSpeechRecognition()
             return
         }
 
@@ -1183,6 +1421,7 @@ public class PromptComposerViewModel @Inject constructor(
         // text without a fresh dictation.
         pendingSendOnTranscribeSuccess = false
         pendingSendWithEnter = false
+        activeProvider = null
 
         // Stop the mic and drop whatever bytes came back. The capture
         // can fail (mic ripped away mid-record, audio focus loss); in
@@ -1233,10 +1472,15 @@ public class PromptComposerViewModel @Inject constructor(
         if (_uiState.value.recording != RecordingState.Transcribing) {
             return
         }
+        if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
+            cancelAndroidSpeechRecognition()
+            return
+        }
         transcribeJob?.cancel()
         transcribeJob = null
         pendingSendOnTranscribeSuccess = false
         pendingSendWithEnter = false
+        activeProvider = null
         savedStateHandle[KEY_WAS_RECORDING] = false
         _uiState.update {
             it.copy(
@@ -1284,6 +1528,10 @@ public class PromptComposerViewModel @Inject constructor(
         return true
     }
 
+    public fun needsOpenAiKeyForMicTap(): Boolean =
+        voiceSettings.transcriptionProvider() == VoiceTranscriptionProvider.OpenAiWhisper &&
+            !hasApiKey()
+
     override fun onCleared() {
         recordingJob?.cancel()
         transcribeJob?.cancel()
@@ -1292,8 +1540,13 @@ public class PromptComposerViewModel @Inject constructor(
         // any AudioRecorderException because there's no UI to surface it
         // to at this point in the lifecycle.
         if (_uiState.value.recording == RecordingState.Recording) {
-            runCatching { audioRecorder.stop() }
+            if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
+                runCatching { speechRecognitionSession?.cancel() }
+            } else {
+                runCatching { audioRecorder.stop() }
+            }
         }
+        runCatching { speechRecognitionSession?.cancel() }
         super.onCleared()
     }
 
@@ -1396,6 +1649,7 @@ public class PromptComposerViewModel @Inject constructor(
          * [RecordingState.Recording]. Render with [formatElapsed].
          */
         val recordingElapsedMs: Long = 0L,
+        val liveTranscript: String? = null,
     )
 
     /**
@@ -1465,6 +1719,32 @@ public class PromptComposerViewModel @Inject constructor(
          * [AppSettings.VOICE_LANGUAGE_AUTO] sentinel.
          */
         public fun whisperLanguageHint(): String?
+
+        public fun recognitionLanguageTag(): String? = whisperLanguageHint()
+
+        public fun transcriptionProvider(): VoiceTranscriptionProvider =
+            VoiceTranscriptionProvider.OpenAiWhisper
+    }
+
+    public interface SpeechRecognitionProvider {
+        public fun isAvailable(): Boolean
+
+        @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+        public fun start(
+            language: String?,
+            listener: SpeechRecognitionListener,
+        ): SpeechRecognitionSession?
+    }
+
+    public interface SpeechRecognitionSession {
+        public fun stopListening()
+        public fun cancel()
+    }
+
+    public interface SpeechRecognitionListener {
+        public fun onPartial(text: String)
+        public fun onFinal(text: String)
+        public fun onError(message: String)
     }
 
     /**
@@ -1635,7 +1915,23 @@ public class PromptComposerViewModel @Inject constructor(
          */
         public const val EMPTY_TRANSCRIPTION_RETRY_MESSAGE: String =
             "Whisper returned no text. Recording saved for retry."
+
+        public const val ANDROID_SPEECH_UNAVAILABLE_MESSAGE: String =
+            "Android speech recognition is not available on this device. Choose Whisper or install/enable a system speech service."
+
+        public const val ANDROID_SPEECH_FAILED_MESSAGE: String =
+            "Android speech recognition failed. Try again or choose Whisper in settings."
     }
+}
+
+internal object UnavailableSpeechRecognitionProvider :
+    PromptComposerViewModel.SpeechRecognitionProvider {
+    override fun isAvailable(): Boolean = false
+
+    override fun start(
+        language: String?,
+        listener: PromptComposerViewModel.SpeechRecognitionListener,
+    ): PromptComposerViewModel.SpeechRecognitionSession? = null
 }
 
 /**
@@ -1669,6 +1965,12 @@ internal fun appendAttachmentPaths(draft: String, paths: List<String>): String {
         draft.endsWith("\n") -> draft + "\n" + block
         else -> draft + "\n\n" + block
     }
+}
+
+private fun appendTranscript(draft: String, transcript: String): String {
+    if (transcript.isBlank()) return draft
+    val sep = if (draft.isEmpty() || draft.endsWith(" ")) "" else " "
+    return draft + sep + transcript
 }
 
 /**

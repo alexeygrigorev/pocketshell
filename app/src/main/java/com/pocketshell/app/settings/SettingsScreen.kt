@@ -173,9 +173,11 @@ fun SettingsScreen(
                     keyStatus = keyStatus,
                     language = settings.voiceLanguage,
                     silenceThresholdSeconds = settings.voiceSilenceThresholdSeconds,
+                    transcriptionProvider = settings.voiceTranscriptionProvider,
                     onSaveApiKey = viewModel::saveApiKey,
                     onClearApiKey = viewModel::clearApiKey,
                     onLanguageSelected = viewModel::setVoiceLanguage,
+                    onTranscriptionProviderSelected = viewModel::setVoiceTranscriptionProvider,
                     onSilenceThresholdChange = viewModel::setVoiceSilenceThresholdSeconds,
                     onOpenAiCosts = onOpenAiCosts,
                 )
@@ -756,9 +758,11 @@ private fun VoiceSection(
     keyStatus: WhisperKeyStatus,
     language: String,
     silenceThresholdSeconds: Float,
+    transcriptionProvider: VoiceTranscriptionProvider,
     onSaveApiKey: (CharArray) -> Unit,
     onClearApiKey: () -> Unit,
     onLanguageSelected: (String) -> Unit,
+    onTranscriptionProviderSelected: (VoiceTranscriptionProvider) -> Unit,
     onSilenceThresholdChange: (Float) -> Unit,
     onOpenAiCosts: () -> Unit = {},
 ) {
@@ -767,6 +771,37 @@ private fun VoiceSection(
     Column {
         SectionLabel("Voice & dictation")
         SectionCard {
+            // -- Provider row -------------------------------------------
+            Text(
+                text = "Transcription provider",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Whisper uses OpenAI and a full recording. Android uses the device's system recognizer, may stream partial text, and depends on the installed service, language packs, network, and that service's privacy policy.",
+                color = PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            VoiceProviderOptionRow(
+                title = "OpenAI Whisper",
+                subtitle = "Best for technical prompts; requires an OpenAI key.",
+                provider = VoiceTranscriptionProvider.OpenAiWhisper,
+                selected = transcriptionProvider == VoiceTranscriptionProvider.OpenAiWhisper,
+                onClick = { onTranscriptionProviderSelected(VoiceTranscriptionProvider.OpenAiWhisper) },
+            )
+            VoiceProviderOptionRow(
+                title = "Android / Google Speech",
+                subtitle = "No OpenAI key; availability, network use, and privacy depend on the system recognizer.",
+                provider = VoiceTranscriptionProvider.AndroidSpeech,
+                selected = transcriptionProvider == VoiceTranscriptionProvider.AndroidSpeech,
+                onClick = { onTranscriptionProviderSelected(VoiceTranscriptionProvider.AndroidSpeech) },
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             // -- API key row --------------------------------------------
             Text(
                 text = "Whisper API key",
@@ -776,7 +811,7 @@ private fun VoiceSection(
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = "Stored encrypted on this device. Only sent to api.openai.com.",
+                text = "Used only by OpenAI Whisper. Stored encrypted on this device and sent to api.openai.com.",
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
@@ -958,6 +993,41 @@ private fun LanguageOptionRow(
             style = PocketShellType.bodyDense,
             fontWeight = FontWeight.Medium,
         )
+    }
+}
+
+@Composable
+private fun VoiceProviderOptionRow(
+    title: String,
+    subtitle: String,
+    provider: VoiceTranscriptionProvider,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(vertical = 8.dp)
+            .testTag(voiceProviderOptionTestTag(provider)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioMark(selected = selected)
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                color = PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
     }
 }
 
@@ -1646,6 +1716,9 @@ fun defaultHostOptionTag(hostId: Long): String =
 
 internal fun voiceLanguageOptionTestTag(code: String): String =
     "settings:voice:language:" + code.lowercase()
+
+internal fun voiceProviderOptionTestTag(provider: VoiceTranscriptionProvider): String =
+    "settings:voice:provider:" + provider.name.lowercase()
 
 /**
  * Stable test tag for the section label above each [SectionCard].

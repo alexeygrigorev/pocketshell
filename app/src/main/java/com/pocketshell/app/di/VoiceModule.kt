@@ -6,6 +6,8 @@ import androidx.annotation.RequiresPermission
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.settings.VoiceTranscriptionProvider
+import com.pocketshell.app.voice.AndroidSpeechRecognitionProvider
 import com.pocketshell.app.voice.ConnectivityObserver
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.app.voice.PendingTranscriptionStore
@@ -107,6 +109,13 @@ object VoiceModule {
         repository: SettingsRepository,
     ): PromptComposerViewModel.VoiceSettingsSnapshot =
         SettingsRepositoryVoiceSnapshot(repository)
+
+    @Provides
+    @Singleton
+    fun provideSpeechRecognitionProvider(
+        @ApplicationContext context: Context,
+    ): PromptComposerViewModel.SpeechRecognitionProvider =
+        AndroidSpeechRecognitionProvider(context)
 
     /**
      * Issue #181: shared [PriceCatalogue] for the bundled `ai-pricing.json`.
@@ -220,6 +229,11 @@ internal class SettingsRepositoryVoiceSnapshot(
         val code = repository.settings.value.voiceLanguage
         return if (code == AppSettings.VOICE_LANGUAGE_AUTO || code.isBlank()) null else code
     }
+
+    override fun recognitionLanguageTag(): String? = whisperLanguageHint()
+
+    override fun transcriptionProvider(): VoiceTranscriptionProvider =
+        repository.settings.value.voiceTranscriptionProvider
 }
 
 /**

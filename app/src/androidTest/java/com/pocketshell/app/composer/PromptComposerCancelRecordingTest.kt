@@ -22,13 +22,13 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #174 / #453: emulator acceptance for the composer's discard/cancel
- * affordances.
+ * Issue #174 / #453: emulator acceptance for the composer's recording
+ * Discard and transcribing Cancel affordances.
  *
- * Recording has a distinct **Discard** affordance that stops the mic and
- * drops the buffer before Whisper. Transcribing keeps its **Cancel**
- * affordance for aborting an already-started round-trip. Both preserve the
- * typed draft and keep the composer open.
+ * Recording has a distinct **Discard** affordance that stops the mic or
+ * Android recognizer and drops the live buffer. Transcribing keeps its
+ * **Cancel** affordance for aborting an already-started round-trip or
+ * final-result wait. Both preserve the typed draft and keep the composer open.
  */
 @RunWith(AndroidJUnit4::class)
 class PromptComposerCancelRecordingTest {
@@ -132,6 +132,7 @@ class PromptComposerCancelRecordingTest {
                 recording = PromptComposerViewModel.RecordingState.Recording,
                 hasDetectedSpeech = true,
                 recordingElapsedMs = 5_000L,
+                liveTranscript = "android partial words",
             )
         }
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
@@ -145,6 +146,7 @@ class PromptComposerCancelRecordingTest {
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_LIVE_TRANSCRIPT_TAG).assertIsDisplayed()
 
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).performClick()
         compose.waitForIdle()

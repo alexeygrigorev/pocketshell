@@ -156,6 +156,9 @@ class SettingsViewModel @Inject constructor(
      */
     fun setVoiceLanguage(code: String) = repository.setVoiceLanguage(code)
 
+    fun setVoiceTranscriptionProvider(provider: VoiceTranscriptionProvider) =
+        repository.setVoiceTranscriptionProvider(provider)
+
     /**
      * Persist [seconds] as the user's preferred auto-stop silence window.
      * The repository clamps to the supported range; passing a value

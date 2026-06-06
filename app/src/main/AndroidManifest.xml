@@ -70,6 +70,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!--
+        Android 11+ package visibility: SpeechRecognizer availability checks
+        query installed RecognitionService implementations. Without this
+        targetSdk 35 builds can see `isRecognitionAvailable(...) == false`
+        even when a system speech service is installed.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".App"
         android:allowBackup="false"

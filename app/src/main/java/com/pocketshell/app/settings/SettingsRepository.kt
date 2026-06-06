@@ -108,6 +108,12 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(voiceLanguage = normalised)
     }
 
+    fun setVoiceTranscriptionProvider(provider: VoiceTranscriptionProvider) {
+        if (_settings.value.voiceTranscriptionProvider == provider) return
+        prefs.edit().putString(KEY_VOICE_TRANSCRIPTION_PROVIDER, provider.name).apply()
+        _settings.value = _settings.value.copy(voiceTranscriptionProvider = provider)
+    }
+
     /**
      * Persist the user's preferred auto-stop silence threshold (seconds).
      * Clamped to [AppSettings.MIN_VOICE_SILENCE_SECONDS] /
@@ -202,6 +208,13 @@ class SettingsRepository @Inject constructor(
             AppSettings.MIN_VOICE_SILENCE_SECONDS,
             AppSettings.MAX_VOICE_SILENCE_SECONDS,
         )
+        val voiceProviderName = prefs.safeString(
+            KEY_VOICE_TRANSCRIPTION_PROVIDER,
+            AppSettings.DEFAULT_VOICE_TRANSCRIPTION_PROVIDER.name,
+        ) ?: AppSettings.DEFAULT_VOICE_TRANSCRIPTION_PROVIDER.name
+        val voiceProvider = runCatching {
+            VoiceTranscriptionProvider.valueOf(voiceProviderName)
+        }.getOrDefault(AppSettings.DEFAULT_VOICE_TRANSCRIPTION_PROVIDER)
         val showSystemNotes = prefs.safeBoolean(
             KEY_SHOW_SYSTEM_NOTES,
             AppSettings.DEFAULT_SHOW_SYSTEM_NOTES,
@@ -231,6 +244,7 @@ class SettingsRepository @Inject constructor(
             defaultHostId = defaultHostId,
             voiceLanguage = language,
             voiceSilenceThresholdSeconds = silence,
+            voiceTranscriptionProvider = voiceProvider,
             showSystemNotes = showSystemNotes,
             hostDetailViewMode = hostDetailViewMode,
             usageWarnThresholdPercent = usageWarnPercent,
@@ -323,6 +337,7 @@ class SettingsRepository @Inject constructor(
         const val KEY_DEFAULT_HOST_ID = "default_host_id"
         const val KEY_VOICE_LANGUAGE = "voice_language"
         const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
+        const val KEY_VOICE_TRANSCRIPTION_PROVIDER = "voice_transcription_provider"
         const val KEY_SHOW_SYSTEM_NOTES = "show_system_notes"
         const val KEY_HOST_DETAIL_VIEW_MODE = "host_detail_view_mode"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"

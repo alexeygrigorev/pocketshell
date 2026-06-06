@@ -180,10 +180,12 @@ background work on the phone).
   rendering: one pane at a time on a real VT emulator, swipe between
   panes and windows. Detach without killing the local view, reattach
   without re-rendering. See [docs/architecture.md](docs/architecture.md).
-- **Voice-first composer.** Whisper (via OpenAI Audio Transcriptions)
-  with live partial transcription, editable text area, inline
-  dictation into the terminal, key bar for keys phones lack, snippet
-  library, command chips. See
+- **Voice-first composer.** Select OpenAI Whisper or the Android/system
+  speech recognizer for prompt dictation. Android recognition does not
+  require an OpenAI key and can show partial text when the installed
+  service supports it; Whisper keeps the buffered OpenAI transcription
+  path. Includes editable text, inline dictation into the terminal, key
+  bar for keys phones lack, snippet library, command chips. See
   [docs/input-methods.md](docs/input-methods.md).
 - **Agent-aware conversation view.** Detects Claude Code, Codex, and
   OpenCode in the currently visible tmux pane and renders a clean

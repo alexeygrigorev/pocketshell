@@ -3,5 +3,8 @@ package com.pocketshell.core.terminal.ui
 import android.content.Context
 import java.io.File
 
+@Suppress("DEPRECATION")
 fun testArtifactsRoot(context: Context): File =
-    context.getExternalFilesDir(null) ?: context.filesDir
+    context.getExternalMediaDirs().firstOrNull()
+        ?: context.getExternalFilesDir(null)
+        ?: context.filesDir

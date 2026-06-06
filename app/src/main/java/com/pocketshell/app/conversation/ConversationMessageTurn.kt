@@ -29,6 +29,7 @@ import com.pocketshell.app.composer.MarkdownText
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.MessageSendState
+import com.pocketshell.core.terminal.selection.ConversationLink
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
@@ -46,6 +47,11 @@ internal fun ConversationMessageTurn(
     // ViewModel can drop the failed placeholder and re-send its text. No-op
     // by default for confirmed/pending turns and for screenshot callers.
     onRetrySend: (String) -> Unit = {},
+    // Issue #557: a file path / directory / URL detected in the message body
+    // was tapped. The pane routes it (file → viewer, directory → file browser,
+    // URL → open) instead of letting the tap fall through to the keyboard.
+    // Null default keeps screenshot/legacy callers rendering plain text.
+    onLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
     val isUser = event.role == ConversationRole.User
     // Slice E1b (#539): source the role colour from the shared semantic
@@ -173,6 +179,7 @@ internal fun ConversationMessageTurn(
                     color = PocketShellColors.Text,
                     fontSize = targetFontSp.sp,
                     fontFamily = FontFamily.Monospace,
+                    onLinkTap = onLinkTap,
                 )
             }
         }

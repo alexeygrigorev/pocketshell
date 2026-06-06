@@ -29,6 +29,14 @@ class ListDirectoryParseTest {
     }
 
     @Test
+    fun `buildListDirCommand expands a leading tilde for HOME-relative dirs`() {
+        // Issue #558 bug 3: a `~/...` directory must expand to $HOME.
+        val cmd = buildListDirCommand("~/git/pocketshell")
+        assertTrue(cmd, cmd.contains("d=~/'git/pocketshell'"))
+        assertTrue(cmd, !cmd.contains("d='~/"))
+    }
+
+    @Test
     fun `parseListing drops the listed directory row and dotdot`() {
         val stdout = listOf(
             "directory|4096|1700000000|/home/u/proj",

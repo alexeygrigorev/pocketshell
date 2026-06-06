@@ -22,9 +22,11 @@ import com.termux.view.TerminalView
  * @property url the literal URL substring as it appears on screen, with any
  *   trailing sentence punctuation already stripped. Safe to pass to
  *   `Intent.ACTION_VIEW` after `Uri.parse`.
- * @property row external row index where the URL begins. URLs that wrap to a
- *   second row are not joined — the scanner emits them per-row, which keeps
- *   hit-testing simple and matches what the user sees on screen.
+ * @property row external row index where this region's fragment lives. Issue
+ *   #558 bug 2: a URL that soft-wraps across rows is reassembled into one
+ *   logical match, then re-emitted as one region per visual row it covers — all
+ *   sharing the SAME full [url] — so a tap on any wrapped fragment opens the
+ *   complete link while hit-testing stays per-row.
  * @property startCol inclusive column where the URL begins on [row].
  * @property endColExclusive exclusive column where the URL ends on [row].
  */
@@ -108,8 +110,12 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
     val topRow = view.topRow
     val firstRow = topRow
     val lastRowExclusive = topRow + rows
-    val out = mutableListOf<UrlRegion>()
 
+    // Issue #558 bug 2: read every visible row WITH its line-wrap flag so a URL
+    // that the emulator soft-wrapped across rows is reassembled into one logical
+    // line before matching. `getLineWrap(row)` is true when the next row
+    // continues this one.
+    val visualRows = mutableListOf<VisualRow>()
     for (row in firstRow until lastRowExclusive) {
         val line: String = try {
             // (selX1, selY1, selX2, selY2): inclusive-inclusive rectangle.
@@ -119,13 +125,25 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
             screen.getSelectedText(0, row, columns, row)
         } catch (_: Throwable) {
             // Mid-resize the vendored emulator occasionally throws AIOOBE.
-            // Treat as "no URLs on this row" rather than failing the whole
+            // Treat as a blank, non-wrapping row rather than failing the whole
             // overlay pass — the next render request will retry.
+            visualRows += VisualRow(row = row, text = "", wrapsToNext = false)
             continue
         }
+        val wraps = try {
+            row + 1 < lastRowExclusive && screen.getLineWrap(row)
+        } catch (_: Throwable) {
+            false
+        }
+        visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
+    }
 
-        // Columns already claimed by a URL on this row, so the loopback pass
-        // (below) does not re-emit a `127.0.0.1` URL the framework matcher
+    val out = mutableListOf<UrlRegion>()
+    for (logical in reassemble(visualRows)) {
+        val line = logical.text
+
+        // Columns already claimed by a URL on this logical line, so the loopback
+        // pass (below) does not re-emit a `127.0.0.1` URL the framework matcher
         // already produced.
         val claimedStarts = mutableSetOf<Int>()
 
@@ -148,20 +166,12 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
             if (endTrim != raw.length) {
                 raw = raw.substring(0, endTrim)
             }
-            val startCol = matcher.start()
-            val endCol = startCol + raw.length
-            if (startCol >= columns) continue
-            // Clip to the on-screen column range. Wrapped URLs that bleed
-            // off the right edge are still tap-eligible up to mColumns.
-            val clippedEnd = endCol.coerceAtMost(columns)
-            if (clippedEnd <= startCol) continue
-            claimedStarts += startCol
-            out += UrlRegion(
-                url = raw,
-                row = row,
-                startCol = startCol,
-                endColExclusive = clippedEnd,
-            )
+            val start = matcher.start()
+            claimedStarts += start
+            // Map the (possibly wrapped) logical span back onto every visual row
+            // it covers, emitting one region per row — all carrying the FULL url
+            // so a tap on any fragment opens the whole link.
+            emitUrlRegions(logical, raw, start, columns, out)
         }
 
         // Issue #488: the framework `Patterns.WEB_URL` does NOT match
@@ -170,11 +180,11 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
         // dev-server URLs we most need tappable so a tap can route into the
         // port-forward flow. Run a second, loopback-literal pass to surface
         // them. `127.0.0.1` is already covered by the framework pass above, so
-        // we skip any candidate whose start column was already claimed.
+        // we skip any candidate whose start was already claimed.
         val loopbackMatcher = LOOPBACK_URL_PATTERN.matcher(line)
         while (loopbackMatcher.find()) {
-            val startCol = loopbackMatcher.start()
-            if (startCol in claimedStarts) continue
+            val start = loopbackMatcher.start()
+            if (start in claimedStarts) continue
             var raw = loopbackMatcher.group() ?: continue
             var endTrim = raw.length
             while (endTrim > 0 && raw[endTrim - 1] in URL_TRAILING_PUNCTUATION) {
@@ -182,19 +192,37 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
             }
             if (endTrim <= 0) continue
             if (endTrim != raw.length) raw = raw.substring(0, endTrim)
-            val endCol = startCol + raw.length
-            if (startCol >= columns) continue
-            val clippedEnd = endCol.coerceAtMost(columns)
-            if (clippedEnd <= startCol) continue
-            out += UrlRegion(
-                url = raw,
-                row = row,
-                startCol = startCol,
-                endColExclusive = clippedEnd,
-            )
+            emitUrlRegions(logical, raw, start, columns, out)
         }
     }
     return out
+}
+
+/**
+ * Map a detected [url] occupying `[start, start+url.length)` on [logical]'s
+ * concatenated text onto per-visual-row [UrlRegion]s (one per row the match
+ * covers), clipping each row's columns to the live grid width. Every emitted
+ * region carries the complete [url] so a tap on any wrapped fragment opens the
+ * whole link (issue #558 bug 2).
+ */
+private fun emitUrlRegions(
+    logical: LogicalLine,
+    url: String,
+    start: Int,
+    columns: Int,
+    out: MutableList<UrlRegion>,
+) {
+    for (span in logical.mapSpanToRows(start, start + url.length)) {
+        if (span.startCol >= columns) continue
+        val clippedEnd = span.endColExclusive.coerceAtMost(columns)
+        if (clippedEnd <= span.startCol) continue
+        out += UrlRegion(
+            url = url,
+            row = span.row,
+            startCol = span.startCol,
+            endColExclusive = clippedEnd,
+        )
+    }
 }
 
 /**

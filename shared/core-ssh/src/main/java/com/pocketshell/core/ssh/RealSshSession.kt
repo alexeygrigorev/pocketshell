@@ -347,9 +347,12 @@ internal class RealSshSession(
             throw SshException("Could not open session channel to read $remotePath: ${t.message}", t)
         }
         try {
-            val quoted = remotePath.replace("'", "'\\''")
+            // Quote via [quoteRemotePathForShell] so a leading `~`/`~/` expands
+            // to the remote `$HOME` (issue #558 bug 3) while the rest stays
+            // quote-safe.
+            val quoted = quoteRemotePathForShell(remotePath)
             val command: Command = try {
-                sessionChannel.exec("cat '$quoted'")
+                sessionChannel.exec("cat $quoted")
             } catch (t: Throwable) {
                 throw SshException("Could not start remote `cat` for $remotePath: ${t.message}", t)
             }
@@ -594,6 +597,38 @@ internal class RealSshSession(
 }
 
 /**
+ * Quote [remotePath] for safe interpolation into a single remote shell command,
+ * while still letting a leading `~` / `~/` expand to the remote `$HOME`
+ * (issue #558 bug 3).
+ *
+ * The previous code single-quoted the whole path (`'...'`), which is correct for
+ * arbitrary filenames but suppresses `~` expansion — so tapping
+ * `~/git/pocketshell/.tmp/host-list-screen.png` reached the server literally and
+ * produced a false "No such file". The client cannot expand `~` itself without
+ * an extra round-trip (it does not know the remote `$HOME`), so instead we leave
+ * the tilde unquoted and single-quote only the remainder:
+ *
+ *  - `~`            → `~`            (the shell expands `~` to `$HOME`)
+ *  - `~/a b/c.png`  → `~/'a b/c.png'`(`~` expands; the rest is quote-safe)
+ *  - `/etc/hosts`   → `'/etc/hosts'` (absolute path unchanged behaviour)
+ *
+ * Only a leading bare `~` or `~/` is treated as expandable; `~user/...` and any
+ * `~` that is not the very first character are quoted literally, matching how a
+ * POSIX shell only expands `~` at the start of a word.
+ */
+internal fun quoteRemotePathForShell(remotePath: String): String {
+    fun quote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+    return when {
+        remotePath == "~" -> "~"
+        remotePath.startsWith("~/") -> {
+            val rest = remotePath.substring(2)
+            if (rest.isEmpty()) "~/" else "~/" + quote(rest)
+        }
+        else -> quote(remotePath)
+    }
+}
+
+/**
  * Exit code [buildListDirCommand] emits on a successful listing. Distinct from
  * the not-a-dir / permission / not-found sentinels so [classifyListFailure] can
  * map each shell-side outcome onto a typed exception.
@@ -632,16 +667,17 @@ internal const val LIST_FIELD_SEP: Char = '|'
  *     exit; we force a clean 0 so [classifyListFailure] only fires on the
  *     guard sentinels.
  *
- * The path is single-quoted with the standard `'\''` escape so arbitrary
- * filenames (spaces, quotes, `$`) don't break parsing. Filenames containing a
- * literal newline are a known limitation of the line-based parse (busybox
- * `stat` cannot NUL-terminate); such names are extremely rare and degrade to a
- * skipped/garbled row rather than a crash.
+ * The path is quoted via [quoteRemotePathForShell] so arbitrary filenames
+ * (spaces, quotes, `$`) don't break parsing while a leading `~`/`~/` still
+ * expands to `$HOME` (issue #558 bug 3). Filenames containing a literal newline
+ * are a known limitation of the line-based parse (busybox `stat` cannot
+ * NUL-terminate); such names are extremely rare and degrade to a skipped/garbled
+ * row rather than a crash.
  */
 internal fun buildListDirCommand(remotePath: String): String {
-    val quoted = remotePath.replace("'", "'\\''")
+    val quoted = quoteRemotePathForShell(remotePath)
     return buildString {
-        append("d='").append(quoted).append("'; ")
+        append("d=").append(quoted).append("; ")
         append("if [ ! -e \"\$d\" ]; then exit ").append(PROBE_EXIT_NO_SUCH).append("; fi; ")
         append("if [ ! -d \"\$d\" ]; then exit ").append(PROBE_EXIT_NOT_A_DIR).append("; fi; ")
         // Need read (to list names) and execute (to stat children).
@@ -804,14 +840,15 @@ internal const val SIZE_PROBE_UNPARSEABLE: Long = -2L
  * For a regular file it prints the byte count (`wc -c` — busybox-safe on the
  * Alpine fixtures and present on any POSIX shell); for anything that is not a
  * regular file it prints [SIZE_PROBE_NO_FILE_SENTINEL]. The path is resolved
- * by the remote login shell, so `~`-relative paths expand server-side.
+ * by the remote login shell, so `~`-relative paths expand server-side (issue
+ * #558 bug 3 — see [quoteRemotePathForShell]).
  *
- * Single-quoted with the standard `'\''` escape so arbitrary filenames don't
- * break shell parsing.
+ * Quoted via [quoteRemotePathForShell] so arbitrary filenames don't break shell
+ * parsing while a leading `~`/`~/` still expands to `$HOME`.
  */
 internal fun buildSizeProbeCommand(remotePath: String): String {
-    val quoted = remotePath.replace("'", "'\\''")
-    return "if [ -f '$quoted' ]; then wc -c < '$quoted'; else echo $SIZE_PROBE_NO_FILE_SENTINEL; fi"
+    val quoted = quoteRemotePathForShell(remotePath)
+    return "if [ -f $quoted ]; then wc -c < $quoted; else echo $SIZE_PROBE_NO_FILE_SENTINEL; fi"
 }
 
 /**

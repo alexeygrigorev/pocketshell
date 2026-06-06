@@ -66,4 +66,35 @@ class RemotePathResolverTest {
     fun `input is trimmed`() {
         assertEquals("/etc/hosts", RemotePathResolver.resolve("  /etc/hosts  ", null))
     }
+
+    @Test
+    fun `relative dotdot path collapses against cwd for resolution and display`() {
+        // Issue #558 bug 1: a `../`-relative tap must resolve AND display as the
+        // canonical absolute path with no literal `..` segments. Four `..` from
+        // /home/alexey/git/pocketshell climb to the root, leaving /tmp/x.md.
+        assertEquals(
+            "/tmp/x.md",
+            RemotePathResolver.resolve(
+                "../../../../tmp/x.md",
+                "/home/alexey/git/pocketshell",
+            ),
+        )
+    }
+
+    @Test
+    fun `absolute path with embedded dotdot is normalized for display`() {
+        // No literal `..` segments survive in the resolved breadcrumb.
+        assertEquals(
+            "/tmp/x.md",
+            RemotePathResolver.resolve(
+                "/home/alexey/git/pocketshell/../../../../tmp/x.md",
+                "/home/alexey/git/pocketshell",
+            ),
+        )
+    }
+
+    @Test
+    fun `tilde path keeps tilde but collapses dotdot segments`() {
+        assertEquals("~/b.txt", RemotePathResolver.resolve("~/a/../b.txt", "/home/me"))
+    }
 }

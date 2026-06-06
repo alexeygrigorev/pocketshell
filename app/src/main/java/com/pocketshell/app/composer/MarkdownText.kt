@@ -17,8 +17,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -26,6 +29,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.core.terminal.selection.ConversationLink
+import com.pocketshell.core.terminal.selection.detectConversationLinks
 import com.pocketshell.uikit.theme.PocketShellColors
 
 /**
@@ -86,6 +91,13 @@ public fun MarkdownText(
     color: Color = PocketShellColors.Text,
     fontSize: TextUnit = 13.sp,
     fontFamily: FontFamily? = null,
+    // Issue #557: when supplied, file paths / directories / URLs detected in the
+    // rendered text become tappable links — a tap routes the detected
+    // [ConversationLink] here (file → viewer, directory → file browser, URL →
+    // open) instead of falling through to the composer/keyboard. Default null
+    // keeps existing callers (screenshot tests, the composer preview) rendering
+    // plain, non-clickable text.
+    onLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
     val blocks = remember(text) { parseMarkdownBlocks(text) }
     SelectionContainer(modifier = modifier) {
@@ -97,7 +109,7 @@ public fun MarkdownText(
                 when (block) {
                     is MarkdownBlock.CodeBlock -> CodeBlock(block.text)
                     is MarkdownBlock.Heading -> Text(
-                        text = renderInline(block.text),
+                        text = renderInline(block.text, onLinkTap),
                         color = color,
                         fontSize = headingSize(block.level),
                         fontWeight = FontWeight.SemiBold,
@@ -105,13 +117,13 @@ public fun MarkdownText(
                     )
                     is MarkdownBlock.Bullet -> BulletRow(
                         marker = block.marker,
-                        text = renderInline(block.text),
+                        text = renderInline(block.text, onLinkTap),
                         color = color,
                         fontSize = fontSize,
                         fontFamily = fontFamily,
                     )
                     is MarkdownBlock.Paragraph -> Text(
-                        text = renderInline(block.text),
+                        text = renderInline(block.text, onLinkTap),
                         color = color,
                         fontSize = fontSize,
                         fontFamily = fontFamily,
@@ -253,10 +265,33 @@ internal fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
 /**
  * Build a Compose [AnnotatedString] from a Markdown line. Visible for
  * tests so the inline-span parsing can be exercised on the host JVM.
+ *
+ * Issue #557: when [onLinkTap] is supplied, file paths / directories / URLs
+ * detected in the line ([detectConversationLinks]) are emitted as
+ * [LinkAnnotation.Clickable] spans (underlined, accent-coloured) so a tap routes
+ * the [ConversationLink] to the caller instead of falling through to the
+ * keyboard. Detection runs on the RAW line text; because a path/URL never
+ * contains a Markdown control char (`*`, `_`, backtick, `[`), a link can only
+ * begin at a literal position, so the linkified span and the markdown spans
+ * never straddle each other.
  */
-internal fun renderInline(text: String): AnnotatedString = buildAnnotatedString {
+internal fun renderInline(
+    text: String,
+    onLinkTap: ((ConversationLink) -> Unit)? = null,
+): AnnotatedString = buildAnnotatedString {
+    val linksByStart: Map<Int, ConversationLink> =
+        if (onLinkTap == null) emptyMap()
+        else detectConversationLinks(text).associateBy { it.start }
     var index = 0
     while (index < text.length) {
+        // A detected file/dir/url link that starts exactly here is rendered as a
+        // single clickable span, taking priority over inline markdown parsing.
+        val link = linksByStart[index]
+        if (link != null && onLinkTap != null) {
+            appendConversationLink(text, link, onLinkTap)
+            index = link.endExclusive
+            continue
+        }
         val ch = text[index]
         if (ch == '\\' && index + 1 < text.length) {
             append(text[index + 1])
@@ -331,6 +366,35 @@ private inline fun AnnotatedString.Builder.withStyle(
         pop(token)
     }
 }
+
+/**
+ * Append [link]'s literal text (taken verbatim from [raw] so any trailing
+ * punctuation the detector trimmed stays as plain text, not part of the tap
+ * target) wrapped in a [LinkAnnotation.Clickable]. The whole span is underlined
+ * + accent-coloured and, on tap, routes the [ConversationLink] to [onLinkTap]
+ * (issue #557).
+ */
+private fun AnnotatedString.Builder.appendConversationLink(
+    raw: String,
+    link: ConversationLink,
+    onLinkTap: (ConversationLink) -> Unit,
+) {
+    val clickable = LinkAnnotation.Clickable(
+        tag = CONVERSATION_LINK_TAG,
+        styles = TextLinkStyles(
+            style = SpanStyle(
+                color = PocketShellColors.Accent,
+                textDecoration = TextDecoration.Underline,
+            ),
+        ),
+    ) { onLinkTap(link) }
+    withLink(clickable) {
+        append(raw.substring(link.start, link.endExclusive))
+    }
+}
+
+/** Test/inspection tag carried by every conversation tap-to-open link span. */
+internal const val CONVERSATION_LINK_TAG: String = "conversation-link"
 
 private val FencedCodeRegex = Regex("^```[a-zA-Z0-9_+-]*\\s*$")
 private val HeadingRegex = Regex("^(#{1,6})\\s+(.+)$")

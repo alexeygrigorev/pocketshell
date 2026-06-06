@@ -1,5 +1,7 @@
 package com.pocketshell.app.fileviewer
 
+import com.pocketshell.core.terminal.selection.PathNormalizer
+
 /**
  * Resolve a user-/agent-supplied remote path against the session's working
  * directory (issue #497).
@@ -8,14 +10,17 @@ package com.pocketshell.app.fileviewer
  * to wherever the agent is running, which is the active pane's cwd. The viewer
  * must turn it into something the remote shell can open.
  *
- * Rules (deliberately conservative — the heavy lifting of `~`/`$VAR` expansion
- * is left to the remote login shell, which `RealSshSession.downloadFile`
- * resolves through):
- *  - Absolute paths (`/...`) pass through unchanged.
- *  - `~`-relative paths (`~`, `~/...`) pass through unchanged — the remote
- *    shell expands them.
+ * Rules:
+ *  - Absolute paths (`/...`) pass through, with `.`/`..` segments collapsed
+ *    ([PathNormalizer]) so a tapped `…/git/pocketshell/../../../tmp/x.md`
+ *    resolves AND displays as the canonical `/tmp/x.md` (issue #558 bug 1).
+ *  - `~`-relative paths (`~`, `~/...`) keep their `~` prefix — the remote login
+ *    shell expands it to `$HOME` at fetch time (`RealSshSession`'s shell
+ *    quoting, issue #558 bug 3) — but their `.`/`..` segments are still
+ *    collapsed.
  *  - Everything else is joined onto [cwd] when [cwd] is a usable absolute or
- *    tilde path; the join collapses a trailing slash and a leading `./`.
+ *    tilde path; the joined result is then normalised so a relative `../`
+ *    target also collapses for resolution and the breadcrumb display.
  *  - When [cwd] is blank/unusable, a relative path passes through unchanged so
  *    the remote shell resolves it against the SSH session's own default cwd
  *    (the user's home). This is a best-effort fallback, not a guarantee.
@@ -25,7 +30,7 @@ object RemotePathResolver {
     fun resolve(input: String, cwd: String?): String {
         val path = input.trim()
         if (path.isEmpty()) return path
-        if (isAlreadyRooted(path)) return path
+        if (isAlreadyRooted(path)) return PathNormalizer.normalize(path)
 
         val base = cwd?.trim().orEmpty()
         if (base.isEmpty() || !isAlreadyRooted(base)) {
@@ -35,7 +40,7 @@ object RemotePathResolver {
 
         val cleanedBase = base.trimEnd('/')
         val cleanedInput = path.removePrefix("./")
-        return "$cleanedBase/$cleanedInput"
+        return PathNormalizer.normalize("$cleanedBase/$cleanedInput")
     }
 
     /** True for absolute (`/...`) or `~`-relative paths the remote shell expands. */

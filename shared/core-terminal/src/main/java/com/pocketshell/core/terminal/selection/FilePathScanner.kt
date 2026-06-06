@@ -99,27 +99,42 @@ public fun findVisibleFilePaths(view: TerminalView): List<FilePathRegion> {
     val topRow = view.topRow
     val firstRow = topRow
     val lastRowExclusive = topRow + rows
-    val out = mutableListOf<FilePathRegion>()
 
+    // Issue #558 bug 2: read every visible row WITH its line-wrap flag so a path
+    // soft-wrapped across rows is reassembled into one logical line before
+    // matching, then re-emitted per visual row sharing the full path string.
+    val visualRows = mutableListOf<VisualRow>()
     for (row in firstRow until lastRowExclusive) {
         val line: String = try {
             screen.getSelectedText(0, row, columns, row)
         } catch (_: Throwable) {
             // Mid-resize the vendored emulator occasionally throws AIOOBE.
+            visualRows += VisualRow(row = row, text = "", wrapsToNext = false)
             continue
         }
+        val wraps = try {
+            row + 1 < lastRowExclusive && screen.getLineWrap(row)
+        } catch (_: Throwable) {
+            false
+        }
+        visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
+    }
 
+    val out = mutableListOf<FilePathRegion>()
+    for (logical in reassemble(visualRows)) {
+        val line = logical.text
         for (detected in detectFilePathsInLine(line, urlSpans(line))) {
-            val start = detected.start
-            if (start >= columns) continue
-            val clippedEnd = detected.endExclusive.coerceAtMost(columns)
-            if (clippedEnd <= start) continue
-            out += FilePathRegion(
-                path = detected.path,
-                row = row,
-                startCol = start,
-                endColExclusive = clippedEnd,
-            )
+            for (span in logical.mapSpanToRows(detected.start, detected.endExclusive)) {
+                if (span.startCol >= columns) continue
+                val clippedEnd = span.endColExclusive.coerceAtMost(columns)
+                if (clippedEnd <= span.startCol) continue
+                out += FilePathRegion(
+                    path = detected.path,
+                    row = span.row,
+                    startCol = span.startCol,
+                    endColExclusive = clippedEnd,
+                )
+            }
         }
     }
     return out

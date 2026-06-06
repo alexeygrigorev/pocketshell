@@ -66,10 +66,11 @@ class FilePathTapInstrumentedTest {
         val client = PocketShellTerminalViewClient()
 
         // The two paths an agent would emit: a project-relative PNG (the
-        // maintainer's motivating case) and a project-relative text path.
-        // Kept short enough to fit on one terminal row — like URLs, the
-        // per-row viewport scanner does not stitch a path that soft-wraps
-        // across two rows (documented limitation shared with findVisibleUrls).
+        // maintainer's motivating case) and a project-relative text path. Kept
+        // short enough to fit on one terminal row; soft-wrapped targets are
+        // covered separately by the reassembly path (issue #558 bug 2, see
+        // WrappedLineReassemblyTest) which stitches a wrapped path/URL into one
+        // logical match before scanning.
         val pngPath = "tmp/textures/alpine-hex-b03.png"
         val txtPath = "out/report.txt"
 

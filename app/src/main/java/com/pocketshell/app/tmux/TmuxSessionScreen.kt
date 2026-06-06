@@ -128,6 +128,7 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
+import com.pocketshell.core.terminal.selection.ConversationLink
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -971,6 +972,27 @@ public fun TmuxSessionScreen(
             val showConversation = currentPane != null &&
                 visibleConversation?.detection != null &&
                 visibleConversation.selectedTab == SessionTab.Conversation
+            // Issue #488 / #557: shared URL-tap routing — a server-local
+            // (loopback) link goes through the port-forward flow; a real-host
+            // link opens in the browser. Used by both the Terminal surface and
+            // the Conversation link-tap sink so the two tabs behave identically.
+            val handleUrlTap: (String) -> Unit = { url ->
+                val local = com.pocketshell.core.terminal.selection
+                    .classifyLocalhostUrl(url)
+                if (local == null) {
+                    com.pocketshell.core.terminal.ui
+                        .openUrlWithFallback(context, url)
+                } else {
+                    val localPort = sessionForwardingIndicatorViewModel
+                        .forwardedLocalPortFor(hostId, local.remotePort)
+                    if (localPort != null) {
+                        com.pocketshell.core.terminal.ui
+                            .openUrlWithFallback(context, local.toLocalUrl(localPort))
+                    } else {
+                        pendingLocalhostForward = local
+                    }
+                }
+            }
             Box(
                 modifier = Modifier
                     .weight(1f),
@@ -1006,6 +1028,26 @@ public fun TmuxSessionScreen(
                         // Issue #494: retry a failed optimistic send.
                         onRetryFailedSend = { id ->
                             viewModel.retryFailedAgentSend(paneIdForSend, id)
+                        },
+                        // Issue #557: a path/dir/URL tapped in a message body is
+                        // routed here (parity with the Terminal tab). The active
+                        // pane's cwd resolves project-relative file/dir targets.
+                        onConversationLinkTap = { link ->
+                            val cwd = currentPane!!.cwd.takeIf { it.isNotBlank() }
+                            when (link.kind) {
+                                com.pocketshell.core.terminal.selection
+                                    .ConversationLinkKind.FILE ->
+                                    onOpenFile(link.text, cwd)
+                                com.pocketshell.core.terminal.selection
+                                    .ConversationLinkKind.DIRECTORY ->
+                                    onBrowseFiles(
+                                        com.pocketshell.app.fileviewer.RemotePathResolver
+                                            .resolve(link.text, cwd),
+                                    )
+                                com.pocketshell.core.terminal.selection
+                                    .ConversationLinkKind.URL ->
+                                    handleUrlTap(link.text)
+                            }
                         },
                     )
                 } else if (panes.isEmpty()) {
@@ -1043,35 +1085,12 @@ public fun TmuxSessionScreen(
                                 onLocalTerminalError = { cause ->
                                     viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
                                 },
-                                // Issue #488: a tapped URL is routed here so
-                                // server-local (loopback) links go through the
-                                // port-forward flow instead of a dead browser
-                                // open. A real-host URL keeps the default
-                                // browser behaviour (openUrlWithFallback).
-                                onUrlTap = { url ->
-                                    val local = com.pocketshell.core.terminal.selection
-                                        .classifyLocalhostUrl(url)
-                                    if (local == null) {
-                                        // Real remote host → normal browser open.
-                                        com.pocketshell.core.terminal.ui
-                                            .openUrlWithFallback(context, url)
-                                    } else {
-                                        val localPort = sessionForwardingIndicatorViewModel
-                                            .forwardedLocalPortFor(hostId, local.remotePort)
-                                        if (localPort != null) {
-                                            // Already forwarded → open the working
-                                            // local URL pointed at the live port.
-                                            com.pocketshell.core.terminal.ui
-                                                .openUrlWithFallback(
-                                                    context,
-                                                    local.toLocalUrl(localPort),
-                                                )
-                                        } else {
-                                            // Not forwarded → offer to forward it.
-                                            pendingLocalhostForward = local
-                                        }
-                                    }
-                                },
+                                // Issue #488: a tapped URL is routed through the
+                                // shared [handleUrlTap] so server-local
+                                // (loopback) links go through the port-forward
+                                // flow instead of a dead browser open, while a
+                                // real-host URL opens in the browser.
+                                onUrlTap = handleUrlTap,
                                 // Issue #500: detect file paths the agent
                                 // emits in the terminal and make them tappable
                                 // → open in the in-app file viewer (#497). The
@@ -3181,6 +3200,10 @@ internal fun TmuxConversationPane(
     // Issue #494: retry a failed optimistic user send (passes its optimistic
     // id). Default no-op for screenshot/legacy callers.
     onRetryFailedSend: (String) -> Unit = {},
+    // Issue #557: a file/dir/URL detected in a message body was tapped. The
+    // screen routes it (file → viewer, directory → file browser, URL → open).
+    // Null default keeps direct callers/screenshot tests rendering plain text.
+    onConversationLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
     // Issue #459: this pane is now read-only chrome — search + the
     // conversation feed. Sending is owned by the shared unified composer
@@ -3293,6 +3316,7 @@ internal fun TmuxConversationPane(
                             expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
                         },
                         onRetryFailedSend = onRetryFailedSend,
+                        onLinkTap = onConversationLinkTap,
                     )
                 }
             }
@@ -3506,9 +3530,10 @@ private fun ConversationEventRow(
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
     onRetryFailedSend: (String) -> Unit = {},
+    onLinkTap: ((com.pocketshell.core.terminal.selection.ConversationLink) -> Unit)? = null,
 ) {
     when (event) {
-        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend)
+        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend, onLinkTap)
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
             result = eventsById.findToolResultFor(event.id),
@@ -3535,8 +3560,13 @@ private fun ConversationEventRow(
 private fun ConversationMessageRow(
     event: ConversationEvent.Message,
     onRetryFailedSend: (String) -> Unit = {},
+    onLinkTap: ((com.pocketshell.core.terminal.selection.ConversationLink) -> Unit)? = null,
 ) {
-    ConversationMessageTurn(event = event, onRetrySend = onRetryFailedSend)
+    ConversationMessageTurn(
+        event = event,
+        onRetrySend = onRetryFailedSend,
+        onLinkTap = onLinkTap,
+    )
 }
 
 private fun Map<String, ConversationEvent>.findToolResultFor(

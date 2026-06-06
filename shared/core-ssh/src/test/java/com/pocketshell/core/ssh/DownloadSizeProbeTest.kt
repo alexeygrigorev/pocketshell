@@ -27,6 +27,24 @@ class DownloadSizeProbeTest {
     }
 
     @Test
+    fun `probe command leaves a leading tilde unquoted so the shell expands HOME`() {
+        // Issue #558 bug 3: `~/...` must reach the shell with `~` unquoted so it
+        // expands to $HOME instead of failing as a literal "No such file".
+        val cmd = buildSizeProbeCommand("~/git/pocketshell/.tmp/host-list-screen.png")
+        assertTrue(cmd, cmd.contains("[ -f ~/'git/pocketshell/.tmp/host-list-screen.png' ]"))
+        assertTrue(cmd, cmd.contains("wc -c < ~/'git/pocketshell/.tmp/host-list-screen.png'"))
+        // The tilde itself is NOT inside the single-quoted span.
+        assertTrue(cmd, !cmd.contains("'~/"))
+    }
+
+    @Test
+    fun `probe command expands a bare tilde`() {
+        val cmd = buildSizeProbeCommand("~")
+        assertTrue(cmd, cmd.contains("[ -f ~ ]"))
+        assertTrue(cmd, !cmd.contains("'~'"))
+    }
+
+    @Test
     fun `parse plain byte count`() {
         assertEquals(1234L, parseSizeProbe("1234\n"))
     }

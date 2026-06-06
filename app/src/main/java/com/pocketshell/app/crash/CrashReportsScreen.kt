@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,7 +42,10 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -333,29 +337,40 @@ private fun DialogScrim(
     }
 }
 
+/**
+ * Crash reports header, routed through the shared [ScreenHeader] (#479 Slice C1)
+ * so the screen reads as the tight dev-tool block — `bodyDense` SemiBold title +
+ * `‹` back chevron in the leading slot — instead of the old 60dp / 20.sp bar.
+ */
 @Composable
 private fun CrashReportsAppBar(onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppBarTextButton(label = "Back", onClick = onBack)
-        Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = "Crash reports",
-            color = PocketShellColors.Text,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.weight(1f),
-        )
-    }
+    ScreenHeader(
+        title = "Crash reports",
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+        },
+    )
 }
 
+/**
+ * A single crash-report row. Routes through the shared [ListRow] (#479 Slice C1)
+ * for the dense 44/8/12 row density + 48dp touch floor; the summary is the row
+ * title and the crash timestamp rides the [trailing] slot on the
+ * `labelSmall`(11) caption rung. The selected report keeps its accent-bordered
+ * card so the user can still see which report the detail pane below reflects.
+ */
 @Composable
 private fun CrashReportRow(
     report: CrashReport,
@@ -363,27 +378,20 @@ private fun CrashReportRow(
     onClick: () -> Unit,
 ) {
     val border = if (selected) PocketShellColors.Accent else PocketShellColors.BorderSoft
-    Column(
+    ListRow(
+        title = report.summary,
         modifier = Modifier
-            .fillMaxWidth()
             .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, border, RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        Text(
-            text = report.summary,
-            color = PocketShellColors.Text,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = ReportTimeFormatter.format(report.timestamp.atZone(ZoneId.systemDefault())),
-            color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
-        )
-    }
+            .border(1.dp, border, RoundedCornerShape(8.dp)),
+        trailing = {
+            Text(
+                text = ReportTimeFormatter.format(report.timestamp.atZone(ZoneId.systemDefault())),
+                color = PocketShellColors.TextMuted,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        },
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -430,12 +438,15 @@ private fun CrashReportDetail(
                 .verticalScroll(rememberScrollState())
                 .padding(10.dp),
         ) {
+            // The crash stack body is the screen's mono content (#479 Slice C1
+            // "stack path → bodyMono"). The flat CrashReportRow only carries the
+            // summary + timestamp, so the stack text lives here in the detail
+            // pane; route it through the shared mono rung instead of a raw 11.sp
+            // FontFamily.Monospace literal.
             Text(
                 text = body,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-                lineHeight = 15.sp,
-                fontFamily = FontFamily.Monospace,
+                style = PocketShellType.bodyMono,
             )
         }
     }

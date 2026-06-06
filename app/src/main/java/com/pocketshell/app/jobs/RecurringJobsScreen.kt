@@ -2,7 +2,6 @@ package com.pocketshell.app.jobs
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,14 +24,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.components.Breadcrumb
-import com.pocketshell.uikit.components.Pill
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.Crumb
-import com.pocketshell.uikit.model.PillKind
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 
 public data class RecurringJobsScreenState(
@@ -115,7 +115,8 @@ public fun RecurringJobsScreen(
         state.jobs.forEach { job ->
             RecurringJobRow(
                 job = job,
-                onClick = { dialogJob = job },
+                onEdit = { dialogJob = job },
+                onRemove = { onRemove(job.id) },
             )
         }
 
@@ -160,48 +161,51 @@ public fun RecurringJobsScreen(
     }
 }
 
+/**
+ * One scheduled-job row. Routes through the shared [ListRow] (#479 Slice C1):
+ *
+ *  - **leading** — a semantic [StatusDot]: green/[ConnectionStatus.Connected]
+ *    when the job is enabled, muted/[ConnectionStatus.Idle] when paused. This
+ *    replaces the old on/paused [com.pocketshell.uikit.components.Pill] (§4
+ *    enabled/last-run → dot).
+ *  - **title** — the job detail (or `Job N` fallback).
+ *  - **subtitle** — the `session | every X | next Y` schedule, rendered on the
+ *    [ListRow]'s `bodyMono` rung (the row's mono subtitle slot is exactly the
+ *    schedule/path vocabulary).
+ *  - **trailing** — a per-row [Kebab] carrying Edit / Remove (§4 decision 4:
+ *    edit/remove move off inline buttons into the one overflow affordance).
+ */
 @Composable
 private fun RecurringJobRow(
     job: RecurringJob,
-    onClick: () -> Unit,
+    onEdit: () -> Unit,
+    onRemove: () -> Unit,
 ) {
-    Column(
+    ListRow(
+        title = job.detail.ifBlank { "Job ${job.id}" },
         modifier = Modifier
-            .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 5.dp)
             .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = job.detail.ifBlank { "Job ${job.id}" },
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp)),
+        subtitle = "${job.sessionName} | every ${job.every} | next ${job.nextRun}",
+        leading = {
+            StatusDot(
+                status = if (job.enabled) {
+                    ConnectionStatus.Connected
+                } else {
+                    ConnectionStatus.Idle
+                },
             )
-            Pill(
-                label = if (job.enabled) "on" else "paused",
-                kind = if (job.enabled) PillKind.Ok else PillKind.Error,
+        },
+        trailing = {
+            Kebab(
+                items = listOf(
+                    KebabItem(label = "Edit", onClick = onEdit),
+                    KebabItem(label = "Remove", onClick = onRemove),
+                ),
             )
-        }
-        Text(
-            text = "${job.sessionName} | every ${job.every} | next ${job.nextRun}",
-            color = PocketShellColors.TextMuted,
-            fontFamily = JetBrainsMonoFamily,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
+        },
+    )
 }
 
 @Composable

@@ -17,10 +17,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,10 +36,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -130,7 +133,7 @@ fun CostsScreen(
                     text = "This permanently deletes every recorded API call. " +
                         "Aggregates reset to zero. There is no undo.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                 )
             },
             confirmButton = {
@@ -156,41 +159,35 @@ fun CostsScreen(
     }
 }
 
+/**
+ * AI Costs header, routed through the shared [ScreenHeader] (#479 Slice C1) so
+ * the screen reads as the tight dev-tool block — `bodyDense` SemiBold title +
+ * `‹` back chevron in the leading slot — instead of the old 60dp / 22.sp bar.
+ * The `‹` chevron and title keep their `costs:back` / `costs:title` test tags so
+ * existing instrumentation keeps resolving them after the migration.
+ */
 @Composable
 private fun CostsAppBar(onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(role = Role.Button, onClick = onBack)
-                .testTag(COSTS_BACK_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Text(
-            text = "AI Costs",
-            color = PocketShellColors.Text,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .padding(start = 4.dp)
-                .testTag(COSTS_TITLE_TAG),
-        )
-    }
+    ScreenHeader(
+        title = "AI Costs",
+        titleTestTag = COSTS_TITLE_TAG,
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .testTag(COSTS_BACK_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -198,9 +195,8 @@ private fun SectionLabel(text: String) {
     Text(
         text = text.uppercase(),
         color = PocketShellColors.TextMuted,
-        fontSize = 11.sp,
+        style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
-        letterSpacing = 0.8.sp,
         modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 8.dp),
     )
 }
@@ -230,24 +226,23 @@ private fun TotalsSection(state: CostsUiState) {
     Column {
         SectionLabel("Totals")
         SectionCard {
+            // ListRow paints its own dense vertical padding, so the rows stack
+            // directly without the old inter-row spacers.
             TotalRow(
                 label = "Lifetime",
                 value = CostFormat.formatUsd(state.lifetimeUsdMillicents),
                 testTag = COSTS_TOTAL_LIFETIME_TAG,
             )
-            Spacer(modifier = Modifier.height(8.dp))
             TotalRow(
                 label = "This month",
                 value = CostFormat.formatUsd(state.monthUsdMillicents),
                 testTag = COSTS_TOTAL_MONTH_TAG,
             )
-            Spacer(modifier = Modifier.height(8.dp))
             TotalRow(
                 label = "This week",
                 value = CostFormat.formatUsd(state.weekUsdMillicents),
                 testTag = COSTS_TOTAL_WEEK_TAG,
             )
-            Spacer(modifier = Modifier.height(8.dp))
             TotalRow(
                 label = "Today",
                 value = CostFormat.formatUsd(state.todayUsdMillicents),
@@ -257,29 +252,26 @@ private fun TotalsSection(state: CostsUiState) {
     }
 }
 
+/**
+ * A lifetime/month/week/today total line. Routes through the shared [ListRow]
+ * (#479 Slice C1) for the dense row density; the formatted USD value rides the
+ * [trailing] slot on the SemiBold `bodyDense` rung and keeps its per-window test
+ * tag so the cost instrumentation keeps resolving it.
+ */
 @Composable
 private fun TotalRow(label: String, value: String, testTag: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            color = PocketShellColors.TextSecondary,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = value,
-            color = PocketShellColors.Text,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.testTag(testTag),
-        )
-    }
+    ListRow(
+        title = label,
+        trailing = {
+            Text(
+                text = value,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(testTag),
+            )
+        },
+    )
 }
 
 @Composable
@@ -292,7 +284,7 @@ private fun BreakdownSection(state: CostsUiState) {
                     text = "No API calls recorded yet. Use the voice composer to make a " +
                         "Whisper transcription and your spend will appear here.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     modifier = Modifier
                         .padding(vertical = 8.dp)
                         .testTag(COSTS_BREAKDOWN_EMPTY_TAG),
@@ -311,20 +303,20 @@ private fun BreakdownSection(state: CostsUiState) {
                             Text(
                                 text = CostFormat.featureLabel(row.provider, row.feature),
                                 color = PocketShellColors.Text,
-                                fontSize = 14.sp,
+                                style = PocketShellType.bodyDense,
                                 fontWeight = FontWeight.SemiBold,
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = "Priced per ${CostFormat.unitLabel(row.provider, row.feature)}",
                                 color = PocketShellColors.TextMuted,
-                                fontSize = 11.sp,
+                                style = MaterialTheme.typography.labelSmall,
                             )
                         }
                         Text(
                             text = CostFormat.formatUsd(row.totalUsdMillicents),
                             color = PocketShellColors.Text,
-                            fontSize = 14.sp,
+                            style = PocketShellType.bodyDense,
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
@@ -358,7 +350,7 @@ private fun ByDaySection(state: CostsUiState) {
                 Text(
                     text = "Empty. Once you make a voice prompt, each Whisper call will land here.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     modifier = Modifier
                         .padding(vertical = 8.dp)
                         .testTag(COSTS_RECENT_EMPTY_TAG),
@@ -397,14 +389,14 @@ private fun DayGroup(group: DailyCostGroup, today: java.time.LocalDate) {
         Text(
             text = header,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.weight(1f),
         )
         Text(
             text = CostFormat.formatUsd(group.subtotalUsdMillicents),
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.testTag(COSTS_DAY_SUBTOTAL_TAG_PREFIX + group.date),
         )
@@ -413,10 +405,12 @@ private fun DayGroup(group: DailyCostGroup, today: java.time.LocalDate) {
         if (index > 0) {
             Spacer(modifier = Modifier.height(6.dp))
         }
+        // The per-request line is tabular (time · model · cost), so it rides the
+        // shared mono rung instead of a raw 12.sp literal.
         Text(
             text = CostFormat.formatRequestRow(request),
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyMono,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 2.dp)
@@ -436,7 +430,6 @@ private fun ActionsSection(onExportCsv: () -> Unit, onClearLog: () -> Unit) {
                 testTag = COSTS_EXPORT_TAG,
                 onClick = onExportCsv,
             )
-            Spacer(modifier = Modifier.height(8.dp))
             ActionRow(
                 label = "Clear log",
                 description = "Delete every recorded call. Aggregates reset to zero.",
@@ -447,38 +440,38 @@ private fun ActionsSection(onExportCsv: () -> Unit, onClearLog: () -> Unit) {
     }
 }
 
+/**
+ * An "Export CSV" / "Clear log" action row. Mirrors the Settings nav-row pattern
+ * (#479 Slice C1/D): the actionable line is the shared [ListRow] with a `›`
+ * disclosure chevron in the [trailing] slot, and the prose description renders
+ * below it on the `labelSmall`(11) caption rung (mono [ListRow] subtitles are
+ * reserved for paths/IDs, so a prose description does not belong in that slot).
+ */
 @Composable
 private fun ActionRow(label: String, description: String, testTag: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(vertical = 8.dp)
-            .testTag(testTag),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
+    ListRow(
+        title = label,
+        trailing = {
             Text(
-                text = label,
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = description,
+                text = "›",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.Bold,
             )
-        }
-        Text(
-            text = "›",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.width(24.dp),
-        )
-    }
+        },
+        onClick = onClick,
+        modifier = Modifier.testTag(testTag),
+    )
+    Text(
+        text = description,
+        color = PocketShellColors.TextSecondary,
+        style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier.padding(
+            start = PocketShellSpacing.sm,
+            top = 2.dp,
+            bottom = 4.dp,
+        ),
+    )
 }
 
 /**

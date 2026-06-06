@@ -21,8 +21,10 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -35,6 +37,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import javax.inject.Inject
 
 /**
@@ -286,7 +289,15 @@ public class PromptComposerViewModel @Inject constructor(
                     error = null,
                 )
             }
-            val result = runCatching { stage() }.getOrElse { Result.failure(it) }
+            val result: Result<List<String>> = try {
+                withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS) { stage() }
+            } catch (timeout: TimeoutCancellationException) {
+                Result.failure(timeout)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (t: Throwable) {
+                Result.failure(t)
+            }
             result.fold(
                 onSuccess = { paths ->
                     if (paths.isEmpty()) {
@@ -1859,6 +1870,14 @@ public class PromptComposerViewModel @Inject constructor(
         public const val SAMPLE_INTERVAL_MS: Long = 50L
 
         /**
+         * Issue #570: attachment staging must be bounded. A hung content
+         * provider, stalled SSH upload, or dead remote must return the
+         * composer to editable Idle state instead of leaving the upload
+         * banner and disabled attachment actions stuck forever.
+         */
+        public const val ATTACHMENT_UPLOAD_TIMEOUT_MS: Long = 90_000L
+
+        /**
          * Issue #169 Part 2: [SavedStateHandle] key for the current
          * composer draft text. Survives both configuration-change recreate
          * (ViewModel retained) and process death (ViewModel rebuilt from
@@ -1986,8 +2005,12 @@ internal fun attachmentDisplayName(remotePath: String): String {
 }
 
 private fun attachmentErrorMessage(error: Throwable): String {
-    val raw = error.message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
-    val detail = raw.ifBlank { error.javaClass.simpleName }
+    val detail = if (error is TimeoutCancellationException) {
+        "upload timed out"
+    } else {
+        val raw = error.message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+        raw.ifBlank { error.javaClass.simpleName }
+    }
     return "Attachment upload failed: $detail. Your draft was kept; reconnect or choose a smaller/readable file."
 }
 

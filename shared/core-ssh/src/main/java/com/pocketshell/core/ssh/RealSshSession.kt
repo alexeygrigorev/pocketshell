@@ -1,6 +1,7 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -20,6 +21,7 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.io.OutputStream
 import java.util.logging.Level
 import java.util.logging.Logger
 
@@ -417,12 +419,13 @@ internal class RealSshSession(
      * Stream + length are taken so the caller can pass either —
      * length is informational only; `cat` does not need it.
      */
-    private fun uploadStreamInternal(
+    private suspend fun uploadStreamInternal(
         input: InputStream,
         @Suppress("UNUSED_PARAMETER") length: Long,
         name: String,
         remotePath: String,
     ) {
+        val coroutineJob = currentCoroutineContext()[Job]
         val sessionChannel = try {
             client.startSession()
         } catch (t: Throwable) {
@@ -431,9 +434,17 @@ internal class RealSshSession(
                 t,
             )
         }
+        var command: Command? = null
+        val cancelHandle = coroutineJob?.invokeOnCompletion { cause ->
+            if (cause != null) {
+                runCatching { input.close() }
+                runCatching { command?.close() }
+                runCatching { sessionChannel.close() }
+            }
+        }
         try {
             val quoted = remotePath.replace("'", "'\\''")
-            val command: Command = try {
+            command = try {
                 sessionChannel.exec("cat > '$quoted'")
             } catch (t: Throwable) {
                 throw SshException(
@@ -442,18 +453,18 @@ internal class RealSshSession(
                 )
             }
             try {
-                command.outputStream.use { output ->
-                    input.copyTo(output)
+                command!!.outputStream.use { output ->
+                    copyToRemoteCancellable(input, output)
                 }
                 // `outputStream.close()` sends EOF on the channel, but
                 // sshj also exposes `signal()` to nudge a stuck remote.
                 // The remote `cat` exits on EOF; `join()` waits for the
                 // command to finish so we can read the exit code.
-                command.join()
-                val exit = command.exitStatus ?: -1
+                command!!.join()
+                val exit = command!!.exitStatus ?: -1
                 if (exit != 0) {
                     val stderr = runCatching {
-                        command.errorStream.readBytes().toString(Charsets.UTF_8)
+                        command!!.errorStream.readBytes().toString(Charsets.UTF_8)
                     }.getOrDefault("")
                     throw SshException(
                         "Remote `cat` exited with status $exit while writing $remotePath: ${stderr.trim()}",
@@ -464,13 +475,35 @@ internal class RealSshSession(
             }
         } catch (e: SshException) {
             throw e
+        } catch (e: CancellationException) {
+            throw e
         } catch (t: Throwable) {
             throw SshException(
                 "Upload of $name to $remotePath failed: ${t.message}",
                 t,
             )
         } finally {
+            cancelHandle?.dispose()
+            runCatching { command?.close() }
             runCatching { sessionChannel.close() }
+        }
+    }
+
+    private suspend fun copyToRemoteCancellable(input: InputStream, output: OutputStream) {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            throwIfUploadCancelled()
+            val read = input.read(buffer)
+            if (read < 0) break
+            throwIfUploadCancelled()
+            output.write(buffer, 0, read)
+        }
+        output.flush()
+    }
+
+    private suspend fun throwIfUploadCancelled() {
+        if (currentCoroutineContext()[Job]?.isActive == false) {
+            throw CancellationException("SSH upload cancelled")
         }
     }
 

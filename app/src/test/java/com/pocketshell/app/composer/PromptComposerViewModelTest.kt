@@ -11,8 +11,10 @@ import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -524,6 +526,69 @@ class PromptComposerViewModelTest {
         assertNotNull(error)
         assertTrue(error!!.contains("Attachment upload failed"))
         assertTrue(error.contains("Permission denied"))
+        assertTrue(error.contains("draft was kept"))
+    }
+
+    @Test
+    fun attachFilesInFlightDoesNotBlockDraftEdits() = runTest {
+        // Issue #570: staging/uploading attachments must not globally block
+        // text composition. The upload can stay busy, but the draft path
+        // remains editable and mirrored into saved state.
+        val vm = newVm()
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+
+        vm.attachFiles(count = 3) {
+            uploadStarted.complete(Unit)
+            uploadResult.await()
+        }
+        runCurrent()
+        uploadStarted.await()
+
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Uploading(3),
+            vm.uiState.value.attachmentUpload,
+        )
+
+        vm.onDraftChange("typing while images upload")
+
+        assertEquals("typing while images upload", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.error)
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Uploading(3),
+            vm.uiState.value.attachmentUpload,
+        )
+
+        uploadResult.complete(Result.success(emptyList()))
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun attachFilesTimeoutClearsBusyStateAndKeepsDraft() = runTest {
+        val vm = newVm()
+        val uploadStarted = CompletableDeferred<Unit>()
+        vm.onDraftChange("keep this")
+
+        vm.attachFiles(count = 3) {
+            uploadStarted.complete(Unit)
+            awaitCancellation()
+        }
+        runCurrent()
+        uploadStarted.await()
+
+        advanceTimeBy(PromptComposerViewModel.ATTACHMENT_UPLOAD_TIMEOUT_MS)
+        runCurrent()
+
+        assertEquals("keep this", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Idle,
+            vm.uiState.value.attachmentUpload,
+        )
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        val error = vm.uiState.value.error
+        assertNotNull(error)
+        assertTrue(error!!.contains("Attachment upload failed"))
+        assertTrue(error.contains("timed out"))
         assertTrue(error.contains("draft was kept"))
     }
 
@@ -2145,6 +2210,41 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
 
         assertEquals(0, sent.size)
+    }
+
+    @Test
+    fun requestSendDuringAttachmentUploadSendsCurrentTextOnly() = runTest {
+        // Issue #570: an in-flight upload should not disable the user's typed
+        // prompt. Uploading files are not staged chips yet, so this sends the
+        // current text without waiting for the stalled attachment batch.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val sent = collectSendRequests(vm)
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+
+        vm.attachFiles(count = 2) {
+            uploadStarted.complete(Unit)
+            uploadResult.await()
+        }
+        runCurrent()
+        uploadStarted.await()
+        vm.onDraftChange("send this now")
+
+        vm.requestSend(withEnter = true)
+        runCurrent()
+
+        assertEquals(1, sent.size)
+        assertEquals("send this now", sent[0].text)
+        assertEquals(true, sent[0].withEnter)
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Uploading(2),
+            vm.uiState.value.attachmentUpload,
+        )
+
+        uploadResult.complete(Result.success(emptyList()))
+        advanceUntilIdle()
     }
 
     @Test

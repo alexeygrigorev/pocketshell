@@ -2,7 +2,6 @@ package com.pocketshell.app.composer
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -101,6 +100,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.pocketshell.app.fileviewer.BoundedImageDecoder
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.voice.DictateDotIcon
@@ -763,10 +763,9 @@ internal fun SheetContent(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Left cluster: paperclip attach + `{}` snippets. Disabled while
-            // a Whisper round-trip / attachment upload is in flight so the
-            // user can't land a stale snippet over the about-to-arrive
-            // transcript.
+            // Left cluster: paperclip attach + `{}` snippets. Attachment
+            // picking itself stays single-flight while a batch is uploading,
+            // but typing, editing, dictation, and text-only Send remain live.
             AttachIconButton(
                 onClick = { onAttachFiles?.invoke() },
                 enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
@@ -799,9 +798,12 @@ internal fun SheetContent(
                     // (possibly stale) ViewModel draft — the IME composing
                     // region lands in `draftFieldValue.text` immediately, so
                     // a short typed prompt enables Send without waiting for an
-                    // IME commit. [commitAndSend] flushes that text into the
-                    // ViewModel before dispatching, so the tap always delivers.
-                    val sendEnabled = draftFieldValue.text.isNotEmpty() && !attachmentBusy
+                    // IME commit. Staged attachment chips also enable Send
+                    // for attachment-only prompts. [commitAndSend] flushes
+                    // the live text into the ViewModel before dispatching, so
+                    // the tap always delivers.
+                    val sendEnabled =
+                        draftFieldValue.text.isNotEmpty() || state.attachments.isNotEmpty()
                     SendButton(
                         onClick = commitAndSend,
                         enabled = sendEnabled,
@@ -812,7 +814,7 @@ internal fun SheetContent(
                     // Sits AFTER Send so the row reads "type + send, or dictate".
                     MicTriggerButton(
                         onClick = onMicTap,
-                        enabled = !attachmentBusy,
+                        enabled = true,
                         modifier = Modifier.testTag(COMPOSER_MIC_TAG),
                     )
                 }
@@ -1425,30 +1427,11 @@ private fun decodeAttachmentThumbnail(
     uri: Uri,
 ): ImageBitmap? {
     return runCatching {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, bounds)
-        }
-        val sampleSize = thumbnailSampleSize(bounds, targetSizePx = 192)
-        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, options)?.asImageBitmap()
-        }
+        BoundedImageDecoder.decodeStream(
+            openInputStream = { resolver.openInputStream(uri) },
+            maxPixels = ATTACHMENT_THUMBNAIL_MAX_PIXELS,
+        )?.asImageBitmap()
     }.getOrNull()
-}
-
-private fun thumbnailSampleSize(options: BitmapFactory.Options, targetSizePx: Int): Int {
-    val height = options.outHeight
-    val width = options.outWidth
-    var sampleSize = 1
-    if (height > targetSizePx || width > targetSizePx) {
-        var halfHeight = height / 2
-        var halfWidth = width / 2
-        while (halfHeight / sampleSize >= targetSizePx && halfWidth / sampleSize >= targetSizePx) {
-            sampleSize *= 2
-        }
-    }
-    return sampleSize.coerceAtLeast(1)
 }
 
 private fun PromptComposerViewModel.StagedAttachment.isImageAttachment(): Boolean {
@@ -1466,6 +1449,7 @@ private fun PromptComposerViewModel.StagedAttachment.fileExtensionLabel(): Strin
 }
 
 private val IMAGE_ATTACHMENT_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif")
+private const val ATTACHMENT_THUMBNAIL_MAX_PIXELS = 192 * 192
 internal val ATTACHMENT_TILE_SIZE = 64.dp
 internal val ATTACHMENT_TILE_REMOVE_TOUCH_SIZE = 48.dp
 private val ATTACHMENT_TILE_REMOVE_SIZE = 22.dp

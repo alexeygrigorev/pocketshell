@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -485,7 +484,7 @@ private fun LoadingPanel() {
 @Composable
 private fun ImagePanel(cacheFile: File) {
     val bitmap = remember(cacheFile.path) {
-        runCatching { BitmapFactory.decodeFile(cacheFile.path)?.asImageBitmap() }.getOrNull()
+        runCatching { BoundedImageDecoder.decodeFile(cacheFile)?.asImageBitmap() }.getOrNull()
     }
     if (bitmap == null) {
         CannotPreviewPanel(

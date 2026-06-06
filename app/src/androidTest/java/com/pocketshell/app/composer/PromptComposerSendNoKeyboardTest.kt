@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -15,11 +16,13 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -59,7 +62,10 @@ class PromptComposerSendNoKeyboardTest {
     }
 
     private class TestMicCapture : PromptComposerViewModel.MicCapture {
-        override fun start() {}
+        var startCount = 0
+        override fun start() {
+            startCount += 1
+        }
         override fun stop(): ByteArray = ByteArray(0)
         override fun currentAmplitude(): Float = 0f
     }
@@ -76,8 +82,10 @@ class PromptComposerSendNoKeyboardTest {
         override fun whisperLanguageHint(): String? = null
     }
 
-    private fun newViewModel(): PromptComposerViewModel = PromptComposerViewModel(
-        audioRecorder = TestMicCapture(),
+    private fun newViewModel(
+        mic: TestMicCapture = TestMicCapture(),
+    ): PromptComposerViewModel = PromptComposerViewModel(
+        audioRecorder = mic,
         whisperClientFactory = WhisperClientFactory {
             object : WhisperClient {
                 override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> =
@@ -184,6 +192,125 @@ class PromptComposerSendNoKeyboardTest {
         // happened before dispatch, so no empty / partial send slipped out.
         assertEquals(1, sendInvocations)
         assertEquals("restart the worker pool", lastSent)
+    }
+
+    /**
+     * Issue #570 / #544: staged attachment chips are a valid prompt even
+     * without typed text. The ViewModel already composes attachment-only
+     * sends; the sheet must keep the Send affordance tappable for that state.
+     */
+    @Test
+    fun sendIsEnabledForAttachmentOnlyPrompt() {
+        var sendInvocations = 0
+
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(
+                        draft = "",
+                        attachments = listOf(
+                            PromptComposerViewModel.StagedAttachment(
+                                remotePath = "~/.pocketshell/attachments/host-1/shot.png",
+                                displayName = "shot.png",
+                            ),
+                        ),
+                    ),
+                    onClose = {},
+                    onDraftChange = {},
+                    onMicTap = {},
+                    onSend = { _ -> sendInvocations += 1 },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+            .performClick()
+        compose.waitForIdle()
+
+        assertEquals(1, sendInvocations)
+    }
+
+    /**
+     * Issue #570: connected proof for the real sheet content while a 3-image
+     * attachment batch is stalled. Uploading disables only attachment/snippet
+     * picking; the visible composer remains usable, text Send dispatches
+     * immediately, and mic dictation can still start instead of wedging behind
+     * the in-flight upload.
+     */
+    @Test
+    fun stalledThreeImageUploadKeepsSendAndMicLive() {
+        val mic = TestMicCapture()
+        val vm = newViewModel(mic)
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+        val sent = java.util.Collections.synchronizedList(
+            mutableListOf<PromptComposerViewModel.SendRequest>(),
+        )
+
+        collectorScope.launch { vm.sendRequests.collect { sent += it } }
+        compose.setContent {
+            PocketShellTheme {
+                val state by vm.uiState.collectAsState()
+                SheetContent(
+                    state = state,
+                    onClose = {},
+                    onDraftChange = vm::onDraftChange,
+                    onMicTap = { vm.onMicTap() },
+                    onSend = { withEnter -> vm.requestSend(withEnter) },
+                    onSnippets = {},
+                    onAttachFiles = {},
+                )
+            }
+        }
+
+        compose.runOnIdle {
+            vm.attachFiles(count = 3) {
+                uploadStarted.complete(Unit)
+                uploadResult.await()
+            }
+        }
+        compose.waitUntil(timeoutMillis = 5_000) { uploadStarted.isCompleted }
+
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG)
+            .assertIsDisplayed()
+            .assertIsNotEnabled()
+        compose.onNodeWithTag(COMPOSER_SNIPPETS_TAG)
+            .assertIsDisplayed()
+            .assertIsNotEnabled()
+
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG)
+            .performTextInput("send while screenshots are still uploading")
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { sent.isNotEmpty() }
+        assertEquals(1, sent.size)
+        assertEquals("send while screenshots are still uploading", sent[0].text)
+        assertEquals(true, sent[0].withEnter)
+        assertTrue(vm.uiState.value.attachmentUpload is PromptComposerViewModel.AttachmentUploadState.Uploading)
+
+        compose.onNodeWithTag(COMPOSER_MIC_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { mic.startCount == 1 }
+        assertEquals(
+            PromptComposerViewModel.RecordingState.Recording,
+            vm.uiState.value.recording,
+        )
+
+        compose.runOnIdle {
+            uploadResult.complete(Result.failure(java.io.IOException("degraded upload path")))
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            vm.uiState.value.attachmentUpload == PromptComposerViewModel.AttachmentUploadState.Idle
+        }
+        assertTrue(vm.uiState.value.error.orEmpty().contains("Attachment upload failed"))
     }
 
     /**

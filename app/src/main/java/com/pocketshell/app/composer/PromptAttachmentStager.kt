@@ -7,6 +7,7 @@ import com.pocketshell.app.share.FilenameSanitiser
 import com.pocketshell.app.share.ShareUploader
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -44,6 +45,8 @@ internal class PromptAttachmentStager(
                 "$displayDir/$remoteName"
             }
             Result.success(paths)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (t: Throwable) {
             Result.failure(if (t is SshException) t else SshException("Attachment upload failed: ${t.message}", t))
         }

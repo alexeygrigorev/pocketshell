@@ -11,7 +11,9 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.printToString
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
@@ -177,19 +179,26 @@ abstract class NetworkFaultProofBase {
     }
 
     protected fun attachToSession(hostRowTag: String, hostName: String, sessionName: String) {
-        compose.waitUntil(timeoutMillis = 45_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        val pickerTimeoutMs = TerminalTestTimeouts.terminalVisibilityTimeoutMs()
+        waitUntilWithDiagnostics(
+            label = "host row $hostName",
+            timeoutMillis = pickerTimeoutMs,
+            textProbes = listOf(hostName),
+            tagProbes = listOf(hostRowTag),
+        ) {
+            hasTag(hostRowTag)
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         var folderPath = FolderListViewModel.UNTRACKED_PATH
-        compose.waitUntil(timeoutMillis = 45_000) {
+        waitUntilWithDiagnostics(
+            label = "folder row for $sessionName",
+            timeoutMillis = pickerTimeoutMs,
+            textProbes = listOf(hostName, sessionName),
+            tagProbes = NETWORK_FAULT_FOLDER_CANDIDATES.map(::folderRowTestTag),
+        ) {
             val match = NETWORK_FAULT_FOLDER_CANDIDATES.firstOrNull { candidate ->
-                compose.onAllNodesWithTag(folderRowTestTag(candidate), useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+                hasTag(folderRowTestTag(candidate))
             }
             if (match != null) {
                 folderPath = match
@@ -198,19 +207,12 @@ abstract class NetworkFaultProofBase {
                 false
             }
         }
-        compose.onNodeWithTag(
-            folderHeaderClickTestTag(folderPath),
-            useUnmergedTree = true,
-        ).performClick()
+        expandFolderUntilSessionRowVisible(folderPath, sessionName, pickerTimeoutMs)
         val sessionRowTag = folderDetailRowTestTag(folderPath, sessionName)
-        compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithTag(sessionRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
         compose.onNodeWithTag(sessionRowTag, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
+        waitForVisibleTerminalText("tmux pane ready") { it.isNotBlank() }
     }
 
     protected fun sendCommandThroughTerminalInput(command: String, label: String) {
@@ -368,6 +370,42 @@ abstract class NetworkFaultProofBase {
         assertTrue("expected captured pane text for $label to contain $expected, got:\n$last", expected in last)
     }
 
+    /**
+     * Half-open/no-FIN link starvation for short ride-through checks. Toxiproxy
+     * keeps the socket established while dropping bytes for [downMillis], then
+     * removes the toxic so the same SSH/tmux connection can make progress again.
+     */
+    protected fun starveLinkFor(label: String, downMillis: Long) {
+        val proxy = toxiproxy()
+        val cutStart = SystemClock.elapsedRealtime()
+        proxy.addBlackhole()
+        try {
+            recordTiming("${label}_link_starved_ms", downMillis)
+            waitForNoDisconnectBandDuring("${label}_while_starved", downMillis)
+        } finally {
+            proxy.clearToxics()
+            recordTiming("${label}_link_starve_total_ms", SystemClock.elapsedRealtime() - cutStart)
+        }
+    }
+
+    /**
+     * Clean socket-drop outage for sustained reconnect checks. Toxiproxy
+     * disables the proxy, which drops active connections and refuses new ones
+     * until [ToxiproxyControl.enable] is called.
+     */
+    protected fun disableProxyFor(label: String, downMillis: Long) {
+        val proxy = toxiproxy()
+        val cutStart = SystemClock.elapsedRealtime()
+        proxy.disable()
+        try {
+            recordTiming("${label}_proxy_disabled_ms", downMillis)
+            SystemClock.sleep(downMillis)
+        } finally {
+            proxy.enable()
+            recordTiming("${label}_proxy_disable_total_ms", SystemClock.elapsedRealtime() - cutStart)
+        }
+    }
+
     protected fun assertNoExtraConnectAttempts(
         before: Int,
         expectedDelta: Int,
@@ -469,6 +507,93 @@ abstract class NetworkFaultProofBase {
             }
             attached
         }
+    }
+
+    private fun expandFolderUntilSessionRowVisible(
+        folderPath: String,
+        sessionName: String,
+        timeoutMillis: Long,
+    ) {
+        val detailTag = folderDetailRowTestTag(folderPath, sessionName)
+        val headerTag = folderHeaderClickTestTag(folderPath)
+        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
+        var taps = 0
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            if (hasTag(detailTag)) {
+                recordTiming("attach_folder_expand_taps", taps.toLong())
+                return
+            }
+            if (hasTag(headerTag)) {
+                compose.onNodeWithTag(headerTag, useUnmergedTree = true).performClick()
+                taps += 1
+            }
+            SystemClock.sleep(250)
+        }
+        waitUntilWithDiagnostics(
+            label = "expanded folder $folderPath showing session row $sessionName after $taps tap(s)",
+            timeoutMillis = 5_000,
+            textProbes = listOf(sessionName, folderPath.substringAfterLast('/')),
+            tagProbes = listOf(
+                folderRowTestTag(folderPath),
+                folderHeaderClickTestTag(folderPath),
+                folderDetailRowTestTag(folderPath, sessionName),
+            ),
+        ) {
+            hasTag(detailTag)
+        }
+    }
+
+    private fun waitUntilWithDiagnostics(
+        label: String,
+        timeoutMillis: Long,
+        textProbes: List<String> = emptyList(),
+        tagProbes: List<String> = emptyList(),
+        condition: () -> Boolean,
+    ) {
+        try {
+            compose.waitUntil(timeoutMillis = timeoutMillis, condition = condition)
+        } catch (error: Throwable) {
+            throw AssertionError(
+                buildString {
+                    appendLine("Timed out after ${timeoutMillis}ms waiting for $label.")
+                    appendLine(screenDiagnostics(textProbes = textProbes, tagProbes = tagProbes))
+                },
+                error,
+            )
+        }
+    }
+
+    private fun hasTag(tag: String): Boolean =
+        compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+    private fun screenDiagnostics(textProbes: List<String>, tagProbes: List<String>): String = buildString {
+        appendLine("Tag probe counts:")
+        tagProbes.distinct().forEach { tag ->
+            val count = runCatching {
+                compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().size
+            }.getOrDefault(-1)
+            appendLine("  $tag=$count")
+        }
+        appendLine("Text probe counts:")
+        textProbes.distinct().forEach { text ->
+            val count = runCatching {
+                compose.onAllNodesWithText(text, useUnmergedTree = true).fetchSemanticsNodes().size
+            }.getOrDefault(-1)
+            appendLine("  \"$text\"=$count")
+        }
+        appendLine("Compose semantics tree:")
+        appendLine(
+            runCatching {
+                compose.waitForIdle()
+                compose.onRoot(useUnmergedTree = true).printToString()
+            }.getOrElse { diagnosticsError ->
+                "  <failed to capture semantics tree: ${diagnosticsError.javaClass.simpleName}: " +
+                    "${diagnosticsError.message.orEmpty()}>"
+            },
+        )
     }
 
     private fun terminalInputConnection(): InputConnection {
@@ -600,6 +725,16 @@ class ToxiproxyControl(private val baseUrl: String) {
         KNOWN_TOXICS.forEach { name ->
             runCatching { request("DELETE", "/proxies/$PROXY_NAME/toxics/$name") }
         }
+    }
+
+    /** Drop active connections and refuse new ones until [enable] restores the proxy. */
+    fun disable() {
+        request("POST", "/proxies/$PROXY_NAME", """{"enabled":false}""")
+    }
+
+    /** Restore the link after [disable]; new connections are accepted again. */
+    fun enable() {
+        request("POST", "/proxies/$PROXY_NAME", """{"enabled":true}""")
     }
 
     private fun createProxy() {

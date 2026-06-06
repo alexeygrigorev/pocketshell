@@ -623,6 +623,35 @@ field in the app.
 The false-positive setup bug is tracked in #70. The reusable opt-in scenario
 suite is tracked in #71.
 
+### Network fault resilience suite
+
+The network fault proofs are opt-in connected Android instrumentation tests.
+They require a booted emulator plus the Docker `agents` target behind
+Toxiproxy. Default CI does not start these services, and the tests also skip
+when the instrumentation process detects CI, so run them manually for reviewer
+evidence or after explicitly changing the workflow.
+
+Start the fixture:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build agents network-fault-proxy
+```
+
+Run the issue #552 ride-through proof:
+
+```bash
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.RideThroughInterruptionE2eTest
+```
+
+To isolate one case, append `#briefLinkCutRidesThroughWithoutDisconnectOrTeardown`
+or `#sustainedLinkCutReconnectsCleanlyWithoutHang` to the class selector. The
+brief case uses a non-closing Toxiproxy timeout toxic for a short byte-starved
+link; the sustained case disables the proxy long enough to force an explicit
+reconnect. Summaries are written under
+`/sdcard/Android/media/com.pocketshell.app/additional_test_output/issue342-network-faults/`.
+
 ### Host setup/bootstrap scenario suite
 
 The bootstrap suite is implemented as opt-in Android instrumentation tests

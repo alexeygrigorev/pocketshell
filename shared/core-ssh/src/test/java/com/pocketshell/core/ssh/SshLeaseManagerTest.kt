@@ -75,6 +75,26 @@ class SshLeaseManagerTest {
     }
 
     @Test
+    fun `default idle ttl keeps released lease warm for sixty seconds`() = runTest {
+        val session = FakeSshSession()
+        val manager = SshLeaseManager(
+            connector = QueueLeaseConnector(session),
+            scope = this,
+            nowMillis = { testScheduler.currentTime },
+        )
+
+        manager.acquire(TARGET).getOrThrow().release()
+
+        advanceTimeBy(59_999)
+        runCurrent()
+        assertFalse(session.closed)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(session.closed)
+    }
+
+    @Test
     fun `reacquire before ttl cancels idle close`() = runTest {
         val session = FakeSshSession()
         val connector = QueueLeaseConnector(session)

@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -47,11 +48,14 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.assistant.AssistantProvider
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 import kotlin.math.roundToInt
 
 /**
@@ -226,35 +230,12 @@ private fun HostImportSection(
     Column {
         SectionLabel("Hosts")
         SectionCard {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(role = Role.Button, onClick = { showImportDialog = true })
-                    .padding(vertical = 8.dp)
-                    .testTag(HOST_IMPORT_ROW_TAG),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Import host",
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = HOST_IMPORT_SETTINGS_COPY,
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+            SettingsNavRow(
+                title = "Import host",
+                description = HOST_IMPORT_SETTINGS_COPY,
+                onClick = { showImportDialog = true },
+                testTag = HOST_IMPORT_ROW_TAG,
+            )
         }
     }
 
@@ -266,7 +247,7 @@ private fun HostImportSection(
                 Text(
                     text = HOST_IMPORT_DIALOG_COPY,
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     modifier = Modifier.testTag(HOST_IMPORT_DIALOG_COPY_TAG),
                 )
             },
@@ -302,41 +283,36 @@ private fun HostImportSection(
     }
 }
 
+/**
+ * Settings header, routed through the shared [ScreenHeader] (#479 Slice D)
+ * so the screen reads as the tight dev-tool block — `bodyDense` SemiBold
+ * title + `‹` back chevron in the leading slot — instead of the old
+ * 60dp / 22.sp bar. The `‹` chevron + `Settings` title keep their existing
+ * `settings:back` / `settings:title` test tags so the navigator/walkthrough
+ * instrumentation keeps resolving them after the migration.
+ */
 @Composable
 private fun SettingsAppBar(onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(role = Role.Button, onClick = onBack)
-                .testTag(SETTINGS_BACK_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Text(
-            text = "Settings",
-            color = PocketShellColors.Text,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .padding(start = 4.dp)
-                .testTag(SETTINGS_TITLE_TAG),
-        )
-    }
+    ScreenHeader(
+        title = "Settings",
+        titleTestTag = SETTINGS_TITLE_TAG,
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .testTag(SETTINGS_BACK_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+        },
+    )
 }
 
 /**
@@ -402,6 +378,60 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
     )
 }
 
+/**
+ * The right-aligned `›` disclosure chevron carried by every navigation row
+ * (Import host, Usage, Crash reports, …). Tokenised onto
+ * [PocketShellType.bodyDense] so the glyph rides the dense-row type rung
+ * instead of a raw `22.sp` literal (#479 Slice D); the muted secondary
+ * colour keeps it quiet next to the row title.
+ */
+@Composable
+private fun NavChevron() {
+    Text(
+        text = "›",
+        color = PocketShellColors.TextSecondary,
+        style = PocketShellType.bodyDense,
+        fontWeight = FontWeight.Bold,
+    )
+}
+
+/**
+ * A disclosure navigation row inside a [SectionCard] — title + optional
+ * prose description + a right-aligned `›` chevron that routes deeper
+ * (Import host, Usage & quota, Crash reports). The actionable line is the
+ * shared [ListRow] so the row inherits the design language's dense
+ * 44/8/12 density and the 48dp touch floor (#479 Slice D); the prose
+ * description renders below it on the [PocketShellType.labelSmall] caption
+ * rung (mono [ListRow] subtitles are reserved for paths/IDs, so a prose
+ * description does not belong in that slot).
+ */
+@Composable
+private fun SettingsNavRow(
+    title: String,
+    onClick: () -> Unit,
+    testTag: String,
+    description: String? = null,
+) {
+    ListRow(
+        title = title,
+        trailing = { NavChevron() },
+        onClick = onClick,
+        modifier = Modifier.testTag(testTag),
+    )
+    if (description != null) {
+        Text(
+            text = description,
+            color = PocketShellColors.TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(
+                start = PocketShellSpacing.sm,
+                top = 2.dp,
+                bottom = 4.dp,
+            ),
+        )
+    }
+}
+
 @Composable
 private fun RadioMark(selected: Boolean) {
     // Custom radio glyph so the on-screen styling stays consistent with
@@ -461,7 +491,7 @@ private fun TerminalSection(
             Text(
                 text = "Default font size",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(4.dp))
@@ -485,7 +515,7 @@ private fun TerminalSection(
                 Text(
                     text = "${fontSizeSp.roundToInt()}sp",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                 )
             }
@@ -498,14 +528,14 @@ private fun TerminalSection(
             Text(
                 text = "Conversation font size",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Scale the agent conversation message text.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -528,7 +558,7 @@ private fun TerminalSection(
                 Text(
                     text = "${conversationFontSizeSp.roundToInt()}sp",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.testTag(CONVERSATION_FONT_VALUE_TAG),
                 )
@@ -543,14 +573,14 @@ private fun TerminalSection(
                     Text(
                         text = "Use tmux when available",
                         color = PocketShellColors.Text,
-                        fontSize = 14.sp,
+                        style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "Default to attaching via tmux on hosts that have it installed.",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = MaterialTheme.typography.labelSmall,
                     )
                 }
                 Switch(
@@ -576,7 +606,7 @@ private fun TerminalSection(
             Text(
                 text = "Agent submit delay",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
@@ -585,7 +615,7 @@ private fun TerminalSection(
                     "agent submits it instead of leaving it in the input. Raise this " +
                     "if Send sometimes leaves text unsent.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -610,7 +640,7 @@ private fun TerminalSection(
                 Text(
                     text = "${agentSubmitEnterDelayMs}ms",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.testTag(AGENT_SUBMIT_DELAY_VALUE_TAG),
                 )
@@ -622,14 +652,14 @@ private fun TerminalSection(
             Text(
                 text = "Open on launch",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Choose a saved host to open directly when PocketShell starts.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(8.dp))
             DefaultHostOptionRow(
@@ -653,7 +683,7 @@ private fun TerminalSection(
                 Text(
                     text = "Add a host first to choose a launch default.",
                     color = PocketShellColors.TextMuted,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.testTag(DEFAULT_HOST_EMPTY_TAG),
                 )
             }
@@ -683,14 +713,14 @@ private fun DefaultHostOptionRow(
             Text(
                 text = title,
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = subtitle,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
         }
     }
@@ -741,14 +771,14 @@ private fun VoiceSection(
             Text(
                 text = "Whisper API key",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Stored encrypted on this device. Only sent to api.openai.com.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(8.dp))
             Row(
@@ -765,7 +795,7 @@ private fun VoiceSection(
                         WhisperKeyStatus.Unset -> PocketShellColors.TextSecondary
                         is WhisperKeyStatus.Set -> PocketShellColors.Text
                     },
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .weight(1f)
@@ -777,7 +807,7 @@ private fun VoiceSection(
                     Text(
                         text = "Clear",
                         color = PocketShellColors.Accent,
-                        fontSize = 13.sp,
+                        style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
                             .clickable(role = Role.Button, onClick = onClearApiKey)
@@ -793,14 +823,14 @@ private fun VoiceSection(
             Text(
                 text = "Language",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Hint Whisper about the spoken language. Auto-detect works for most cases.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(8.dp))
             AppSettings.VOICE_LANGUAGE_OPTIONS.forEach { option ->
@@ -821,14 +851,14 @@ private fun VoiceSection(
                 Text(
                     text = "Auto-stop silence threshold",
                     color = PocketShellColors.Text,
-                    fontSize = 14.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     text = "${formatThresholdLabel(silenceThresholdSeconds)}s",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.testTag(VOICE_SILENCE_VALUE_TAG),
                 )
@@ -837,7 +867,7 @@ private fun VoiceSection(
             Text(
                 text = "Default is conservative for long dictation; lower values stop more aggressively.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(8.dp))
             val totalRangeSeconds =
@@ -867,12 +897,12 @@ private fun VoiceSection(
                 Text(
                     text = "Aggressive",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
+                    style = MaterialTheme.typography.labelSmall,
                 )
                 Text(
                     text = "Conservative",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
+                    style = MaterialTheme.typography.labelSmall,
                 )
             }
 
@@ -885,35 +915,12 @@ private fun VoiceSection(
             // because the only AI feature wired today is the Whisper
             // call site directly above; future LLM features (planner,
             // chat) sit in the same section.
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(role = Role.Button, onClick = onOpenAiCosts)
-                    .padding(vertical = 8.dp)
-                    .testTag(VOICE_AI_COSTS_ROW_TAG),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "AI Costs",
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Track OpenAI spend per voice transcription.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+            SettingsNavRow(
+                title = "AI Costs",
+                description = "Track OpenAI spend per voice transcription.",
+                onClick = onOpenAiCosts,
+                testTag = VOICE_AI_COSTS_ROW_TAG,
+            )
         }
     }
 
@@ -948,7 +955,7 @@ private fun LanguageOptionRow(
         Text(
             text = option.label,
             color = PocketShellColors.Text,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -975,7 +982,7 @@ internal fun VoiceApiKeyEntryDialog(
                     text = "Paste your OpenAI API key. It's stored encrypted on this device " +
                         "and only sent in the Authorization header to api.openai.com.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.labelSmall,
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
@@ -1056,14 +1063,14 @@ private fun AssistantSection(
             Text(
                 text = "Provider",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "LLM backing the in-app action assistant. Separate from voice transcription.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(8.dp))
             AssistantProviderRow(
@@ -1087,7 +1094,7 @@ private fun AssistantSection(
             Text(
                 text = "Base URL",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(6.dp))
@@ -1107,7 +1114,7 @@ private fun AssistantSection(
             Text(
                 text = "Model",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(6.dp))
@@ -1127,14 +1134,14 @@ private fun AssistantSection(
             Text(
                 text = "API key",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Stored encrypted on this device, per provider.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(8.dp))
             val keyStatus = assistantState.keyStatusFor(provider)
@@ -1152,7 +1159,7 @@ private fun AssistantSection(
                         WhisperKeyStatus.Unset -> PocketShellColors.TextSecondary
                         is WhisperKeyStatus.Set -> PocketShellColors.Text
                     },
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .weight(1f)
@@ -1164,7 +1171,7 @@ private fun AssistantSection(
                     Text(
                         text = "Clear",
                         color = PocketShellColors.Accent,
-                        fontSize = 13.sp,
+                        style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
                             .clickable(role = Role.Button) { onClearKey(provider) }
@@ -1208,7 +1215,7 @@ private fun AssistantProviderRow(
         Text(
             text = label,
             color = PocketShellColors.Text,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -1234,7 +1241,7 @@ internal fun AssistantApiKeyEntryDialog(
                     text = "Paste the API key for the selected provider. It's stored " +
                         "encrypted on this device and only sent in the request header.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.labelSmall,
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
@@ -1298,35 +1305,12 @@ private fun UsageSection(
     Column {
         SectionLabel("Usage")
         SectionCard {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(role = Role.Button, onClick = onOpenUsage)
-                    .padding(vertical = 8.dp)
-                    .testTag(USAGE_OPEN_TAG),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Usage & quota",
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Provider quotas reported by pocketshell on bootstrapped hosts.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+            SettingsNavRow(
+                title = "Usage & quota",
+                description = "Provider quotas reported by pocketshell on bootstrapped hosts.",
+                onClick = onOpenUsage,
+                testTag = USAGE_OPEN_TAG,
+            )
 
             // Issue #214: per-provider state list rendered inline in
             // the Settings → Usage section. Surfaces the same threshold
@@ -1359,14 +1343,14 @@ private fun UsageSection(
                     Text(
                         text = "Warn me when usage exceeds",
                         color = PocketShellColors.Text,
-                        fontSize = 14.sp,
+                        style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
                         text = "$warnThresholdPercent%",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 13.sp,
+                        style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.testTag(USAGE_WARN_THRESHOLD_VALUE_TAG),
                     )
@@ -1375,7 +1359,7 @@ private fun UsageSection(
                 Text(
                     text = "Default 80%. Critical (95%) and exceeded (100%) are fixed.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.labelSmall,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 val sliderRange = AppSettings.MIN_USAGE_WARN_PERCENT.toFloat()..
@@ -1433,20 +1417,20 @@ private fun UsageSection(
                     Text(
                         text = "No pocketshell-installed hosts detected",
                         color = PocketShellColors.Text,
-                        fontSize = 13.sp,
+                        style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "Install pocketshell on a host to see provider quotas here.",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = MaterialTheme.typography.labelSmall,
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = "Learn more about pocketshell usage",
                         color = PocketShellColors.Accent,
-                        fontSize = 12.sp,
+                        style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
                             .clickable(role = Role.Button) {
@@ -1470,35 +1454,12 @@ private fun DiagnosticsSection(onOpenCrashReports: () -> Unit) {
     Column {
         SectionLabel("Diagnostics")
         SectionCard {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(role = Role.Button, onClick = onOpenCrashReports)
-                    .padding(vertical = 8.dp)
-                    .testTag(DIAGNOSTICS_CRASHES_TAG),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Crash reports",
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Local-only crash logs you can share manually.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+            SettingsNavRow(
+                title = "Crash reports",
+                description = "Local-only crash logs you can share manually.",
+                onClick = onOpenCrashReports,
+                testTag = DIAGNOSTICS_CRASHES_TAG,
+            )
         }
     }
 }
@@ -1528,55 +1489,32 @@ private fun WorkspaceRootsSection(
             Text(
                 text = "Per-host workspace roots",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Configure host-detail roots and tree/flat defaults.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
             Spacer(modifier = Modifier.height(8.dp))
             if (hosts.isEmpty()) {
                 Text(
                     text = "Add a host first to configure workspace roots.",
                     color = PocketShellColors.TextMuted,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.testTag(WATCHED_FOLDERS_SETTINGS_EMPTY_TAG),
                 )
             } else {
                 hosts.forEach { host ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(role = Role.Button) {
-                                onPickHost(host.id, host.name)
-                            }
-                            .padding(vertical = 10.dp)
-                            .testTag(watchedFoldersSettingsHostRowTag(host.id)),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = host.name,
-                                color = PocketShellColors.Text,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                text = "${host.username}@${host.hostname}:${host.port}",
-                                color = PocketShellColors.TextSecondary,
-                                fontSize = 12.sp,
-                            )
-                        }
-                        Text(
-                            text = "›",
-                            color = PocketShellColors.TextSecondary,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
+                    ListRow(
+                        title = host.name,
+                        subtitle = "${host.username}@${host.hostname}:${host.port}",
+                        trailing = { NavChevron() },
+                        onClick = { onPickHost(host.id, host.name) },
+                        modifier = Modifier.testTag(watchedFoldersSettingsHostRowTag(host.id)),
+                    )
                 }
             }
         }
@@ -1595,14 +1533,14 @@ internal fun AboutFooter(appBuildInfo: AppBuildInfo) {
         Text(
             text = "About",
             color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
+            style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = appBuildInfo.displayText(),
             color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
+            style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.testTag(ABOUT_VERSION_TAG),
         )
     }

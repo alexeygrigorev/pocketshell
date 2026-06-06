@@ -42,6 +42,57 @@ class FilePathScannerTest {
     }
 
     @Test
+    fun detectsPocketShellAttachmentPathAsOneHomeRelativeFile() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
+                "20260606-153324-01-Screenshot_20260606-153310.png"
+
+        assertEquals(listOf(attachment), paths("Attached files:\n- $attachment"))
+    }
+
+    @Test
+    fun detectsLineBrokenPocketShellAttachmentPathAsOneTarget() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
+                "20260606-153324-01-Screenshot_20260606-153310.png"
+        val broken =
+            "Attached files:\n" +
+                "- ~/.pocketshell/attachments/host-1-git-pocketshell-\n" +
+                "  c/20260606-153324-01-Screenshot_20260606-153310.png"
+
+        val detected = detectFilePathsInLine(broken)
+
+        assertEquals(listOf(attachment), detected.map { it.path })
+    }
+
+    @Test
+    fun terminalAttachmentContinuationRowsReassembleBeforePathDetection() {
+        val rows = markAttachmentContinuationWraps(
+            listOf(
+                VisualRow(
+                    row = 4,
+                    text = "- ~/.pocketshell/attachments/host-1-git-pocketshell-",
+                    wrapsToNext = false,
+                ),
+                VisualRow(
+                    row = 5,
+                    text = "c/20260606-153324-01-Screenshot_20260606-153310.png",
+                    wrapsToNext = false,
+                ),
+            ),
+        )
+        val logical = reassemble(rows).single()
+
+        assertEquals(
+            listOf(
+                "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
+                    "20260606-153324-01-Screenshot_20260606-153310.png",
+            ),
+            paths(logical.text),
+        )
+    }
+
+    @Test
     fun detectsDotSlashAndDotDotSlashPaths() {
         assertEquals(listOf("./build.gradle.kts"), paths("see ./build.gradle.kts"))
         assertEquals(listOf("../docs/readme.md"), paths("cat ../docs/readme.md"))

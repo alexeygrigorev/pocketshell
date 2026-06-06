@@ -36,6 +36,25 @@ class ConversationLinkDetectionTest {
         assertEquals(ConversationLinkKind.FILE, out["~/notes/todo.md"])
     }
 
+    @Test
+    fun detectsLineBrokenPocketShellAttachmentAsOneFileLink() {
+        val out = links(
+            """
+            Attached files:
+            - ~/.pocketshell/attachments/host-1-git-pocketshell-
+              c/20260606-153324-01-Screenshot_20260606-153310.png
+            """.trimIndent(),
+        )
+
+        assertEquals(1, out.size)
+        assertEquals(
+            "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
+                "20260606-153324-01-Screenshot_20260606-153310.png",
+            out[0].text,
+        )
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
     // --- Directories --------------------------------------------------------
 
     @Test

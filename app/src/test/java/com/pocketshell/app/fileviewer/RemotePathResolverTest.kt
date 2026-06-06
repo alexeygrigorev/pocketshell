@@ -20,6 +20,18 @@ class RemotePathResolverTest {
     }
 
     @Test
+    fun `pocketshell attachment path stays home rooted instead of cwd relative`() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
+                "20260606-153324-01-Screenshot_20260606-153310.png"
+
+        assertEquals(
+            attachment,
+            RemotePathResolver.resolve(attachment, "/home/alexey/git/pocketshell"),
+        )
+    }
+
+    @Test
     fun `relative path joins onto cwd`() {
         assertEquals(
             "/home/me/proj/out/report.png",

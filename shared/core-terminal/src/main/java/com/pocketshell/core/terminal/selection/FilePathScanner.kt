@@ -121,7 +121,7 @@ public fun findVisibleFilePaths(view: TerminalView): List<FilePathRegion> {
     }
 
     val out = mutableListOf<FilePathRegion>()
-    for (logical in reassemble(visualRows)) {
+    for (logical in reassemble(markAttachmentContinuationWraps(visualRows))) {
         val line = logical.text
         for (detected in detectFilePathsInLine(line, urlSpans(line))) {
             for (span in logical.mapSpanToRows(detected.start, detected.endExclusive)) {
@@ -177,10 +177,16 @@ public fun detectFilePathsInLine(
 ): List<DetectedFilePath> {
     if (line.isEmpty()) return emptyList()
     val out = mutableListOf<DetectedFilePath>()
+
+    for (detected in detectAttachmentFilePathsInLine(line, excludedRanges)) {
+        out += detected
+    }
+
     val matcher = FILE_PATH_PATTERN.matcher(line)
     while (matcher.find()) {
         val start = matcher.start()
         if (excludedRanges.any { start in it }) continue
+        if (out.any { start < it.endExclusive && it.start < matcher.end() }) continue
         var raw = matcher.group() ?: continue
         var endTrim = raw.length
         while (endTrim > 0 && raw[endTrim - 1] in PATH_TRAILING_PUNCTUATION) {
@@ -200,6 +206,77 @@ public fun detectFilePathsInLine(
         )
     }
     return out
+}
+
+/**
+ * Detect PocketShell's staged attachment paths under
+ * `~/.pocketshell/attachments/`, even when display wrapping inserted a newline
+ * in the path. The returned [DetectedFilePath.path] is the real remote path
+ * with those display-only breaks removed, while the span still covers the raw
+ * text range so the visible wrapped target remains tappable.
+ */
+private fun detectAttachmentFilePathsInLine(
+    line: String,
+    excludedRanges: List<IntRange>,
+): List<DetectedFilePath> {
+    val compacted = compactLineBreaks(line)
+    if (compacted.text.indexOf(ATTACHMENT_ROOT) < 0) return emptyList()
+
+    val out = mutableListOf<DetectedFilePath>()
+    val matcher = ATTACHMENT_FILE_PATH_PATTERN.matcher(compacted.text)
+    while (matcher.find()) {
+        val compactStart = matcher.start()
+        val compactEnd = matcher.end()
+        val originalStart = compacted.originalOffsets[compactStart]
+        val originalEndExclusive = compacted.originalOffsets[compactEnd - 1] + 1
+        if (excludedRanges.any { originalStart in it }) continue
+        var path = matcher.group() ?: continue
+        var compactEndTrim = path.length
+        while (compactEndTrim > 0 && path[compactEndTrim - 1] in PATH_TRAILING_PUNCTUATION) {
+            compactEndTrim--
+        }
+        if (compactEndTrim <= 0) continue
+        if (compactEndTrim != path.length) {
+            path = path.substring(0, compactEndTrim)
+        }
+        if (!endsWithKnownExtension(path)) continue
+        out += DetectedFilePath(
+            path = path,
+            start = originalStart,
+            endExclusive = if (compactEndTrim == compactEnd - compactStart) {
+                originalEndExclusive
+            } else {
+                compacted.originalOffsets[compactStart + compactEndTrim - 1] + 1
+            },
+        )
+    }
+    return out
+}
+
+private data class CompactedLine(
+    val text: String,
+    val originalOffsets: IntArray,
+)
+
+private fun compactLineBreaks(line: String): CompactedLine {
+    val text = StringBuilder(line.length)
+    val offsets = ArrayList<Int>(line.length)
+    var index = 0
+    while (index < line.length) {
+        val ch = line[index]
+        if (ch == '\r' || ch == '\n') {
+            index += 1
+            if (ch == '\r' && line.getOrNull(index) == '\n') index += 1
+            while (line.getOrNull(index) == ' ' || line.getOrNull(index) == '\t') {
+                index += 1
+            }
+            continue
+        }
+        text.append(ch)
+        offsets += index
+        index += 1
+    }
+    return CompactedLine(text.toString(), offsets.toIntArray())
 }
 
 /**
@@ -252,6 +329,8 @@ private val PATH_TRAILING_PUNCTUATION: Set<Char> = setOf(
 private val EXTENSION_ALTERNATION: String =
     FILE_PATH_EXTENSIONS.joinToString("|") { Regex.escape(it) }
 
+private const val ATTACHMENT_ROOT: String = "~/.pocketshell/attachments/"
+
 /**
  * Conservative file-path regex used by [detectFilePathsInLine].
  *
@@ -285,6 +364,52 @@ private val FILE_PATH_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern
     // Extensions may be emitted uppercase (`.PNG`, `.JPG`); match either case.
     java.util.regex.Pattern.CASE_INSENSITIVE,
 )
+
+private val ATTACHMENT_FILE_PATH_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.compile(
+    "(?<![\\w/.~-])" +
+        Regex.escape(ATTACHMENT_ROOT) +
+        "(?:[\\w.-]+/)*[\\w.-]+\\.(?:$EXTENSION_ALTERNATION)" +
+        "(?![\\w])",
+    java.util.regex.Pattern.CASE_INSENSITIVE,
+)
+
+private val ATTACHMENT_CONTINUATION_FILE_PATTERN: java.util.regex.Pattern =
+    java.util.regex.Pattern.compile(
+        "^[\\w.-]+(?:/[\\w.-]+)*\\.(?:$EXTENSION_ALTERNATION)(?![\\w])",
+        java.util.regex.Pattern.CASE_INSENSITIVE,
+    )
+
+internal fun markAttachmentContinuationWraps(rows: List<VisualRow>): List<VisualRow> {
+    if (rows.size < 2) return rows
+    var changed = false
+    val out = rows.toMutableList()
+    for (index in 0 until rows.lastIndex) {
+        val current = out[index]
+        if (current.wrapsToNext) continue
+        if (looksLikeUnfinishedAttachmentPath(current.text) &&
+            looksLikeAttachmentContinuation(rows[index + 1].text)
+        ) {
+            out[index] = current.copy(wrapsToNext = true)
+            changed = true
+        }
+    }
+    return if (changed) out else rows
+}
+
+private fun looksLikeUnfinishedAttachmentPath(text: String): Boolean {
+    val trimmed = text.trimEnd()
+    val rootStart = trimmed.lastIndexOf(ATTACHMENT_ROOT)
+    if (rootStart < 0) return false
+    val candidate = trimmed.substring(rootStart)
+    if (candidate.any { it.isWhitespace() }) return false
+    if (candidate == ATTACHMENT_ROOT) return true
+    return !endsWithKnownExtension(candidate)
+}
+
+private fun looksLikeAttachmentContinuation(text: String): Boolean {
+    val trimmed = text.trimStart()
+    return ATTACHMENT_CONTINUATION_FILE_PATTERN.matcher(trimmed).find()
+}
 
 private fun endsWithKnownExtension(token: String): Boolean {
     val dot = token.lastIndexOf('.')

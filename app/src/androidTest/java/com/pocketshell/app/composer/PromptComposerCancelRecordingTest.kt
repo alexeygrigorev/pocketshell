@@ -23,7 +23,7 @@ import org.junit.runner.RunWith
  * affordance.
  *
  * The recording UI was redesigned (issue #453 / #508): the Recording state
- * is stopped via two explicit actions ("To field" / "Send"), and the Cancel
+ * is stopped via two explicit actions ("Insert" / "Send"), and the Cancel
  * affordance lives in the **Transcribing** state — it cancels the in-flight
  * transcription and restores the composer to Idle with the typed draft
  * preserved. This test renders [SheetContent] in the Transcribing state and
@@ -118,7 +118,7 @@ class PromptComposerCancelRecordingTest {
         compose.onNodeWithContentDescription("Start dictation").assertIsDisplayed()
 
         // Recording: still no Cancel — the two explicit stop actions
-        // ("To field" / "Send") drive the stop->transcribe transition instead.
+        // ("Insert" / "Send") drive the stop->transcribe transition instead.
         compose.runOnIdle {
             state = state.copy(
                 recording = PromptComposerViewModel.RecordingState.Recording,

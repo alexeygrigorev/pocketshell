@@ -68,7 +68,7 @@ class PromptComposerVisualScreenshotTest {
         WalkthroughScreenshotArtifacts.capture("05b-composer-idle-draft")
 
         // State 2: Recording — waveform + timer + the two explicit stop
-        // actions ("To field" / "Send"). No status text, no Auto-send toggle.
+        // actions ("Insert" / "Send"). No status text, no Auto-send toggle.
         compose.runOnIdle {
             state = state.copy(
                 recording = PromptComposerViewModel.RecordingState.Recording,
@@ -83,7 +83,7 @@ class PromptComposerVisualScreenshotTest {
         // Auto-send toggle.
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
-        compose.onNodeWithText("To field").assertExists()
+        compose.onNodeWithText("Insert").assertExists()
         // Declutter: no LISTENING/CAPTURING text.
         compose.onNodeWithText("CAPTURING").assertDoesNotExist()
         compose.waitForIdle()

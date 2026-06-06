@@ -33,7 +33,7 @@ import org.junit.runner.RunWith
  *
  * The Recording row now offers two explicit stop actions instead of a
  * persistent Auto-send toggle:
- *  - **"To field"** ([COMPOSER_TO_FIELD_TAG]) — stop + transcribe, drop the
+ *  - **"Insert"** ([COMPOSER_TO_FIELD_TAG]) — stop + transcribe, drop the
  *    text into the editable composer field; nothing is sent.
  *  - **"Send"** ([COMPOSER_STOP_SEND_TAG]) — stop + transcribe + send
  *    immediately. Also shown in Transcribing to arm the queued send for the
@@ -179,7 +179,7 @@ class PromptComposerSendWhileRecordingTest {
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
-        // "To field" stop -> Transcribing (parked on the latch).
+        // "Insert" stop -> Transcribing (parked on the latch).
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 5_000) {
@@ -206,7 +206,7 @@ class PromptComposerSendWhileRecordingTest {
 
     @Test
     fun toFieldStopInsertsTranscriptIntoEditableDraftWithoutSending() {
-        // Issue #508: tapping "To field" drops the completed dictation into
+        // Issue #508/#580: tapping "Insert" drops the completed dictation into
         // the editable input for review — no send fires.
         val mic = TestMicCapture()
         val whisper = object : WhisperClient {
@@ -229,7 +229,7 @@ class PromptComposerSendWhileRecordingTest {
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
-        // Stop via "To field".
+        // Stop via "Insert".
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed().performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 10_000) {

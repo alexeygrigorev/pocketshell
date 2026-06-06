@@ -712,7 +712,7 @@ internal fun SheetContent(
         //  - Left: 📎 attach (paperclip) + `{}` snippets — always present.
         //  - Right, Idle / Text-inserted: a single primary Send button with
         //    a send-arrow glyph (the old Insert/Send pair collapses to one).
-        //  - Right, Recording: two explicit stop actions — "To field"
+        //  - Right, Recording: two explicit stop actions — "Insert"
         //    (stop + transcribe into the editable field, nothing sent) and
         //    "Send" (stop + transcribe + send). The old persistent Auto-send
         //    toggle is gone (#508): the choice is made per-recording.
@@ -785,7 +785,7 @@ internal fun SheetContent(
                     // Issue #508: two explicit stop actions replace the old
                     // persistent Auto-send toggle. The choice is made
                     // per-recording, at the moment of stopping:
-                    //  - "To field": stop + transcribe, drop the text into the
+                    //  - "Insert": stop + transcribe, drop the text into the
                     //    editable composer field (nothing sent). The user can
                     //    then attach a screenshot / edit before sending. This
                     //    is the historic [onMicTap] stop path — the transcript
@@ -808,7 +808,7 @@ internal fun SheetContent(
                 PromptComposerViewModel.RecordingState.Transcribing -> {
                     // Issue #508: the audio is already captured and the Whisper
                     // round-trip is in flight, but the user can still pick where
-                    // the transcript lands once it returns. "To field" is a
+                    // the transcript lands once it returns. "Insert" is a
                     // no-op on the in-flight request — the transcript appends to
                     // the draft by default — so the only extra action surfaced
                     // here is "Send" (arms the queued send) plus Cancel (aborts
@@ -835,7 +835,7 @@ internal fun SheetContent(
  * The animated waveform alone (plus the live ticking timer) conveys "we are
  * capturing"; there is no redundant "CAPTURING" text. The single in-surface
  * "Stop" label was removed in #508 — stopping is now done via the two
- * explicit bottom-row actions ("To field" / "Send"), so a lone "Stop" here
+ * explicit bottom-row actions ("Insert" / "Send"), so a lone "Stop" here
  * would be ambiguous about where the transcript lands.
  */
 @Composable
@@ -1002,7 +1002,7 @@ private fun SendButton(
 }
 
 /**
- * Issue #508: "To field" stop action shown while Recording. Tapping it stops
+ * Issue #508 / #580: "Insert" stop action shown while Recording. Tapping it stops
  * the recording and transcribes, dropping the resulting text into the
  * editable composer field — nothing is sent. The user can then attach a
  * screenshot / edit before tapping Send manually. Rendered as a clear
@@ -1027,12 +1027,12 @@ private fun ToFieldButton(
                 shape = RoundedCornerShape(22.dp),
             )
             .clickable(role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = "Stop and put transcript in the field" }
+            .semantics { contentDescription = "Insert transcript into prompt" }
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "To field",
+            text = "Insert",
             color = PocketShellColors.Text,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
@@ -1045,7 +1045,7 @@ private fun ToFieldButton(
  * Tapping it stops the recording (or arms the in-flight transcription) and
  * sends the dictation immediately once Whisper returns. Rendered as the
  * accent-filled primary pill with a send arrow so it reads as the
- * commit/submit action next to the secondary "To field" choice.
+ * commit/submit action next to the secondary "Insert" choice.
  */
 @Composable
 private fun StopSendButton(
@@ -1923,7 +1923,7 @@ private fun PromptComposerIdlePreview() {
 
 /**
  * Issue #453 / #508: Recording state — amplitude-driven waveform + the
- * `00:17` elapsed timer; below, the two explicit stop actions ("To field" +
+ * `00:17` elapsed timer; below, the two explicit stop actions ("Insert" +
  * "Send"). No persistent Auto-send toggle, no redundant "CAPTURING" text.
  */
 @Preview(name = "Composer · recording", widthDp = 412, heightDp = 360)

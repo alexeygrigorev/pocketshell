@@ -2099,11 +2099,11 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
     }
 
-    // -- Issue #508: two explicit stop buttons (To field / Send) ----------
+    // -- Issue #508/#580: two explicit stop buttons (Insert / Send) -------
 
     @Test
     fun toFieldStopLandsTranscriptInDraftWithoutSending() = runTest {
-        // The "To field" button is the historic stop-and-transcribe path
+        // The "Insert" button is the historic stop-and-transcribe path
         // ([onMicTap] while Recording): the transcript appends to the editable
         // draft and NOTHING is sent. The user can then attach a screenshot /
         // edit before tapping Send manually.
@@ -2118,7 +2118,7 @@ class PromptComposerViewModelTest {
         runCurrent()
         assertEquals(RecordingState.Recording, vm.uiState.value.recording)
 
-        vm.onMicTap() // "To field": stop -> transcribe -> draft
+        vm.onMicTap() // "Insert": stop -> transcribe -> draft
         advanceUntilIdle()
 
         assertEquals(0, sent.size)

@@ -18,6 +18,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -73,13 +75,18 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
@@ -103,6 +110,7 @@ import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1163,6 +1171,7 @@ private fun MicTriggerButton(
     modifier: Modifier = Modifier,
 ) {
     val accent = LocalPocketShellSemantic.current.accent
+    val lockThresholdPx = with(LocalDensity.current) { MIC_LOCK_SWIPE_THRESHOLD_DP.dp.toPx() }
     Box(
         modifier = modifier
             .size(44.dp)
@@ -1170,8 +1179,21 @@ private fun MicTriggerButton(
                 color = if (enabled) accent else PocketShellColors.SurfaceElev,
                 shape = androidx.compose.foundation.shape.CircleShape,
             )
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = "Start dictation" },
+            .micSwipeUpLockGesture(
+                enabled = enabled,
+                lockThresholdPx = lockThresholdPx,
+                onPressStart = onClick,
+            )
+            .semantics {
+                contentDescription = "Start dictation"
+                role = Role.Button
+                if (enabled) {
+                    onClick {
+                        onClick()
+                        true
+                    }
+                }
+            },
         contentAlignment = Alignment.Center,
     ) {
         // Issue #453: render the proper Material-style filled microphone
@@ -1186,6 +1208,40 @@ private fun MicTriggerButton(
         )
     }
 }
+
+private fun Modifier.micSwipeUpLockGesture(
+    enabled: Boolean,
+    lockThresholdPx: Float,
+    onPressStart: () -> Unit,
+): Modifier {
+    if (!enabled) return this
+    return pointerInput(enabled, lockThresholdPx, onPressStart) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            onPressStart()
+            down.consume()
+            var locked = false
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                val drag = change.position - down.position
+                if (!locked && micSwipeCrossedLockThreshold(drag.x, drag.y, lockThresholdPx)) {
+                    locked = true
+                    change.consume()
+                }
+                if (change.changedToUpIgnoreConsumed()) {
+                    break
+                }
+            }
+        }
+    }
+}
+
+internal fun micSwipeCrossedLockThreshold(
+    dragX: Float,
+    dragY: Float,
+    lockThresholdPx: Float,
+): Boolean = dragY <= -lockThresholdPx && abs(dragY) >= abs(dragX)
 
 /**
  * Issue #566: compact ChatGPT/Claude-style staged attachment tiles. Each
@@ -2103,6 +2159,7 @@ internal fun composerSendTooltipTestTag(label: String): String =
  * buffer before Whisper; in `Transcribing` it aborts the in-flight round-trip.
  */
 internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recording"
+private const val MIC_LOCK_SWIPE_THRESHOLD_DP = 40
 
 /**
  * Issue #180: test tags for the failed-transcription queue surface.

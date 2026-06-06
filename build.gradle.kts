@@ -9,4 +9,6 @@ plugins {
     alias(libs.plugins.kotlin.compose) apply false
     alias(libs.plugins.hilt) apply false
     alias(libs.plugins.ksp) apply false
+    // Roborazzi (issue #555): fast JVM screenshot rendering for design iteration.
+    alias(libs.plugins.roborazzi) apply false
 }

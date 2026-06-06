@@ -2,6 +2,11 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    // Roborazzi (issue #555): adds `recordRoborazziDebug` / `verifyRoborazziDebug`
+    // to render the ui-kit composables under `PocketShellTheme` to PNGs on the
+    // host JVM in seconds, no emulator. Drives the fast design-iteration loop
+    // (see `scripts/render.sh`). Additive to the emulator screenshot tests.
+    alias(libs.plugins.roborazzi)
 }
 
 android {
@@ -24,6 +29,15 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    // Robolectric (and therefore Roborazzi) needs the merged Android resources
+    // on the unit-test classpath so the real `PocketShellTheme` resolves during
+    // host-JVM rendering. (#555)
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 }
 
@@ -50,4 +64,17 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.junit)
+
+    // Roborazzi fast-render harness (#555). Robolectric runs the real
+    // composition on the host JVM; `roborazzi-compose` supplies the
+    // `captureRoboImage(filePath) { … }` overload that launches its own headless
+    // ComponentActivity and snapshots it; `ui-test-manifest` provides that empty
+    // host activity. All test-only — none of this ships in an APK.
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.robolectric)
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.roborazzi.junit.rule)
+    testImplementation(libs.compose.ui.test.manifest)
+    testImplementation(libs.junit)
 }

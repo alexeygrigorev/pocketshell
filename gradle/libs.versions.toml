@@ -86,6 +86,17 @@ androidx-annotation = "1.9.0"
 okhttp = "4.12.0"
 androidx-security-crypto = "1.1.0"
 
+# Roborazzi (issue #555). Fast JVM/Robolectric Compose screenshot rendering for
+# the design-iteration loop: render a real composable under `PocketShellTheme`
+# to a PNG on the host JVM in seconds, no emulator. Pinned to the 1.46.x line —
+# the band the researcher validated against the repo's Kotlin 2.1.21 / AGP
+# 8.9.2 / Robolectric 4.14.1 toolchain (Paparazzi forces a toolchain move,
+# Google's Compose Preview Screenshot Testing needs AGP 9.0). Roborazzi *reuses*
+# the repo's existing Robolectric 4.14.1 pin rather than bundling its own, so no
+# AGP/Kotlin/Compose-BOM bump is required. This is an additive iteration loop,
+# not a replacement for the emulator release-validation gate.
+roborazzi = "1.46.1"
+
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
@@ -144,6 +155,14 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "androidx-security-crypto" }
 
+# Roborazzi (issue #555). `roborazzi` is the core capture API,
+# `roborazzi-compose` adds `captureRoboImage { … }` for composables, and
+# `roborazzi-junit-rule` provides the JUnit integration. All `testImplementation`
+# on the rendering module — they never ship in any APK.
+roborazzi = { group = "io.github.takahirom.roborazzi", name = "roborazzi", version.ref = "roborazzi" }
+roborazzi-compose = { group = "io.github.takahirom.roborazzi", name = "roborazzi-compose", version.ref = "roborazzi" }
+roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "roborazzi-junit-rule", version.ref = "roborazzi" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
@@ -151,3 +170,6 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+# Roborazzi (issue #555). The Gradle plugin wires the `recordRoborazziDebug` /
+# `verifyRoborazziDebug` tasks onto the module's unit-test source set.
+roborazzi = { id = "io.github.takahirom.roborazzi", version.ref = "roborazzi" }

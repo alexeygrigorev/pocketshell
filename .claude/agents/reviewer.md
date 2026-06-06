@@ -27,6 +27,11 @@ You are the reviewer for the PocketShell project. You are triggered after an imp
    and JVM tests are not enough for approval. Use the explicit SDK paths from
    `agents.md` before claiming `adb` or `emulator` is unavailable.
 
+   **For UI/design issues**: ALSO run `scripts/render.sh` as a fast first
+   visual check and compare the render PNG to the mockup (`docs/mockups/`) —
+   but this does NOT replace the emulator validation above. The JVM render is
+   seconds; the emulator is the acceptance check. Do both. (#555)
+
    **CI-environment compatibility (locked rule 2026-05-27)** — when a
    connected test depends on a Docker service, a port, or a fixture
    beyond the default `agents` (port 2222), you MUST verify the CI

@@ -125,6 +125,7 @@ Does:
 - Reads the issue, linked docs, and relevant existing code
 - Writes code and tests in the local working tree
 - Runs build and tests before reporting done
+- For UI/design work, renders the changed component/screen with `scripts/render.sh` (JVM Roborazzi — seconds, no emulator) and visually inspects the PNG BEFORE the emulator run; if the issue links a mockup, compares the render against it. Attaches the render PNG to the status comment. The fast first design check — NOT a replacement for emulator validation. See "Fast Design Renders" below (#555).
 - Posts a status comment on the issue with changed files, test results, judgment calls, and open questions
 - If a reviewer requested changes, reads the review first and addresses every item
 - Owns all code changes required by reviewer feedback, even if the fix looks small
@@ -153,6 +154,10 @@ Does:
 - For mobile, UI, terminal, SSH, tmux, agent, setup, and release-gate issues,
   runs the relevant emulator check too; code inspection alone is not enough for
   approval
+- For UI/design issues, ALSO runs `scripts/render.sh` as a fast first visual
+  check and compares the render to the mockup — but STILL runs the full emulator
+  validation. The render is JVM-level; the emulator is the acceptance check.
+  Both. See "Fast Design Renders" below (#555).
 - For user-facing journeys, reproduces the actual workflow and inspects the
   resulting screenshots/logs/timings. A passing assertion is not enough if the
   visible app state would still be unusable to the user.
@@ -525,6 +530,37 @@ visible screenshot, or do not prove the workflow is usable. For terminal/tmux
 work, the reviewer must see input reach the terminal and output appear in the
 app UI. For performance-sensitive work, the reviewer must include timing
 evidence.
+
+## Fast Design Renders (Roborazzi)
+
+For UI/design work, the JVM render harness (#555) is the **fast first visual
+check** — it renders real composables under the actual `PocketShellTheme` to
+PNGs in ~seconds with NO emulator:
+
+```bash
+scripts/render.sh                 # render every case
+scripts/render.sh hostListScreen  # one case
+```
+
+Outputs land in `shared/ui-kit/build/renders/`. Add or adjust a `@Test` case in
+`shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt` for
+the component/screen you changed (the harness fills the Pixel-7 viewport, so a
+render shows the whole screen).
+
+- **Implementer (design/UI):** render the changed component/screen and visually
+  inspect the PNG BEFORE the emulator run; if the issue links a mockup
+  (`docs/mockups/`), compare the render to it and note the comparison. Attach the
+  render PNG to the status comment. Caveat: the harness composes ui-kit-level
+  screens; for an app-only composable it can't yet render, say so and rely on the
+  emulator.
+- **Reviewer (design/UI):** also render as a fast first visual check and compare
+  to the mockup — but STILL run the full emulator validation. The render is
+  JVM-level; the emulator is the acceptance check. Both.
+
+This is additive — it never replaces the emulator/Docker validation gate; it just
+makes the design iteration loop seconds instead of minutes. The orchestrator also
+drops the latest renders into `.tmp/` so the maintainer can view them via
+PocketShell's file viewer.
 
 ## Terminal Artifact Review
 

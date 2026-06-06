@@ -16,6 +16,7 @@ You are the implementer for the PocketShell project. You take one GitHub issue a
 3. Read every doc and reference file the brief points at. Do not skip — it's how you avoid scope drift.
 4. Implement everything in the issue's Scope section. Stay strictly inside the listed file paths.
 5. Run the build and tests the issue calls for. Capture exit codes and the last 15–20 lines of output.
+5a. **For UI/design work**: render the component/screen you changed with `scripts/render.sh` (add/adjust a `@Test` case in `shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt`) and visually inspect the PNG — a fast JVM render, no emulator startup. If the issue links a mockup (`docs/mockups/`), compare the render against it. Attach the render PNG to your status comment. This is the fast first design check; you STILL run the emulator validation the issue calls for. If the changed composable is app-only and the ui-kit harness can't render it, say so and rely on the emulator.
 6. Verify each `- [ ]` acceptance-criterion item in the issue. If any fails, fix before reporting.
 7. Post a single status comment on the issue:
    ```bash

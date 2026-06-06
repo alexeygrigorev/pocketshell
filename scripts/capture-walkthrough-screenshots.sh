@@ -82,17 +82,34 @@ run_logged() {
   local name="$1"
   shift
   local log_file="$RUN_DIR/$name.log"
+  local start_seconds end_seconds elapsed_seconds status
+  start_seconds="$(date +%s)"
   printf '\n[%s]\n' "$name"
-  printf 'Command:'
-  printf ' %q' "$@"
-  printf '\nLog: %s\n' "$log_file"
+  printf 'Log: %s\n' "$log_file"
+  set +e
   {
     printf '[%s] %s\n' "$(date -Is)" "$name"
     printf 'Command:'
     printf ' %q' "$@"
     printf '\n\n'
     "$@"
-  } 2>&1 | tee "$log_file"
+  } > "$log_file" 2>&1
+  status="$?"
+  set -e
+  end_seconds="$(date +%s)"
+  elapsed_seconds=$((end_seconds - start_seconds))
+  if [[ "$status" -eq 0 ]]; then
+    printf 'PASS: %s (%ss)\n' "$name" "$elapsed_seconds"
+  else
+    printf 'FAIL: %s exited %s after %ss\n' "$name" "$status" "$elapsed_seconds" >&2
+    if [[ -s "$log_file" ]]; then
+      printf '\nLast 80 lines from %s:\n' "$log_file" >&2
+      tail -n 80 "$log_file" >&2 || true
+    else
+      printf '\nNo output was captured in %s\n' "$log_file" >&2
+    fi
+  fi
+  return "$status"
 }
 
 mkdir -p "$RUN_DIR"
@@ -147,8 +164,7 @@ wait_for_host_ssh_fixture() {
     tail -n 80 "$log_file" || true
     fail "Docker SSH fixture reported healthy but follow-up SSH probe failed at $SSH_USER@$SSH_HOST:$SSH_PORT"
   }
-  printf '\n[04-docker-ssh-readiness]\nLog: %s\n' "$log_file"
-  tail -n 20 "$log_file"
+  printf '\n[04-docker-ssh-readiness]\nLog: %s\nPASS: docker SSH fixture healthy\n' "$log_file"
 }
 
 install_apks() {
@@ -173,8 +189,7 @@ wait_for_instrumentation() {
     if grep -q '^package:com.pocketshell.app$' "$log_file" &&
       grep -q '^package:com.pocketshell.app.test$' "$log_file" &&
       grep -q '^instrumentation:com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner' "$log_file"; then
-      printf '\n[%s-instrumentation-ready]\nLog: %s\n' "$step_name" "$log_file"
-      tail -n 20 "$log_file"
+      printf '\n[%s-instrumentation-ready]\nLog: %s\nPASS: Android test instrumentation registered\n' "$step_name" "$log_file"
       return 0
     fi
     sleep 1

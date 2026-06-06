@@ -151,16 +151,54 @@ record_artifact() {
   printf -- '- %s: `%s`\n' "$label" "$path" >> "$SUMMARY_PATH"
 }
 
+safe_artifact_name() {
+  printf '%s' "$1" | tr '[:upper:] /' '[:lower:]--' | tr -cd '[:alnum:]_.-'
+}
+
+print_failure_log_tail() {
+  local log_file="$1"
+  if [[ -s "$log_file" ]]; then
+    printf '\nLast 80 lines from %s:\n' "$log_file" >&2
+    tail -n 80 "$log_file" >&2 || true
+  else
+    printf '\nNo output was captured in %s\n' "$log_file" >&2
+  fi
+}
+
 run_required() {
   local label="$1"
   local artifact="$2"
   shift 2
+  local safe_label
+  safe_label="$(safe_artifact_name "$label")"
+  local log_file="$RUN_DIR/$safe_label.log"
+  local start_seconds end_seconds elapsed_seconds status
+  start_seconds="$(date +%s)"
   printf '\n[%s]\n' "$label"
-  printf 'Command:'
-  printf ' %q' "$@"
-  printf '\nArtifact: %s\n' "$artifact"
+  printf 'Artifact: %s\n' "$artifact"
+  printf 'Log: %s\n' "$log_file"
   record_artifact "$label" "$artifact"
-  "$@" || {
+  record_artifact "$label log" "build/release-emulator-validation/$RUN_ID/$safe_label.log"
+  set +e
+  {
+    printf '[%s] %s\n' "$(date -Is)" "$label"
+    printf 'Command:'
+    printf ' %q' "$@"
+    printf '\n\n'
+    "$@"
+  } > "$log_file" 2>&1
+  status="$?"
+  set -e
+  end_seconds="$(date +%s)"
+  elapsed_seconds=$((end_seconds - start_seconds))
+  if [[ "$status" -eq 0 ]]; then
+    printf 'PASS: %s (%ss)\n' "$label" "$elapsed_seconds"
+    return 0
+  fi
+
+  printf 'FAIL: %s exited %s after %ss\n' "$label" "$status" "$elapsed_seconds" >&2
+  print_failure_log_tail "$log_file"
+  {
     sed -i 's/^Automated status: RUNNING$/Automated status: FAIL/' "$SUMMARY_PATH"
     fail "$label failed"
   }
@@ -233,8 +271,9 @@ run_real_agent_release_gate_instrumentation() {
   printf 'Artifact root: %s\n' "$run_dir"
 
   # Bring up (or verify) the real-agent compose service.
+  printf 'Starting real-agent Docker fixture; log: %s\n' "$run_dir/docker-up.log"
   docker compose -f "$REAL_AGENT_COMPOSE_FILE" up -d --build real-agents \
-    2>&1 | tee "$run_dir/docker-up.log"
+    > "$run_dir/docker-up.log" 2>&1
 
   # Issue #150: wait on the compose `healthcheck:` block via
   # `docker inspect`, not a host-side SSH retry loop. Keep one follow-up
@@ -278,8 +317,8 @@ run_real_agent_release_gate_instrumentation() {
       -e class "$REAL_AGENT_RELEASE_GATE_TEST_CLASS" \
       -e pocketshellRealAgentReleaseGate 1 \
       com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
-      2>&1 | tee "$attempt_instrumentation_log"
-    instrumentation_status="${PIPESTATUS[0]}"
+      > "$attempt_instrumentation_log" 2>&1
+    instrumentation_status="$?"
     set -e
 
     # Capture diagnostics regardless of outcome so reviewers can audit.
@@ -322,14 +361,17 @@ run_real_agent_release_gate_instrumentation() {
 
   if [[ "$instrumentation_status" -ne 0 ]]; then
     printf 'FAIL: RealAgentReleaseGateTest instrumentation exited %s\n' "$instrumentation_status" >&2
+    print_failure_log_tail "$instrumentation_log"
     return "$instrumentation_status"
   fi
   if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
     printf 'FAIL: RealAgentReleaseGateTest did not report INSTRUMENTATION_CODE: -1\n' >&2
+    print_failure_log_tail "$instrumentation_log"
     return 1
   fi
   if ! grep -q 'OK (' "$instrumentation_log"; then
     printf 'FAIL: RealAgentReleaseGateTest did not report an OK summary\n' >&2
+    print_failure_log_tail "$instrumentation_log"
     return 1
   fi
   return 0
@@ -375,8 +417,7 @@ run_long_running_session_detached_instrumentation_attempt() {
       local total_lines
       total_lines="$(wc -l < "$poll_log" | tr -d ' ')"
       if [[ "$total_lines" =~ ^[0-9]+$ ]] && (( total_lines > last_streamed_line )); then
-        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" |
-          tee -a "$attempt_instrumentation_log"
+        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" >> "$attempt_instrumentation_log"
         last_streamed_line="$total_lines"
       fi
     else
@@ -390,8 +431,7 @@ run_long_running_session_detached_instrumentation_attempt() {
       local total_lines
       total_lines="$(wc -l < "$poll_log" | tr -d ' ')"
       if [[ "$total_lines" =~ ^[0-9]+$ ]] && (( total_lines > last_streamed_line )); then
-        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" |
-          tee -a "$attempt_instrumentation_log"
+        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" >> "$attempt_instrumentation_log"
       fi
       "$ADB" shell "rm -f $device_log $device_status $device_done" >/dev/null 2>&1 || true
       local status
@@ -453,8 +493,9 @@ run_long_running_session_instrumentation() {
   printf 'Artifact root: %s\n' "$run_dir"
 
   # Bring up (or verify) the deterministic agents compose service on port 2222.
+  printf 'Starting deterministic agents Docker fixture; log: %s\n' "$run_dir/docker-up.log"
   docker compose -f "$LONG_RUNNING_COMPOSE_FILE" up -d agents \
-    2>&1 | tee "$run_dir/docker-up.log"
+    > "$run_dir/docker-up.log" 2>&1
 
   for attempt in $(seq 1 "$LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS"); do
     attempt_instrumentation_log="$run_dir/instrumentation-attempt-$attempt.log"
@@ -535,14 +576,17 @@ run_long_running_session_instrumentation() {
 
   if [[ "$instrumentation_status" -ne 0 ]]; then
     printf 'FAIL: LongRunningSessionStabilityTest instrumentation exited %s\n' "$instrumentation_status" >&2
+    print_failure_log_tail "$instrumentation_log"
     return "$instrumentation_status"
   fi
   if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
     printf 'FAIL: LongRunningSessionStabilityTest did not report INSTRUMENTATION_CODE: -1\n' >&2
+    print_failure_log_tail "$instrumentation_log"
     return 1
   fi
   if ! grep -q 'OK (' "$instrumentation_log"; then
     printf 'FAIL: LongRunningSessionStabilityTest did not report an OK summary\n' >&2
+    print_failure_log_tail "$instrumentation_log"
     return 1
   fi
   return 0

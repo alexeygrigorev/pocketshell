@@ -261,6 +261,16 @@ log_path_for() {
   printf '%s/%02d-%s.log' "$RUN_DIR" "$STEP_INDEX" "$name"
 }
 
+print_failure_log_tail() {
+  local log_file="$1"
+  if [[ -s "$log_file" ]]; then
+    printf '\nLast 80 lines from %s:\n' "$log_file" >&2
+    tail -n 80 "$log_file" >&2 || true
+  else
+    printf '\nNo output was captured in %s\n' "$log_file" >&2
+  fi
+}
+
 STEP_INDEX=0
 run_step() {
   local name="$1"
@@ -268,6 +278,8 @@ run_step() {
   STEP_INDEX=$((STEP_INDEX + 1))
   local log_file
   log_file="$(log_path_for "$name")"
+  local start_seconds end_seconds elapsed_seconds
+  start_seconds="$(date +%s)"
   local command_string=""
   local arg
   local quoted_arg
@@ -284,9 +296,7 @@ run_step() {
   local step_array_index=$((${#STEP_NAMES[@]} - 1))
 
   printf '\n[%02d] %s\n' "$STEP_INDEX" "$name"
-  printf 'Command:'
-  printf ' %q' "$@"
-  printf '\nLog: %s\n' "$log_file"
+  printf 'Log: %s\n' "$log_file"
 
   set +e
   {
@@ -295,12 +305,15 @@ run_step() {
     printf ' %q' "$@"
     printf '\n\n'
     "$@"
-  } 2>&1 | tee "$log_file"
+  } > "$log_file" 2>&1
   local status=$?
   set -e
+  end_seconds="$(date +%s)"
+  elapsed_seconds=$((end_seconds - start_seconds))
 
   if [[ "$status" -eq 0 ]]; then
     STEP_STATUSES[$step_array_index]="passed"
+    printf 'PASS: %s (%ss)\n' "$name" "$elapsed_seconds"
     case "$name" in
       cold-reset-install-app-walkthrough-apks)
         APP_WALKTHROUGH_INSTALL_STATUS="passed"
@@ -317,6 +330,8 @@ run_step() {
     FAILING_STEP="$name"
     FAILING_LOG_PATH="$log_file"
     FAILURE_MESSAGE="step '$name' failed with status $status"
+    printf 'FAIL: %s exited %s after %ss\n' "$name" "$status" "$elapsed_seconds" >&2
+    print_failure_log_tail "$log_file"
     case "$name" in
       emulator-readiness)
         FAILURE_MESSAGE="infrastructure readiness failed before connected tests; see emulator-readiness diagnostics"

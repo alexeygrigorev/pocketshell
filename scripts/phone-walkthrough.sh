@@ -207,9 +207,7 @@ run_logged() {
   local start_ms end_ms elapsed_ms status
   start_ms="$(date +%s%3N)"
   printf '\n[%s]\n' "$name"
-  printf 'Command:'
-  printf ' %q' "$@"
-  printf '\nLog: %s\n' "$(relpath "$log_file")"
+  printf 'Log: %s\n' "$(relpath "$log_file")"
   set +e
   {
     printf '[%s] %s\n' "$(date -Is)" "$name"
@@ -217,12 +215,23 @@ run_logged() {
     printf ' %q' "$@"
     printf '\n\n'
     "$@"
-  } 2>&1 | tee "$log_file"
-  status="${PIPESTATUS[0]}"
+  } > "$log_file" 2>&1
+  status="$?"
   set -e
   end_ms="$(date +%s%3N)"
   elapsed_ms=$((end_ms - start_ms))
   printf '%s\tstatus=%s\telapsed_ms=%s\n' "$name" "$status" "$elapsed_ms" >> "$TIMING_DIR/commands.tsv"
+  if [[ "$status" -eq 0 ]]; then
+    printf 'PASS: %s (%sms)\n' "$name" "$elapsed_ms"
+  else
+    printf 'FAIL: %s exited %s after %sms\n' "$name" "$status" "$elapsed_ms" >&2
+    if [[ -s "$log_file" ]]; then
+      printf '\nLast 80 lines from %s:\n' "$(relpath "$log_file")" >&2
+      tail -n 80 "$log_file" >&2 || true
+    else
+      printf '\nNo output was captured in %s\n' "$(relpath "$log_file")" >&2
+    fi
+  fi
   return "$status"
 }
 
@@ -544,8 +553,7 @@ verify_docker_agents() {
     tail -n 100 "$log_file" || true
     fail "Docker SSH fixture reported healthy but follow-up probe failed at $SSH_USER@$SSH_HOST:$SSH_PORT"
   }
-  printf '\n[06-docker-ssh-readiness]\nLog: %s\n' "$(relpath "$log_file")"
-  tail -n 20 "$log_file"
+  printf '\n[06-docker-ssh-readiness]\nLog: %s\nPASS: docker SSH fixture healthy\n' "$(relpath "$log_file")"
 }
 
 verify_docker_bootstrap_profiles() {
@@ -582,8 +590,7 @@ verify_docker_bootstrap_profiles() {
       tail -n 100 "$log_file" || true
       fail "Docker bootstrap fixture '$profile' reported healthy but follow-up SSH probe failed at $SSH_USER@$SSH_HOST:$port"
     }
-    printf '\n[06-docker-bootstrap-readiness-%s]\nLog: %s\n' "$profile" "$(relpath "$log_file")"
-    tail -n 10 "$log_file"
+    printf '\n[06-docker-bootstrap-readiness-%s]\nLog: %s\nPASS: bootstrap fixture healthy\n' "$profile" "$(relpath "$log_file")"
   done
 }
 
@@ -606,8 +613,7 @@ ensure_remote_tmux_existing_session() {
         "$SSH_USER@$SSH_HOST" \
         "tmux has-session -t '$session_name' 2>/dev/null || tmux new-session -d -s '$session_name' 'printf \"PocketShell walkthrough tmux fixture ready\\\\n\"; exec sh'; tmux display-message -p -t '$session_name' '#S'; tmux list-sessions"
     } >> "$log_file" 2>&1 && {
-      printf '\n[06b-docker-tmux-existing-session]\nLog: %s\n' "$(relpath "$log_file")"
-      tail -n 30 "$log_file"
+      printf '\n[06b-docker-tmux-existing-session]\nLog: %s\nPASS: tmux session ready\n' "$(relpath "$log_file")"
       return 0
     }
     sleep 1

@@ -104,9 +104,7 @@ class FileViewerActOnFileScreenshotTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(200)
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/file-viewer-act").apply { mkdirs() }
         val file = File(dir, name)
         val bitmap: Bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return

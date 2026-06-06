@@ -3856,7 +3856,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: return false
         val windowId = paneRows[paneId]?.windowId ?: return false
         if (windowId.isBlank()) return false
-        val remembered = agentSessionMemory.recall(
+        agentSessionMemory.recall(
             hostId = target.hostId,
             sessionName = target.sessionName,
             windowId = windowId,
@@ -3864,8 +3864,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Only defer while the seeded agent UI is actually still showing; once
         // detection has confirmed an exit and the row is gone, there is
         // nothing to protect.
-        return remembered.detection != null &&
-            _agentConversations.value[paneId]?.detection != null
+        return _agentConversations.value[paneId]?.detection != null
     }
 
     /**

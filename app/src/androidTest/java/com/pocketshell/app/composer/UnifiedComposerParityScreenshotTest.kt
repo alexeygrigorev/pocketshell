@@ -180,9 +180,7 @@ class UnifiedComposerParityScreenshotTest {
 
     private fun artifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/unified-composer-parity")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create unified-composer-parity screenshot dir: ${dir.absolutePath}"

@@ -185,9 +185,7 @@ class AppUpdateActionBannerTest {
         instrumentation.waitForIdleSync()
         SystemClock.sleep(300)
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val directory = File(mediaRoot, "additional_test_output/app-update-action")
         check(directory.exists() || directory.mkdirs()) {
             "Could not create app-update artifact directory: ${directory.absolutePath}"

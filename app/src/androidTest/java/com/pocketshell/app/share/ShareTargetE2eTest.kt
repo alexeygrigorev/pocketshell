@@ -981,9 +981,7 @@ class ShareTargetE2eTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/share-target")
         check(dir.exists() || dir.mkdirs()) {
             "could not create artifact directory ${dir.absolutePath}"

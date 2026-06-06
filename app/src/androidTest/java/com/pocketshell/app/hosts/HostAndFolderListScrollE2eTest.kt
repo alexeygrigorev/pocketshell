@@ -324,9 +324,7 @@ class FolderListScrollE2eTest {
 
 private fun issue274ArtifactFile(name: String): File {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
-    val mediaRoot = instrumentation.targetContext.externalMediaDirs
-        .firstOrNull { it != null }
-        ?: instrumentation.targetContext.getExternalFilesDir(null)
+    val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
     val directory = File(mediaRoot, "additional_test_output/issue274-scroll")
     check(directory.exists() || directory.mkdirs()) {
         "Could not create issue274 artifact directory: ${directory.absolutePath}"

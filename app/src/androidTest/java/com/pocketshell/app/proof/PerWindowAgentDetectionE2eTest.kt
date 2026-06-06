@@ -372,9 +372,7 @@ class PerWindowAgentDetectionE2eTest {
 
     private fun writeTimings() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/per-window-agent-detection")
         if (!dir.exists() && !dir.mkdirs()) return
         val file = File(dir, "timings.txt")

@@ -79,15 +79,12 @@ android {
         //
         // The upstream `src/main/jni/` tree is retained on disk only as a
         // refresh-tracking copy of upstream (VENDORED.md "Refresh procedure")
-        // — these `srcDirs()` calls explicitly clear those two source-set
-        // entries so AGP never tries to compile them alongside the stub.
-        // `jniLibs { srcDirs() }` is also cleared so AGP only picks up the
-        // `.so` files produced by the cmake build, not any stray pre-built
-        // libraries that might be dropped under `src/main/jniLibs/`.
+        // — `externalNativeBuild` points at the stub CMake project directly,
+        // so the deprecated `jni` source-set DSL is intentionally unused here.
+        // `jniLibs { srcDirs() }` is cleared so AGP only picks up the `.so`
+        // files produced by the cmake build, not any stray pre-built libraries
+        // that might be dropped under `src/main/jniLibs/`.
         named("main") {
-            jni {
-                srcDirs()
-            }
             jniLibs {
                 srcDirs()
             }

@@ -268,9 +268,7 @@ object WalkthroughScreenshotArtifacts {
         instrumentation.waitForIdleSync()
         SystemClock.sleep(300)
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create screenshot directory: ${dir.absolutePath}"

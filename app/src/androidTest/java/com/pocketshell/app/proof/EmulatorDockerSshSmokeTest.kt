@@ -1042,9 +1042,7 @@ class EmulatorDockerSshSmokeTest {
 
     private fun issue78ArtifactDirectory(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val directory = File(mediaRoot, "additional_test_output/$ISSUE78_DEVICE_DIR_NAME")
         check(directory.exists() || directory.mkdirs()) {
             "Could not create issue78 artifact directory: ${directory.absolutePath}"

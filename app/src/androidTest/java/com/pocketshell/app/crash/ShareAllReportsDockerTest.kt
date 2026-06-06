@@ -204,8 +204,7 @@ class ShareAllReportsDockerTest {
 
     private fun writeEvidence(text: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs.firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/issue466-share-all-reports")
         check(dir.exists() || dir.mkdirs()) { "Could not create evidence dir: ${dir.absolutePath}" }
         val file = File(dir, "share-all-summary.txt")

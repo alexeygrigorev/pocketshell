@@ -642,9 +642,7 @@ class ConversationInteractE2eTest {
 
     private fun writeTimings(engineLabel: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/conversation-interact-e2e")
         if (!dir.exists() && !dir.mkdirs()) return
         val file = File(dir, "$engineLabel-timings.txt")

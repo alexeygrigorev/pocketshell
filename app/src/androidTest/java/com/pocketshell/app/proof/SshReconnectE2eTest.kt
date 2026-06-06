@@ -661,9 +661,7 @@ class SshReconnectE2eTest {
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create flaky-reconnect artifact directory: ${dir.absolutePath}"

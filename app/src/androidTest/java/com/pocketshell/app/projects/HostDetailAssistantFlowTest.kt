@@ -292,9 +292,7 @@ class HostDetailAssistantFlowTest {
         }.getOrNull() ?: return
 
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
             ?: return
         val outDir = File(mediaRoot, "additional_test_output/issue334-host-detail-assistant").apply {
             if (!exists()) mkdirs()

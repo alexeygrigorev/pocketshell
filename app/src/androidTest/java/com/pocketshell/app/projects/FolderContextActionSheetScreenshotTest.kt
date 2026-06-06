@@ -59,9 +59,7 @@ class FolderContextActionSheetScreenshotTest {
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/folder-context-sheet")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create folder-context-sheet screenshot directory: ${dir.absolutePath}"

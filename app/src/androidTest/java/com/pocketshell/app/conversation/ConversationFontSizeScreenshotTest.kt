@@ -127,9 +127,7 @@ class ConversationFontSizeScreenshotTest {
 
     private fun artifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/issue-496-conversation-font")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create issue-496 screenshot dir: ${dir.absolutePath}"

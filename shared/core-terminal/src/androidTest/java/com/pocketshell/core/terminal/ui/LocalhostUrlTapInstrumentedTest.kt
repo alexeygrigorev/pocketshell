@@ -207,9 +207,7 @@ class LocalhostUrlTapInstrumentedTest {
             val canvas = Canvas(bitmap)
             view.draw(canvas)
             val ctx = InstrumentationRegistry.getInstrumentation().targetContext
-            val mediaRoot = ctx.externalMediaDirs.firstOrNull { it != null }
-                ?: ctx.getExternalFilesDir(null)
-                ?: ctx.cacheDir
+            val mediaRoot = testArtifactsRoot(ctx)
             val dir = File(mediaRoot, "additional_test_output/issue-488")
             if (!dir.exists()) dir.mkdirs()
             val outFile = File(dir, fileName)

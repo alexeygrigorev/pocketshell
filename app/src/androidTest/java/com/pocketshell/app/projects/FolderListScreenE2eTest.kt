@@ -1145,9 +1145,7 @@ class FolderListScreenE2eTest {
         } catch (t: Throwable) {
             return
         }
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val outDir = File(mediaRoot, "additional_test_output/issue300-folder-tree").apply {
             if (!exists()) mkdirs()
         }
@@ -1173,13 +1171,10 @@ class FolderListScreenE2eTest {
 
         // Use the standard `additional_test_output/<bucket>` convention
         // used elsewhere (HostConnectErrorE2eTest, walkthrough captures)
-        // so the artifact pipeline picks it
-        // up via the normal externalMediaDirs / getExternalFilesDir
-        // fallback chain.
+        // so the artifact pipeline picks it up via the normal app-specific
+        // external-files fallback chain.
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val outDir = File(mediaRoot, "additional_test_output/issue300-folder-tree").apply {
             if (!exists()) mkdirs()
         }

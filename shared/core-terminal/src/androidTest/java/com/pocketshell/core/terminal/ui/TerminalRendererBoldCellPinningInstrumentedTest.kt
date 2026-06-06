@@ -347,9 +347,7 @@ class TerminalRendererBoldCellPinningInstrumentedTest {
      */
     private fun saveDiagnostic(bitmap: Bitmap, fileName: String) {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
-        val mediaRoot = ctx.externalMediaDirs.firstOrNull { it != null }
-            ?: ctx.getExternalFilesDir(null)
-            ?: ctx.cacheDir
+        val mediaRoot = testArtifactsRoot(ctx)
         val dir = File(mediaRoot, "additional_test_output/issue-172")
         runCatching {
             if (!dir.exists()) dir.mkdirs()

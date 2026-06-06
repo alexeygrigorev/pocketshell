@@ -70,8 +70,7 @@ class SessionForwardingChipUiTest {
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
         assertNotNull("could not capture the chip screenshot", bitmap)
         val ctx = instrumentation.targetContext
-        val mediaRoot = ctx.externalMediaDirs.firstOrNull { it != null }
-            ?: ctx.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(ctx)
         val dir = File(mediaRoot, "additional_test_output/session-forwarding-chip")
         dir.mkdirs()
         val shot = File(dir, "$name-viewport.png")

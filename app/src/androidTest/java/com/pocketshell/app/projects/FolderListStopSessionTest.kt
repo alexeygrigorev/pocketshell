@@ -214,9 +214,7 @@ class FolderListStopSessionTest {
 
     private fun outDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         return File(mediaRoot, "additional_test_output/issue518-stop-session").apply {
             if (!exists()) mkdirs()
         }

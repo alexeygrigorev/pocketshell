@@ -204,9 +204,7 @@ class UsageThresholdTintScreenshotTest {
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/usage-threshold-tints")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create threshold-tint screenshot directory: ${dir.absolutePath}"

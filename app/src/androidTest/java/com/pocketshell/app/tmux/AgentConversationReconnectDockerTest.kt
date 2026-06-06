@@ -630,9 +630,7 @@ class AgentConversationReconnectDockerTest {
 
     private fun writeText(name: String, text: String): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/agent-conversation-reconnect")
         check(dir.exists() || dir.mkdirs()) { "could not create artifact dir ${dir.absolutePath}" }
         val file = File(dir, name)

@@ -485,7 +485,7 @@ class TerminalKeyboardStressTest {
             val view = checkNotNull(findTerminalView(activity.window.decorView))
             view.requestFocus()
             val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(view, InputMethodManager.SHOW_FORCED)
+            imm.showSoftInput(view, 0)
         }
         instrumentation.waitForIdleSync()
     }
@@ -817,9 +817,7 @@ class TerminalKeyboardStressTest {
 
     private fun artifactFile(name: String): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         // Isolated subdirectory so sibling terminal-lab tests running in
         // parallel (the orchestrator may run TerminalLabDockerTest at the
         // same time) cannot clobber this run's artifacts.

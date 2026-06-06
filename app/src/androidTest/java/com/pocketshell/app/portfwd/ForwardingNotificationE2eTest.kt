@@ -213,8 +213,7 @@ class ForwardingNotificationE2eTest {
     private fun captureShade(name: String) {
         instrumentation.uiAutomation.executeShellCommand("cmd statusbar expand-notifications").close()
         Thread.sleep(1_500)
-        val mediaRoot = context.externalMediaDirs.firstOrNull { it != null }
-            ?: context.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(context)
         val artifactsDir = File(mediaRoot, "additional_test_output/forwarding-notification")
         assertTrue(
             "could not create artifact dir ${artifactsDir.absolutePath}",

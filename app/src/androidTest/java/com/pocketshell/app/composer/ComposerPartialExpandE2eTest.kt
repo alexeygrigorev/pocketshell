@@ -169,7 +169,7 @@ class ComposerPartialExpandE2eTest {
         // Authoritative viewport capture for the reviewer. Saved to the
         // `additional_test_output/issue234-composer-partial-expand/`
         // bucket so `adb pull` / the artifact pipeline picks it up via
-        // the standard `externalMediaDirs` convention.
+        // the standard app-specific external-files convention.
         captureFullDevice("issue234-composer-partial-expand-viewport.png")
 
         // Sanity: the dismiss callback should not have fired during the
@@ -236,9 +236,7 @@ class ComposerPartialExpandE2eTest {
         // a frame ~16ms, allow a few for the partial-expand ease-out.
         android.os.SystemClock.sleep(300)
         val bitmap: Bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val outDir = File(
             mediaRoot,
             "additional_test_output/issue234-composer-partial-expand",

@@ -975,9 +975,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
     private fun artifactFile(name: String): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME")
         check(dir.exists() || dir.mkdirs()) {
             "could not create artifact directory ${dir.absolutePath}"

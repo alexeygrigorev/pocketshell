@@ -322,9 +322,7 @@ private object HostCardArtifacts {
 
     private fun artifactFile(scenario: String, name: String): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val directory = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME/host-card-badge-$scenario")
         check(directory.exists() || directory.mkdirs()) {
             "Could not create host-card setup badge artifact directory: ${directory.absolutePath}"

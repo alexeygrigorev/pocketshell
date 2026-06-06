@@ -227,8 +227,7 @@ class EnvScreenE2eTest {
         // artifact pipeline scans; fall back to the always-writable
         // internal files dir so the reviewer still has artifacts even on
         // an AVD where external storage is unavailable.
-        val mediaRoot = ctx.externalMediaDirs.firstOrNull { it != null }
-            ?: ctx.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(ctx)
             ?: ctx.filesDir
         return File(mediaRoot, "additional_test_output/issue264-env").apply {
             if (!exists()) mkdirs()

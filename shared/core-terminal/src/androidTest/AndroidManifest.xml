@@ -22,15 +22,13 @@
   tests that need an Activity host with different window flags than the
   default empty ComponentActivity.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application>
         <activity
             android:name="androidx.activity.ComponentActivity"
             android:showWhenLocked="true"
-            android:turnScreenOn="true"
-            tools:replace="android:showWhenLocked,android:turnScreenOn" />
+            android:turnScreenOn="true" />
     </application>
 
 </manifest>

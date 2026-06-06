@@ -418,9 +418,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         runCatching {
             val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
             val instrumentation = InstrumentationRegistry.getInstrumentation()
-            val mediaRoot = instrumentation.targetContext.externalMediaDirs
-                .firstOrNull { it != null }
-                ?: instrumentation.targetContext.getExternalFilesDir(null)
+            val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
             val dir = java.io.File(mediaRoot, "additional_test_output/issue-283-bottom-strip")
             if (dir.exists() || dir.mkdirs()) {
                 val outFile = java.io.File(dir, fileName)

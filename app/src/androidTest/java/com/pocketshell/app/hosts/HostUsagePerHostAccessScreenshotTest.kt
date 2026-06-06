@@ -84,9 +84,7 @@ class HostUsagePerHostAccessScreenshotTest {
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/host-usage-per-host-access")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create per-host usage screenshot directory: ${dir.absolutePath}"

@@ -136,9 +136,7 @@ class ShowAllPortsScreenshotTest {
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/show-all-ports")
         check(dir.exists() || dir.mkdirs()) {
             "Could not create show-all-ports screenshot directory: ${dir.absolutePath}"

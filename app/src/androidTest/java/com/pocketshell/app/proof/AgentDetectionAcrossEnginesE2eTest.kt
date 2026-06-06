@@ -474,9 +474,7 @@ class AgentDetectionAcrossEnginesE2eTest {
 
     private fun writeTimings(agent: AgentKind) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = instrumentation.targetContext.externalMediaDirs
-            .firstOrNull { it != null }
-            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/agent-detection-across-engines")
         if (!dir.exists() && !dir.mkdirs()) return
         val file = File(dir, "${agent.name}-timings.txt")

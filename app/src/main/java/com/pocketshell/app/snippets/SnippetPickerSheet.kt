@@ -21,11 +21,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -43,6 +48,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -103,13 +109,17 @@ public fun SnippetPickerSheet(
     val snippets by viewModel.snippets.collectAsState()
     var query by remember { mutableStateOf("") }
     var showManage by remember { mutableStateOf(false) }
+    var pendingTemplate by remember { mutableStateOf<PendingSnippetTemplate?>(null) }
 
-    val kindFiltered = remember(snippets, kindFilter) {
-        filterSnippetsForPicker(snippets = snippets, query = "", kindFilter = kindFilter)
+    val pickerSnippets = remember(snippets, kindFilter) {
+        snippetsForPickerWithBuiltIns(snippets, kindFilter)
     }
-    val filtered = remember(query, snippets, kindFilter) {
+    val kindFiltered = remember(pickerSnippets, kindFilter) {
+        filterSnippetsForPicker(snippets = pickerSnippets, query = "", kindFilter = kindFilter)
+    }
+    val filtered = remember(query, pickerSnippets, kindFilter) {
         filterSnippetsForPicker(
-            snippets = snippets,
+            snippets = pickerSnippets,
             query = query,
             kindFilter = kindFilter,
         )
@@ -129,11 +139,27 @@ public fun SnippetPickerSheet(
             query = query,
             onQueryChange = { query = it },
             onSnippetSend = { snippet, withEnter ->
-                onSnippetSend(snippet, withEnter)
-                onDismiss()
+                if (snippetHasTemplateParameters(snippet)) {
+                    pendingTemplate = PendingSnippetTemplate(snippet, withEnter)
+                } else {
+                    onSnippetSend(snippet, withEnter)
+                    onDismiss()
+                }
             },
             onManageTap = { showManage = true },
             onClose = onDismiss,
+        )
+    }
+
+    pendingTemplate?.let { pending ->
+        SnippetTemplateDialog(
+            snippet = pending.snippet,
+            onDismiss = { pendingTemplate = null },
+            onSend = { expanded ->
+                pendingTemplate = null
+                onSnippetSend(pending.snippet.copy(body = expanded), pending.withEnter)
+                onDismiss()
+            },
         )
     }
 
@@ -155,6 +181,11 @@ public fun SnippetPickerSheet(
         }
     }
 }
+
+private data class PendingSnippetTemplate(
+    val snippet: SnippetEntity,
+    val withEnter: Boolean,
+)
 
 /**
  * Pure-renderer content for the sheet body. Pulled out so the `@Preview`s
@@ -485,6 +516,84 @@ private fun SnippetSendChip(
  */
 internal fun snippetSendChipTag(snippetId: Long, withEnter: Boolean): String =
     if (withEnter) "snippet-send-with-enter-$snippetId" else "snippet-send-$snippetId"
+
+@Composable
+private fun SnippetTemplateDialog(
+    snippet: SnippetEntity,
+    onDismiss: () -> Unit,
+    onSend: (expandedBody: String) -> Unit,
+) {
+    val parameters = remember(snippet.body) { snippetTemplateParameters(snippet.body) }
+    var values by remember(parameters) { mutableStateOf(parameters.associateWith { "" }) }
+    val ready = parameters.all { !values[it].isNullOrBlank() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(text = snippet.displayLabel(), color = PocketShellColors.Text)
+        },
+        text = {
+            Column {
+                parameters.forEachIndexed { index, name ->
+                    if (index > 0) Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = values[name].orEmpty(),
+                        onValueChange = { next -> values = values + (name to next) },
+                        label = { Text(parameterLabel(name)) },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(snippetTemplateParameterTag(name)),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+                        colors = snippetTemplateFieldColors(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = ready,
+                onClick = {
+                    if (ready) {
+                        onSend(expandSnippetTemplate(snippet.body, values))
+                    }
+                },
+            ) {
+                Text(
+                    text = "Send",
+                    color = if (ready) PocketShellColors.Accent else PocketShellColors.TextMuted,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+        titleContentColor = PocketShellColors.Text,
+        textContentColor = PocketShellColors.TextSecondary,
+    )
+}
+
+internal fun snippetTemplateParameterTag(name: String): String =
+    "snippet-template-param-$name"
+
+private fun parameterLabel(name: String): String =
+    name.replace('-', ' ').replace('_', ' ')
+
+@Composable
+private fun snippetTemplateFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = PocketShellColors.Text,
+    unfocusedTextColor = PocketShellColors.Text,
+    focusedBorderColor = PocketShellColors.Accent,
+    unfocusedBorderColor = PocketShellColors.Border,
+    focusedLabelColor = PocketShellColors.Accent,
+    unfocusedLabelColor = PocketShellColors.TextSecondary,
+    cursorColor = PocketShellColors.Accent,
+    focusedContainerColor = PocketShellColors.SurfaceElev,
+    unfocusedContainerColor = PocketShellColors.SurfaceElev,
+)
 
 /**
  * Returns the one-line body preview string for [snippet] to render

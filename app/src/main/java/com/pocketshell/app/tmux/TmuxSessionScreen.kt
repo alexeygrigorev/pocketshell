@@ -115,6 +115,7 @@ import com.pocketshell.app.agentcommands.AgentCommandSheet
 import com.pocketshell.app.agentcommands.SessionControlAction
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.app.snippets.snippetDispatchText
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
@@ -1603,10 +1604,9 @@ public fun TmuxSessionScreen(
                 // never write a snippet into a dead pane and lose the tap.
                 if (sessionLive) {
                     currentPane?.let { pane ->
-                        val payload = if (withEnter) snippet.body + "\r" else snippet.body
                         viewModel.writeInputToPane(
                             pane.paneId,
-                            payload.toByteArray(Charsets.UTF_8),
+                            snippetDispatchText(snippet, withEnter).toByteArray(Charsets.UTF_8),
                         )
                     }
                     showSnippetPicker = false

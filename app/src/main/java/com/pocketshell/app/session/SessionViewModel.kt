@@ -17,6 +17,7 @@ import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.composer.PromptAttachmentStager
+import com.pocketshell.app.snippets.snippetDispatchText
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
@@ -845,7 +846,9 @@ public class SessionViewModel @Inject constructor(
      * along with the picker's `onSnippetPicked` callback.
      */
     public fun sendSnippet(snippet: SnippetEntity, withEnter: Boolean) {
-        sendText(snippet.body, withEnter = withEnter)
+        val payload = snippetDispatchText(snippet, withEnter)
+        if (payload.isEmpty()) return
+        sendTerminalInput(payload.toByteArray(Charsets.UTF_8))
     }
 
     /**

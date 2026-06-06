@@ -1,5 +1,6 @@
 package com.pocketshell.app
 
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -125,6 +126,85 @@ class BackgroundGraceControllerTest {
         runCurrent()
 
         assertEquals(listOf("foreground:resumedWithinGrace=true"), events)
+    }
+
+    @Test
+    fun `real app fanout does not detach tmux or stop leases on within-grace resume`() = runTest {
+        val events = mutableListOf<String>()
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = { events += "tmux:background" },
+                onForeground = { events += "tmux:foreground" },
+            ),
+        )
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onBackground() }
+                events += "ssh:stop"
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "ssh:start"
+                if (!resumedWithinGrace) {
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                }
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis / 2)
+        runCurrent()
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            "a short process background must not detach tmux or stop SSH leases",
+            listOf("ssh:start"),
+            events,
+        )
+    }
+
+    @Test
+    fun `real app fanout detaches tmux and stops leases only after grace elapses`() = runTest {
+        val events = mutableListOf<String>()
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = { events += "tmux:background" },
+                onForeground = { events += "tmux:foreground" },
+            ),
+        )
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onBackground() }
+                events += "ssh:stop"
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "ssh:start"
+                if (!resumedWithinGrace) {
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                }
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis + 1)
+        runCurrent()
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            listOf("tmux:background", "ssh:stop", "ssh:start", "tmux:foreground"),
+            events,
+        )
     }
 
     private fun kotlinx.coroutines.test.TestScope.controller(

@@ -5471,6 +5471,21 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun tmuxInputCapacityBytesForTest(): Int = TMUX_INPUT_MAX_PENDING_BYTES
 
     override fun onCleared() {
+        Log.w(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-viewmodel-cleared " +
+                "status=${_connectionStatus.value::class.simpleName} " +
+                "activeTarget=${activeTarget?.let { targetLogFields(it) } ?: "none"} " +
+                "connectingTarget=${connectingTarget?.let { targetLogFields(it) } ?: "none"} " +
+                "hasClient=${clientRef != null} " +
+                "clientDisconnected=${clientRef?.disconnected?.value} " +
+                "hasSession=${sessionRef != null} " +
+                "sessionConnected=${sessionRef?.isConnected} " +
+                "hasLease=${leaseRef != null} " +
+                "appActive=$appActive " +
+                "pendingReattach=${pendingReattach != null} " +
+                "backgroundDetachActive=${backgroundDetachJob?.isActive == true}",
+        )
         cancelTmuxSessionPrewarm()
         connectJob?.cancel()
         connectJob = null

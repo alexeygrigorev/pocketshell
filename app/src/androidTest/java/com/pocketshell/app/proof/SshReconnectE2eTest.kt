@@ -34,6 +34,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
@@ -711,6 +712,7 @@ class SshReconnectE2eTest {
 
         override val events: Flow<ControlEvent> = emptyFlow()
         override val disconnected: StateFlow<Boolean> = disconnectedState.asStateFlow()
+        override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> = emptyFlow()
 
         fun markDisconnected() {
             disconnectedState.value = true

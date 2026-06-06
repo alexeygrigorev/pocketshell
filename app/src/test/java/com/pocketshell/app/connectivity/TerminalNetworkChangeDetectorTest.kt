@@ -40,6 +40,30 @@ class TerminalNetworkChangeDetectorTest {
     }
 
     @Test
+    fun `first validated network after unknown startup is learned without reconnect event`() {
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.NoValidatedNetwork,
+        )
+
+        assertNull(
+            detector.update(
+                snapshot = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "default-network-available",
+            ),
+        )
+
+        val handoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("cell"),
+            reason = "real-handoff",
+        )
+
+        assertTrue(handoff != null)
+        assertEquals(TerminalNetworkSnapshot.Validated("wifi"), handoff!!.previousValidated)
+        assertEquals(TerminalNetworkSnapshot.Validated("cell"), handoff.current)
+        assertEquals(1L, handoff.sequence)
+    }
+
+    @Test
     fun `offline transition waits until a validated network returns`() {
         val detector = TerminalNetworkChangeDetector(
             initial = TerminalNetworkSnapshot.Validated("wifi"),

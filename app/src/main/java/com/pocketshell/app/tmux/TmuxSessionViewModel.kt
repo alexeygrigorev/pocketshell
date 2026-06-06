@@ -337,7 +337,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private var eventsJob: Job? = null
     private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
-    private var lastPaneOutputAtElapsedMs: Long? = null
 
     // Issue #440: the cause of the most recent failed connect attempt, set
     // by [failConnectAttempt] and consulted by [scheduleAutoReconnect]. The
@@ -1398,19 +1397,16 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: connectingTarget ?: return
         if (clientRef == null && sessionRef == null) return
         val reason = change.reason
-        val lastOutputAt = lastPaneOutputAtElapsedMs
-        val outputAgeMs = lastOutputAt?.let { SystemClock.elapsedRealtime() - it }
-        val realValidatedIdentityChange = change.previousValidated != null &&
-            change.previousValidated != change.current
-        if (
-            outputAgeMs != null &&
-            outputAgeMs <= NETWORK_RECONNECT_OUTPUT_QUIET_MS &&
-            !realValidatedIdentityChange
-        ) {
+        val previousValidated = change.previousValidated
+        val realValidatedIdentityChange = previousValidated != null &&
+            previousValidated != change.current
+        if (!realValidatedIdentityChange) {
             Log.i(
                 ISSUE_548_NETWORK_TAG,
                 "tmux-network-proactive-reconnect-skip reason=$reason " +
-                    "cause=recent-output outputAgeMs=$outputAgeMs " +
+                    "cause=no-real-validated-handoff " +
+                    "previousValidated=${previousValidated?.logValue ?: "none"} " +
+                    "current=${change.current.logValue} " +
                     targetLogFields(target),
             )
             return
@@ -2481,8 +2477,8 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
         // Issue #173: observe the client's latched `disconnected`
-        // StateFlow so we flip [_connectionStatus] to Failed when the
-        // underlying [TmuxClient.readerLoop] exits (clean EOF, sshj
+        // StateFlow so we start bounded recovery when the underlying
+        // [TmuxClient.readerLoop] exits (clean EOF, sshj
         // exception, or [TmuxClient.close]). The hot [TmuxClient.events]
         // SharedFlow does NOT signal end-of-stream when the reader dies,
         // so this is the only path that catches an OS-driven socket
@@ -3321,7 +3317,6 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun recordVisiblePaneOutput(event: ControlEvent.Output) {
-        lastPaneOutputAtElapsedMs = SystemClock.elapsedRealtime()
         logFirstPaneOutput(event)
     }
 
@@ -6845,14 +6840,6 @@ internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
-
-/**
- * Issue #548: a validated-network callback is only a proactive hint. If
- * tmux pane bytes arrived recently, the control stream is demonstrably
- * alive, so do not present the session as SSH reconnecting unless the
- * transport later reports EOF/failure via [TmuxClient.disconnected].
- */
-internal const val NETWORK_RECONNECT_OUTPUT_QUIET_MS: Long = 5_000L
 
 /**
  * Issue #451: how long [TmuxSessionViewModel.stagePromptAttachments] waits

@@ -155,6 +155,10 @@ internal class TerminalNetworkChangeDetector(
         if (previous == snapshot) return null
         current = snapshot
         if (snapshot !is TerminalNetworkSnapshot.Validated) return null
+        if (previousValidated == null) {
+            lastValidated = snapshot
+            return null
+        }
         if (snapshot == previousValidated) return null
         lastValidated = snapshot
         sequence += 1L

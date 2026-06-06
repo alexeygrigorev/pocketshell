@@ -1214,6 +1214,46 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun firstValidatedNetworkHintDoesNotReconnectIdleStableTerminal() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        advanceUntilIdle()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                current = TerminalNetworkSnapshot.Validated("wifi"),
+                previousValidated = null,
+                reason = "first-validated-network",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "first validated callback is startup state discovery, not proof that SSH died",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(0, connector.connectCount)
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+    }
+
+    @Test
     fun realNetworkIdentityChangeDuringActiveTerminalOutputStillReconnects() = runTest {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
@@ -1254,6 +1294,60 @@ class TmuxSessionViewModelTest {
         )
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
         assertEquals(0, connector.connectCount)
+    }
+
+    @Test
+    fun networkReconnectAndPassiveDisconnectAreCoalescedIntoOneAttempt() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+        advanceUntilIdle()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "wifi-cellular-handoff"),
+        )
+        runCurrent()
+        oldClient.disconnectedSignal.value = true
+        runCurrent()
+
+        assertTrue(
+            "passive EOF during a scheduled network reconnect must not replace it with a second loop",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertEquals(0, connector.connectCount)
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+
+        advanceTimeBy(60_000L)
+        advanceUntilIdle()
+
+        assertEquals(
+            "only the already scheduled network reconnect should open a transport",
+            1,
+            connector.connectCount,
+        )
+        assertEquals(1, TMUX_CONNECT_ATTEMPTS.get())
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
     }
 
     @Test

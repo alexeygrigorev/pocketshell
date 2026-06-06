@@ -70,6 +70,27 @@ internal class FakeTmuxClient : TmuxClient {
     override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> =
         outputBacklogOverflowEvents
 
+    var reportOutputBacklogOverflowOnTryEmitFailure: Boolean = false
+
+    private val droppedPaneOutputCounts: MutableMap<String, Int> = mutableMapOf()
+
+    fun tryEmitPaneOutput(paneId: String, data: ByteArray): Boolean {
+        val event = ControlEvent.Output(paneId, data)
+        val accepted = if (decoupleOutputForFromEvents) {
+            emittedPaneOutputs.tryEmit(event)
+        } else {
+            emittedEvents.tryEmit(event)
+        }
+        if (!accepted && reportOutputBacklogOverflowOnTryEmitFailure) {
+            val dropped = (droppedPaneOutputCounts[paneId] ?: 0) + 1
+            droppedPaneOutputCounts[paneId] = dropped
+            outputBacklogOverflowEvents.tryEmit(
+                TmuxOutputBacklogOverflow(paneId = paneId, droppedEvents = dropped),
+            )
+        }
+        return accepted
+    }
+
     val sentCommands: MutableList<String> = mutableListOf()
 
     /**

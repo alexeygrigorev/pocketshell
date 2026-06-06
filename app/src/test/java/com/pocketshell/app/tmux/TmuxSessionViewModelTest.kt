@@ -1741,6 +1741,130 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun codexLikePaneOutputOverflowStaysLocalAndNeverReconnectsStableTransport() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
+        val client = FakeTmuxClient()
+        client.decoupleOutputForFromEvents = true
+        client.reportOutputBacklogOverflowOnTryEmitFailure = true
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "codex",
+            client = client,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    "%0",
+                    "@0",
+                    "\$0",
+                    "codex",
+                    paneIndex = 0,
+                    sessionName = "codex",
+                ),
+            ),
+        )
+        runCurrent()
+
+        val state = vm.panes.value.single().terminalState
+        val observedTerminalSideChannelChunks = AtomicInteger(0)
+        val terminalSideChannelCollector = launch {
+            state.output.collect {
+                observedTerminalSideChannelChunks.incrementAndGet()
+                delay(60_000)
+            }
+        }
+        val slowPaneOutputCollector = launch {
+            client.outputFor("%0").collect {
+                delay(60_000)
+            }
+        }
+        runCurrent()
+
+        try {
+            val chunks = codexLikeIssue576BurstChunks()
+            val emittedBytes = chunks.sumOf { it.size }
+            assertTrue(
+                "test fixture drift: emittedBytes=$emittedBytes",
+                emittedBytes >= 250_000,
+            )
+
+            var rejectedChunks = 0
+            val sender = async {
+                chunks.forEach { chunk ->
+                    if (!client.tryEmitPaneOutput("%0", chunk)) rejectedChunks += 1
+                }
+            }
+            val completed = withTimeoutOrNull(5_000) {
+                sender.await()
+                true
+            } ?: false
+            assertTrue(
+                "Codex-like pane output burst must not block the reader/UI producer",
+                completed,
+            )
+            assertTrue(
+                "test must actually reproduce bounded pane-output backpressure",
+                rejectedChunks > 0,
+            )
+
+            runCurrent()
+            shadowOf(Looper.getMainLooper()).idle()
+
+            registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+                networkChange(
+                    previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                    current = TerminalNetworkSnapshot.Validated("wifi"),
+                    previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                    reason = "same-network-after-codex-output-overflow",
+                ),
+            )
+            runCurrent()
+
+            assertTrue(
+                "some output should reach the terminal side-channel before local overflow recovery",
+                observedTerminalSideChannelChunks.get() > 0,
+            )
+            assertTrue(
+                "output overflow is local terminal backpressure, not an SSH/tmux disconnect",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertEquals(
+                "stable mocked transport must not be reopened for local output overflow",
+                0,
+                connector.connectCount,
+            )
+            assertEquals(
+                "local output overflow must not enqueue tmux reconnect attempts",
+                0,
+                TMUX_CONNECT_ATTEMPTS.get(),
+            )
+            assertFalse(
+                "local output overflow must not flip the tmux disconnected signal",
+                client.disconnectedSignal.value,
+            )
+            assertTrue(
+                "overflowed pane should expose local terminal recovery instead of fake reconnect",
+                vm.panes.value.single().surfaceError,
+            )
+        } finally {
+            terminalSideChannelCollector.cancel()
+            slowPaneOutputCollector.cancel()
+        }
+    }
+
+    @Test
     fun terminalOutputBacklogOverflowIsLocalPaneErrorNotReconnect() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -7179,6 +7303,68 @@ class TmuxSessionViewModelTest {
             }.toByteArray(Charsets.UTF_8)
         }
         chunks += "\u001b[?25h\u001b[0m\r\nISSUE576-VM-DONE\r\n".toByteArray(Charsets.UTF_8)
+        return chunks
+    }
+
+    private fun codexLikeIssue576BurstChunks(): List<ByteArray> {
+        val transcript = buildString {
+            append("# Codex synthetic /new overflow harness\r\n\r\n")
+            append("Preparing workspace context with many changed files and prior transcript lines.\r\n")
+            append("```text\r\n")
+            append("git status --short --branch\r\n")
+            repeat(48) { index ->
+                append(" M app/src/main/java/com/pocketshell/issue576/File")
+                append(index.toString().padStart(3, '0'))
+                append(".kt\r\n")
+            }
+            append("```\r\n\r\n")
+            append("```kotlin\r\n")
+            append("fun generatedStatus(index: Int) = \"line-${'$'}index\"\r\n")
+            append("```\r\n\r\n")
+            append("LONG-WRAPPED-CONTEXT ")
+            append("L".repeat(32_000))
+            append("\r\n")
+            repeat(720) { index ->
+                append("\u001b[2K\r")
+                append("status: indexing ")
+                append(index)
+                append("/720 ")
+                append(".".repeat(index % 40))
+                append("\r\n")
+                append("- changed file ")
+                append(index.toString().padStart(4, '0'))
+                append(": ")
+                append("markdown `inline code` and shell output ".repeat(5))
+                append("\r\n")
+                if (index % 9 == 0) {
+                    append("```sh\r\n")
+                    append("printf 'burst chunk ")
+                    append(index)
+                    append("'; sleep 0.01\r\n")
+                    append("```\r\n")
+                }
+                if (index % 17 == 0) {
+                    append("> progress note ")
+                    append(index)
+                    append(": ")
+                    append("wrapped ".repeat(90))
+                    append("\r\n")
+                }
+            }
+            append("\u001b[32mISSUE576-CODEX-LIKE-DONE\u001b[0m\r\n")
+        }.toByteArray(Charsets.UTF_8)
+
+        val chunkSizes = intArrayOf(1, 2, 5, 13, 3, 34, 8, 89, 21, 144)
+        val chunks = mutableListOf<ByteArray>()
+        var offset = 0
+        var chunkIndex = 0
+        while (offset < transcript.size) {
+            val size = chunkSizes[chunkIndex % chunkSizes.size]
+            val end = minOf(transcript.size, offset + size)
+            chunks += transcript.copyOfRange(offset, end)
+            offset = end
+            chunkIndex += 1
+        }
         return chunks
     }
 

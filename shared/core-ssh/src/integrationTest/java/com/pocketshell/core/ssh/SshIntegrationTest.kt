@@ -397,6 +397,46 @@ class SshIntegrationTest {
     }
 
     @Test
+    fun keepAliveThreadIsRunningAfterConnect() = runTest {
+        // Issue #548 regression guard. The keep-alive interval must be set
+        // BEFORE client.connect() so sshj's onConnect() (which runs inside
+        // connect()) sees isEnabled() == true and actually starts the
+        // KeepAlive thread. With the KEEP_ALIVE provider that thread is a
+        // KeepAliveRunner named "sshj-KeepAliveRunner". The old code set the
+        // interval AFTER connect(), so this thread was never started and an
+        // idle NAT/server silently reaped the connection.
+        //
+        // We assert the thread exists, is alive, and belongs to the right
+        // provider. This is the core proof of the fix — the previous
+        // long-running stability test could pass even with keep-alive dead
+        // because tmux tick traffic kept the LAN socket warm.
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        session.use {
+            // The KeepAlive thread is started synchronously inside connect(),
+            // so it must already be present here. sshj names it
+            // "sshj-KeepAliveRunner-<remote>-<n>", so match by prefix.
+            val keepAliveThreads = Thread.getAllStackTraces().keys
+                .filter { t -> t.name.startsWith("sshj-KeepAliveRunner") && t.isAlive }
+            assertTrue(
+                "expected a live sshj-KeepAliveRunner thread after connect " +
+                    "(keep-alive must start, issue #548); live thread names were: " +
+                    Thread.getAllStackTraces().keys
+                        .filter { t -> t.name.startsWith("sshj-") }
+                        .map { t -> t.name },
+                keepAliveThreads.isNotEmpty(),
+            )
+        }
+    }
+
+    @Test
     fun closeDisconnectsTheSession() = runTest {
         val session = SshConnection.connect(
             host = container!!.host,

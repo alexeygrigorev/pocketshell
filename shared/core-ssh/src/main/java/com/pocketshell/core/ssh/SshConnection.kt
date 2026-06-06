@@ -7,6 +7,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import net.schmizz.keepalive.KeepAliveProvider
+import net.schmizz.keepalive.KeepAliveRunner
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
@@ -35,6 +37,27 @@ public object SshConnection {
 
     /** Default keep-alive interval in seconds. */
     internal const val DEFAULT_KEEP_ALIVE_SECONDS: Int = 15
+
+    /**
+     * Number of consecutive unanswered keep-alive requests sshj tolerates
+     * before it declares the peer lost and tears the transport down with
+     * `CONNECTION_LOST`.
+     *
+     * With the [KeepAliveProvider.KEEP_ALIVE] provider ([KeepAliveRunner])
+     * every interval sends a `keepalive@openssh.com` global request and
+     * expects a reply; an unanswered request increments the miss counter,
+     * and any reply resets it. The session is only dropped after this many
+     * *consecutive* misses.
+     *
+     * Tolerance window = [DEFAULT_KEEP_ALIVE_SECONDS] x this count.
+     * At 15s x 4 = 60s: a brief blip (metro tunnel / dead spot / quick
+     * wifi<->cellular gap) of up to ~60s of no replies is ridden through
+     * (the session freezes, then resumes when connectivity returns) instead
+     * of dropping on the first missed packet. Only a sustained outage past
+     * the window counts as a real disconnect. This mirrors the existing
+     * 60s background-grace window (#450) so the two tolerances agree.
+     */
+    internal const val DEFAULT_MAX_ALIVE_COUNT: Int = 4
 
     /**
      * Connect to `[host]:[port]` as [user] and authenticate with [key]
@@ -118,7 +141,14 @@ public object SshConnection {
                     val client = connector.createClient()
                     liveClient.set(client)
                     connector.applyKnownHostsPolicy(client, knownHosts)
-                    connector.connect(client, host, port, timeoutMs, keepAliveSeconds)
+                    connector.connect(
+                        client,
+                        host,
+                        port,
+                        timeoutMs,
+                        keepAliveSeconds,
+                        DEFAULT_MAX_ALIVE_COUNT,
+                    )
                     connector.authenticate(client, user, key, passphrase)
 
                     val session = connector.toSession(client)
@@ -159,7 +189,21 @@ public object SshConnection {
 
     private fun createSshConfig(): DefaultConfig {
         ensureBouncyCastleProvider()
-        return DefaultConfig()
+        return DefaultConfig().apply {
+            // sshj's DefaultConfig ships KeepAliveProvider.HEARTBEAT, which
+            // only *writes* SSH_MSG_IGNORE packets and never waits for a
+            // reply — so it keeps a NAT mapping warm but can never detect a
+            // dead peer. Switch to KeepAliveProvider.KEEP_ALIVE
+            // (KeepAliveRunner): it sends keepalive@openssh.com global
+            // requests, counts unanswered ones, and tears the transport down
+            // with CONNECTION_LOST after `maxAliveCount` consecutive misses.
+            //
+            // This MUST be set on the Config before the SSHClient is
+            // constructed: SSHClient's constructor builds its ConnectionImpl
+            // using Config.getKeepAliveProvider(), so the KeepAlive instance
+            // is fixed at construction time and can't be swapped afterwards.
+            keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
+        }
     }
 
     private fun ensureBouncyCastleProvider() {
@@ -241,6 +285,7 @@ public object SshConnection {
             port: Int,
             timeoutMs: Int,
             keepAliveSeconds: Int,
+            maxAliveCount: Int,
         )
         suspend fun authenticate(client: C, user: String, key: SshKey, passphrase: CharArray?)
         fun toSession(client: C): SshSession
@@ -260,11 +305,36 @@ public object SshConnection {
             port: Int,
             timeoutMs: Int,
             keepAliveSeconds: Int,
+            maxAliveCount: Int,
         ) {
             client.connectTimeout = timeoutMs
             client.timeout = timeoutMs
+
+            // Configure keep-alive BEFORE connect(). sshj starts its
+            // KeepAlive thread inside SSHClient.onConnect() — which runs
+            // synchronously *during* client.connect() — and only if
+            // KeepAlive.isEnabled() is already true at that moment.
+            // isEnabled() returns (keepAliveInterval > 0), so the interval
+            // has to be set before connect() runs. The previous code set it
+            // *after* connect() returned, which meant onConnect() saw
+            // interval == 0, isEnabled() == false, and the keep-alive thread
+            // was NEVER started for the whole session. With no SSH-level
+            // keep-alives, an idle NAT/server reaped the TCP and the
+            // connection silently died (issue #548). The KeepAlive instance
+            // already exists here: SSHClient's constructor built the
+            // ConnectionImpl (and its KeepAlive) from the config provider, so
+            // client.connection.keepAlive is reachable pre-connect.
+            val keepAlive = client.connection.keepAlive
+            keepAlive.keepAliveInterval = keepAliveSeconds
+            // KeepAliveRunner adds maxAliveCount: how many consecutive
+            // unanswered keepalive@openssh.com requests to tolerate before
+            // declaring CONNECTION_LOST. The default provider (HEARTBEAT)
+            // ignores this; KEEP_ALIVE (set in createSshConfig) honours it.
+            if (keepAlive is KeepAliveRunner) {
+                keepAlive.maxAliveCount = maxAliveCount
+            }
+
             client.connect(host, port)
-            client.connection.keepAlive.keepAliveInterval = keepAliveSeconds
         }
 
         override suspend fun authenticate(

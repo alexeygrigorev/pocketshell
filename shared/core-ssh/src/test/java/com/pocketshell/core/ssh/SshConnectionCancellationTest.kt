@@ -102,6 +102,7 @@ class SshConnectionCancellationTest {
             port: Int,
             timeoutMs: Int,
             keepAliveSeconds: Int,
+            maxAliveCount: Int,
         ) {
             connectEntered.complete(Unit)
             when (connectMode) {

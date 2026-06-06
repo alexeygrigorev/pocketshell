@@ -1,6 +1,7 @@
 package com.pocketshell.core.terminal.selection
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -86,5 +87,71 @@ class WrappedLineReassemblyTest {
             ),
             spans,
         )
+    }
+
+    @Test
+    fun `wrapped github issue URL emits one full-target decoration region per visual row`() {
+        val url =
+            "https://github.com/alexeygrigorev/pocketshell/issues/558" +
+                "#issuecomment-4638326371"
+        val splitAt = url.indexOf("#issuecomment") + 4
+        val rows = listOf(
+            VisualRow(10, "open ${url.take(splitAt)}", wrapsToNext = true),
+            VisualRow(11, url.drop(splitAt), wrapsToNext = false),
+        )
+
+        val regions = terminalMatchRegionsForRows(rows, columns = 80, matcher = DefaultTerminalMatcher())
+        val urlRegions = regions.filter { it.match is TerminalMatch.Url }
+
+        assertEquals(2, urlRegions.size)
+        assertEquals(listOf(10, 11), urlRegions.map { it.row })
+        assertTrue(
+            "every visual fragment should carry the complete URL: $urlRegions",
+            urlRegions.all { it.match.value == url },
+        )
+        assertEquals(5, urlRegions[0].startCol)
+        assertEquals(rows[0].text.length, urlRegions[0].endColExclusive)
+        assertEquals(0, urlRegions[1].startCol)
+        assertEquals(rows[1].text.length, urlRegions[1].endColExclusive)
+    }
+
+    @Test
+    fun `single-line URL still emits one full-target decoration region`() {
+        val url = "https://github.com/alexeygrigorev/pocketshell/issues/558"
+        val rows = listOf(VisualRow(3, "see $url", wrapsToNext = false))
+
+        val regions = terminalMatchRegionsForRows(rows, columns = 100, matcher = DefaultTerminalMatcher())
+        val region = regions.single { it.match is TerminalMatch.Url }
+
+        assertEquals(url, region.match.value)
+        assertEquals(3, region.row)
+        assertEquals(4, region.startCol)
+        assertEquals(4 + url.length, region.endColExclusive)
+    }
+
+    @Test
+    fun `wrapped tilde path emits one full-target decoration region per visual row`() {
+        val path =
+            "~/projects/pocketshell/shared/core-terminal/src/main/java/" +
+                "com/pocketshell/core/terminal/selection/SelectionScanner.kt"
+        val splitAt = path.indexOf("com/pocketshell")
+        val rows = listOf(
+            VisualRow(20, "file ${path.take(splitAt)}", wrapsToNext = true),
+            VisualRow(21, path.drop(splitAt), wrapsToNext = false),
+        )
+
+        val regions = terminalMatchRegionsForRows(rows, columns = 96, matcher = DefaultTerminalMatcher())
+        val pathRegions = regions.filter { it.match is TerminalMatch.Path }
+
+        assertEquals(2, pathRegions.size)
+        assertEquals(listOf(20, 21), pathRegions.map { it.row })
+        assertTrue(
+            "every visual fragment should carry the complete path: $pathRegions",
+            pathRegions.all { it.match.value == path },
+        )
+        assertEquals(5, pathRegions[0].startCol)
+        assertEquals(rows[0].text.length, pathRegions[0].endColExclusive)
+        assertEquals(0, pathRegions[1].startCol)
+        assertEquals(rows[1].text.length, pathRegions[1].endColExclusive)
     }
 }

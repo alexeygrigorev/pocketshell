@@ -5,8 +5,12 @@ import android.graphics.Canvas
 import android.view.View
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.core.terminal.selection.TerminalMatch
+import com.pocketshell.core.terminal.selection.TerminalMatchRegion
 import com.pocketshell.core.terminal.selection.UrlRegion
+import com.pocketshell.core.terminal.selection.findVisibleTerminalMatches
 import com.pocketshell.core.terminal.selection.findVisibleUrls
+import com.pocketshell.core.terminal.selection.hitTestUrl
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +34,9 @@ import java.io.FileOutputStream
  * the URL into a deliberately narrow grid so it wraps, runs [findVisibleUrls],
  * and asserts that every emitted region — on every visual row the URL covers —
  * carries the FULL URL string (not just its per-visual-line slice).
+ *
+ * Also verifies [findVisibleTerminalMatches], which feeds underline decoration,
+ * emits one URL match region per wrapped visual row with the same full URL.
  *
  * Captures a viewport screenshot under `additional_test_output/issue-558/`.
  */
@@ -96,6 +103,33 @@ class WrappedUrlReassemblyInstrumentedTest {
                 "wrapped fragments must occupy distinct rows: $found",
                 found.map { it.row }.distinct().size >= 2,
             )
+            val continuation = found.first { it.row != found.first().row }
+            val continuationHit = hitTestUrl(
+                view,
+                found,
+                centerX(continuation, view),
+                centerY(continuation, view),
+            )
+            assertTrue(
+                "tap on continuation row should resolve the full URL, got $continuationHit",
+                continuationHit?.url == longUrl,
+            )
+
+            val matchRegions = arrayOfNulls<List<TerminalMatchRegion>>(1)
+            instrumentation.runOnMainSync {
+                matchRegions[0] = findVisibleTerminalMatches(view)
+            }
+            val urlMatchRegions = requireNotNull(matchRegions[0])
+                .filter { it.match is TerminalMatch.Url }
+                .filter { it.match.value == longUrl }
+            assertTrue(
+                "underline decoration should include every wrapped URL fragment: $urlMatchRegions",
+                urlMatchRegions.size >= 2,
+            )
+            assertTrue(
+                "underline fragments should occupy distinct visual rows: $urlMatchRegions",
+                urlMatchRegions.map { it.row }.distinct().size >= 2,
+            )
 
             instrumentation.runOnMainSync {
                 saveViewportScreenshot(view, "issue-558-wrapped-url-viewport.png")
@@ -105,6 +139,17 @@ class WrappedUrlReassemblyInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
+    }
+
+    private fun centerX(region: UrlRegion, view: TerminalView): Float {
+        val renderer = requireNotNull(view.mRenderer) { "renderer should be initialised" }
+        return (region.startCol + (region.endColExclusive - region.startCol) / 2f) * renderer.fontWidth
+    }
+
+    private fun centerY(region: UrlRegion, view: TerminalView): Float {
+        val renderer = requireNotNull(view.mRenderer) { "renderer should be initialised" }
+        val rowOnScreen = region.row - view.topRow
+        return renderer.fontLineSpacingAndAscent + (rowOnScreen + 0.5f) * renderer.fontLineSpacing
     }
 
     private fun saveViewportScreenshot(view: TerminalView, fileName: String) {

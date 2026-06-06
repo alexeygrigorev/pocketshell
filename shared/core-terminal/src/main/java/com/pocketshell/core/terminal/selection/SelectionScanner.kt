@@ -19,8 +19,13 @@ data class TerminalMatchRegion(
 /**
  * Scans only the visible terminal viewport and returns match regions.
  * Span-aware matchers provide exact geometry; older value-only matchers use a
- * literal, per-line fallback so existing custom implementations remain
- * tappable.
+ * literal fallback so existing custom implementations remain tappable.
+ *
+ * Soft-wrapped rows are reassembled before matching, then each match is mapped
+ * back to every visual row fragment it covers. This keeps underline decoration
+ * and smart-selection hit regions aligned with the URL/path scanners: tapping
+ * or recognizing a wrapped continuation row uses the same complete target as
+ * the first row.
  */
 fun findVisibleTerminalMatches(
     view: TerminalView,
@@ -33,24 +38,46 @@ fun findVisibleTerminalMatches(
     if (columns <= 0 || rows <= 0) return emptyList()
 
     val topRow = view.topRow
-    val out = mutableListOf<TerminalMatchRegion>()
+    val visualRows = mutableListOf<VisualRow>()
     for (row in topRow until topRow + rows) {
         val line: String = try {
             screen.getSelectedText(0, row, columns, row)
         } catch (_: Throwable) {
+            visualRows += VisualRow(row = row, text = "", wrapsToNext = false)
             continue
         }
-        for (span in matchSpansForLine(line, matcher)) {
-            val startCol = span.start.coerceAtLeast(0)
-            if (startCol >= columns) continue
-            val endCol = span.endExclusive.coerceAtMost(columns)
-            if (endCol <= startCol) continue
-            out += TerminalMatchRegion(
-                match = span.match,
-                row = row,
-                startCol = startCol,
-                endColExclusive = endCol,
-            )
+        val wraps = try {
+            row + 1 < topRow + rows && screen.getLineWrap(row)
+        } catch (_: Throwable) {
+            false
+        }
+        visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
+    }
+    return terminalMatchRegionsForRows(visualRows, columns, matcher)
+}
+
+internal fun terminalMatchRegionsForRows(
+    visualRows: List<VisualRow>,
+    columns: Int,
+    matcher: TerminalMatcher,
+): List<TerminalMatchRegion> {
+    if (columns <= 0 || visualRows.isEmpty()) return emptyList()
+
+    val out = mutableListOf<TerminalMatchRegion>()
+    for (logical in reassemble(visualRows)) {
+        for (span in matchSpansForLine(logical.text, matcher)) {
+            for (rowSpan in logical.mapSpanToRows(span.start, span.endExclusive)) {
+                val startCol = rowSpan.startCol.coerceAtLeast(0)
+                if (startCol >= columns) continue
+                val endCol = rowSpan.endColExclusive.coerceAtMost(columns)
+                if (endCol <= startCol) continue
+                out += TerminalMatchRegion(
+                    match = span.match,
+                    row = rowSpan.row,
+                    startCol = startCol,
+                    endColExclusive = endCol,
+                )
+            }
         }
     }
     return out

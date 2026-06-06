@@ -39,8 +39,9 @@ What works in v0.3.8 / current `main`:
   save into a file on the remote host.
 - Port-forwarding (extracted from `ssh-auto-forward-android`) is
   default-off per host. When enabled, it uses the one carve-out from
-  D21's no-background rule — a scoped foreground service while tunnels
-  are active.
+  D21's no-background rule: app-scoped forwarding supervisors backed by
+  a scoped foreground service while tunnels are active, so forwards keep
+  running when the panel or app is backgrounded.
 
 The deterministic Docker host used in CI does not use real provider
 credentials. It ships local shims for `claude`, `codex`, `opencode`,
@@ -219,9 +220,10 @@ background work on the phone).
   PocketShell to either paste into the currently-attached session or
   save as a file on the remote host.
 - **Port forwarding.** Auto-forward modules ported from
-  `ssh-auto-forward-android`. Per-host port table, foreground-service
-  network recovery, and visible reconnecting/stopped tunnel state while
-  tunnels restart after a transport bounce.
+  `ssh-auto-forward-android`. Per-host port table, controller-owned
+  foreground-service sessions that outlive panel disposal, network
+  recovery, and visible reconnecting/stopped tunnel state while tunnels
+  restart after a transport bounce.
 
 ## Architecture
 

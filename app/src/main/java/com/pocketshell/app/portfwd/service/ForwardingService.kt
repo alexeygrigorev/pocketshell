@@ -54,19 +54,10 @@ import kotlinx.coroutines.launch
  *    the notification text so the user sees host name + tunnel count
  *  - Register a network-availability callback and call
  *    [ForwardingController.reconnectNow] on network recovery, so the
- *    [com.pocketshell.core.portfwd.AutoForwarderSupervisor] in the
- *    ViewModel skips its exponential-backoff sleep
+ *    controller-owned [com.pocketshell.core.portfwd.AutoForwarderSupervisor]
+ *    skips its exponential-backoff sleep
  *  - Stop itself when [ForwardingController.flowOfActiveHostCount]
  *    drops to zero (all hosts disabled their auto-forward toggle)
- *
- * Non-goals for this round:
- *  - The service does NOT own the SSH session or the supervisor.
- *    Those still live inside `PortForwardPanelViewModel`. The service
- *    is a "process keeper" + UI shim; the panel is in charge of the
- *    actual forwarding logic. A future refactor MAY move the
- *    supervisor into the service, but doing so today would require a
- *    binder/IPC layer that the current ViewModel-centric design does
- *    not yet have.
  */
 @AndroidEntryPoint
 class ForwardingService : Service() {
@@ -138,6 +129,7 @@ class ForwardingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                controller.stopAllForwarding(requestServiceStop = false)
                 stopForwarding()
                 return START_NOT_STICKY
             }

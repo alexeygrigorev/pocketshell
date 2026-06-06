@@ -1,12 +1,14 @@
 package com.pocketshell.app.portfwd
 
 import android.content.Context
+import android.content.Intent
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.portfwd.service.ForwardingService
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
@@ -18,9 +20,12 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
@@ -37,6 +42,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
@@ -96,6 +102,7 @@ class PortForwardPanelViewModelTest {
 
         viewModel.setAutoForwardEnabled(false)
         runCurrent()
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -240,6 +247,7 @@ class PortForwardPanelViewModelTest {
         assertFalse(viewModel.state.value.showAllPorts)
         assertEquals(listOf(3000, 8080), viewModel.state.value.tunnels.map { it.remotePort })
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -307,6 +315,7 @@ class PortForwardPanelViewModelTest {
         assertEquals(listOf(3000), forwardingSession.openedForwards.map { it.remotePort })
         assertEquals(com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING, viewModel.state.value.tunnels.single().status)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -338,6 +347,7 @@ class PortForwardPanelViewModelTest {
         // idle discovery scan, so a single SSH connect happened.
         assertEquals(1, connector.hosts.size)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -373,6 +383,7 @@ class PortForwardPanelViewModelTest {
             session.openedForwards.map { it.remotePort }.sorted(),
         )
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -400,12 +411,13 @@ class PortForwardPanelViewModelTest {
         )
         assertEquals(emptyList<FakePortForward>(), session.openedForwards)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
 
     @Test
-    fun loadingDifferentHostStopsExistingForwarderAndSession() = runTest {
+    fun loadingDifferentHostKeepsExistingControllerOwnedForwarderAlive() = runTest {
         val hostA = insertHost(name = "a", keyPath = "/tmp/a", maxAutoPort = 4000, skipPortsBelow = 1000)
         val hostB = insertHost(name = "b", keyPath = "/tmp/b", maxAutoPort = 5000, skipPortsBelow = 1000)
         val sessionA = FakeSshSession(
@@ -415,7 +427,11 @@ class PortForwardPanelViewModelTest {
             ssOutput = "127.0.0.1:4000 users:((\"python\",pid=44,fd=3))\n",
         )
         val connector = QueueConnector(listOf(Result.success(sessionA), Result.success(sessionB)))
-        val viewModel = newViewModel(connector)
+        val forwardingController = newForwardingController(connector)
+        val viewModel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
 
         viewModel.load(hostA, "/tmp/a")
         runCurrent()
@@ -428,15 +444,19 @@ class PortForwardPanelViewModelTest {
         viewModel.setAutoForwardEnabled(true)
         runCurrent()
 
-        assertTrue(sessionA.closed)
-        assertFalse(sessionA.openedForwards.single().isActive)
+        assertFalse("loading a different panel host must not kill host A forwarding", sessionA.closed)
+        assertTrue(sessionA.openedForwards.single().isActive)
         assertTrue(viewModel.state.value.autoForwardEnabled)
         assertEquals("b", viewModel.state.value.host?.name)
         assertEquals(listOf("/tmp/a", "/tmp/b"), connector.keys)
         assertFalse(sessionB.closed)
+        assertEquals(2, forwardingController.flowOfActiveHostCount().value)
 
         viewModel.leavePanel()
+        forwardingController.stopAllForwarding(requestServiceStop = false)
         runCurrent()
+        assertTrue(sessionA.closed)
+        assertTrue(sessionB.closed)
     }
 
     @Test
@@ -455,6 +475,7 @@ class PortForwardPanelViewModelTest {
 
         assertEquals(listOf("/tmp/new"), connector.keys)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -475,6 +496,7 @@ class PortForwardPanelViewModelTest {
 
         assertEquals(listOf("new"), connector.passphrases)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -507,6 +529,7 @@ class PortForwardPanelViewModelTest {
         assertTrue(staleSession.closed)
         assertFalse(freshSession.closed)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -520,6 +543,7 @@ class PortForwardPanelViewModelTest {
 
         viewModel.load(hostId, "/tmp/key", "secret".toCharArray())
         runCurrent()
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
         viewModel.load(hostId, "/tmp/key")
@@ -529,6 +553,7 @@ class PortForwardPanelViewModelTest {
 
         assertEquals(listOf(null), connector.passphrases)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -544,6 +569,7 @@ class PortForwardPanelViewModelTest {
         assertEquals(PortForwardConnectionState.Idle, viewModel.state.value.connectionState)
         assertFalse(viewModel.state.value.autoForwardEnabled)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
         viewModel.load(hostId, "/tmp/key")
@@ -553,6 +579,7 @@ class PortForwardPanelViewModelTest {
         assertEquals(PortForwardConnectionState.Idle, viewModel.state.value.connectionState)
         assertFalse(viewModel.state.value.autoForwardEnabled)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -566,6 +593,7 @@ class PortForwardPanelViewModelTest {
 
         viewModel.load(host.id, "/tmp/key")
         runCurrent()
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
         hostDao.completeCall(0, host)
@@ -630,12 +658,17 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
-    fun leavePanelStopsForwarderAndClosesSession() = runTest {
+    fun leavePanelDetachesUiButKeepsControllerOwnedForwardingAlive() = runTest {
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
         val session = FakeSshSession(
             ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
         )
-        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+        val connector = FakeConnector(Result.success(session))
+        val forwardingController = newForwardingController(connector)
+        val viewModel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
 
         viewModel.load(hostId, "/tmp/key")
         runCurrent()
@@ -647,6 +680,17 @@ class PortForwardPanelViewModelTest {
 
         assertFalse(viewModel.state.value.autoForwardEnabled)
         assertEquals(PortForwardConnectionState.Idle, viewModel.state.value.connectionState)
+        assertEquals(
+            "panel disposal must not unregister the foreground-service-backed host",
+            1,
+            forwardingController.flowOfActiveHostCount().value,
+        )
+        assertFalse("active forwarding must outlive panel disposal", session.closed)
+        assertTrue(session.openedForwards.single().isActive)
+
+        forwardingController.stopForwarding(hostId)
+        runCurrent()
+
         assertTrue(session.closed)
         assertFalse(session.openedForwards.single().isActive)
     }
@@ -670,6 +714,7 @@ class PortForwardPanelViewModelTest {
         )
         assertEquals(true, viewModel.state.value.host?.enabled)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -697,6 +742,7 @@ class PortForwardPanelViewModelTest {
         )
         assertEquals(false, viewModel.state.value.host?.enabled)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -753,6 +799,7 @@ class PortForwardPanelViewModelTest {
         assertFalse("active tunnels must survive ON_STOP", session.closed)
         assertTrue(session.openedForwards.single().isActive)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -784,6 +831,7 @@ class PortForwardPanelViewModelTest {
             stored!!.enabled,
         )
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -827,6 +875,7 @@ class PortForwardPanelViewModelTest {
         assertTrue(firstSession.openedForwards.single().isActive)
         assertEquals(1, connector.hosts.size)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -877,6 +926,7 @@ class PortForwardPanelViewModelTest {
 
         owner.moveTo(Lifecycle.State.CREATED)
         runCurrent()
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
         owner.moveTo(Lifecycle.State.RESUMED)
@@ -917,6 +967,7 @@ class PortForwardPanelViewModelTest {
         assertTrue(session.openedForwards.single().isActive)
         assertFalse(session.closed)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -966,6 +1017,7 @@ class PortForwardPanelViewModelTest {
         )
 
         viewModel.setAutoForwardEnabled(false)
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -982,7 +1034,7 @@ class PortForwardPanelViewModelTest {
         val connector = QueueConnector(
             listOf(Result.success(firstSession), Result.success(recoveredSession)),
         )
-        val forwardingController = ForwardingController(context)
+        val forwardingController = newForwardingController(connector)
         val viewModel = newViewModel(
             connector = connector,
             forwardingController = forwardingController,
@@ -1027,6 +1079,7 @@ class PortForwardPanelViewModelTest {
         assertEquals(1, recoveredSession.openedForwards.size)
         assertEquals(1, forwardingController.flowOfTotalTunnelCount().value)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -1043,7 +1096,7 @@ class PortForwardPanelViewModelTest {
         val connector = QueueConnector(
             listOf(Result.success(firstSession), Result.success(recoveredSession)),
         )
-        val forwardingController = ForwardingController(context)
+        val forwardingController = newForwardingController(connector)
         val viewModel = newViewModel(
             connector = connector,
             forwardingController = forwardingController,
@@ -1110,8 +1163,47 @@ class PortForwardPanelViewModelTest {
         )
         assertEquals(1, forwardingController.flowOfTotalTunnelCount().value)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
+    }
+
+    @Test
+    fun serviceStopActionStopsControllerOwnedForwarding() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = FakeConnector(Result.success(session))
+        val forwardingController = newForwardingController(connector)
+        val viewModel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        assertEquals(1, forwardingController.flowOfActiveHostCount().value)
+        assertFalse(session.closed)
+        assertTrue(session.openedForwards.single().isActive)
+
+        val service = Robolectric.buildService(ForwardingService::class.java).get()
+        service.controller = forwardingController
+        service.onStartCommand(
+            Intent(context, ForwardingService::class.java).apply {
+                action = ForwardingService.ACTION_STOP
+            },
+            0,
+            1,
+        )
+        runCurrent()
+
+        assertEquals(0, forwardingController.flowOfActiveHostCount().value)
+        assertTrue(session.closed)
+        assertFalse(session.openedForwards.single().isActive)
     }
 
     @Test
@@ -1126,7 +1218,7 @@ class PortForwardPanelViewModelTest {
         val connector = QueueConnector(
             listOf(Result.success(session), Result.success(unusedReconnectSession)),
         )
-        val forwardingController = ForwardingController(context)
+        val forwardingController = newForwardingController(connector)
         val viewModel = newViewModel(
             connector = connector,
             forwardingController = forwardingController,
@@ -1151,6 +1243,7 @@ class PortForwardPanelViewModelTest {
         assertTrue(session.openedForwards.single().isActive)
         assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
 
+        viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
         runCurrent()
     }
@@ -1220,7 +1313,12 @@ class PortForwardPanelViewModelTest {
         hostDao: HostDao = db.hostDao(),
         sshKeyDao: SshKeyDao = db.sshKeyDao(),
         portRemappingDao: com.pocketshell.core.storage.dao.PortRemappingDao = db.portRemappingDao(),
-        forwardingController: ForwardingController = ForwardingController(context),
+        forwardingController: ForwardingController = ForwardingController(
+            appContext = context,
+            connector = connector,
+            portRemappingDao = portRemappingDao,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+        ),
         showAllPortsStore: ShowAllPortsStore = ShowAllPortsStore(context),
     ): PortForwardPanelViewModel =
         PortForwardPanelViewModel(
@@ -1230,6 +1328,17 @@ class PortForwardPanelViewModelTest {
             portRemappingDao = portRemappingDao,
             forwardingController = forwardingController,
             showAllPortsStore = showAllPortsStore,
+        )
+
+    private fun newForwardingController(
+        connector: PortForwardConnector,
+        portRemappingDao: com.pocketshell.core.storage.dao.PortRemappingDao = db.portRemappingDao(),
+    ): ForwardingController =
+        ForwardingController(
+            appContext = context,
+            connector = connector,
+            portRemappingDao = portRemappingDao,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
 
     private class FakeConnector(

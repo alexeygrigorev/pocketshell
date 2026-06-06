@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderColors
 import androidx.compose.material3.SliderDefaults
@@ -50,7 +51,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -178,44 +181,31 @@ private fun FileViewerAppBar(
     displayPath: String,
     onBack: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(role = Role.Button, onClick = onBack)
-                .testTag(FILE_VIEWER_BACK_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Column(modifier = Modifier.padding(start = 4.dp)) {
-            Text(
-                text = displayPath.substringAfterLast('/').ifEmpty { "File" },
-                color = PocketShellColors.Text,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag(FILE_VIEWER_TITLE_TAG),
-            )
-            Text(
-                text = displayPath.ifEmpty { hostName },
-                color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-            )
-        }
-    }
+    // Slice E1b (#539): the bespoke 60dp bar + raw `sp` title/breadcrumb adopt
+    // the shared `ScreenHeader`. The file name is the title; the full remote
+    // path is the breadcrumb subtitle (mono, since it is path data). The mono
+    // file-reading surface below is left untouched.
+    ScreenHeader(
+        title = displayPath.substringAfterLast('/').ifEmpty { "File" },
+        subtitle = displayPath.ifEmpty { hostName },
+        titleTestTag = FILE_VIEWER_TITLE_TAG,
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .testTag(FILE_VIEWER_BACK_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+        },
+    )
 }
 
 @Composable

@@ -7,13 +7,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -32,9 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -45,7 +39,10 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -98,42 +95,29 @@ fun ForwardingChooserScreen(
             .fillMaxSize()
             .background(PocketShellColors.Background),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(PocketShellColors.Surface)
-                .padding(horizontal = 12.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButtonBox(label = "<", onClick = onBack)
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Port Forwarding",
-                    color = PocketShellColors.Text,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "Choose a saved host",
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 12.sp,
-                )
-            }
-        }
+        ScreenHeader(
+            title = "Port Forwarding",
+            subtitle = "Choose a saved host",
+            modifier = Modifier.background(PocketShellColors.Surface),
+            leading = { TextButtonBox(label = "<", onClick = onBack) },
+        )
 
         passphraseUnlockError?.let { error ->
             Text(
                 text = error,
                 color = PocketShellColors.Red,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyDense,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
 
         if (hosts.isEmpty()) {
             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text("No saved hosts.", color = PocketShellColors.TextSecondary, fontSize = 13.sp)
+                Text(
+                    "No saved hosts.",
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyDense,
+                )
             }
         } else {
             LazyColumn(
@@ -201,38 +185,23 @@ data class ForwardingHostKey(
 
 @Composable
 private fun ForwardingHostRow(host: HostEntity, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface)
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
+    // Slice E1b (#539): the bespoke raw-`sp` row adopts the shared `ListRow`.
+    // Host name is the dense title; `user@host:port` is the mono subtitle
+    // (path/connection data); the enabled/open state is the trailing label.
+    ListRow(
+        title = host.name,
+        subtitle = "${host.username}@${host.hostname}:${host.port}",
+        modifier = Modifier.background(PocketShellColors.Surface),
+        onClick = onClick,
+        trailing = {
             Text(
-                text = host.name,
-                color = PocketShellColors.Text,
-                fontSize = 15.sp,
+                text = if (host.enabled) "Enabled" else "Open",
+                color = if (host.enabled) PocketShellColors.Green else PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                text = "${host.username}@${host.hostname}:${host.port}",
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Text(
-            text = if (host.enabled) "Enabled" else "Open",
-            color = if (host.enabled) PocketShellColors.Green else PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
+        },
+    )
 }
 
 @Composable
@@ -247,7 +216,7 @@ private fun TextButtonBox(label: String, onClick: () -> Unit) {
         Text(
             text = label,
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }

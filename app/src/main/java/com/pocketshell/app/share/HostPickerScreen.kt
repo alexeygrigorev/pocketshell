@@ -5,7 +5,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,10 +33,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Host picker for the Android share-target flow (issue #138).
@@ -337,28 +339,14 @@ private fun TargetRow(
     testTag: String,
     onClick: () -> Unit,
 ) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .testTag(testTag),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(12.dp),
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
+    // Slice E1b (#539): the Material default-density card adopts the shared
+    // dense `ListRow`. The target path is the mono subtitle (path data).
+    ListRow(
+        title = title,
+        subtitle = subtitle,
+        modifier = Modifier.testTag(testTag),
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -397,36 +385,28 @@ private fun HostList(
 
 @Composable
 private fun HostRow(host: HostEntity, onClick: () -> Unit) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .testTag(SHARE_HOST_ROW_TAG_PREFIX + host.id),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(12.dp),
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = host.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "${host.username}@${host.hostname}:${host.port}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            host.lastConnectedAt?.let {
-                Spacer(Modifier.height(2.dp))
+    // Slice E1b (#539): the Material default-density card adopts the shared
+    // dense `ListRow`. `user@host:port` is the mono subtitle; the optional
+    // last-connected timestamp folds into the trailing slot so no information
+    // is lost when collapsing the 3-line card to the dense 2-line row.
+    ListRow(
+        title = host.name,
+        subtitle = "${host.username}@${host.hostname}:${host.port}",
+        modifier = Modifier.testTag(SHARE_HOST_ROW_TAG_PREFIX + host.id),
+        onClick = onClick,
+        trailing = host.lastConnectedAt?.let { connectedAt ->
+            {
                 Text(
-                    text = "Last connected — ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it))}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = java.text.DateFormat.getDateTimeInstance()
+                        .format(java.util.Date(connectedAt)),
+                    style = PocketShellType.labelMono,
+                    color = PocketShellColors.TextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -502,7 +482,6 @@ private fun UploadResultSurface(
                     .testTag(SHARE_RESULT_DETAIL_TAG),
                 text = detail,
                 style = MaterialTheme.typography.bodyMedium,
-                fontSize = 14.sp,
             )
         }
         Spacer(Modifier.height(24.dp))

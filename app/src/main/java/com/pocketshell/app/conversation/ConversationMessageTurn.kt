@@ -29,6 +29,7 @@ import com.pocketshell.app.composer.MarkdownText
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.MessageSendState
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -47,7 +48,14 @@ internal fun ConversationMessageTurn(
     onRetrySend: (String) -> Unit = {},
 ) {
     val isUser = event.role == ConversationRole.User
-    val roleColor = if (isUser) PocketShellColors.Accent else PocketShellColors.Purple
+    // Slice E1b (#539): source the role colour from the shared semantic
+    // vocabulary (`LocalPocketShellSemantic`) instead of raw palette tokens —
+    // user = accent, agent = agentAccent (purple). This is the same role
+    // colour the shared `Badge` uses (`BadgeRole.Agent` -> `agentAccent`), so
+    // the dense glyph indicator and any badge stay in lockstep without
+    // re-encoding the colour per call site.
+    val semantic = LocalPocketShellSemantic.current
+    val roleColor = if (isUser) semantic.accent else semantic.agentAccent
     val glyph = if (isUser) "›" else "A"
     val startIndent = if (isUser) 0.dp else 10.dp
 
@@ -68,12 +76,17 @@ internal fun ConversationMessageTurn(
             .padding(start = startIndent, top = 1.dp, bottom = 1.dp),
         verticalAlignment = Alignment.Top,
     ) {
+        // Slice E1b (#539): the role indicator is the compact mono glyph
+        // (#260/#493 dense terminal-flavoured turn — deliberately a single
+        // glyph + colour/indent, NOT a full-width labelled pill). Its size now
+        // rides the shared `bodyMono` rung instead of a raw `16.sp` literal,
+        // and its colour comes from the semantic role vocabulary (above) — the
+        // same `agentAccent`/`accent` the shared `Badge` paints.
         Text(
             text = glyph,
             color = roleColor,
-            fontFamily = FontFamily.Monospace,
+            style = PocketShellType.bodyMono,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 16.sp,
             modifier = Modifier.width(18.dp),
         )
         Column(
@@ -102,8 +115,7 @@ internal fun ConversationMessageTurn(
                         Text(
                             text = "sending…",
                             color = PocketShellColors.TextMuted,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
+                            style = PocketShellType.labelMono,
                             modifier = Modifier.testTag(
                                 CONVERSATION_PENDING_TAG_PREFIX + event.id,
                             ),
@@ -113,9 +125,8 @@ internal fun ConversationMessageTurn(
                         Text(
                             text = "failed · retry",
                             color = PocketShellColors.Red,
-                            fontFamily = FontFamily.Monospace,
+                            style = PocketShellType.labelMono,
                             fontWeight = FontWeight.Medium,
-                            fontSize = 10.sp,
                             modifier = Modifier
                                 .clickable { onRetrySend(event.id) }
                                 .testTag(CONVERSATION_RETRY_TAG_PREFIX + event.id),
@@ -125,8 +136,7 @@ internal fun ConversationMessageTurn(
                         Text(
                             text = timestamp,
                             color = PocketShellColors.TextMuted,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
+                            style = PocketShellType.labelMono,
                             modifier = Modifier.testTag(CONVERSATION_TIMESTAMP_TAG_PREFIX + event.id),
                         )
                     }
@@ -216,8 +226,7 @@ private fun StreamingBadge(roleColor: Color) {
         Text(
             text = "live",
             color = roleColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
+            style = PocketShellType.labelMono,
             fontWeight = FontWeight.Medium,
         )
     }

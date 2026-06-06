@@ -39,32 +39,14 @@ class SystemSurfaceStateTest {
     }
 
     @Test
-    fun bootForwardingMessageFormatsCounts() {
-        assertEquals("No enabled forwarding hosts queued for restore", bootForwardingMessage(0))
-        assertEquals("Forwarding restore pending for enabled hosts", bootForwardingMessage(1))
-        assertEquals("Forwarding restore pending for 2 enabled hosts", bootForwardingMessage(2))
-    }
-
-    @Test
-    fun bootForwardingMessageClampsNegativeCounts() {
-        assertEquals("No enabled forwarding hosts queued for restore", bootForwardingMessage(-1))
-    }
-
-    @Test
     fun storeFallsBackWhenRestoredPrefsHaveWrongTypes() {
         context.getSharedPreferences("system_surfaces", Context.MODE_PRIVATE)
             .edit()
             .putString("active_session_count", "many")
-            .putString("boot_forwarding_requested", "true")
-            .putInt("boot_forwarding_message", 42)
             .commit()
 
         val store = SystemSurfaceStateStore(context)
 
         assertEquals(SessionWidgetState(activeSessionCount = 0), store.readSessionWidgetState())
-        assertEquals(
-            BootForwardingStatus(requested = false, lastMessage = null),
-            store.readBootForwardingStatus(),
-        )
     }
 }

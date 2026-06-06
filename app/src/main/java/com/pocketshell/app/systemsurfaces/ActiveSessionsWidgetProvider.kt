@@ -52,12 +52,8 @@ class ActiveSessionsWidgetProvider : AppWidgetProvider() {
             context: Context,
             state: SessionWidgetState,
         ): RemoteViews {
-            val bootForwardingStatus = SystemSurfaceStateStore(context).readBootForwardingStatus()
             val intent = Intent(context, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            if (bootForwardingStatus.requested) {
-                intent.putExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, true)
-            }
             val pendingIntent = PendingIntent.getActivity(
                 context,
                 0,
@@ -66,12 +62,7 @@ class ActiveSessionsWidgetProvider : AppWidgetProvider() {
             )
             return RemoteViews(context.packageName, R.layout.widget_active_sessions).apply {
                 setTextViewText(R.id.widget_session_count, state.activeSessionCount.toString())
-                setTextViewText(
-                    R.id.widget_session_label,
-                    bootForwardingStatus.lastMessage
-                        ?.takeIf { bootForwardingStatus.requested }
-                        ?: activeSessionCountText(state.activeSessionCount),
-                )
+                setTextViewText(R.id.widget_session_label, activeSessionCountText(state.activeSessionCount))
                 setOnClickPendingIntent(R.id.widget_active_sessions_root, pendingIntent)
             }
         }

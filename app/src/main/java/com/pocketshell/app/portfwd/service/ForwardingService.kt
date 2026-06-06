@@ -74,7 +74,7 @@ class ForwardingService : Service() {
 
     companion object {
         private const val TAG = "PsForwardingService"
-        private const val CHANNEL_ID = "pocketshell_forwarding"
+        private const val CHANNEL_ID = "pocketshell_forwarding_status"
         private const val NOTIFICATION_ID = 0x70_46_53_56 // "pFSV" — unique within app
 
         const val ACTION_START = "com.pocketshell.app.portfwd.action.START_FORWARDING"
@@ -442,6 +442,7 @@ class ForwardingService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
@@ -451,14 +452,18 @@ class ForwardingService : Service() {
             .build()
     }
 
-    private fun createNotificationChannel() {
+    @androidx.annotation.VisibleForTesting
+    internal fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             "Port forwarding",
-            NotificationManager.IMPORTANCE_LOW,
+            NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
             description = "Always-on status while SSH port forwarding is active"
             setShowBadge(false)
+            setSound(null, null)
+            enableVibration(false)
+            enableLights(false)
         }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)

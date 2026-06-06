@@ -32,13 +32,11 @@ import java.io.InputStreamReader
  * recognizable status-bar icon and "Running in the background" wording — and it
  * clears when no tunnels remain.
  *
- * The maintainer reported never seeing this notification. The root cause was
- * that POST_NOTIFICATIONS (Android 13+) was only requested once at first
- * launch; a user who dismissed it (or first forwards much later) never got the
- * grant, so the foreground-service notification was silently suppressed. This
- * test grants the permission deterministically (the production re-prompt on
- * forward-start is covered separately by the launch flow) and proves the
- * ongoing notification actually lands in the status bar.
+ * The maintainer reported this notification being absent or reduced to a tiny
+ * silent shade row. This test grants POST_NOTIFICATIONS deterministically (the
+ * production re-prompt on forward-start is covered separately by the launch
+ * flow) and proves the ongoing notification actually lands in the status bar on
+ * a default-importance channel.
  *
  * Determinism mirrors `UpdateAvailableNotificationE2eTest` (#502): grant
  * propagation and `notify()`/`startForeground()` → `activeNotifications` are
@@ -164,6 +162,18 @@ class ForwardingNotificationE2eTest {
                 "status-bar icon (Recorder-style recognizable glyph)",
             com.pocketshell.app.R.drawable.ic_stat_forwarding,
             posted.notification.smallIcon?.resId,
+        )
+        val channel = notificationManager.getNotificationChannel(posted.notification.channelId)
+        assertEquals(
+            "foreground notification should use the upgrade-safe status channel",
+            "pocketshell_forwarding_status",
+            posted.notification.channelId,
+        )
+        assertNotNull("foreground notification channel must be registered", channel)
+        assertEquals(
+            "foreground notification channel must be visible in the main shade",
+            NotificationManager.IMPORTANCE_DEFAULT,
+            requireNotNull(channel).importance,
         )
         // Issue #521: body says it's running in the background + the host +
         // tunnel count (Recorder "Recording now" feel).

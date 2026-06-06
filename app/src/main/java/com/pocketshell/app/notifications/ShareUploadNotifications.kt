@@ -16,9 +16,8 @@ import com.pocketshell.app.R
 
 /**
  * Notification channel + result toasts for the Android share-target
- * upload flow (issue #138). Mirrors the [PendingBootForwardingNotification]
- * shape in `systemsurfaces` — small object, no DI dependency, callable
- * from a `ShareActivity` once a transfer resolves.
+ * upload flow (issue #138). Kept as a small object with no DI dependency,
+ * callable from a `ShareActivity` once a transfer resolves.
  *
  * Success notifications are tappable: pressing them launches the
  * [CopyRemotePathReceiver] which copies the full remote path to the

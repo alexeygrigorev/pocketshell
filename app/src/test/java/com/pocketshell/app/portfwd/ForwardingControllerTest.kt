@@ -1,9 +1,11 @@
 package com.pocketshell.app.portfwd
 
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import androidx.core.app.NotificationCompat
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.portfwd.service.ForwardingService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -477,6 +479,40 @@ class ForwardingControllerTest {
         assertTrue(
             "notification must keep a Stop action",
             notification.actions?.any { it.title?.toString() == "Stop" } == true,
+        )
+    }
+
+    @Test
+    fun `notification uses default-importance status channel without sound or vibration`() {
+        val service = Robolectric.buildService(ForwardingService::class.java).get()
+        service.createNotificationChannel()
+        val notification = service.buildNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 2,
+        )
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channel = manager.getNotificationChannel(notification.channelId)
+
+        assertEquals("pocketshell_forwarding_status", notification.channelId)
+        assertNotNull("foreground-service notification channel must be registered", channel)
+        val forwardingChannel = requireNotNull(channel)
+        assertEquals(
+            "channel must not be low-importance, or Android can collapse it into the tiny silent row",
+            NotificationManager.IMPORTANCE_DEFAULT,
+            forwardingChannel.importance,
+        )
+        assertEquals(
+            "pre-O notification priority should match the default-importance channel",
+            NotificationCompat.PRIORITY_DEFAULT,
+            @Suppress("DEPRECATION")
+            notification.priority,
+        )
+        assertNull("default-importance channel should not make noise", forwardingChannel.sound)
+        assertEquals(
+            "default-importance channel should not vibrate",
+            false,
+            forwardingChannel.shouldVibrate(),
         )
     }
 

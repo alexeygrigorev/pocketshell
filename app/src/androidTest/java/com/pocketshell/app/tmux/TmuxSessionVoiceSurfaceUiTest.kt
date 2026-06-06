@@ -32,6 +32,7 @@ import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.app.voice.SnippetsChipIcon
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -95,6 +96,25 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("^D").assertIsDisplayed().assertHasClickAction().performClick()
 
         assertEquals(listOf("^C", "^D"), taps)
+    }
+
+    @Test
+    fun tmuxTerminalKeyBarExposesEmergencyKeysWithoutIme() {
+        val taps = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme {
+                KeyBar(
+                    keys = tmuxKeyBarLayout(expanded = false),
+                    onKey = { taps += it.label },
+                )
+            }
+        }
+
+        compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText("^C").assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText("^D").assertIsDisplayed().assertHasClickAction().performClick()
+
+        assertEquals(listOf("Esc", "^C", "^D"), taps)
     }
 
     @Test

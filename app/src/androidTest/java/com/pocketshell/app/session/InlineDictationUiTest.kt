@@ -1,13 +1,17 @@
 package com.pocketshell.app.session
 
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasNoClickAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -27,6 +31,62 @@ class InlineDictationUiTest {
 
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun rawSshTerminalKeyBarExposesEmergencyKeysWithoutIme() {
+        val taps = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme {
+                KeyBar(
+                    keys = SessionTerminalKeyBarLayout,
+                    onKey = { taps += it.label },
+                )
+            }
+        }
+
+        listOf("Esc", "Ctrl-C", "Ctrl-D").forEach { label ->
+            compose.onNodeWithText(label)
+                .assertIsDisplayed()
+                .assertHasClickAction()
+                .performClick()
+        }
+
+        assertEquals(listOf("Esc", "Ctrl-C", "Ctrl-D"), taps)
+    }
+
+    @Test
+    fun rawSshConversationWithImeDoesNotShowTerminalKeyBar() {
+        val keyTaps = mutableListOf<String>()
+        var dictateTaps = 0
+        compose.setContent {
+            PocketShellTheme {
+                RawSessionBottomControls(
+                    isImeVisible = true,
+                    showConversation = true,
+                    sessionLive = true,
+                    onKey = { keyTaps += it.label },
+                    micState = InlineDictationViewModel.RecordingState.Idle,
+                    micAmplitude = 0f,
+                    dictationMode = InlineDictationViewModel.DictationMode.Prompt,
+                    onDictationModeSelected = {},
+                    onInlineMicTap = {},
+                    onChipTap = {},
+                    onDictateTap = { dictateTaps++ },
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = null,
+                    onProjectNavigationTap = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithText("Ctrl-C").assertDoesNotExist()
+        compose.onNodeWithText("Ctrl-D").assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
+
+        assertEquals(emptyList<String>(), keyTaps)
+        assertEquals(1, dictateTaps)
+    }
 
     @Test
     fun recordingStateShowsAmplitudeWaveformOnInlineMicSlot() {

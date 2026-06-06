@@ -80,6 +80,7 @@ import androidx.compose.ui.text.font.FontFamily
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Breadcrumb
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.Tabs
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
@@ -393,65 +394,61 @@ public fun SessionScreen(
                 onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
-            if (isImeVisible) {
-                KeyBarWithMic(
-                    keys = KeyBarLayout,
-                    onKey = { binding -> viewModel.onKeyBarKey(binding.label) },
-                    modifierStates = keyBarModifierStates,
-                    onModifierStateChange = { binding, state ->
-                        viewModel.onKeyBarModifierState(binding.label, state)
-                    },
-                    micState = dictationState.recording,
-                    micAmplitude = dictationState.amplitude,
-                    dictationError = dictationState.error,
-                    dictationMode = dictationState.mode,
-                    onDictationModeSelected = inlineDictationViewModel::selectMode,
-                    onMicTap = {
-                        // Same three-step gate as the prompt composer
-                        // (#15): permission → API-key → recorder.
-                        val granted = ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.RECORD_AUDIO,
-                        ) == PackageManager.PERMISSION_GRANTED
-                        if (!granted) {
-                            inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            return@KeyBarWithMic
-                        }
-                        if (!inlineDictationViewModel.hasApiKey()) {
-                            // Inline dictation does not own a key-entry
-                            // dialog (the issue is explicit about "no
-                            // sheet"). We route the user to the prompt
-                            // composer, which already hosts the one-field
-                            // dialog. Surfacing this as a banner avoids
-                            // the dead-end "tap mic, nothing happens".
-                            showMicSheet = true
-                            return@KeyBarWithMic
-                        }
-                        inlineDictationViewModel.onMicTap()
-                    },
-                    // Issue #249: gate key bar + mic on liveness.
-                    inputEnabled = sessionLive,
-                )
-            } else {
-                BottomChipControls(
-                    chips = DefaultSessionChips,
-                    onChipTap = viewModel::onChipTap,
-                    onDictateTap = { showMicSheet = true },
-                    // Issue #131: the show-keyboard chip routes through the
-                    // helper that finds the TerminalView under the current
-                    // Compose root and requests focus + IMM. `showSoftInput`
-                    // is documented as an idempotent no-op when the keyboard
-                    // is already up, which matches the "no-op when shown"
-                    // contract from the issue.
-                    onShowKeyboardTap = { showTerminalSoftKeyboard(composeRootView) },
-                    onAddSnippetTap = if (hostId != null) {
-                        { showSnippetPicker = true }
-                    } else null,
-                    onProjectNavigationTap = { showProjectNavigation = true },
-                    // Issue #249: gate chips + dictate mic on liveness.
-                    inputEnabled = sessionLive,
-                )
-            }
+            val showConversation =
+                agentConversation.selectedTab == SessionTab.Conversation &&
+                    agentConversation.detection != null
+
+            RawSessionBottomControls(
+                isImeVisible = isImeVisible,
+                showConversation = showConversation,
+                sessionLive = sessionLive,
+                onKey = { binding -> viewModel.onKeyBarKey(binding.label) },
+                modifierStates = keyBarModifierStates,
+                onModifierStateChange = { binding, state ->
+                    viewModel.onKeyBarModifierState(binding.label, state)
+                },
+                micState = dictationState.recording,
+                micAmplitude = dictationState.amplitude,
+                dictationError = dictationState.error,
+                dictationMode = dictationState.mode,
+                onDictationModeSelected = inlineDictationViewModel::selectMode,
+                onInlineMicTap = inlineMicTap@{
+                    // Same three-step gate as the prompt composer
+                    // (#15): permission → API-key → recorder.
+                    val granted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.RECORD_AUDIO,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!granted) {
+                        inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        return@inlineMicTap
+                    }
+                    if (!inlineDictationViewModel.hasApiKey()) {
+                        // Inline dictation does not own a key-entry
+                        // dialog (the issue is explicit about "no
+                        // sheet"). We route the user to the prompt
+                        // composer, which already hosts the one-field
+                        // dialog. Surfacing this as a banner avoids
+                        // the dead-end "tap mic, nothing happens".
+                        showMicSheet = true
+                        return@inlineMicTap
+                    }
+                    inlineDictationViewModel.onMicTap()
+                },
+                onChipTap = viewModel::onChipTap,
+                onDictateTap = { showMicSheet = true },
+                // Issue #131: the show-keyboard chip routes through the
+                // helper that finds the TerminalView under the current
+                // Compose root and requests focus + IMM. `showSoftInput`
+                // is documented as an idempotent no-op when the keyboard
+                // is already up, which matches the "no-op when shown"
+                // contract from the issue.
+                onShowKeyboardTap = { showTerminalSoftKeyboard(composeRootView) },
+                onAddSnippetTap = if (hostId != null) {
+                    { showSnippetPicker = true }
+                } else null,
+                onProjectNavigationTap = { showProjectNavigation = true },
+            )
         }
 
         SessionMoreMenu(
@@ -1466,6 +1463,68 @@ private fun ProjectNavigationSheet(
 }
 
 @Composable
+internal fun RawSessionBottomControls(
+    isImeVisible: Boolean,
+    showConversation: Boolean,
+    sessionLive: Boolean,
+    onKey: (KeyBinding) -> Unit,
+    modifierStates: Map<String, KeyModifierState> = emptyMap(),
+    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
+    micState: InlineDictationViewModel.RecordingState,
+    micAmplitude: Float,
+    dictationError: String? = null,
+    dictationMode: InlineDictationViewModel.DictationMode,
+    onDictationModeSelected: (InlineDictationViewModel.DictationMode) -> Unit,
+    onInlineMicTap: () -> Unit,
+    onChipTap: (String) -> Unit,
+    onDictateTap: () -> Unit,
+    onShowKeyboardTap: () -> Unit,
+    onAddSnippetTap: (() -> Unit)?,
+    onProjectNavigationTap: () -> Unit,
+) {
+    // Raw SSH mirrors the tmux route: terminal key rows are Terminal-only.
+    // Conversation always sends through the unified composer surface, even if
+    // the IME is visible from an earlier terminal interaction.
+    if (isImeVisible && !showConversation) {
+        KeyBarWithMic(
+            keys = SessionTerminalKeyBarLayout,
+            onKey = onKey,
+            modifierStates = modifierStates,
+            onModifierStateChange = onModifierStateChange,
+            micState = micState,
+            micAmplitude = micAmplitude,
+            dictationError = dictationError,
+            dictationMode = dictationMode,
+            onDictationModeSelected = onDictationModeSelected,
+            onMicTap = onInlineMicTap,
+            // Issue #249: gate key bar + mic on liveness.
+            inputEnabled = sessionLive,
+        )
+    } else {
+        Column {
+            if (!showConversation) {
+                KeyBar(
+                    keys = SessionTerminalKeyBarLayout,
+                    onKey = if (sessionLive) onKey else { _ -> },
+                    modifierStates = modifierStates,
+                    onModifierStateChange = onModifierStateChange,
+                )
+            }
+            BottomChipControls(
+                chips = DefaultSessionChips,
+                onChipTap = onChipTap,
+                onDictateTap = onDictateTap,
+                onShowKeyboardTap = onShowKeyboardTap,
+                onAddSnippetTap = onAddSnippetTap,
+                onProjectNavigationTap = onProjectNavigationTap,
+                // Issue #249: gate chips + dictate mic on liveness.
+                inputEnabled = sessionLive,
+            )
+        }
+    }
+}
+
+@Composable
 private fun DirectoryShortcutRow(item: ProjectNavigationItem, onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -1485,19 +1544,22 @@ private fun DirectoryShortcutRow(item: ProjectNavigationItem, onClick: () -> Uni
 }
 
 /**
- * The 8 bar slots from `docs/mockups/session.html`:
+ * Terminal key row for raw SSH.
  *
- * - Esc, Tab, Ctrl, Alt, then four arrows.
+ * The row keeps the original one-tap Esc/Tab/arrows and sticky Ctrl
+ * affordances, and adds direct `Ctrl-C` / `Ctrl-D` emergency controls so
+ * interrupt/EOF are reachable even when the software keyboard never opens.
  *
- * `Ctrl` and `Alt` are declared as `Modifier` so the ui-kit can render
- * one-shot and locked states while the screen mirrors those transitions
- * into [SessionViewModel].
+ * `Ctrl` remains a [KeyKind.Modifier] so the ui-kit can render one-shot and
+ * locked state while the screen mirrors those transitions into
+ * [SessionViewModel].
  */
-private val KeyBarLayout: List<KeyBinding> = listOf(
+internal val SessionTerminalKeyBarLayout: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
-    KeyBinding(label = "Tab", kind = KeyKind.Regular),
     KeyBinding(label = "Ctrl", kind = KeyKind.Modifier),
-    KeyBinding(label = "Alt", kind = KeyKind.Modifier),
+    KeyBinding(label = "Ctrl-C", kind = KeyKind.Regular),
+    KeyBinding(label = "Ctrl-D", kind = KeyKind.Regular),
+    KeyBinding(label = "Tab", kind = KeyKind.Regular),
     KeyBinding(label = "‹", kind = KeyKind.Arrow),
     KeyBinding(label = "⌃", kind = KeyKind.Arrow),
     KeyBinding(label = "⌄", kind = KeyKind.Arrow),

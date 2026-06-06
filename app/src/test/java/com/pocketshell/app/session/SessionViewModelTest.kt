@@ -103,6 +103,15 @@ class SessionViewModelTest {
     }
 
     @Test
+    fun directCtrlCAndCtrlDLabelsMapToControlBytes() {
+        val vm = newVm()
+        assertArrayEquals(byteArrayOf(0x03), vm.unmodifiedBytesFor("Ctrl-C"))
+        assertArrayEquals(byteArrayOf(0x03), vm.unmodifiedBytesFor("^C"))
+        assertArrayEquals(byteArrayOf(0x04), vm.unmodifiedBytesFor("Ctrl-D"))
+        assertArrayEquals(byteArrayOf(0x04), vm.unmodifiedBytesFor("^D"))
+    }
+
+    @Test
     fun arrowsMapToAnsiCsiSequences() {
         val vm = newVm()
         // ESC [ D / A / B / C — per the brief and the standard ANSI CSI

@@ -1281,6 +1281,8 @@ public class SessionViewModel @Inject constructor(
     internal fun unmodifiedBytesFor(label: String): ByteArray? = when (label) {
         "Esc" -> byteArrayOf(0x1B)
         "Tab" -> byteArrayOf(0x09)
+        "^C", "Ctrl-C" -> byteArrayOf(0x03)
+        "^D", "Ctrl-D" -> byteArrayOf(0x04)
         // Mock-style arrows from `docs/mockups/session.html` and
         // `docs/input-methods.md`. `‹›` are left/right; `⌃⌄` are up/down
         // (see `.key.arrow` styling in `docs/mockups/styles.css`).

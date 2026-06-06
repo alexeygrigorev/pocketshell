@@ -136,6 +136,7 @@ import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
@@ -1198,74 +1199,96 @@ public fun TmuxSessionScreen(
                 )
             } else if (currentPane != null && (showConversation || !isImeVisible)) {
                 val isAgentPane = currentAgentConversation?.detection != null
-                BottomChipControls(
-                    chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
-                    onChipTap = { chip ->
-                        currentPane?.let { pane ->
-                            // Issue #454: the agent band no longer carries the
-                            // "/ commands" chip (the dedicated "/" header button
-                            // from issue #462 is the single palette entry now),
-                            // so the only chips reaching this handler are the
-                            // shell-pane quick-run commands ([DefaultSessionChips]).
-                            // Each runs literally in the focused pane — mirrors
-                            // `SessionViewModel.onChipTap`, appending a CR that
-                            // the tmux input bridge translates into a named
-                            // `Enter` key.
-                            viewModel.writeInputToPane(
-                                pane.paneId,
-                                (chip + "\r").toByteArray(Charsets.UTF_8),
-                            )
-                        }
-                    },
-                    onDictateTap = { showMicSheet = true },
-                    // Issue #131: surface the show-keyboard chip on the
-                    // tmux route too. The helper looks up the
-                    // `TerminalView` of the currently visible pane (the
-                    // pager renders one pane at a time, so there is only
-                    // ever a single attached `TerminalView` to find under
-                    // the Compose root).
-                    //
-                    // Issue #459: the show-keyboard chip raises the soft
-                    // keyboard to type raw keys straight into the focused
-                    // terminal pane. In the Conversation tab there is no
-                    // attached `TerminalView` and you only ever send via the
-                    // composer, so the chip would be a dead no-op — hide it
-                    // (null) there. Terminal keeps it.
-                    onShowKeyboardTap = if (showConversation) {
-                        null
-                    } else {
-                        {
-                            showTerminalSoftKeyboard(
-                                composeRootView,
-                                onLocalTerminalError = { cause ->
-                                    currentPane?.paneId?.let { paneId ->
-                                        viewModel.reportTerminalSurfaceFailure(paneId, cause)
+                Column {
+                    if (!showConversation) {
+                        KeyBar(
+                            keys = tmuxKeyBarLayout(keyBarExpanded),
+                            onKey = if (sessionLive) {
+                                { binding ->
+                                    when (binding.label) {
+                                        TmuxKeyBarExpandLabel -> keyBarExpanded = true
+                                        TmuxKeyBarCollapseLabel -> keyBarExpanded = false
+                                        else -> viewModel.onKeyBarKey(currentPane.paneId, binding.label)
                                     }
-                                },
-                            )
-                        }
-                    },
-                    // Issue #453: no snippet chip on agent panes — the composer
-                    // sheet's `{}` affordance already inserts saved prompts, so
-                    // the band chip was a redundant third way to do the same
-                    // thing. Issue #454: shell panes keep the saved-snippet
-                    // picker, now rendered as a clear `snippets` chip with a
-                    // list glyph (the old `+ command` / `+ prompt` labels read
-                    // as "add a new command" and were the affordance the
-                    // maintainer found unclear).
-                    onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
-                        { showSnippetPicker = true }
-                    } else null,
-                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                    addSnippetIcon = SnippetsChipIcon,
-                    // Project navigation on tmux panes is a separate
-                    // follow-up — see #123 notes on per-pane cwd /
-                    // project-root wiring.
-                    onProjectNavigationTap = null,
-                    // Issue #249: gate chips on liveness.
-                    inputEnabled = sessionLive,
-                    modifier = Modifier.navigationBarsPadding(),
-                )
+                                }
+                            } else {
+                                { _ -> }
+                            },
+                            modifierStates = mapOf(TmuxCtrlModifierLabel to ctrlModifierState),
+                            onModifierStateChange = { binding, state ->
+                                viewModel.onKeyBarModifierState(binding.label, state)
+                            },
+                        )
+                    }
+                    BottomChipControls(
+                        chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
+                        onChipTap = { chip ->
+                            currentPane?.let { pane ->
+                                // Issue #454: the agent band no longer carries the
+                                // "/ commands" chip (the dedicated "/" header button
+                                // from issue #462 is the single palette entry now),
+                                // so the only chips reaching this handler are the
+                                // shell-pane quick-run commands ([DefaultSessionChips]).
+                                // Each runs literally in the focused pane — mirrors
+                                // `SessionViewModel.onChipTap`, appending a CR that
+                                // the tmux input bridge translates into a named
+                                // `Enter` key.
+                                viewModel.writeInputToPane(
+                                    pane.paneId,
+                                    (chip + "\r").toByteArray(Charsets.UTF_8),
+                                )
+                            }
+                        },
+                        onDictateTap = { showMicSheet = true },
+                        // Issue #131: surface the show-keyboard chip on the
+                        // tmux route too. The helper looks up the
+                        // `TerminalView` of the currently visible pane (the
+                        // pager renders one pane at a time, so there is only
+                        // ever a single attached `TerminalView` to find under
+                        // the Compose root).
+                        //
+                        // Issue #459: the show-keyboard chip raises the soft
+                        // keyboard to type raw keys straight into the focused
+                        // terminal pane. In the Conversation tab there is no
+                        // attached `TerminalView` and you only ever send via the
+                        // composer, so the chip would be a dead no-op — hide it
+                        // (null) there. Terminal keeps it.
+                        onShowKeyboardTap = if (showConversation) {
+                            null
+                        } else {
+                            {
+                                showTerminalSoftKeyboard(
+                                    composeRootView,
+                                    onLocalTerminalError = { cause ->
+                                        currentPane?.paneId?.let { paneId ->
+                                            viewModel.reportTerminalSurfaceFailure(paneId, cause)
+                                        }
+                                    },
+                                )
+                            }
+                        },
+                        // Issue #453: no snippet chip on agent panes — the composer
+                        // sheet's `{}` affordance already inserts saved prompts, so
+                        // the band chip was a redundant third way to do the same
+                        // thing. Issue #454: shell panes keep the saved-snippet
+                        // picker, now rendered as a clear `snippets` chip with a
+                        // list glyph (the old `+ command` / `+ prompt` labels read
+                        // as "add a new command" and were the affordance the
+                        // maintainer found unclear).
+                        onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
+                            { showSnippetPicker = true }
+                        } else null,
+                        addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+                        addSnippetIcon = SnippetsChipIcon,
+                        // Project navigation on tmux panes is a separate
+                        // follow-up — see #123 notes on per-pane cwd /
+                        // project-root wiring.
+                        onProjectNavigationTap = null,
+                        // Issue #249: gate chips on liveness.
+                        inputEnabled = sessionLive,
+                        modifier = Modifier.navigationBarsPadding(),
+                    )
+                }
             }
 
             // Pane pager dot indicator — a thin row of dots so the user

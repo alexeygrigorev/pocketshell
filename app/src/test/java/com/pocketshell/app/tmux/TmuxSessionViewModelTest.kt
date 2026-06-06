@@ -54,6 +54,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
@@ -3559,6 +3561,97 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun codexAgentLogRetryWithTerminalFloodKeepsConversationAndTerminalConsistent() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val detection = newCodexDetection()
+        val oldTailJob = Job()
+        val retryTailJob = Job()
+        val retryGate = CompletableDeferred<Unit>()
+        val recentMtimeSeconds = System.currentTimeMillis() / 1000
+        val codexLines = codexTranscriptWithToolFlood(toolResults = 700)
+        val retrySession = FakeSshSession(
+            tailJob = retryTailJob,
+            execGate = retryGate,
+            wcOutput = "${codexLines.size}\n",
+            agentLogLines = codexLines,
+            detectionOutput = "codex|$recentMtimeSeconds|/work|${detection.sourcePath}\n",
+            processOutput = "123 1 pts/1 codex codex --synthetic-overflow\n",
+        )
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "codex",
+                    paneIndex = 0,
+                    cwd = "/work",
+                    currentCommand = "codex",
+                    paneTty = "/dev/pts/1",
+                ),
+            ),
+        )
+        vm.attachSessionForAgentRetryForTest(retrySession)
+        vm.startAgentConversationForTest("%0", detection)
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = oldTailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+        oldTailJob.complete()
+        advanceUntilIdle()
+
+        val terminalState = vm.panes.value.single().terminalState
+        val payloads = List(CODEX_SCALE_OUTPUT_CHUNKS, ::codexScaleOutputChunk)
+        val emitted = payloads.sumOf { it.size }
+        val drained = async(start = CoroutineStart.UNDISPATCHED) {
+            var total = 0
+            terminalState.output.first { bytes ->
+                total += bytes.size
+                total >= emitted
+            }
+            total
+        }
+
+        assertTrue(vm.retryAgentConversationStreamForPane("%0"))
+        payloads.forEach { bytes ->
+            client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
+        }
+        retryGate.complete(Unit)
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(
+            "Codex-scale terminal output must still drain while Conversation retries",
+            emitted,
+            drained.await(),
+        )
+        val state = vm.agentConversations.value["%0"]!!
+        val messages = state.events.filterIsInstance<ConversationEvent.Message>()
+        assertEquals(AgentConversationSyncStatus.Live, state.syncStatus)
+        assertTrue(
+            "widened Codex agent-log read must keep the user prompt that is outside the old 200-line tail",
+            messages.any { it.role == ConversationRole.User && it.text == ISSUE_576_CODEX_USER_PROMPT },
+        )
+        assertTrue(
+            "assistant response from the synthetic Codex transcript should also be present",
+            messages.any { it.role == ConversationRole.Assistant && it.text == ISSUE_576_CODEX_ASSISTANT_REPLY },
+        )
+        assertTrue(
+            "Codex conversation overflow must not be classified as a tmux disconnect",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse(client.disconnectedSignal.value)
+        assertTrue(
+            "Codex retry must request the widened raw-line window; commands=${retrySession.execCommands}",
+            retrySession.execCommands.any { it.contains("pocketshell agent-log") && it.contains("--tail 1600") },
+        )
+    }
+
+    @Test
     fun retryAgentLogTailForPaneDetectionFailureReturnsLogUnavailable() = runTest {
         val vm = newVm()
         val detection = newClaudeDetection()
@@ -6465,6 +6558,23 @@ class TmuxSessionViewModelTest {
         }.toByteArray(Charsets.UTF_8)
     }
 
+    private fun codexTranscriptWithToolFlood(toolResults: Int): List<String> = buildList {
+        add(
+            """{"type":"session_meta","payload":{"id":"xyz","cwd":"/work"}}""",
+        )
+        add(
+            """{"id":"issue-576-user","type":"event_msg","timestamp":"2026-06-06T15:15:00Z","payload":{"type":"user_message","message":${JSONObject.quote(ISSUE_576_CODEX_USER_PROMPT)}}}""",
+        )
+        repeat(toolResults) { index ->
+            add(
+                """{"type":"response_item","payload":{"type":"function_call_output","call_id":"issue-576-call-$index","output":${JSONObject.quote("terminal chunk $index " + "x".repeat(900))}}}""",
+            )
+        }
+        add(
+            """{"type":"response_item","payload":{"type":"message","id":"issue-576-assistant","role":"assistant","content":[{"type":"output_text","text":${JSONObject.quote(ISSUE_576_CODEX_ASSISTANT_REPLY)}}]}}""",
+        )
+    }
+
     private class QueueLeaseConnector(
         private vararg val sessions: FakeSshSession,
     ) : SshLeaseConnector {
@@ -6483,6 +6593,8 @@ class TmuxSessionViewModelTest {
         const val CODEX_SCALE_OUTPUT_CHUNKS = 320
         const val CODEX_SCALE_OUTPUT_LINES_PER_CHUNK = 20
         const val CODEX_SCALE_OUTPUT_BYTES = 1_500_000
+        const val ISSUE_576_CODEX_USER_PROMPT = "issue 576 synthetic Codex prompt before tool flood"
+        const val ISSUE_576_CODEX_ASSISTANT_REPLY = "issue 576 synthetic Codex final reply"
     }
 
     /**
@@ -6558,6 +6670,7 @@ class TmuxSessionViewModelTest {
         private val execGate: CompletableDeferred<Unit>? = null,
         private val wcOutput: String = "0\n",
         private val initialEventsOutput: String = "",
+        private val agentLogLines: List<String>? = null,
         private val detectionOutput: String = "",
         private val processOutput: String = "",
         // Issue #448: ports the `ss -tlnp` confirm scan reports as
@@ -6569,16 +6682,20 @@ class TmuxSessionViewModelTest {
         @Volatile
         var closed: Boolean = false
 
+        val execCommands = mutableListOf<String>()
+
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
 
         override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
+            execCommands += command
             execGate?.await()
             val stdout = when {
                 command.contains("ss -tlnp") ->
                     ssListeningPorts.joinToString("\n") { "0.0.0.0:$it users:((\"server\",pid=1,fd=3))" }
                 command.contains("netstat -tlnp") || command.contains("ss -tln") -> ""
                 command.contains("wc -l < ") -> wcOutput
+                command.contains("pocketshell agent-log") -> agentLogEnvelope(command) ?: initialEventsOutput
                 command.startsWith("tail -n ") -> initialEventsOutput
                 command.contains("ps -eo pid,ppid,tty,comm,args") -> processOutput
                 command.contains(".claude") ||
@@ -6587,6 +6704,29 @@ class TmuxSessionViewModelTest {
                 else -> ""
             }
             return com.pocketshell.core.ssh.ExecResult(stdout = stdout, stderr = "", exitCode = 0)
+        }
+
+        private fun agentLogEnvelope(command: String): String? {
+            val lines = agentLogLines ?: return null
+            val tail = Regex("""--tail\s+(\d+)""")
+                .find(command)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+            val selected = if (tail == null || tail <= 0 || tail >= lines.size) {
+                lines
+            } else {
+                lines.takeLast(tail)
+            }
+            return JSONObject(
+                mapOf(
+                    "count" to selected.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(selected),
+                    "path" to "/home/u/.codex/sessions/xyz.jsonl",
+                    "session" to "xyz",
+                ),
+            ).toString()
         }
 
         var tailCalls: Int = 0

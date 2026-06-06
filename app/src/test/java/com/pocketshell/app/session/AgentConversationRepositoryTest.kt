@@ -59,7 +59,7 @@ class AgentConversationRepositoryTest {
         assertEquals(1, session.execCommands.size)
         assertTrue(session.execCommands.single().contains("pocketshell agent-log --engine codex"))
         assertTrue(session.execCommands.single().contains("--session 'pocketshell-codex'"))
-        assertTrue(session.execCommands.single().contains("--json --tail 20"))
+        assertTrue(session.execCommands.single().contains("--json --tail 160"))
         assertFalse(session.execCommands.single().contains("tail -n"))
     }
 

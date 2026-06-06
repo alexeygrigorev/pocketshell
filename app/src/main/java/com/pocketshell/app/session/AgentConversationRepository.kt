@@ -712,7 +712,9 @@ internal class AgentConversationRepository(
         val sessionId = detection.sessionId?.takeIf { it.isNotBlank() }
             ?: detection.sourcePath.substringAfterLast('/').substringBeforeLast('.')
         if (sessionId.isBlank()) return emptyList()
-        val boundedMaxLines = maxLines.coerceAtLeast(1)
+        val boundedMaxLines = (maxLines * JSONL_RAW_LINES_PER_EVENT)
+            .coerceAtLeast(maxLines)
+            .coerceAtLeast(1)
         val output = session.exec(
             "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
                 "--json --tail $boundedMaxLines 2>/dev/null || true",

@@ -35,12 +35,12 @@ public object SpeechAudioGuard {
 
     /**
      * Root-mean-square amplitude (in the normalised `[0f, 1f]` range, where
-     * `1f` is full-scale 16-bit PCM) below which a recording is treated as
-     * "no speech". 0.006 sits comfortably above the noise floor of a quiet
-     * room captured by the `VOICE_RECOGNITION` source (which already applies
-     * noise suppression) while staying well below the RMS of even soft
-     * speech. Empirically a silent capture lands near 0.000–0.002; quiet
-     * conversational speech is ~0.02 and up.
+     * `1f` is full-scale 16-bit PCM) below which a short analysis window is
+     * not counted as speech-like. 0.006 sits comfortably above the noise
+     * floor of a quiet room captured by the `VOICE_RECOGNITION` source
+     * (which already applies noise suppression) while staying well below the
+     * RMS of even soft speech. Empirically a silent capture lands near
+     * 0.000-0.002; quiet conversational speech is ~0.02 and up.
      */
     public const val MIN_RMS_AMPLITUDE: Float = 0.006f
 
@@ -63,12 +63,21 @@ public object SpeechAudioGuard {
     public const val MIN_DURATION_MS: Long = 350L
 
     /**
+     * Minimum accumulated in-recording audio that must clear
+     * [MIN_RMS_AMPLITUDE]. The guard uses short windows instead of one RMS
+     * over the whole recording because a 30s trailing silence window can
+     * otherwise dilute a real one-word command below the speech floor.
+     */
+    public const val MIN_SPEECH_WINDOW_MS: Long = 150L
+
+    /**
      * Decide whether [wav] carries enough speech energy, for long enough, to
      * be worth transcribing.
      *
      * Returns `true` only when BOTH hold:
      *  - the audio is at least [MIN_DURATION_MS] long, and
-     *  - its RMS amplitude is at least [MIN_RMS_AMPLITUDE].
+     *  - at least [MIN_SPEECH_WINDOW_MS] of captured audio clears
+     *    [MIN_RMS_AMPLITUDE] in short windows.
      *
      * Anything else (empty buffer, header-only WAV, a too-short clip, or a
      * long-but-silent clip) returns `false` → the caller must skip Whisper
@@ -82,7 +91,7 @@ public object SpeechAudioGuard {
         val analysis = analyze(wav)
         if (!analysis.hasRecognizedPcm || analysis.pcmByteCount <= 0) return false
         if (analysis.durationMs < MIN_DURATION_MS) return false
-        return analysis.rmsAmplitude >= MIN_RMS_AMPLITUDE
+        return analysis.speechWindowMs >= MIN_SPEECH_WINDOW_MS
     }
 
     /**
@@ -100,8 +109,8 @@ public object SpeechAudioGuard {
         return analysis.hasRecognizedPcm &&
             analysis.pcmByteCount > 0 &&
             analysis.durationMs >= MIN_DURATION_MS &&
-            analysis.rmsAmplitude >= MIN_RECOVERABLE_RMS_AMPLITUDE &&
-            analysis.rmsAmplitude < MIN_RMS_AMPLITUDE
+            analysis.speechWindowMs < MIN_SPEECH_WINDOW_MS &&
+            analysis.recoverableWindowMs >= MIN_SPEECH_WINDOW_MS
     }
 
     /**
@@ -113,6 +122,8 @@ public object SpeechAudioGuard {
         val durationMs: Long,
         val rmsAmplitude: Float,
         val pcmByteCount: Int,
+        val speechWindowMs: Long = 0L,
+        val recoverableWindowMs: Long = 0L,
     )
 
     public fun analyze(wav: ByteArray): AudioEnergyAnalysis {
@@ -130,11 +141,22 @@ public object SpeechAudioGuard {
                 pcmByteCount = 0,
             )
         }
+        val durationMs = durationMsFromWav(wav)
         return AudioEnergyAnalysis(
             hasRecognizedPcm = true,
-            durationMs = durationMsFromWav(wav),
+            durationMs = durationMs,
             rmsAmplitude = rms16(pcm),
             pcmByteCount = pcm.size,
+            speechWindowMs = accumulatedWindowMs(
+                wav = wav,
+                pcm = pcm,
+                minRmsAmplitude = MIN_RMS_AMPLITUDE,
+            ),
+            recoverableWindowMs = accumulatedWindowMs(
+                wav = wav,
+                pcm = pcm,
+                minRmsAmplitude = MIN_RECOVERABLE_RMS_AMPLITUDE,
+            ),
         )
     }
 
@@ -216,10 +238,14 @@ public object SpeechAudioGuard {
      * normalised to `[0f, 1f]` against full-scale ([Short.MAX_VALUE]).
      */
     private fun rms16(pcm: ByteArray): Float {
+        return rms16(pcm, startInclusive = 0, endExclusive = pcm.size)
+    }
+
+    private fun rms16(pcm: ByteArray, startInclusive: Int, endExclusive: Int): Float {
         var sumSquares = 0.0
         var count = 0L
-        var i = 0
-        while (i + 1 < pcm.size) {
+        var i = startInclusive
+        while (i + 1 < endExclusive) {
             val lo = pcm[i].toInt() and 0xFF
             val hi = pcm[i + 1].toInt()
             val sample = (hi shl 8) or lo
@@ -234,6 +260,7 @@ public object SpeechAudioGuard {
     }
 
     private const val FULL_SCALE: Double = 32_768.0
+    private const val ANALYSIS_WINDOW_MS: Long = 50L
 
     /**
      * Extract the raw PCM bytes from the canonical WAV produced by
@@ -272,6 +299,47 @@ public object SpeechAudioGuard {
 
         val dataSize = (wav.size - 44).coerceAtLeast(0)
         return dataSize * 1000L / bytesPerSecond
+    }
+
+    /**
+     * Count how much audio clears [minRmsAmplitude] in bounded windows.
+     * Measuring windows keeps trailing/leading silence from diluting a real
+     * utterance, while [MIN_SPEECH_WINDOW_MS] keeps isolated clicks from
+     * being treated as speech.
+     */
+    private fun accumulatedWindowMs(
+        wav: ByteArray,
+        pcm: ByteArray,
+        minRmsAmplitude: Float,
+    ): Long {
+        if (pcm.isEmpty()) return 0L
+        val bytesPerSecond = bytesPerSecondFromWav(wav)
+        if (bytesPerSecond <= 0L) return 0L
+        val rawWindowBytes = (bytesPerSecond * ANALYSIS_WINDOW_MS / 1000L).toInt()
+        val windowBytes = (rawWindowBytes - (rawWindowBytes % 2)).coerceAtLeast(2)
+
+        var accumulatedMs = 0L
+        var offset = 0
+        while (offset < pcm.size) {
+            val end = (offset + windowBytes).coerceAtMost(pcm.size)
+            val size = end - offset
+            if (size >= 2) {
+                if (rms16(pcm, startInclusive = offset, endExclusive = end) >= minRmsAmplitude) {
+                    accumulatedMs += size * 1000L / bytesPerSecond
+                }
+            }
+            offset = end
+        }
+        return accumulatedMs
+    }
+
+    private fun bytesPerSecondFromWav(wav: ByteArray): Long {
+        if (wav.size < 44) return 0L
+        val channels = le16(wav, 22)
+        val sampleRate = le32(wav, 24)
+        val bitsPerSample = le16(wav, 34)
+        if (sampleRate <= 0 || channels <= 0 || bitsPerSample <= 0) return 0L
+        return sampleRate * channels * bitsPerSample / 8L
     }
 
     /**

@@ -57,6 +57,8 @@ class SpeechAudioGuardTest {
         return out
     }
 
+    private fun ByteArray.then(other: ByteArray): ByteArray = this + other
+
     @Test
     fun silentRecordingHasNoSpeechEnergy() {
         // A full second of pure silence — long enough to clear the duration
@@ -92,8 +94,43 @@ class SpeechAudioGuardTest {
     }
 
     @Test
+    fun speechSurroundedByLongSilenceStillHasSpeechEnergy() {
+        // Regression for #587: a short real utterance followed by the full
+        // silence-watchdog tail has a low whole-file RMS, but the speech
+        // windows themselves are clearly above the floor.
+        val pcm = silentPcm(1_000)
+            .then(tonePcm(700, amplitude = 0.03f))
+            .then(silentPcm(30_000))
+
+        assertTrue(SpeechAudioGuard.hasSpeechEnergy(wav(pcm)))
+    }
+
+    @Test
+    fun briefLoudBurstInsideLongRecordingHasNoSpeechEnergy() {
+        // A click or bump can be loud, but it is too short to be treated as
+        // a dictated command just because the overall recording is long.
+        val pcm = silentPcm(1_000)
+            .then(tonePcm(100, amplitude = 0.5f))
+            .then(silentPcm(1_000))
+
+        assertFalse(SpeechAudioGuard.hasSpeechEnergy(wav(pcm)))
+    }
+
+    @Test
     fun marginalLongClipIsRecoverableButNotFirstPassSpeech() {
         val audio = wav(tonePcm(1_000, amplitude = 0.004f))
+        assertFalse(SpeechAudioGuard.hasSpeechEnergy(audio))
+        assertTrue(SpeechAudioGuard.isRecoverableNoSpeechRejection(audio))
+    }
+
+    @Test
+    fun marginalSpeechWithLongSilenceIsRecoverableButNotFirstPassSpeech() {
+        val audio = wav(
+            silentPcm(1_000)
+                .then(tonePcm(700, amplitude = 0.004f))
+                .then(silentPcm(30_000)),
+        )
+
         assertFalse(SpeechAudioGuard.hasSpeechEnergy(audio))
         assertTrue(SpeechAudioGuard.isRecoverableNoSpeechRejection(audio))
     }

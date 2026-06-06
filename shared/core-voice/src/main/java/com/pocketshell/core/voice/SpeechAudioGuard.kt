@@ -45,6 +45,15 @@ public object SpeechAudioGuard {
     public const val MIN_RMS_AMPLITUDE: Float = 0.006f
 
     /**
+     * Lower RMS floor used only to decide whether a rejected recording is
+     * worth preserving for retry. This does NOT make the audio eligible for
+     * Whisper on the first pass; it only separates pure silence / mic noise
+     * from "there is real captured signal here, but it landed below the
+     * conservative speech threshold".
+     */
+    public const val MIN_RECOVERABLE_RMS_AMPLITUDE: Float = 0.002f
+
+    /**
      * Minimum captured audio duration. A capture shorter than this almost
      * never contains a usable utterance — it is a fat-fingered double-tap on
      * the mic, or the auto-stop firing before the user spoke. Whisper's
@@ -70,14 +79,63 @@ public object SpeechAudioGuard {
      * than throwing.
      */
     public fun hasSpeechEnergy(wav: ByteArray): Boolean {
-        val pcm = pcm16DataChunk(wav) ?: return false
-        if (pcm.isEmpty()) return false
+        val analysis = analyze(wav)
+        if (!analysis.hasRecognizedPcm || analysis.pcmByteCount <= 0) return false
+        if (analysis.durationMs < MIN_DURATION_MS) return false
+        return analysis.rmsAmplitude >= MIN_RMS_AMPLITUDE
+    }
 
-        val durationMs = durationMsFromWav(wav)
-        if (durationMs < MIN_DURATION_MS) return false
+    /**
+     * Whether a [hasSpeechEnergy] rejection is suspicious enough to preserve
+     * for manual retry/export instead of being treated as plain silence.
+     *
+     * This deliberately stays narrower than [hasSpeechEnergy]: callers must
+     * still skip Whisper on the first pass. We only return `true` for a
+     * measurable, long-enough WAV with some non-trivial signal below the
+     * speech floor. Header-only, too-short, malformed, and pure-silence
+     * captures remain non-recoverable so #452 silence suppression is intact.
+     */
+    public fun isRecoverableNoSpeechRejection(wav: ByteArray): Boolean {
+        val analysis = analyze(wav)
+        return analysis.hasRecognizedPcm &&
+            analysis.pcmByteCount > 0 &&
+            analysis.durationMs >= MIN_DURATION_MS &&
+            analysis.rmsAmplitude >= MIN_RECOVERABLE_RMS_AMPLITUDE &&
+            analysis.rmsAmplitude < MIN_RMS_AMPLITUDE
+    }
 
-        val rms = rms16(pcm)
-        return rms >= MIN_RMS_AMPLITUDE
+    /**
+     * Measured shape of a captured WAV. Exposed so app-level code can make a
+     * recoverability decision without duplicating WAV parsing.
+     */
+    public data class AudioEnergyAnalysis(
+        val hasRecognizedPcm: Boolean,
+        val durationMs: Long,
+        val rmsAmplitude: Float,
+        val pcmByteCount: Int,
+    )
+
+    public fun analyze(wav: ByteArray): AudioEnergyAnalysis {
+        val pcm = pcm16DataChunk(wav) ?: return AudioEnergyAnalysis(
+            hasRecognizedPcm = false,
+            durationMs = 0L,
+            rmsAmplitude = 0f,
+            pcmByteCount = 0,
+        )
+        if (pcm.isEmpty()) {
+            return AudioEnergyAnalysis(
+                hasRecognizedPcm = true,
+                durationMs = 0L,
+                rmsAmplitude = 0f,
+                pcmByteCount = 0,
+            )
+        }
+        return AudioEnergyAnalysis(
+            hasRecognizedPcm = true,
+            durationMs = durationMsFromWav(wav),
+            rmsAmplitude = rms16(pcm),
+            pcmByteCount = pcm.size,
+        )
     }
 
     /**

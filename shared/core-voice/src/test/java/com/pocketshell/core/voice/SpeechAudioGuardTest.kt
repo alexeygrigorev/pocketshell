@@ -92,6 +92,23 @@ class SpeechAudioGuardTest {
     }
 
     @Test
+    fun marginalLongClipIsRecoverableButNotFirstPassSpeech() {
+        val audio = wav(tonePcm(1_000, amplitude = 0.004f))
+        assertFalse(SpeechAudioGuard.hasSpeechEnergy(audio))
+        assertTrue(SpeechAudioGuard.isRecoverableNoSpeechRejection(audio))
+    }
+
+    @Test
+    fun pureSilenceIsNotRecoverableNoSpeech() {
+        assertFalse(SpeechAudioGuard.isRecoverableNoSpeechRejection(wav(silentPcm(1_000))))
+    }
+
+    @Test
+    fun tooShortLoudClipIsNotRecoverableNoSpeech() {
+        assertFalse(SpeechAudioGuard.isRecoverableNoSpeechRejection(wav(tonePcm(100, amplitude = 0.5f))))
+    }
+
+    @Test
     fun realSpeechLevelClipHasSpeechEnergy() {
         // Conversational speech RMS is ~0.02+. A 0.3-amplitude sine over a
         // full second is comfortably above the floor and long enough.

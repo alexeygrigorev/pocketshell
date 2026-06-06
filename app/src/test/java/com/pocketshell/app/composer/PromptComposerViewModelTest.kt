@@ -80,6 +80,7 @@ class PromptComposerViewModelTest {
      */
     private class FakeMicCapture(
         private val amplitudes: List<Float> = listOf(0.5f, 0.5f, 0.5f),
+        private val audio: ByteArray = SpeechAudioGuard.speechWavForTesting(),
         private val startFailure: AudioRecorderException? = null,
         private val stopFailure: AudioRecorderException? = null,
     ) : PromptComposerViewModel.MicCapture {
@@ -99,12 +100,7 @@ class PromptComposerViewModelTest {
             stopFailure?.let { throw it }
             stopCount++
             running = false
-            // Issue #452: return a WAV that carries real speech energy so
-            // the silence guard lets it through to Whisper — these FSM
-            // tests exercise the transcription path, not the silence path.
-            // The dedicated silence-guard coverage lives in
-            // SpeechAudioGuardTest + the no-speech FSM tests below.
-            return SpeechAudioGuard.speechWavForTesting()
+            return audio
         }
 
         override fun currentAmplitude(): Float {
@@ -1163,6 +1159,8 @@ class PromptComposerViewModelTest {
 
         override suspend fun loadAudio(id: String): ByteArray? = initialAudioMap[id]
 
+        fun storedAudio(id: String): ByteArray? = initialAudioMap[id]
+
         override suspend fun markSucceeded(id: String) {
             succeededIds += id
             initialAudioMap.remove(id)
@@ -1304,6 +1302,132 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun marginalNonSilentGuardRejectionIsQueuedForRetryInsteadOfLost() = runTest {
+        // Regression for #587: a real, long capture can land below the
+        // conservative speech RMS floor. It must still skip Whisper on the
+        // first pass (#452), but the audio should be preserved for retry/export
+        // instead of being discarded under an unrecoverable no-speech banner.
+        val marginalAudio = SpeechAudioGuard.speechWavForTesting(durationMs = 1_200, amplitude = 0.004f)
+        assertFalse(SpeechAudioGuard.hasSpeechEnergy(marginalAudio))
+        assertTrue(SpeechAudioGuard.isRecoverableNoSpeechRejection(marginalAudio))
+
+        var whisperCalls = 0
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls++
+                return Result.success("should not be called")
+            }
+        }
+        val (vm, queue) = newVmWithQueue(
+            mic = FakeMicCapture(audio = marginalAudio),
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(0, whisperCalls)
+        assertEquals(1, queue.enqueueCount)
+        assertTrue(queue.storedAudio("pending-1")!!.contentEquals(marginalAudio))
+        assertEquals(
+            PromptComposerViewModel.SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE,
+            queue.snapshot().single().lastErrorMessage,
+        )
+        assertEquals(
+            PromptComposerViewModel.SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE,
+            vm.uiState.value.error,
+        )
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun pureSilenceStillSkipsWhisperAndIsNotQueued() = runTest {
+        var whisperCalls = 0
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls++
+                return Result.success("시청해주셔서 감사합니다!")
+            }
+        }
+        val (vm, queue) = newVmWithQueue(
+            mic = SilentCaptureMic(),
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(0, whisperCalls)
+        assertEquals(0, queue.enqueueCount)
+        assertEquals(
+            PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
+    fun emptyWhisperSuccessKeepsRealRecordingQueuedForRetry() = runTest {
+        val (vm, queue) = newVmWithQueue(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("   \n") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onDraftChange("typed prompt")
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(1, queue.enqueueCount)
+        assertEquals(emptyList<String>(), queue.succeededIds)
+        assertEquals(
+            listOf("pending-1" to PromptComposerViewModel.EMPTY_TRANSCRIPTION_RETRY_MESSAGE),
+            queue.failureIds,
+        )
+        assertNotNull(queue.storedAudio("pending-1"))
+        assertEquals("typed prompt", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.EMPTY_TRANSCRIPTION_RETRY_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
+    fun hallucinationWhisperSuccessKeepsSpeechLikeRecordingQueuedForRetry() = runTest {
+        val (vm, queue) = newVmWithQueue(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("시청해주셔서 감사합니다!") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onDraftChange("typed prompt")
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(1, queue.enqueueCount)
+        assertEquals(emptyList<String>(), queue.succeededIds)
+        assertEquals(
+            listOf("pending-1" to PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE),
+            queue.failureIds,
+        )
+        assertNotNull(queue.storedAudio("pending-1"))
+        assertEquals("typed prompt", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
     fun retryPendingSuccessAppendsToDraftAndClearsQueue() = runTest {
         // Seed a queued item without going through the recording path.
         val queue = FakePendingQueue()
@@ -1342,6 +1466,33 @@ class PromptComposerViewModelTest {
         assertEquals(1, queue.failureIds.size)
         assertEquals("retryable", queue.failureIds[0].first)
         assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun retryPendingEmptyWhisperResponseKeepsAudioQueued() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "retryable-empty"
+        queue.enqueueAudio(SpeechAudioGuard.speechWavForTesting(), "composer")
+
+        val (vm, _) = newVmWithQueue(
+            whisper = fakeWhisperClient { Result.success(" \n ") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+        )
+        vm.retryPending("retryable-empty")
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("retryable-empty" to PromptComposerViewModel.EMPTY_TRANSCRIPTION_RETRY_MESSAGE),
+            queue.failureIds,
+        )
+        assertFalse(queue.succeededIds.contains("retryable-empty"))
+        assertNotNull(queue.storedAudio("retryable-empty"))
+        assertEquals("", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.EMPTY_TRANSCRIPTION_RETRY_MESSAGE,
+            vm.uiState.value.error,
+        )
     }
 
     @Test

@@ -678,14 +678,39 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #452: silence guard. Whisper hallucinates a stock phrase
         // (e.g. the Korean `시청해주셔서 감사합니다!` from the report) when handed
         // silent / very short / low-energy audio. Detect that BEFORE the
-        // network round-trip: skip Whisper entirely, never persist the
-        // empty clip, and surface a clear "no speech detected" hint instead
-        // of inserting hallucinated text. A queued Send is dropped — there
-        // is no transcript to send.
+        // network round-trip and skip Whisper. Issue #587 adds one narrow
+        // recovery path: if the WAV is long and non-empty with real signal
+        // below the conservative speech threshold, queue the recording for
+        // retry/export instead of throwing it away as plain silence.
         if (!SpeechAudioGuard.hasSpeechEnergy(audio)) {
-            savedStateHandle[KEY_WAS_RECORDING] = false
             pendingSendOnTranscribeSuccess = false
             pendingSendWithEnter = false
+            if (SpeechAudioGuard.isRecoverableNoSpeechRejection(audio)) {
+                _uiState.update {
+                    it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
+                }
+                transcribeJob = viewModelScope.launch {
+                    val pendingId = pendingTranscriptionStore.enqueueAudio(
+                        audio = audio,
+                        destinationContext = PendingTranscriptionEntity.DESTINATION_COMPOSER,
+                        initialError = SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE,
+                    )?.id
+                    savedStateHandle[KEY_WAS_RECORDING] = false
+                    _uiState.update {
+                        it.copy(
+                            recording = RecordingState.Idle,
+                            amplitude = 0f,
+                            error = if (pendingId != null) {
+                                SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE
+                            } else {
+                                NO_SPEECH_DETECTED_MESSAGE
+                            },
+                        )
+                    }
+                }
+                return
+            }
+            savedStateHandle[KEY_WAS_RECORDING] = false
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -782,21 +807,48 @@ public class PromptComposerViewModel @Inject constructor(
             val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
             result.fold(
                 onSuccess = { text ->
-                    if (pendingId != null) {
-                        // Clean up the persisted audio + row now that
-                        // the transcript is in hand. Best-effort: a
-                        // delete failure here leaves an orphan file
-                        // that the next reconcile() will sweep up.
-                        runCatching { pendingTranscriptionStore.markSucceeded(pendingId) }
+                    val trimmed = text.trim()
+                    if (trimmed.isEmpty()) {
+                        if (pendingId != null) {
+                            runCatching {
+                                pendingTranscriptionStore.markFailure(
+                                    pendingId,
+                                    EMPTY_TRANSCRIPTION_RETRY_MESSAGE,
+                                )
+                            }
+                        }
+                        pendingSendOnTranscribeSuccess = false
+                        pendingSendWithEnter = false
+                        _uiState.update {
+                            it.copy(
+                                recording = RecordingState.Idle,
+                                amplitude = 0f,
+                                error = if (pendingId != null) {
+                                    EMPTY_TRANSCRIPTION_RETRY_MESSAGE
+                                } else {
+                                    NO_SPEECH_DETECTED_MESSAGE
+                                },
+                            )
+                        }
+                        return@fold
                     }
                     // Issue #452: secondary backstop. Even when the audio
                     // cleared the energy bar, Whisper can still return a
                     // canned silence-hallucination phrase. If the whole
                     // transcript is one of the known stock phrases, treat
                     // it as "no speech": do NOT append it to the draft and
-                    // drop any queued Send. The audio row is already
-                    // cleaned up above.
-                    if (SpeechAudioGuard.isLikelyHallucination(text)) {
+                    // drop any queued Send. Issue #587 keeps the persisted
+                    // row when there is one, so a speech-like capture can be
+                    // retried/exported instead of being irreversibly lost.
+                    if (SpeechAudioGuard.isLikelyHallucination(trimmed)) {
+                        if (pendingId != null) {
+                            runCatching {
+                                pendingTranscriptionStore.markFailure(
+                                    pendingId,
+                                    NO_SPEECH_DETECTED_MESSAGE,
+                                )
+                            }
+                        }
                         pendingSendOnTranscribeSuccess = false
                         pendingSendWithEnter = false
                         _uiState.update {
@@ -807,6 +859,13 @@ public class PromptComposerViewModel @Inject constructor(
                             )
                         }
                         return@fold
+                    }
+                    if (pendingId != null) {
+                        // Clean up the persisted audio + row now that the
+                        // transcript is usable. Best-effort: a delete failure
+                        // here leaves an orphan file that the next reconcile()
+                        // will sweep up.
+                        runCatching { pendingTranscriptionStore.markSucceeded(pendingId) }
                     }
                     // Issue #211: snapshot the queued-send flag BEFORE
                     // the state update clears the draft via the send
@@ -822,7 +881,7 @@ public class PromptComposerViewModel @Inject constructor(
 
                     val combinedDraft = _uiState.updateAndReturnDraft { current ->
                         val sep = if (current.isEmpty() || current.endsWith(" ")) "" else " "
-                        current + sep + text
+                        current + sep + trimmed
                     }
                     // Mirror the appended draft into [SavedStateHandle]
                     // immediately so a recreate after a successful
@@ -951,10 +1010,31 @@ public class PromptComposerViewModel @Inject constructor(
             val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
             result.fold(
                 onSuccess = { text ->
+                    val trimmed = text.trim()
+                    if (trimmed.isEmpty()) {
+                        runCatching {
+                            pendingTranscriptionStore.markFailure(
+                                id,
+                                EMPTY_TRANSCRIPTION_RETRY_MESSAGE,
+                            )
+                        }
+                        _uiState.update { it.copy(error = EMPTY_TRANSCRIPTION_RETRY_MESSAGE) }
+                        return@fold
+                    }
+                    if (SpeechAudioGuard.isLikelyHallucination(trimmed)) {
+                        runCatching {
+                            pendingTranscriptionStore.markFailure(
+                                id,
+                                NO_SPEECH_DETECTED_MESSAGE,
+                            )
+                        }
+                        _uiState.update { it.copy(error = NO_SPEECH_DETECTED_MESSAGE) }
+                        return@fold
+                    }
                     runCatching { pendingTranscriptionStore.markSucceeded(id) }
                     _uiState.update {
                         val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
-                        val newDraft = it.draft + sep + text
+                        val newDraft = it.draft + sep + trimmed
                         savedStateHandle[KEY_DRAFT] = newDraft
                         it.copy(draft = newDraft, error = null)
                     }
@@ -1513,6 +1593,23 @@ public class PromptComposerViewModel @Inject constructor(
          */
         public const val NO_SPEECH_DETECTED_MESSAGE: String =
             "No speech detected — nothing to send. Tap the mic and speak."
+
+        /**
+         * Issue #587: used when the local guard rejects the first-pass
+         * transcription but the WAV still looks like a long, non-empty
+         * capture with real signal. The user gets a retry/export path instead
+         * of losing the recording under a plain "no speech" banner.
+         */
+        public const val SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE: String =
+            "No speech detected, but the recording was saved for retry."
+
+        /**
+         * Issue #587: Whisper can occasionally return an empty text field for
+         * a real recording. Treat that as a failed transcription and keep the
+         * persisted audio row for retry/export.
+         */
+        public const val EMPTY_TRANSCRIPTION_RETRY_MESSAGE: String =
+            "Whisper returned no text. Recording saved for retry."
     }
 }
 

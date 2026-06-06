@@ -166,4 +166,69 @@ class MainActivityDeepLinkTest {
         )
         assertEquals(AppDestination.PortForwardChooser, dest)
     }
+
+    // ----------------------------------------------------------------
+    // Issue #560: share-into-session launch intent decoding.
+    // ----------------------------------------------------------------
+
+    private fun shareSessionIntent(): Intent = Intent().apply {
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_HOST_ID, 7L)
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_HOST_NAME, "hetzner")
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_HOSTNAME, "10.0.0.5")
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_PORT, 2222)
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_USERNAME, "me")
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_KEY_PATH, "/data/keys/id")
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_NAME, "scratch")
+        putExtra(
+            MainActivity.EXTRA_OPEN_SESSION_ATTACHMENTS,
+            arrayOf("~/.pocketshell/attachments/host-7-scratch/x.png"),
+        )
+    }
+
+    @Test
+    fun shareSessionDestinationFromIntent_buildsTmuxSession() {
+        val dest = shareSessionDestinationFromIntent(shareSessionIntent())
+        val expected = AppDestination.TmuxSession(
+            hostId = 7L,
+            hostName = "hetzner",
+            hostname = "10.0.0.5",
+            port = 2222,
+            username = "me",
+            keyPath = "/data/keys/id",
+            passphrase = null,
+            sessionName = "scratch",
+        )
+        assertEquals(expected, dest)
+    }
+
+    @Test
+    fun initialDestinationFromIntent_routesShareSessionLaunch() {
+        assertEquals(
+            shareSessionDestinationFromIntent(shareSessionIntent()),
+            initialDestinationFromIntent(shareSessionIntent()),
+        )
+    }
+
+    @Test
+    fun shareSessionDestinationFromIntent_nullWhenMissingRequiredExtras() {
+        // Missing session name -> not a share-session launch.
+        val intent = shareSessionIntent().apply {
+            removeExtra(MainActivity.EXTRA_OPEN_SESSION_NAME)
+        }
+        assertNull(shareSessionDestinationFromIntent(intent))
+        assertEquals(AppDestination.HostList, initialDestinationFromIntent(intent))
+    }
+
+    @Test
+    fun composerAttachmentsFromIntent_pullsStagedPaths() {
+        assertEquals(
+            listOf("~/.pocketshell/attachments/host-7-scratch/x.png"),
+            composerAttachmentsFromIntent(shareSessionIntent()),
+        )
+    }
+
+    @Test
+    fun composerAttachmentsFromIntent_emptyWhenAbsent() {
+        assertEquals(emptyList<String>(), composerAttachmentsFromIntent(Intent()))
+    }
 }

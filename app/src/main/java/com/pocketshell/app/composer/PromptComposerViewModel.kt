@@ -318,6 +318,37 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #560: pre-load an already-uploaded remote file as a composer
+     * attachment chip, without re-running an upload. The share-into-session
+     * flow uploads the shared file to the session's `.pocketshell/attachments`
+     * scope via the exact #544 [PromptAttachmentStager] mechanic, then hands
+     * the resulting remote path here so the user lands in the composer with
+     * the file already staged as a removable chip — ready to type a message
+     * and Send. The draft text is never touched.
+     *
+     * De-duplicates by remote path so a re-delivered intent (e.g. the
+     * activity recreating across a configuration change) cannot double the
+     * chip. No-op on a blank path.
+     */
+    public fun seedAttachment(remotePath: String) {
+        val trimmed = remotePath.trim()
+        if (trimmed.isEmpty()) return
+        _uiState.update { current ->
+            if (current.attachments.any { it.remotePath == trimmed }) {
+                current
+            } else {
+                current.copy(
+                    attachments = current.attachments +
+                        StagedAttachment(
+                            remotePath = trimmed,
+                            displayName = attachmentDisplayName(trimmed),
+                        ),
+                )
+            }
+        }
+    }
+
+    /**
      * Issue #544: remove a single staged attachment chip by its remote path.
      * The draft text is untouched; removing every chip leaves the prompt
      * exactly as the user typed it, so the "Attached files:" suffix is only

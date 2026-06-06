@@ -97,6 +97,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.ConversationSyncStatusRow
@@ -251,6 +252,19 @@ public fun TmuxSessionScreen(
     @Suppress("UNUSED_PARAMETER") initialComposerDraft: String = "",
     @Suppress("UNUSED_PARAMETER") onInitialComposerDraftConsumed: () -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onComposerDraftChanged: (String) -> Unit = {},
+    // Issue #560: share-into-session staged attachment path(s). When
+    // non-empty, the screen seeds them into the shared
+    // [PromptComposerViewModel] as #544 chips and opens the composer sheet
+    // focused so the user lands ready to type a message + Send. Consumed
+    // once via [onInitialComposerAttachmentsConsumed].
+    initialComposerAttachments: List<String> = emptyList(),
+    onInitialComposerAttachmentsConsumed: () -> Unit = {},
+    // Issue #560: the shared composer VM, obtained at the screen level so the
+    // staged attachment chips can be seeded before the sheet first opens. The
+    // same instance is handed to [PromptComposerSheet] below so the sheet
+    // renders the seeded chips. Defaulted via `hiltViewModel()` (activity
+    // scope) so direct callers / unit tests are unchanged.
+    promptComposerViewModel: PromptComposerViewModel = hiltViewModel(),
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     connectTrigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
 ) {
@@ -387,6 +401,21 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
+
+    // Issue #560: a share-into-session launch carries staged remote
+    // attachment path(s). Seed them into the shared composer VM as #544
+    // chips and open the composer focused so the user lands ready to type a
+    // message + Send. Keyed on the path list so a re-delivered intent
+    // (configuration change) re-seeds correctly; the consume callback clears
+    // the activity-side state so a later in-session navigation does not
+    // re-open the composer.
+    LaunchedEffect(initialComposerAttachments) {
+        if (initialComposerAttachments.isNotEmpty()) {
+            initialComposerAttachments.forEach { promptComposerViewModel.seedAttachment(it) }
+            showMicSheet = true
+            onInitialComposerAttachmentsConsumed()
+        }
+    }
     // Issue #458: whether the terminal key bar shows its full row (the long
     // tail of Ctrl combos + arrows) or the compact curated default. Local UI
     // state toggled by the `⋯` / `×` slot; survives recomposition only (a
@@ -1530,6 +1559,7 @@ public fun TmuxSessionScreen(
         val viewingConversation = currentAgentConversation?.detection != null &&
             currentAgentConversation.selectedTab == SessionTab.Conversation
         PromptComposerSheet(
+            viewModel = promptComposerViewModel,
             onDismiss = { showMicSheet = false },
             onSend = { text, withEnter ->
                 // Issue #249: if the session dropped while the composer

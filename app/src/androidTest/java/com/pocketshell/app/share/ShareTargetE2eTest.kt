@@ -754,6 +754,229 @@ class ShareTargetE2eTest {
         Unit
     }
 
+    /**
+     * Issue #560: an active session must be offered as a share destination,
+     * and picking it must stage the shared file into that session's
+     * `.pocketshell/attachments/host-<id>-<session>/` scope (the #544
+     * mechanic) rather than an inbox folder. This connected journey brings up
+     * a real `tmux -CC` session, registers it against the production
+     * [ActiveTmuxClients], drives the share intent → host picker → ACTIVE
+     * SESSION row, then verifies the file landed under the per-session
+     * attachment scope on the Docker fixture.
+     *
+     * A screenshot of the destination picker (showing the active-session
+     * row) is captured as authoritative UI evidence.
+     */
+    @Test
+    fun shareIntentStagesFileIntoActiveSession() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val targetContext = instrumentation.targetContext
+        val key = instrumentation.context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val marker = "psinto${System.currentTimeMillis()}"
+        val sessionName = "issue560-$marker"
+        registeredSessionName = sessionName
+        val projectRelative = "psinto-$marker"
+        val homePath = remoteHome(key)
+        val projectPath = "$homePath/$projectRelative"
+        val hostId = seedHost(targetContext, key, marker)
+        val (sharedFile, fileContents) = stageSharedFile(targetContext, marker)
+        stagedFile = sharedFile
+
+        val entryPoint = EntryPointAccessors.fromApplication(
+            targetContext.applicationContext,
+            ShareTestAccessEntryPoint::class.java,
+        )
+        val activeClients: ActiveTmuxClients = entryPoint.activeTmuxClients()
+        val tmuxFactory: TmuxClientFactory = entryPoint.tmuxClientFactory()
+
+        // The per-session attachment scope the #544 mechanic uses.
+        val attachmentScopeDir = "\$HOME/.pocketshell/attachments/host-$hostId-$sessionName"
+
+        try {
+            cleanProjectOnRemote(key, projectPath)
+            runCatching { cleanAttachmentScope(key, hostId, sessionName) }
+            withTimeout(20_000) {
+                SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    user = DEFAULT_USER,
+                    key = SshKey.Pem(key),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ).getOrThrow().use { session ->
+                    session.exec("mkdir -p \"$projectPath\"")
+                }
+            }
+
+            val ssh = withTimeout(20_000) {
+                SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    user = DEFAULT_USER,
+                    key = SshKey.Pem(key),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ).getOrThrow()
+            }
+            sshSession = ssh
+            // Issue #560: the picker lists EVERY tmux session on the server
+            // and leads with the focused one. The shared Docker fixture can
+            // carry leftover sessions from sibling tests, so kill them all
+            // first to guarantee this test's session is the sole (focused)
+            // active session the picker surfaces.
+            runCatching { ssh.exec("tmux kill-server 2>/dev/null || true") }
+            delay(500)
+
+            val client = tmuxFactory.create(
+                session = ssh,
+                sessionName = sessionName,
+                startDirectory = projectPath,
+            )
+            tmuxClient = client
+            client.connect()
+
+            withTimeout(15_000) {
+                while (true) {
+                    val resp = client.sendCommand("display-message -p '#{pane_current_path}'")
+                    val cwd = resp.output.firstOrNull()?.trim().orEmpty()
+                    if (!resp.isError && cwd.trimEnd('/') == projectPath.trimEnd('/')) break
+                    delay(200)
+                }
+            }
+
+            activeClients.register(
+                hostId = hostId,
+                hostName = "Share Into Session Docker $marker",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = "/tmp/${marker}-test-key",
+                client = client,
+            )
+            registeredHostId = hostId
+
+            val sharedUri = FileProvider.getUriForFile(
+                targetContext,
+                "${targetContext.packageName}.shareprovider",
+                sharedFile,
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                setClassName(targetContext, ShareActivity::class.java.name)
+                type = "application/octet-stream"
+                putExtra(Intent.EXTRA_STREAM, sharedUri)
+                putExtra(Intent.EXTRA_TITLE, sharedFile.name)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            launchedActivity = ActivityScenario.launch(shareIntent)
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(SHARE_PICKER_ROOT_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            val hostTag = SHARE_HOST_ROW_TAG_PREFIX + hostId
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(hostTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostTag, useUnmergedTree = true).performClick()
+
+            // Issue #560: the active session must surface as a destination
+            // above the inbox folders.
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(SHARE_TARGET_ACTIVE_SESSION_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            captureScreenshot("issue560-share-active-session-picker")
+
+            compose.onNodeWithTag(SHARE_TARGET_ACTIVE_SESSION_TAG, useUnmergedTree = true)
+                .performClick()
+
+            // The file must land in the per-session attachment scope.
+            val remoteName = withTimeout(30_000) {
+                pollRemoteUntilAttachmentExists(key, attachmentScopeDir, marker)
+            }
+            assertNotNull(
+                "expected a staged file under $attachmentScopeDir/ on remote",
+                remoteName,
+            )
+            val remotePath = "$attachmentScopeDir/$remoteName"
+            val readBack = SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec("cat \"$remotePath\"")
+            }
+            assertEquals(
+                "expected staged-into-session contents to round-trip, stderr='${readBack.stderr}'",
+                0,
+                readBack.exitCode,
+            )
+            assertEquals(
+                "expected staged contents to match the local payload",
+                fileContents,
+                readBack.stdout,
+            )
+        } finally {
+            cleanProjectOnRemote(key, projectPath)
+            runCatching { cleanAttachmentScope(key, hostId, sessionName) }
+        }
+        Unit
+    }
+
+    private suspend fun pollRemoteUntilAttachmentExists(
+        key: String,
+        attachmentScopeDir: String,
+        marker: String,
+    ): String? {
+        while (true) {
+            val listing = SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec(
+                    "ls -1 \"$attachmentScopeDir\" 2>/dev/null | grep \"$marker\" | head -n 1",
+                )
+            }
+            if (listing.exitCode == 0) {
+                val name = listing.stdout.trim()
+                if (name.isNotEmpty()) return name
+            }
+            delay(500)
+        }
+    }
+
+    private suspend fun cleanAttachmentScope(key: String, hostId: Long, sessionName: String) {
+        runCatching {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec(
+                    "rm -rf \"\$HOME/.pocketshell/attachments/host-$hostId-$sessionName\"",
+                )
+            }
+        }
+    }
+
     private fun captureScreenshot(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()

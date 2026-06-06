@@ -14,6 +14,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.pocketshell.app.MainActivity
 import com.pocketshell.app.share.ShareUploader.Companion.extensionForMimeType
 import com.pocketshell.app.share.ShareUploader.Companion.queryUriDisplayName
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -68,7 +69,41 @@ class ShareActivity : FragmentActivity() {
         // flow imperatively on the activity's lifecycle scope so the
         // toast is independent of Compose recomposition.
         watchUploadStateForToasts()
+
+        // Issue #560: when the user picked an active SESSION as the
+        // destination, the ViewModel stages the file into that session's
+        // attachment scope and emits a one-shot launch event. Hand off to
+        // MainActivity into that tmux session with the staged path
+        // pre-loaded as a composer chip, then finish this one-shot surface.
+        watchSessionLaunch()
     }
+
+    private fun watchSessionLaunch() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.sessionLaunch.collect { launch ->
+                    startActivity(buildSessionLaunchIntent(launch))
+                    finish()
+                }
+            }
+        }
+    }
+
+    private fun buildSessionLaunchIntent(launch: SessionLaunch): Intent =
+        Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_HOST_ID, launch.hostId)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_HOST_NAME, launch.hostName)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_HOSTNAME, launch.hostname)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_PORT, launch.port)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_USERNAME, launch.username)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_KEY_PATH, launch.keyPath)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_NAME, launch.sessionName)
+            putExtra(
+                MainActivity.EXTRA_OPEN_SESSION_ATTACHMENTS,
+                launch.attachmentPaths.toTypedArray(),
+            )
+        }
 
     private fun watchUploadStateForToasts() {
         lifecycleScope.launch {

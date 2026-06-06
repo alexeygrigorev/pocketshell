@@ -13,6 +13,8 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.tmux.CommandResponse
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -790,6 +792,210 @@ class ShareViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf<ShareTarget>(ShareTarget.HostInbox), fake.uploadedTargets)
+    }
+
+    // ---- Issue #560: active sessions as a destination + share-into-session ----
+
+    @Test
+    fun selectTargetHostSurfacesActiveSessionsFocusedFirst() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 50L, name = "gpu-box")
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf(
+                        "work::0::main::0::1::/home/alexey/git/pocketshell::/dev/pts/1::bash",
+                        "scratch::0::main::1::1::/home/alexey/git/live::/dev/pts/2::bash",
+                    ),
+                    isError = false,
+                ),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(uriItem("shot.png"))
+
+        vm.selectTargetHost(host)
+        advanceUntilIdle()
+
+        val selection = vm.targetSelection.first { it != null && !it.loading }!!
+        assertEquals(
+            "both active sessions must be offered as destinations",
+            listOf("scratch", "work"),
+            selection.activeSessions.map { it.sessionName },
+        )
+        assertTrue(
+            "the focused session must lead and be flagged focused",
+            selection.activeSessions.first().sessionName == "scratch" &&
+                selection.activeSessions.first().focused,
+        )
+        assertFalse(
+            "non-focused session must not be flagged focused",
+            selection.activeSessions[1].focused,
+        )
+    }
+
+    // Note: NOT a `runTest`. `stageIntoSession` reuses the #544
+    // `PromptAttachmentStager`, whose upload runs on the real
+    // `Dispatchers.IO` (`withContext(Dispatchers.IO)`); the virtual
+    // `runTest` scheduler does not advance that real dispatcher, so this
+    // test drives the round-trip on a real scope and waits on the
+    // one-shot launch event with a timeout.
+    @Test
+    fun stageIntoSessionUploadsToSessionScopeAndEmitsLaunch() {
+        kotlinx.coroutines.runBlocking {
+            // The ViewModel's `viewModelScope` is bound to the
+            // [MainDispatcherRule] dispatcher; left at the default
+            // `UnconfinedTestDispatcher` it would not advance under plain
+            // runBlocking, so swap Main to the real default dispatcher for
+            // this one test.
+            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
+            try {
+                val registry = ActiveTmuxClients()
+                val vm = newVm(registry)
+                val host = seededHost(id = 51L, name = "gpu-box")
+                registry.register(
+                    hostId = host.id,
+                    hostName = host.name,
+                    hostname = host.hostname,
+                    port = host.port,
+                    username = host.username,
+                    keyPath = "/tmp/key",
+                    client = FakeTmuxClient(),
+                )
+                val fakeSession = FakeStagingSshSession()
+                vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
+                val tempFile =
+                    java.io.File.createTempFile("share-into-session", ".png", context.cacheDir)
+                tempFile.writeBytes(byteArrayOf(1, 2, 3, 4))
+                vm.setItem(
+                    ShareableItem.UriItem(
+                        uri = android.net.Uri.fromFile(tempFile),
+                        displayName = "shot.png",
+                        size = tempFile.length(),
+                        mimeType = "image/png",
+                        fallbackExtension = "png",
+                    ),
+                )
+
+                val session = ActiveSessionTarget(
+                    sessionName = "scratch",
+                    cwd = "/home/alexey/git/live",
+                    label = "scratch",
+                    focused = true,
+                )
+
+                vm.stageIntoSession(host, session)
+                val launch = kotlinx.coroutines.withTimeout(5_000L) {
+                    vm.sessionLaunch.first()
+                }
+
+                assertEquals(host.id, launch.hostId)
+                assertEquals("scratch", launch.sessionName)
+                assertEquals("/tmp/key-51", launch.keyPath)
+                assertEquals(1, launch.attachmentPaths.size)
+                val staged = launch.attachmentPaths.single()
+                assertTrue(
+                    "staged path must land in the per-session #544 scope, got '$staged'",
+                    staged.contains(".pocketshell/attachments/host-51-scratch/"),
+                )
+                assertTrue(
+                    "the stager must create the per-session dir, got ${fakeSession.execCommands}",
+                    fakeSession.execCommands.any { it.contains("host-51-scratch") },
+                )
+                assertTrue(
+                    "the file bytes must have been uploaded",
+                    fakeSession.uploadedRemotePaths.isNotEmpty(),
+                )
+                assertTrue("the staging session must be closed", fakeSession.closed)
+                tempFile.delete()
+            } finally {
+                // Restore a test Main so the [MainDispatcherRule]'s
+                // `finished()` resetMain still has an installed dispatcher to
+                // reset (calling resetMain twice would throw).
+                kotlinx.coroutines.Dispatchers.setMain(
+                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun stageIntoSessionWithNoLiveClientSurfacesFailure() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 52L, name = "gpu-box")
+        vm.setItem(uriItem("shot.png"))
+
+        vm.stageIntoSession(
+            host,
+            ActiveSessionTarget(sessionName = "s", cwd = "/x", label = "s"),
+        )
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals("gpu-box", failed.hostName)
+        assertTrue(failed.message.contains("save to inbox", ignoreCase = true))
+    }
+
+    /**
+     * Minimal [com.pocketshell.core.ssh.SshSession] fake for the
+     * share-into-session staging round-trip: records exec commands +
+     * uploaded paths, succeeds every `mkdir -p`, and reports connected.
+     */
+    private class FakeStagingSshSession : com.pocketshell.core.ssh.SshSession {
+        val execCommands = mutableListOf<String>()
+        val uploadedRemotePaths = mutableListOf<String>()
+        var closed: Boolean = false
+
+        override val isConnected: Boolean get() = !closed
+
+        override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
+            execCommands += command
+            return com.pocketshell.core.ssh.ExecResult(stdout = "", stderr = "", exitCode = 0)
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job =
+            kotlinx.coroutines.Job().apply { complete() }
+
+        override fun openLocalPortForward(
+            remoteHost: String,
+            remotePort: Int,
+            localPort: Int,
+        ): com.pocketshell.core.ssh.SshPortForward =
+            throw NotImplementedError("not needed for staging tests")
+
+        override fun startShell(): com.pocketshell.core.ssh.SshShell =
+            throw NotImplementedError("not needed for staging tests")
+
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String {
+            uploadedRemotePaths += remotePath
+            return remotePath
+        }
+
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String {
+            input.readBytes()
+            uploadedRemotePaths += remotePath
+            return remotePath
+        }
+
+        override fun close() {
+            closed = true
+        }
     }
 
     /**

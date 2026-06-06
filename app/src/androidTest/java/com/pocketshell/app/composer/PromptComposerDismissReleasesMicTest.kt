@@ -5,9 +5,11 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -204,5 +206,52 @@ class PromptComposerDismissReleasesMicTest {
         // Settle: stop the active recording so no sampler loop outlives the test.
         viewModel.cancelRecording()
         compose.waitForIdle()
+    }
+
+    /**
+     * Issue #560: the share-into-session flow pre-stages the shared file into
+     * the session composer as a #544 attachment chip (via
+     * [PromptComposerViewModel.seedAttachment]) and opens the composer
+     * focused. This renders the REAL [PromptComposerSheet] backed by a real
+     * VM, seeds an already-uploaded remote path the way the share launch
+     * does, opens the sheet, and asserts the chip renders by file name (never
+     * the full remote path) — the visible end state the user lands on after
+     * picking a session destination. A screenshot is captured as evidence.
+     */
+    @Test
+    fun seededAttachmentRendersAsComposerChipWhenSheetOpens() {
+        val viewModel = newViewModel(FakeMicCapture())
+        // Pre-stage the attachment the same way the share-into-session launch
+        // does before the composer opens.
+        viewModel.seedAttachment(
+            "~/.pocketshell/attachments/host-7-scratch/20260606-120000-01-diagram.png",
+        )
+
+        compose.setContent {
+            PocketShellTheme {
+                PromptComposerSheet(
+                    onDismiss = {},
+                    onSend = { _, _ -> true },
+                    viewModel = viewModel,
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        // The chip must show only the file name, never the full remote path.
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertExists()
+        compose.onNodeWithText("20260606-120000-01-diagram.png").assertIsDisplayed()
+        compose.onNodeWithText(".pocketshell/attachments", substring = true)
+            .assertDoesNotExist()
+
+        // Exactly one chip is staged from the single seeded path.
+        assertEquals(1, viewModel.uiState.value.attachments.size)
+        assertEquals(
+            "~/.pocketshell/attachments/host-7-scratch/20260606-120000-01-diagram.png",
+            viewModel.uiState.value.attachments.single().remotePath,
+        )
+
+        com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
+            .capture("issue560-composer-seeded-attachment-chip")
     }
 }

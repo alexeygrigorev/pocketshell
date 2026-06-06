@@ -423,6 +423,42 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun seedAttachmentPreloadsChipAndKeepsDraftClean() = runTest {
+        // Issue #560: the share-into-session flow stages the shared file via
+        // the #544 mechanic, then seeds the resulting remote path here so the
+        // composer opens with the chip already present and the draft clean.
+        val vm = newVm()
+        vm.onDraftChange("")
+        val path = "~/.pocketshell/attachments/host-7-scratch/20260606-120000-01-shot.png"
+
+        vm.seedAttachment(path)
+
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = path,
+                    displayName = "20260606-120000-01-shot.png",
+                ),
+            ),
+            vm.uiState.value.attachments,
+        )
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun seedAttachmentDeDuplicatesAndIgnoresBlank() = runTest {
+        val vm = newVm()
+        val path = "~/.pocketshell/attachments/host-7-scratch/shot.png"
+
+        vm.seedAttachment(path)
+        vm.seedAttachment(path)
+        vm.seedAttachment("   ")
+
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals(path, vm.uiState.value.attachments.single().remotePath)
+    }
+
+    @Test
     fun removeAttachmentForUnknownPathIsNoOp() = runTest {
         val vm = newVm()
         val path = "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt"

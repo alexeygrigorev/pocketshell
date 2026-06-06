@@ -203,6 +203,17 @@ class MainActivity : FragmentActivity() {
      */
     private var restoredComposerDraft by mutableStateOf("")
 
+    /**
+     * Issue #560: remote attachment path(s) handed in by the share-into-
+     * session flow ([com.pocketshell.app.share.ShareActivity]). When the
+     * launch intent opens a tmux session and carries staged attachment
+     * paths, the navigator seeds them into the session composer as #544
+     * chips and opens the composer focused. Consumed once; cleared after the
+     * session destination has been seeded so a later in-session navigation
+     * does not re-seed a stale chip.
+     */
+    private var pendingComposerAttachments by mutableStateOf<List<String>>(emptyList())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         StartupTiming.mark("main-on-create-start", "savedInstanceState" to (savedInstanceState != null))
         super.onCreate(savedInstanceState)
@@ -249,6 +260,10 @@ class MainActivity : FragmentActivity() {
         val intentDestination = initialDestinationFromIntent(intent)
         val resumingFromProcessDeath = savedInstanceState != null
         val importPayload = importPayloadFromIntent(intent)
+        // Issue #560: a share-into-session launch carries the staged remote
+        // attachment path(s); seed them into the session composer as #544
+        // chips once the navigator reaches the tmux destination.
+        pendingComposerAttachments = composerAttachmentsFromIntent(intent)
         StartupTiming.mark(
             "main-initial-route-input",
             "savedInstanceState" to resumingFromProcessDeath,
@@ -372,6 +387,10 @@ class MainActivity : FragmentActivity() {
                         onComposerDraftChanged = { draft -> currentComposerDraft = draft },
                         initialComposerDraft = restoredComposerDraft,
                         onInitialComposerDraftConsumed = { restoredComposerDraft = "" },
+                        initialComposerAttachments = pendingComposerAttachments,
+                        onInitialComposerAttachmentsConsumed = {
+                            pendingComposerAttachments = emptyList()
+                        },
                         restoredTmuxDestination = restoredTmuxDestination,
                     )
                 }
@@ -461,6 +480,31 @@ class MainActivity : FragmentActivity() {
             "hasImportPayload" to (importPayloadFromIntent(intent) != null),
         )
         importPayloadFromIntent(intent)?.let { pendingImportPayload = it }
+        // Issue #560: re-delivered share-into-session intents (the app was
+        // already running) seed the staged attachment chip(s) the same way
+        // the cold-launch path does in onCreate.
+        composerAttachmentsFromIntent(intent).takeIf { it.isNotEmpty() }?.let {
+            pendingComposerAttachments = it
+        }
+    }
+
+    companion object {
+        /**
+         * Issue #560: share-into-session launch extras. The share flow
+         * ([com.pocketshell.app.share.ShareActivity]) stages the shared file
+         * into a chosen active session, then launches MainActivity with these
+         * extras so it opens that tmux session with the staged path(s)
+         * pre-loaded as composer attachment chips and the composer focused.
+         */
+        const val EXTRA_OPEN_SESSION_HOST_ID: String = "pocketshell.extra.OPEN_SESSION_HOST_ID"
+        const val EXTRA_OPEN_SESSION_HOST_NAME: String = "pocketshell.extra.OPEN_SESSION_HOST_NAME"
+        const val EXTRA_OPEN_SESSION_HOSTNAME: String = "pocketshell.extra.OPEN_SESSION_HOSTNAME"
+        const val EXTRA_OPEN_SESSION_PORT: String = "pocketshell.extra.OPEN_SESSION_PORT"
+        const val EXTRA_OPEN_SESSION_USERNAME: String = "pocketshell.extra.OPEN_SESSION_USERNAME"
+        const val EXTRA_OPEN_SESSION_KEY_PATH: String = "pocketshell.extra.OPEN_SESSION_KEY_PATH"
+        const val EXTRA_OPEN_SESSION_NAME: String = "pocketshell.extra.OPEN_SESSION_NAME"
+        const val EXTRA_OPEN_SESSION_ATTACHMENTS: String =
+            "pocketshell.extra.OPEN_SESSION_ATTACHMENTS"
     }
 }
 
@@ -497,6 +541,12 @@ private fun AppNavigator(
     // navigation does not re-seed a stale draft.
     initialComposerDraft: String = "",
     onInitialComposerDraftConsumed: () -> Unit = {},
+    // Issue #560: staged remote attachment path(s) from a share-into-session
+    // launch. Seeded into the session composer as #544 chips with the
+    // composer opened + focused. Consumed once; cleared via
+    // [onInitialComposerAttachmentsConsumed].
+    initialComposerAttachments: List<String> = emptyList(),
+    onInitialComposerAttachmentsConsumed: () -> Unit = {},
     restoredTmuxDestination: AppDestination.TmuxSession? = null,
 ) {
     // Issue #116: per-host worst-case usage record map, derived from
@@ -1232,6 +1282,10 @@ private fun AppNavigator(
             // next `onStop` persists them.
             initialComposerDraft = initialComposerDraft,
             onInitialComposerDraftConsumed = onInitialComposerDraftConsumed,
+            // Issue #560: seed the share-staged attachment(s) into the
+            // session composer as #544 chips and open the composer focused.
+            initialComposerAttachments = initialComposerAttachments,
+            onInitialComposerAttachmentsConsumed = onInitialComposerAttachmentsConsumed,
             onComposerDraftChanged = onComposerDraftChanged,
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
@@ -1328,12 +1382,53 @@ private fun TmuxRestoreIntentSnapshot.sameRestoreIdentity(
         sessionName == destination.sessionName &&
         startDirectory == destination.startDirectory
 
-internal fun initialDestinationFromIntent(intent: Intent?): AppDestination =
+internal fun initialDestinationFromIntent(intent: Intent?): AppDestination {
     if (intent?.getBooleanExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, false) == true) {
-        AppDestination.PortForwardChooser
-    } else {
-        AppDestination.HostList
+        return AppDestination.PortForwardChooser
     }
+    shareSessionDestinationFromIntent(intent)?.let { return it }
+    return AppDestination.HostList
+}
+
+/**
+ * Issue #560: build a [AppDestination.TmuxSession] from a share-into-session
+ * launch intent. Returns null when the intent is not a share-session launch
+ * (the host id / session name / key path extras are required). The share
+ * flow ([com.pocketshell.app.share.ShareActivity]) populates these extras
+ * after staging the shared file into the chosen session.
+ */
+internal fun shareSessionDestinationFromIntent(intent: Intent?): AppDestination.TmuxSession? {
+    if (intent == null) return null
+    val hostId = intent.getLongExtra(MainActivity.EXTRA_OPEN_SESSION_HOST_ID, 0L)
+    val sessionName = intent.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_NAME)
+    val keyPath = intent.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_KEY_PATH)
+    val hostname = intent.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_HOSTNAME)
+    val username = intent.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_USERNAME)
+    if (hostId <= 0L || sessionName.isNullOrBlank() ||
+        keyPath.isNullOrBlank() || hostname.isNullOrBlank() || username.isNullOrBlank()
+    ) {
+        return null
+    }
+    return AppDestination.TmuxSession(
+        hostId = hostId,
+        hostName = intent.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_HOST_NAME).orEmpty(),
+        hostname = hostname,
+        port = intent.getIntExtra(MainActivity.EXTRA_OPEN_SESSION_PORT, 22),
+        username = username,
+        keyPath = keyPath,
+        passphrase = null,
+        sessionName = sessionName,
+    )
+}
+
+/**
+ * Issue #560: pull the staged remote attachment path(s) out of a share-into-
+ * session launch intent. Empty when the intent carries none.
+ */
+internal fun composerAttachmentsFromIntent(intent: Intent?): List<String> =
+    intent?.getStringArrayExtra(MainActivity.EXTRA_OPEN_SESSION_ATTACHMENTS)
+        ?.filter { it.isNotBlank() }
+        ?: emptyList()
 
 /**
  * Issue #177: decide the activity's initial destination, distinguishing a

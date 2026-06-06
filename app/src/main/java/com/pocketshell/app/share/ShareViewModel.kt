@@ -1,26 +1,36 @@
 package com.pocketshell.app.share
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.notifications.ShareUploadNotifications
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
 import com.pocketshell.app.tmux.buildBracketedPasteHexChunks
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.tmux.TmuxClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -134,6 +144,48 @@ internal class ShareViewModel @Inject constructor(
     internal var uploader: ShareItemUploader = ShareUploader(applicationContext)
 
     /**
+     * Issue #560: one-shot navigation event. After the shared file is
+     * staged into a chosen active session's `.pocketshell/attachments`
+     * scope (the #544 mechanic), the ViewModel emits a [SessionLaunch] here.
+     * [ShareActivity] collects it, launches [com.pocketshell.app.MainActivity]
+     * into that tmux session with the staged remote path pre-loaded as a
+     * composer attachment chip, and finishes itself.
+     *
+     * Backed by a [Channel] so the event is delivered to the activity's
+     * collector even if it subscribes a tick after the emit (the staging
+     * round-trip can outrun the first composition).
+     */
+    private val _sessionLaunch = Channel<SessionLaunch>(capacity = Channel.BUFFERED)
+    val sessionLaunch: Flow<SessionLaunch> = _sessionLaunch.receiveAsFlow()
+
+    /**
+     * Issue #560: SSH connect seam for the share-into-session staging
+     * round-trip. Defaults to the same [SshConnection.connect] the rest of
+     * the app uses; a `var` so unit tests can substitute a fake session
+     * without a live host. Production never reassigns it.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var connectForStaging: suspend (HostEntity, SshKeyEntity) -> Result<SshSession> =
+        { host, keyEntity ->
+            val keyFile = java.io.File(keyEntity.privateKeyPath)
+            if (!keyFile.exists()) {
+                Result.failure(
+                    com.pocketshell.core.ssh.SshException(
+                        "No SSH key for host ${host.name} (missing ${keyEntity.name})",
+                    ),
+                )
+            } else {
+                SshConnection.connect(
+                    host = host.hostname,
+                    port = host.port,
+                    user = host.username,
+                    key = SshKey.Path(keyFile),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                )
+            }
+        }
+
+    /**
      * Stage the [items] the activity extracted from the share intent.
      * Idempotent; replaces any earlier staging (e.g. if the activity
      * is re-created across configuration change).
@@ -198,7 +250,28 @@ internal class ShareViewModel @Inject constructor(
         if (_uploadState.value is UploadState.Running) return
         _targetSelection.value = TargetSelection(host = host, loading = true)
         viewModelScope.launch {
-            val sessionProjects = resolveSessionProjects(host)
+            // Issue #560: enumerate the host's active tmux sessions ONCE so
+            // they can be offered as destinations above the inbox folders.
+            // The same `list-panes -a` round-trip yields each session's
+            // active-pane cwd, which #507 already turns into the
+            // session-project targets below; we additionally surface the
+            // session itself (name + cwd) as a "share into this session"
+            // destination (#560).
+            val activeSessions = resolveActiveSessions(host)
+            // Issue #507: the session-PROJECT targets — each open session's
+            // active-pane cwd, focused first, de-duplicated by path and with
+            // a path-derived label. Sessions whose cwd tmux did not report as
+            // an absolute path are excluded from the project list (but still
+            // appear as #560 active-session destinations, which key on the
+            // session name rather than the cwd).
+            val sessionProjects = buildList {
+                val seenPaths = linkedSetOf<String>()
+                for (session in activeSessions) {
+                    val path = session.cwd.takeIf { it.startsWith("/") } ?: continue
+                    if (!seenPaths.add(path)) continue
+                    add(ProjectTarget(path = path, label = defaultLabelForPath(path)))
+                }
+            }
             val sessionPaths = sessionProjects.map { it.path }.toSet()
             val knownProjects = runCatching {
                 projectRootDao.getByHostId(host.id).first()
@@ -218,6 +291,7 @@ internal class ShareViewModel @Inject constructor(
             _targetSelection.value = TargetSelection(
                 host = host,
                 loading = false,
+                activeSessions = activeSessions,
                 sessionProjects = sessionProjects,
                 knownProjects = knownProjects,
             )
@@ -227,6 +301,115 @@ internal class ShareViewModel @Inject constructor(
     /** Dismiss the target chooser and return to the host list. */
     fun clearTargetSelection() {
         _targetSelection.value = null
+    }
+
+    /**
+     * Issue #560: stage the staged share item(s) INTO an active session,
+     * then open that session with the file pre-loaded as a composer
+     * attachment chip.
+     *
+     * The upload reuses the exact #544 [PromptAttachmentStager] mechanic:
+     * it opens a short-lived [SshSession] to the host (the live `tmux -CC`
+     * control channel is not a file-transfer channel), uploads each staged
+     * file to `~/.pocketshell/attachments/host-<id>-<session>/…` — the same
+     * scope key the in-session Attach button uses
+     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.stagePromptAttachments])
+     * — and emits a [SessionLaunch] carrying the session destination + the
+     * resulting remote path(s). The activity then launches into that tmux
+     * session with the composer focused and the chip(s) already present.
+     *
+     * Works for ANY active session (agent or plain shell); there is no
+     * agent-detection gate. Surfaces failure through the existing
+     * [UploadState] machine so the picker UI does not need a parallel
+     * result surface.
+     */
+    fun stageIntoSession(host: HostEntity, session: ActiveSessionTarget) {
+        val payload = _items.value
+        if (payload.isEmpty()) return
+        if (_uploadState.value is UploadState.Running) return
+        val entry = activeTmuxClients.clients.value[host.id]
+        if (entry == null) {
+            val message = "No active session on ${host.name} — save to inbox instead"
+            android.util.Log.w(LOG_TAG, "share into session aborted: $message")
+            _uploadState.value = UploadState.Failed(host.name, message)
+            ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+            return
+        }
+        _targetSelection.value = null
+        _uploadState.value = UploadState.Running(host.name)
+        viewModelScope.launch {
+            val keyEntity = sshKeyDao.getById(host.keyId)
+            if (keyEntity == null) {
+                val message = "No SSH key for host ${host.name}"
+                android.util.Log.w(LOG_TAG, "share into session aborted: $message")
+                _uploadState.value = UploadState.Failed(host.name, message)
+                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                return@launch
+            }
+
+            val connectResult = connectForStaging(host, keyEntity)
+            val sshSession = connectResult.getOrElse { error ->
+                val message = error.message ?: "Could not connect to ${host.name}"
+                android.util.Log.w(LOG_TAG, "share into session connect failed: $message", error)
+                _uploadState.value = UploadState.Failed(host.name, message)
+                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                return@launch
+            }
+
+            // Issue #560: scope key MUST match the in-session Attach path
+            // (TmuxSessionViewModel) so the chip lands in the exact same
+            // remote directory the user would see attaching from inside the
+            // session — the #544 mechanic, no parallel upload location.
+            val scopeKey = "host-${host.id}-${session.sessionName}"
+            val stager = PromptAttachmentStager(
+                resolver = applicationContext.contentResolver,
+                cacheDir = applicationContext.cacheDir,
+            )
+            val uris: List<Uri> = payload.mapNotNull { it as? ShareableItem.UriItem }.map { it.uri }
+            val result = if (uris.isEmpty()) {
+                Result.failure(
+                    IllegalStateException("Only file shares can be staged into a session"),
+                )
+            } else {
+                sshSession.use { live -> stager.stage(live, scopeKey, uris) }
+            }
+
+            result.fold(
+                onSuccess = { remotePaths ->
+                    if (remotePaths.isEmpty()) {
+                        val message = "No files were staged into ${session.sessionName}"
+                        _uploadState.value = UploadState.Failed(host.name, message)
+                        ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                        return@fold
+                    }
+                    android.util.Log.i(
+                        LOG_TAG,
+                        "staged ${remotePaths.size} file(s) into session ${session.sessionName}",
+                    )
+                    _sessionLaunch.trySend(
+                        SessionLaunch(
+                            hostId = host.id,
+                            hostName = host.name,
+                            hostname = host.hostname,
+                            port = host.port,
+                            username = host.username,
+                            keyPath = keyEntity.privateKeyPath,
+                            sessionName = session.sessionName,
+                            attachmentPaths = remotePaths,
+                        ),
+                    )
+                    // Leave the FSM Running so the picker shows the spinner
+                    // until the activity finishes; the launch event is what
+                    // ends this surface.
+                },
+                onFailure = { error ->
+                    val message = error.message ?: "Could not stage into ${session.sessionName}"
+                    android.util.Log.w(LOG_TAG, "share into session staging failed: $message", error)
+                    _uploadState.value = UploadState.Failed(host.name, message)
+                    ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                },
+            )
+        }
     }
 
     /**
@@ -249,7 +432,7 @@ internal class ShareViewModel @Inject constructor(
      * which the per-session active pane and the globally focused pane are
      * derived without a second query.
      */
-    private suspend fun resolveSessionProjects(host: HostEntity): List<ProjectTarget> {
+    private suspend fun resolveActiveSessions(host: HostEntity): List<ActiveSessionTarget> {
         val entry = activeTmuxClients.clients.value[host.id] ?: return emptyList()
         val windows = runCatching {
             val response =
@@ -262,7 +445,7 @@ internal class ShareViewModel @Inject constructor(
         // The focused session is the one whose active window is also the
         // active pane row tmux reports; `parseSessionWindowRows` already
         // filtered to active panes, so `active == true` marks the
-        // focused window. Sort that session's cwd first.
+        // focused window. Sort that session first.
         val activePanes = SshFolderListGateway.activePaneRowsBySession(windows)
         val focusedSession = windows.firstOrNull { it.active }?.sessionName
 
@@ -274,16 +457,19 @@ internal class ShareViewModel @Inject constructor(
             }
         }
 
-        val seenPaths = linkedSetOf<String>()
-        val projects = mutableListOf<ProjectTarget>()
+        val sessions = mutableListOf<ActiveSessionTarget>()
         for (sessionName in ordered) {
+            if (sessionName.isBlank()) continue
             val cwd = activePanes[sessionName]?.cwd?.trim().orEmpty()
-            if (cwd.isBlank() || !cwd.startsWith("/")) continue
-            val normalised = cwd.trimEnd('/').ifBlank { "/" }
-            if (!seenPaths.add(normalised)) continue
-            projects += ProjectTarget(path = normalised, label = defaultLabelForPath(normalised))
+            val normalised = cwd.takeIf { it.startsWith("/") }?.trimEnd('/')?.ifBlank { "/" }.orEmpty()
+            sessions += ActiveSessionTarget(
+                sessionName = sessionName,
+                cwd = normalised,
+                label = sessionName,
+                focused = sessionName == focusedSession,
+            )
         }
-        return projects
+        return sessions
     }
 
     /**
@@ -719,6 +905,50 @@ internal data class ProjectTarget(
 internal data class TargetSelection(
     val host: HostEntity,
     val loading: Boolean = false,
+    val activeSessions: List<ActiveSessionTarget> = emptyList(),
     val sessionProjects: List<ProjectTarget> = emptyList(),
     val knownProjects: List<ProjectTarget> = emptyList(),
+)
+
+/**
+ * Issue #560: an active tmux session on the chosen host that a shared
+ * file can be staged into. Picking one uploads the file to the session's
+ * `.pocketshell/attachments` scope (the #544 mechanic) and opens the
+ * session with the file pre-loaded as a composer attachment chip.
+ *
+ * @property sessionName the tmux session name — the navigation key and
+ *   the attachment scope segment (`host-<id>-<sessionName>`).
+ * @property cwd the session's active-pane `pane_current_path`, or empty
+ *   when tmux did not report a usable absolute path. Display-only here;
+ *   the attachment scope keys on the session name, not the cwd.
+ * @property label the user-visible session label (the session name).
+ * @property focused true for the host's currently-focused session, which
+ *   the picker lists first.
+ */
+internal data class ActiveSessionTarget(
+    val sessionName: String,
+    val cwd: String,
+    val label: String,
+    val focused: Boolean = false,
+)
+
+/**
+ * Issue #560: one-shot navigation payload emitted after a shared file is
+ * staged into an active session. [ShareActivity] consumes it to launch
+ * [com.pocketshell.app.MainActivity] into the tmux session with the staged
+ * remote path pre-loaded as a composer attachment chip.
+ *
+ * Carries the resolved SSH connection parameters (sourced from the
+ * [HostEntity] + its key) so the session destination can be rebuilt on the
+ * MainActivity side without a second DB read.
+ */
+internal data class SessionLaunch(
+    val hostId: Long,
+    val hostName: String,
+    val hostname: String,
+    val port: Int,
+    val username: String,
+    val keyPath: String,
+    val sessionName: String,
+    val attachmentPaths: List<String>,
 )

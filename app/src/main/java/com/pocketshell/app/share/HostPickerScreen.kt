@@ -92,6 +92,9 @@ internal fun HostPickerScreen(
                     selection != null ->
                         TargetPickerScreen(
                             selection = selection,
+                            onChooseSession = { session ->
+                                viewModel.stageIntoSession(selection.host, session)
+                            },
                             onChooseHostInbox = {
                                 viewModel.startUpload(selection.host, ShareTarget.HostInbox)
                             },
@@ -223,6 +226,7 @@ internal fun HostPickerScreen(
 @Composable
 private fun TargetPickerScreen(
     selection: TargetSelection,
+    onChooseSession: (ActiveSessionTarget) -> Unit,
     onChooseHostInbox: () -> Unit,
     onChooseProject: (ProjectTarget) -> Unit,
     onBack: () -> Unit,
@@ -248,6 +252,40 @@ private fun TargetPickerScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))
+        }
+
+        // Issue #560: the host's active tmux sessions lead the list — the
+        // most convenient destination. Picking one stages the shared file
+        // into that session (the #544 attachment mechanic) and opens the
+        // session with the file as a composer chip, composer focused.
+        if (selection.activeSessions.isNotEmpty()) {
+            item {
+                Text(
+                    text = "Active sessions",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        itemsIndexed(
+            selection.activeSessions,
+            key = { _, session -> "active-session:" + session.sessionName },
+        ) { index, session ->
+            TargetRow(
+                title = if (session.focused) {
+                    "${session.label} (focused session)"
+                } else {
+                    "${session.label} (session)"
+                },
+                subtitle = session.cwd.takeIf { it.isNotBlank() }
+                    ?: "Stage into this session's composer",
+                testTag = if (index == 0) {
+                    SHARE_TARGET_ACTIVE_SESSION_TAG
+                } else {
+                    SHARE_TARGET_SESSION_ROW_TAG_PREFIX + session.sessionName
+                },
+                onClick = { onChooseSession(session) },
+            )
         }
 
         item {
@@ -573,6 +611,8 @@ internal const val SHARE_TEXT_SAVE_TAG: String = "share:text:save"
 internal const val SHARE_EMPTY_STATE_TAG: String = "share:picker:empty"
 internal const val SHARE_TARGET_PICKER_TAG: String = "share:target:picker"
 internal const val SHARE_TARGET_HOST_INBOX_TAG: String = "share:target:host-inbox"
+internal const val SHARE_TARGET_ACTIVE_SESSION_TAG: String = "share:target:active-session"
+internal const val SHARE_TARGET_SESSION_ROW_TAG_PREFIX: String = "share:target:session:"
 internal const val SHARE_TARGET_ACTIVE_PROJECT_TAG: String = "share:target:active-project"
 internal const val SHARE_TARGET_SESSION_PROJECT_ROW_TAG_PREFIX: String =
     "share:target:session-project:"

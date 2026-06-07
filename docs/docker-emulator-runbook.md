@@ -90,6 +90,13 @@ Reusable compose services:
   `opencode`, `heru`, `agent-log-explorer`, `tmuxctl`, `uv`, and `systemctl`
   shims plus seeded agent fixtures. Use it for normal connected Android smoke,
   walkthrough journeys, usage/jobs/agent fixture checks, and the APK pre-release gate.
+- `network-fault-proxy`: runs Toxiproxy in front of `agents:22`, maps data
+  port `2228` and control port `8474`, and is used by the opt-in
+  `pocketshellNetworkFaultProofs=true` resilience proofs for latency,
+  half-open starvation, and clean on/off link cuts.
+- `packet-loss-proxy`: builds the Linux `tc netem` proxy, maps host port
+  `2229`, and is used by the opt-in packet-loss proof. Netem runs inside this
+  container rather than on the host or emulator network.
 - `bootstrap-ready`: builds `pocketshell-test:bootstrap-ready`, maps host port
   `2230`, and contains the shared bootstrap base plus `pocketshell` and
   `systemctl` shims in `/usr/local/bin`; the

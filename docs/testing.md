@@ -631,10 +631,18 @@ Toxiproxy. Default CI does not start these services, and the tests also skip
 when the instrumentation process detects CI, so run them manually for reviewer
 evidence or after explicitly changing the workflow.
 
-Start the fixture:
+Start the ride-through fixture:
 
 ```bash
 docker compose -f tests/docker/docker-compose.yml up -d --build agents network-fault-proxy
+```
+
+For the full network-fault proof family, including packet loss, also start the
+netem proxy:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build \
+  agents network-fault-proxy packet-loss-proxy
 ```
 
 Run the issue #552 ride-through proof:
@@ -651,6 +659,13 @@ brief case uses a non-closing Toxiproxy timeout toxic for a short byte-starved
 link; the sustained case disables the proxy long enough to force an explicit
 reconnect. Summaries are written under
 `/sdcard/Android/media/com.pocketshell.app/additional_test_output/issue342-network-faults/`.
+
+The Toxiproxy request-shape unit test is part of the normal debug JVM suite and
+does not need Docker, an emulator, or an unstable network:
+
+```bash
+./gradlew :app:testDebugUnitTest --tests com.pocketshell.app.proof.ToxiproxyControlTest
+```
 
 ### Host setup/bootstrap scenario suite
 

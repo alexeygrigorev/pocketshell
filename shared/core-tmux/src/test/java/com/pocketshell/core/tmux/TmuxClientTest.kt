@@ -1099,7 +1099,10 @@ class TmuxClientTest {
             "expected client.disconnected to latch true after detachCleanly",
             client.disconnected.value,
         )
-        val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+        val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit") { fields ->
+            fields["disconnectCause"] == "detach_or_replace" &&
+                fields["intent"] == "detach_or_replace"
+        }
         assertEquals("detach_or_replace", exit["disconnectCause"])
         assertEquals("detach_or_replace", exit["intent"])
         assertEquals("eof", exit["source"])
@@ -1395,11 +1398,12 @@ class TmuxClientTest {
     private suspend fun waitForDiagnosticEvent(
         events: List<Pair<String, Map<String, Any?>>>,
         name: String,
+        predicate: (Map<String, Any?>) -> Boolean = { true },
     ): Map<String, Any?> =
         withTimeout(3_000) {
             while (true) {
                 synchronized(events) {
-                    events.firstOrNull { it.first == name }?.second
+                    events.firstOrNull { it.first == name && predicate(it.second) }?.second
                 }?.let { return@withTimeout it }
                 yield()
                 delay(10)

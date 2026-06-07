@@ -98,6 +98,26 @@ class PortForwardPanelScreenTest {
     }
 
     @Test
+    fun `hiddenNoisyPortsToggleLabel names hidden noisy ports with count`() {
+        assertEquals(
+            "Show hidden/noisy ports (3 hidden)",
+            hiddenNoisyPortsToggleLabel(checked = false, hiddenCount = 3),
+        )
+    }
+
+    @Test
+    fun `hiddenNoisyPortsToggleLabel omits count when enabled or empty`() {
+        assertEquals(
+            "Show hidden/noisy ports",
+            hiddenNoisyPortsToggleLabel(checked = true, hiddenCount = 3),
+        )
+        assertEquals(
+            "Show hidden/noisy ports",
+            hiddenNoisyPortsToggleLabel(checked = false, hiddenCount = 0),
+        )
+    }
+
+    @Test
     fun `shouldClearPendingForwardAutoOpen clears after requested port fails`() {
         val state = PortForwardPanelState(
             connectionState = PortForwardConnectionState.Connected,

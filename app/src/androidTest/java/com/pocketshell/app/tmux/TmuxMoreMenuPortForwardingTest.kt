@@ -6,11 +6,13 @@ import androidx.activity.ComponentActivity
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
@@ -78,6 +80,50 @@ class TmuxMoreMenuPortForwardingTest {
 
         assertTrue(
             "Port forwarding kebab item should invoke onOpenPortForwarding",
+            portForwardingClicks == 1,
+        )
+    }
+
+    @Test
+    fun activeForwardingItemShowsStatusAndInvokesCallback() {
+        var portForwardingClicks = 0
+        compose.setContent {
+            PocketShellTheme {
+                val expanded = mutableStateOf(true)
+                TmuxMoreMenu(
+                    expanded = expanded.value,
+                    currentWindowId = "@1",
+                    forwardingState = SessionForwardingIndicatorState(
+                        active = true,
+                        tunnelCount = 4,
+                    ),
+                    onDismiss = { expanded.value = false },
+                    onCreateSession = {},
+                    onRenameSession = {},
+                    onKillSession = {},
+                    onSwitchSession = {},
+                    onOpenJobs = {},
+                    onOpenUsage = {},
+                    onOpenPortForwarding = { portForwardingClicks++ },
+                    onNewWindow = {},
+                    onRenameWindow = {},
+                    onKillWindow = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Port forwarding").assertIsDisplayed()
+        compose.onNodeWithText("4 active ports").assertIsDisplayed()
+        compose
+            .onNodeWithContentDescription("4 ports forwarding active for this host")
+            .assertIsDisplayed()
+        compose
+            .onNodeWithTag(TMUX_PORT_FORWARDING_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.waitForIdle()
+
+        assertTrue(
+            "active port forwarding menu item should still open the panel",
             portForwardingClicks == 1,
         )
     }

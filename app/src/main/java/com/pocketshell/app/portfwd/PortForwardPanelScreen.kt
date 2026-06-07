@@ -55,7 +55,7 @@ import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
 
-/** Test tag for the #492 "Show all ports" checkbox row. */
+/** Test tag for the #492/#602 hidden/noisy ports checkbox row. */
 const val SHOW_ALL_PORTS_TEST_TAG = "port_forward_show_all_ports"
 
 @Composable
@@ -369,10 +369,10 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
 }
 
 /**
- * Issue #492: "Show all ports" checkbox. Unchecked = the default filtered
- * table (only ports 10000+). Checked = every discovered port including
- * the hidden low ports. The label surfaces the hidden-row count so the user
- * knows the table is filtered.
+ * Issue #492/#602: hidden/noisy ports checkbox. Unchecked = the default
+ * filtered table (only ports 10000+). Checked = every discovered port
+ * including the hidden low/noisy ports. The label surfaces the hidden-row count
+ * so the user knows the table is filtered.
  */
 @Composable
 private fun ShowAllPortsRow(
@@ -398,16 +398,19 @@ private fun ShowAllPortsRow(
         )
         Spacer(Modifier.width(4.dp))
         Text(
-            text = if (!checked && hiddenCount > 0) {
-                "Show all ports ($hiddenCount hidden)"
-            } else {
-                "Show all ports"
-            },
+            text = hiddenNoisyPortsToggleLabel(checked, hiddenCount),
             color = PocketShellColors.Text,
             style = PocketShellType.bodyDense,
         )
     }
 }
+
+internal fun hiddenNoisyPortsToggleLabel(checked: Boolean, hiddenCount: Int): String =
+    if (!checked && hiddenCount > 0) {
+        "Show hidden/noisy ports ($hiddenCount hidden)"
+    } else {
+        "Show hidden/noisy ports"
+    }
 
 @Composable
 private fun PortTableHeader() {

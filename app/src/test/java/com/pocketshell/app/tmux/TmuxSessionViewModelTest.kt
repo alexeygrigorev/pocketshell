@@ -6417,6 +6417,90 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun cachedRuntimeRefreshBestEffortSeedFailureKeepsConnectedClientOpen() = runTest {
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(registry = registry, runtimeCache = runtimeCache)
+        val session = FakeSshSession()
+        val clientA = FakeTmuxClient()
+        val clientB = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = clientA,
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "cached-work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = clientB,
+            session = session,
+        )
+        runCurrent()
+        clientA.sentCommands.clear()
+        clientA.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tcached-work\t0",
+                    "%1\t@0\t\$0\twork\tfresh-remote\t1",
+                ),
+                isError = false,
+            ),
+        )
+        clientA.failBestEffortOnCommandPrefix = "capture-pane"
+        clientA.bestEffortException = TmuxClientException("tmux command `capture-pane` timed out")
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceTimeBy(CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS)
+        runCurrent()
+
+        assertTrue(
+            "expected cached-runtime refresh to attempt capture seed, got ${clientA.sentCommands}",
+            clientA.sentCommands.contains("capture-pane -p -e -S -200 -t %1"),
+        )
+        assertTrue(
+            "cached-runtime best-effort seed timeout must not mark connection Failed/Reconnecting; " +
+                "status=${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse("cached-runtime seed timeout must not close tmux client", clientA.closed)
+        assertFalse("cached-runtime seed timeout must not mark tmux disconnected", clientA.disconnected.value)
+    }
+
+    @Test
     fun staleCachedRuntimeRefreshCannotOverwriteNewerSelection() = runTest {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
@@ -6952,6 +7036,43 @@ class TmuxSessionViewModelTest {
             1,
             connector.connectCount,
         )
+    }
+
+    @Test
+    fun sessionPrewarmBestEffortSeedFailureCachesRuntimeAndKeepsClientOpen() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4").apply {
+            failBestEffortOnCommandPrefix = "display-message"
+            bestEffortException = TmuxClientException("tmux command `display-message` timed out")
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected prewarm seed to query cursor best-effort, got ${prewarmClient.sentCommands}",
+            prewarmClient.sentCommands.contains("display-message -p -t %4 '#{cursor_x},#{cursor_y}'"),
+        )
+        assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")))
+        assertFalse("prewarm seed timeout must not close tmux client", prewarmClient.closed)
+        assertFalse("prewarm seed timeout must not mark tmux disconnected", prewarmClient.disconnected.value)
     }
 
     @Test

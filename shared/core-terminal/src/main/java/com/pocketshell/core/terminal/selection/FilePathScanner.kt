@@ -456,23 +456,32 @@ internal fun markFilePathContinuationWraps(rows: List<VisualRow>): List<VisualRo
     if (rows.size < 2) return rows
     var changed = false
     val out = rows.toMutableList()
-    var carryingGeneratedImagePath = false
-    for (index in 0 until rows.lastIndex) {
+    var index = 0
+    while (index < rows.lastIndex) {
         val current = out[index]
-        if (current.wrapsToNext) continue
+        if (current.wrapsToNext) {
+            index += 1
+            continue
+        }
         val joinsAttachment = looksLikeUnfinishedAttachmentPath(current.text) &&
             looksLikeAttachmentContinuation(rows[index + 1].text)
-        val currentIsGeneratedImagePath = carryingGeneratedImagePath ||
-            looksLikeUnfinishedGeneratedImagePath(current.text)
-        val joinsGeneratedImage = currentIsGeneratedImagePath &&
-            !lastTokenEndsWithKnownExtension(current.text) &&
-            looksLikeGeneratedImageContinuation(rows[index + 1].text)
+        val generatedImageEnd = generatedImageContinuationEnd(rows, index)
 
-        if (joinsAttachment || joinsGeneratedImage) {
+        if (joinsAttachment) {
             out[index] = current.copy(wrapsToNext = true)
             changed = true
         }
-        carryingGeneratedImagePath = joinsGeneratedImage
+        if (generatedImageEnd != null) {
+            for (joinIndex in index until generatedImageEnd) {
+                if (!out[joinIndex].wrapsToNext) {
+                    out[joinIndex] = out[joinIndex].copy(wrapsToNext = true)
+                    changed = true
+                }
+            }
+            index = generatedImageEnd
+        } else {
+            index += 1
+        }
     }
     return if (changed) out else rows
 }
@@ -505,21 +514,47 @@ private fun looksLikeAttachmentContinuationFragment(path: String): Boolean {
     return ATTACHMENT_TIMESTAMPED_BASENAME_PATTERN.matcher(leaf).matches()
 }
 
-private fun looksLikeUnfinishedGeneratedImagePath(text: String): Boolean {
-    val token = lastNonWhitespaceToken(text)
+private fun generatedImageContinuationEnd(rows: List<VisualRow>, startIndex: Int): Int? {
+    val startToken = lastNonWhitespaceToken(rows[startIndex].text)
+    if (!looksLikeUnfinishedGeneratedImagePath(startToken)) return null
+
+    var candidate = startToken
+    var index = startIndex
+    while (index < rows.lastIndex && !endsWithKnownExtension(candidate)) {
+        val continuation = generatedImageContinuationToken(rows[index + 1].text) ?: return null
+        candidate += continuation
+        index += 1
+    }
+    return index.takeIf {
+        it > startIndex && looksLikeCompleteGeneratedImagePath(candidate)
+    }
+}
+
+private fun looksLikeUnfinishedGeneratedImagePath(token: String): Boolean {
     if (token.isEmpty()) return false
     if (!token.contains(GENERATED_IMAGES_ROOT)) return false
     return !endsWithKnownExtension(token)
 }
 
-private fun looksLikeGeneratedImageContinuation(text: String): Boolean {
-    val token = text.trimStart()
-    if (token.isEmpty()) return false
-    return GENERATED_IMAGE_CONTINUATION_PATTERN.matcher(token).find()
+private fun generatedImageContinuationToken(text: String): String? {
+    val token = firstNonWhitespaceToken(text).trimEndOfPathPunctuation()
+    if (token.isEmpty()) return null
+    if (!GENERATED_IMAGE_CONTINUATION_PATTERN.matcher(token).matches()) return null
+    return token
 }
 
-private fun lastTokenEndsWithKnownExtension(text: String): Boolean =
-    endsWithKnownExtension(lastNonWhitespaceToken(text))
+private fun looksLikeCompleteGeneratedImagePath(token: String): Boolean {
+    if (!token.contains(GENERATED_IMAGES_ROOT)) return false
+    val relative = token.substringAfterLast(GENERATED_IMAGES_ROOT)
+    return GENERATED_IMAGE_TARGET_PATTERN.matcher(relative).matches()
+}
+
+private fun firstNonWhitespaceToken(text: String): String {
+    val trimmed = text.trimStart()
+    if (trimmed.isEmpty()) return ""
+    val end = trimmed.indexOfFirst { it.isWhitespace() }
+    return if (end < 0) trimmed else trimmed.substring(0, end)
+}
 
 private fun lastNonWhitespaceToken(text: String): String {
     val trimmed = text.trim()
@@ -535,6 +570,12 @@ private fun endsWithKnownExtension(token: String): Boolean {
     return ext in FILE_PATH_EXTENSIONS
 }
 
+private fun String.trimEndOfPathPunctuation(): String {
+    var end = length
+    while (end > 0 && this[end - 1] in PATH_TRAILING_PUNCTUATION) end--
+    return substring(0, end)
+}
+
 private const val GENERATED_IMAGES_ROOT: String = "/.codex/generated_images/"
 
 private val FILE_URI_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.compile(
@@ -544,6 +585,13 @@ private val FILE_URI_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.
 
 private val GENERATED_IMAGE_CONTINUATION_PATTERN: java.util.regex.Pattern =
     java.util.regex.Pattern.compile(
-        "^[\\w.%@+-]+(?:/[\\w.%@+-]+)*/?",
+        "[\\w.%@+-]+(?:/[\\w.%@+-]+)*/?",
+        java.util.regex.Pattern.CASE_INSENSITIVE,
+    )
+
+private val GENERATED_IMAGE_TARGET_PATTERN: java.util.regex.Pattern =
+    java.util.regex.Pattern.compile(
+        "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/" +
+            "ig_[\\w.%@+-]+\\.(?:$EXTENSION_ALTERNATION)",
         java.util.regex.Pattern.CASE_INSENSITIVE,
     )

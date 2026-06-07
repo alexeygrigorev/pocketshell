@@ -165,6 +165,24 @@ class TerminalSurfaceInputInstrumentedTest {
     }
 
     @Test
+    fun smartTextComposingTextWaitsForEditorConfirmation() = runBlocking {
+        withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
+            instrumentation.runOnMainSync {
+                inputConnection.setComposingText("echo composed", 1)
+                assertEquals(
+                    "smart text composing updates must stay local until the user confirms",
+                    "",
+                    remoteStdin.snapshot(),
+                )
+                inputConnection.performEditorAction(EditorInfo.IME_ACTION_SEND)
+            }
+
+            remoteStdin.awaitSnapshot("echo composed\r")
+            assertEquals("echo composed\r", remoteStdin.snapshot())
+        }
+    }
+
+    @Test
     fun smartTextStagingClearsBeforeCtrlCAndEscapeControls() = runBlocking {
         withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
             instrumentation.runOnMainSync {

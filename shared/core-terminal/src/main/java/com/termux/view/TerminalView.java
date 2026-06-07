@@ -470,6 +470,22 @@ public final class TerminalView extends View {
             }
 
             @Override
+            public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                try {
+                    if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
+                        mClient.logInfo(LOG_TAG, "IME: setComposingText(\"" + text + "\", " + newCursorPosition + ")");
+                    }
+                    boolean handled = super.setComposingText(text, newCursorPosition);
+                    if (smartTextKeyboard) rememberSmartTextStaging(getEditable(), true);
+                    return handled;
+                } catch (RuntimeException e) {
+                    reportTerminalViewFailure("IME setComposingText failed", e);
+                    getEditable().clear();
+                    return true;
+                }
+            }
+
+            @Override
             public boolean performContextMenuAction(int id) {
                 if (smartTextKeyboard && (id == android.R.id.paste || id == android.R.id.pasteAsPlainText)) {
                     clearSmartTextStaging();

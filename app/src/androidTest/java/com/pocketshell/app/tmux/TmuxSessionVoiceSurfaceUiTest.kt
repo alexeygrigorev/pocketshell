@@ -93,6 +93,50 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
+    fun tmuxKeyboardHiddenShowsControlsWithoutHotkeyBar() {
+        val keyTaps = mutableListOf<String>()
+        var enterTaps = 0
+        var keyboardTaps = 0
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = false,
+                    showConversation = false,
+                    sessionLive = true,
+                    isAgentPane = true,
+                    keyBarExpanded = false,
+                    onKeyBarExpandedChange = {},
+                    onKey = { keyTaps += it.label },
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = { enterTaps++ },
+                    onShowKeyboardTap = { keyboardTaps++ },
+                    onAddSnippetTap = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithText("^C").assertDoesNotExist()
+        compose.onNodeWithText("^D").assertDoesNotExist()
+        compose.onNodeWithText("Tab").assertDoesNotExist()
+
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed()
+
+        assertEquals(emptyList<String>(), keyTaps)
+        assertEquals(1, enterTaps)
+        assertEquals(1, keyboardTaps)
+    }
+
+    @Test
     fun tmuxKeyBarExposesCtrlCAndCtrlDKeys() {
         val taps = mutableListOf<String>()
         compose.setContent {

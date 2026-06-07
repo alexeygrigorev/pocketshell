@@ -173,17 +173,27 @@ fun PortForwardPanelScreen(
                 onEnabledChange = viewModel::setAutoForwardEnabled,
             )
 
-            // Issue #602: the discovery table hides low noisy ports below
-            // 10000 by default. The checkbox reveals them. Only relevant for
-            // the discovery view; auto-forward rows
-            // are the user's explicit tunnels, not a filtered scan.
-            if (!state.autoForwardEnabled) {
-                ShowAllPortsRow(
-                    checked = state.showAllPorts,
-                    hiddenCount = state.hiddenPortCount,
-                    onCheckedChange = viewModel::setShowAllPorts,
-                )
+            val hiddenPortCount = if (state.autoForwardEnabled) {
+                hiddenTunnelRowCount(state.tunnels)
+            } else {
+                state.hiddenPortCount
             }
+            val displayedTunnels = if (state.autoForwardEnabled) {
+                visibleTunnelRows(state.tunnels, state.showAllPorts)
+            } else {
+                state.tunnels
+            }
+
+            // Issue #602: the table hides low noisy ports below 10000 by
+            // default. Keep that true even when auto-forward is active so a
+            // foreground forwarding session with many system/app ports does
+            // not recreate the noisy 20+ row dogfood screen. The tunnels keep
+            // running; this only filters the rows rendered in the panel.
+            ShowAllPortsRow(
+                checked = state.showAllPorts,
+                hiddenCount = hiddenPortCount,
+                onCheckedChange = viewModel::setShowAllPorts,
+            )
 
             state.error?.let { error ->
                 ErrorBanner(error)
@@ -192,13 +202,20 @@ fun PortForwardPanelScreen(
             PortTableHeader()
 
             when {
-                state.autoForwardEnabled && state.tunnels.isEmpty() &&
+                state.autoForwardEnabled && displayedTunnels.isEmpty() &&
                     state.connectionState != PortForwardConnectionState.Error -> {
-                    EmptyScanningState(modifier = Modifier.weight(1f))
+                    if (state.tunnels.isEmpty()) {
+                        EmptyScanningState(modifier = Modifier.weight(1f))
+                    } else {
+                        HiddenPortsState(
+                            hiddenCount = hiddenPortCount,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
 
                 !state.autoForwardEnabled -> {
-                    if (state.tunnels.isEmpty()) {
+                    if (displayedTunnels.isEmpty()) {
                         DisabledState(
                             scanning = state.connectionState == PortForwardConnectionState.Connecting,
                             modifier = Modifier.weight(1f),
@@ -208,7 +225,7 @@ fun PortForwardPanelScreen(
                             modifier = Modifier.weight(1f),
                             contentPadding = PaddingValues(bottom = 12.dp),
                         ) {
-                            items(state.tunnels, key = { it.remotePort }) { tunnel ->
+                            items(displayedTunnels, key = { it.remotePort }) { tunnel ->
                                 // Discovery (auto-forward off) state:
                                 // tapping a discovered-port row — or its
                                 // Start button — initiates a forward for
@@ -229,7 +246,7 @@ fun PortForwardPanelScreen(
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(bottom = 12.dp),
                     ) {
-                        items(state.tunnels, key = { it.remotePort }) { tunnel ->
+                        items(displayedTunnels, key = { it.remotePort }) { tunnel ->
                             PortForwardRow(
                                 tunnel = tunnel,
                                 onToggle = { viewModel.togglePort(tunnel.remotePort) },
@@ -259,6 +276,20 @@ internal fun localForwardedUrlFor(tunnels: List<TunnelInfo>, localhostUrl: Local
     } ?: return null
     return localhostUrl.toLocalUrl(tunnel.localPort)
 }
+
+internal fun visibleTunnelRows(tunnels: List<TunnelInfo>, showAllPorts: Boolean): List<TunnelInfo> =
+    if (showAllPorts) {
+        tunnels.sortedWith(
+            compareBy<TunnelInfo> {
+                if (InterestingPortFilter.isInRange(it.remotePort)) 0 else 1
+            }.thenBy { it.remotePort },
+        )
+    } else {
+        tunnels.filter { InterestingPortFilter.isInRange(it.remotePort) }
+    }
+
+internal fun hiddenTunnelRowCount(tunnels: List<TunnelInfo>): Int =
+    tunnels.count { !InterestingPortFilter.isInRange(it.remotePort) }
 
 internal fun shouldClearPendingForwardAutoOpen(state: PortForwardPanelState, remotePort: Int): Boolean =
     state.connectionState == PortForwardConnectionState.Error ||
@@ -562,6 +593,21 @@ private fun DisabledState(scanning: Boolean, modifier: Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Text(
             if (scanning) "Discovering listening ports..." else "No listening ports discovered.",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
+        )
+    }
+}
+
+@Composable
+private fun HiddenPortsState(hiddenCount: Int, modifier: Modifier) {
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Text(
+            if (hiddenCount == 1) {
+                "1 low port hidden."
+            } else {
+                "$hiddenCount low ports hidden."
+            },
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyDense,
         )

@@ -190,6 +190,18 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(agentSubmitEnterDelayMs = snapped)
     }
 
+    /**
+     * Persist the bounded process-background grace window before terminal
+     * SSH/tmux teardown. Only the conservative predefined options are
+     * accepted; unsupported hand-edited values fall back to the 60s default.
+     */
+    fun setBackgroundGraceMillis(millis: Long) {
+        val supported = normaliseBackgroundGraceMillis(millis)
+        if (_settings.value.backgroundGraceMillis == supported) return
+        prefs.edit().putLong(KEY_BACKGROUND_GRACE_MILLIS, supported).apply()
+        _settings.value = _settings.value.copy(backgroundGraceMillis = supported)
+    }
+
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) {
         if (_settings.value.diagnosticsRecordingEnabled == enabled) return
         prefs.edit().putBoolean(KEY_DIAGNOSTICS_RECORDING_ENABLED, enabled).apply()
@@ -256,6 +268,12 @@ class SettingsRepository @Inject constructor(
                 AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
             ),
         )
+        val backgroundGraceMillis = normaliseBackgroundGraceMillis(
+            prefs.safeLong(
+                KEY_BACKGROUND_GRACE_MILLIS,
+                AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS,
+            ),
+        )
         val diagnosticsRecordingEnabled = prefs.safeBoolean(
             KEY_DIAGNOSTICS_RECORDING_ENABLED,
             AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
@@ -273,6 +291,7 @@ class SettingsRepository @Inject constructor(
             hostDetailViewMode = hostDetailViewMode,
             usageWarnThresholdPercent = usageWarnPercent,
             agentSubmitEnterDelayMs = agentSubmitEnterDelayMs,
+            backgroundGraceMillis = backgroundGraceMillis,
             diagnosticsRecordingEnabled = diagnosticsRecordingEnabled,
         )
     }
@@ -318,6 +337,12 @@ class SettingsRepository @Inject constructor(
             AppSettings.MAX_USAGE_WARN_PERCENT,
         )
     }
+
+    private fun normaliseBackgroundGraceMillis(millis: Long): Long =
+        AppSettings.BACKGROUND_GRACE_OPTIONS
+            .firstOrNull { it.millis == millis }
+            ?.millis
+            ?: AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS
 
     private fun SharedPreferences.safeString(key: String, default: String?): String? =
         runCatching { getString(key, default) }
@@ -368,6 +393,7 @@ class SettingsRepository @Inject constructor(
         const val KEY_HOST_DETAIL_VIEW_MODE = "host_detail_view_mode"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
         const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
+        const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
         const val KEY_DIAGNOSTICS_RECORDING_ENABLED = "diagnostics_recording_enabled"
     }
 }

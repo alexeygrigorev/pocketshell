@@ -174,6 +174,16 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `setBackgroundGraceMillis flows through to repository`() {
+        val vm = newVm()
+        vm.setBackgroundGraceMillis(AppSettings.BACKGROUND_GRACE_10_MINUTES_MS)
+        assertEquals(
+            AppSettings.BACKGROUND_GRACE_10_MINUTES_MS,
+            repo.settings.value.backgroundGraceMillis,
+        )
+    }
+
+    @Test
     fun `setDefaultHostId flows through to repository`() {
         val vm = newVm()
         vm.setDefaultHostId(11L)

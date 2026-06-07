@@ -82,6 +82,9 @@ enum class VoiceTranscriptionProvider {
  *   composer voice input. Defaults to [VoiceTranscriptionProvider.OpenAiWhisper]
  *   so existing users keep the current Whisper behaviour until they opt into
  *   the Android/system recognizer.
+ * @property backgroundGraceMillis bounded process-background grace window
+ *   before the app tears down live terminal SSH/tmux connections. Defaults to
+ *   60 seconds, preserving the original issue #450 behaviour.
  */
 data class AppSettings(
     val terminalFontSizeSp: Float = DEFAULT_TERMINAL_FONT_SP,
@@ -117,6 +120,7 @@ data class AppSettings(
      * via the Settings → Terminal slider.
      */
     val agentSubmitEnterDelayMs: Int = DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
+    val backgroundGraceMillis: Long = DEFAULT_BACKGROUND_GRACE_MILLIS,
     /**
      * Issue #549: always-on diagnostics flight recorder. On by default;
      * records bounded, privacy-redacted connection/action metadata to an
@@ -268,6 +272,18 @@ data class AppSettings(
 
         const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = true
         const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
+
+        const val BACKGROUND_GRACE_30_SECONDS_MS: Long = 30_000L
+        const val DEFAULT_BACKGROUND_GRACE_MILLIS: Long = 60_000L
+        const val BACKGROUND_GRACE_5_MINUTES_MS: Long = 5 * 60_000L
+        const val BACKGROUND_GRACE_10_MINUTES_MS: Long = 10 * 60_000L
+
+        val BACKGROUND_GRACE_OPTIONS: List<BackgroundGraceOption> = listOf(
+            BackgroundGraceOption(BACKGROUND_GRACE_30_SECONDS_MS, "30 sec"),
+            BackgroundGraceOption(DEFAULT_BACKGROUND_GRACE_MILLIS, "1 min"),
+            BackgroundGraceOption(BACKGROUND_GRACE_5_MINUTES_MS, "5 min"),
+            BackgroundGraceOption(BACKGROUND_GRACE_10_MINUTES_MS, "10 min"),
+        )
     }
 }
 
@@ -278,3 +294,9 @@ data class AppSettings(
  * their own option lists without instantiating [AppSettings].
  */
 data class VoiceLanguageOption(val code: String, val label: String)
+
+/**
+ * Display tuple for the bounded terminal background grace setting. The
+ * repository persists only [millis]; the UI renders [label].
+ */
+data class BackgroundGraceOption(val millis: Long, val label: String)

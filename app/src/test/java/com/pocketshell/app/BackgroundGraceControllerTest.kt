@@ -23,13 +23,14 @@ import org.junit.Test
  *    teardown exactly once, and the subsequent foreground signals a
  *    normal post-grace reattach.
  *
- * `runTest` virtual time drives [kotlinx.coroutines.delay] deterministically
- * so the 60 s window is exercised without wall-clock waits.
+ * `runTest` virtual time drives [kotlinx.coroutines.delay] deterministically.
+ * Tests inject a short duration so coverage does not depend on real minute
+ * waits.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class BackgroundGraceControllerTest {
 
-    private val graceMillis = 60_000L
+    private val graceMillis = 1_000L
 
     @Test
     fun `background does not tear down immediately - it starts the grace timer`() = runTest {
@@ -128,6 +129,44 @@ class BackgroundGraceControllerTest {
         runCurrent()
 
         assertEquals(listOf("foreground:resumedWithinGrace=true"), events)
+    }
+
+    @Test
+    fun `updated grace duration is used by the next background cycle`() = runTest {
+        val events = mutableListOf<String>()
+        val controller = controller(events)
+
+        controller.setGraceMillis(200L)
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(199L)
+        runCurrent()
+
+        assertEquals(emptyList<String>(), events)
+
+        advanceTimeBy(2L)
+        runCurrent()
+        assertEquals(listOf("teardown"), events)
+    }
+
+    @Test
+    fun `updating duration during an active grace window keeps the original deadline`() = runTest {
+        val events = mutableListOf<String>()
+        val controller = controller(events)
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis / 2)
+        runCurrent()
+        controller.setGraceMillis(200L)
+        advanceTimeBy(graceMillis / 2 - 1)
+        runCurrent()
+
+        assertEquals(emptyList<String>(), events)
+
+        advanceTimeBy(2L)
+        runCurrent()
+        assertEquals(listOf("teardown"), events)
     }
 
     @Test

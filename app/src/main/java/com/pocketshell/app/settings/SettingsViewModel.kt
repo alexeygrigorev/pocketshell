@@ -210,6 +210,9 @@ class SettingsViewModel @Inject constructor(
     fun setAgentSubmitEnterDelayMs(delayMs: Int) =
         repository.setAgentSubmitEnterDelayMs(delayMs)
 
+    fun setBackgroundGraceMillis(millis: Long) =
+        repository.setBackgroundGraceMillis(millis)
+
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) =
         repository.setDiagnosticsRecordingEnabled(enabled)
 

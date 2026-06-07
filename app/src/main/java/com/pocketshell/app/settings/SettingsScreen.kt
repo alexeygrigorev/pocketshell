@@ -193,6 +193,8 @@ fun SettingsScreen(
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
                     agentSubmitEnterDelayMs = settings.agentSubmitEnterDelayMs,
                     onAgentSubmitEnterDelayChange = viewModel::setAgentSubmitEnterDelayMs,
+                    backgroundGraceMillis = settings.backgroundGraceMillis,
+                    onBackgroundGraceChange = viewModel::setBackgroundGraceMillis,
                     hosts = hosts,
                     selectedHostId = settings.defaultHostId,
                     onSelectDefaultHost = viewModel::setDefaultHostId,
@@ -520,6 +522,8 @@ private fun TerminalSection(
     onTmuxOnAttachChange: (Boolean) -> Unit,
     agentSubmitEnterDelayMs: Int,
     onAgentSubmitEnterDelayChange: (Int) -> Unit,
+    backgroundGraceMillis: Long,
+    onBackgroundGraceChange: (Long) -> Unit,
     hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
     selectedHostId: Long?,
     onSelectDefaultHost: (Long?) -> Unit,
@@ -678,6 +682,35 @@ private fun TerminalSection(
                         uncheckedBorderColor = PocketShellColors.Border,
                     ),
                     modifier = Modifier.testTag(TMUX_SWITCH_TAG),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Background grace",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Keep the live terminal connection briefly after app switch before " +
+                    "detaching tmux and releasing SSH.",
+                color = PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            AppSettings.BACKGROUND_GRACE_OPTIONS.forEach { option ->
+                DefaultHostOptionRow(
+                    title = option.label,
+                    subtitle = if (option.millis == AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS) {
+                        "Default"
+                    } else {
+                        "Bounded terminal grace window"
+                    },
+                    selected = backgroundGraceMillis == option.millis,
+                    onClick = { onBackgroundGraceChange(option.millis) },
+                    testTag = backgroundGraceOptionTag(option.millis),
                 )
             }
 
@@ -1814,6 +1847,7 @@ internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
 // value label, placed under Settings → Terminal.
 internal const val AGENT_SUBMIT_DELAY_SLIDER_TAG = "settings:terminal:agent-submit-delay-slider"
 internal const val AGENT_SUBMIT_DELAY_VALUE_TAG = "settings:terminal:agent-submit-delay-value"
+internal const val BACKGROUND_GRACE_OPTION_PREFIX = "settings:terminal:background-grace"
 internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"
 internal const val DEFAULT_HOST_EMPTY_TAG = "settings:startup:default-host:empty"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
@@ -1872,6 +1906,9 @@ fun watchedFoldersSettingsHostRowTag(hostId: Long): String =
 
 fun defaultHostOptionTag(hostId: Long): String =
     "settings:startup:default-host:$hostId"
+
+fun backgroundGraceOptionTag(millis: Long): String =
+    "$BACKGROUND_GRACE_OPTION_PREFIX:$millis"
 
 internal fun voiceLanguageOptionTestTag(code: String): String =
     "settings:voice:language:" + code.lowercase()

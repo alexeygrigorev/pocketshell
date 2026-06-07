@@ -65,6 +65,7 @@ class SettingsRepositoryTest {
         assertTrue("expected default to be ON", snap.showSystemNotes)
         assertEquals(null, snap.defaultHostId)
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
+        assertEquals(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS, snap.backgroundGraceMillis)
         assertEquals(AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED, snap.diagnosticsRecordingEnabled)
     }
 
@@ -166,6 +167,30 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `setBackgroundGraceMillis accepts supported options and persists`() {
+        val repo = SettingsRepository(context)
+        repo.setBackgroundGraceMillis(AppSettings.BACKGROUND_GRACE_5_MINUTES_MS)
+        assertEquals(
+            AppSettings.BACKGROUND_GRACE_5_MINUTES_MS,
+            repo.settings.value.backgroundGraceMillis,
+        )
+        assertEquals(
+            AppSettings.BACKGROUND_GRACE_5_MINUTES_MS,
+            SettingsRepository(context).settings.value.backgroundGraceMillis,
+        )
+    }
+
+    @Test
+    fun `setBackgroundGraceMillis rejects unsupported values to default`() {
+        val repo = SettingsRepository(context)
+        repo.setBackgroundGraceMillis(123_456L)
+        assertEquals(
+            AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS,
+            repo.settings.value.backgroundGraceMillis,
+        )
+    }
+
+    @Test
     fun `setTerminalKeyboardMode persists and round-trips`() {
         val repo = SettingsRepository(context)
         repo.setTerminalKeyboardMode(TerminalKeyboardMode.SmartText)
@@ -203,6 +228,7 @@ class SettingsRepositoryTest {
             .putString("show_system_notes", "maybe")
             .putBoolean("host_detail_view_mode", true)
             .putString("usage_warn_threshold_percent", "eighty")
+            .putString("background_grace_millis", "soon")
             .putString("default_host_id", "host-a")
             .commit()
 
@@ -217,6 +243,7 @@ class SettingsRepositoryTest {
         assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
         assertEquals(AppSettings.DEFAULT_USAGE_WARN_PERCENT, snap.usageWarnThresholdPercent)
+        assertEquals(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS, snap.backgroundGraceMillis)
         assertEquals(null, snap.defaultHostId)
     }
 

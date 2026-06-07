@@ -11,6 +11,8 @@ import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
+import com.pocketshell.app.settings.AppSettings
+import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
@@ -55,7 +57,7 @@ import javax.inject.Inject
  *
  * Issue #450 (maintainer-sanctioned relaxation of D21): the terminal
  * teardown on `ON_STOP` is now **delayed by a bounded grace window**
- * ([BACKGROUND_GRACE_MILLIS], 60 s) instead of firing immediately. A
+ * ([BACKGROUND_GRACE_MILLIS], default 60 s) instead of firing immediately. A
  * quick app-switch — to copy a snippet, glance at another app —
  * returns to PocketShell within the grace window, the pending teardown
  * is cancelled on `ON_START`, and the live SSH/tmux connection is never
@@ -88,6 +90,9 @@ class App : Application() {
 
     @Inject
     lateinit var diagnosticRecorder: DiagnosticRecorder
+
+    @Inject
+    lateinit var settingsRepository: SettingsRepository
 
     /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
@@ -174,6 +179,9 @@ class App : Application() {
             Lifecycle.Event.ON_STOP -> {
                 processForeground = false
                 DiagnosticEvents.record("app", "background")
+                backgroundGraceController.setGraceMillis(
+                    settingsRepository.settings.value.backgroundGraceMillis,
+                )
                 backgroundGraceController.onBackground()
             }
             Lifecycle.Event.ON_START -> {
@@ -321,16 +329,12 @@ private const val TERMINAL_NETWORK_TAG: String = "PsAppTerminalNet"
 internal const val GRACE_LIFECYCLE_TAG: String = "PsAppBgGrace"
 
 /**
- * Issue #450: the single, easily-tunable bounded grace window before the
- * terminal SSH/tmux connection is torn down after the app backgrounds.
- *
- * The maintainer asked for "at least a minute" so a quick app-switch
- * (copying a snippet, glancing at another app) does not trigger a
- * reconnect on return. 60 s satisfies that while keeping the window
- * bounded — this is a delay of the existing teardown, not permanent
- * background work. Flip this one constant to retune.
+ * Issue #450: default bounded grace window before the terminal SSH/tmux
+ * connection is torn down after the app backgrounds. The Settings →
+ * Terminal preference can extend or shorten this for future background
+ * cycles; the default preserves the original hard-coded 60s behaviour.
  */
-internal const val BACKGROUND_GRACE_MILLIS: Long = 60_000L
+internal const val BACKGROUND_GRACE_MILLIS: Long = AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS
 
 /**
  * Issue #450: bounded grace-window state machine for the terminal
@@ -360,7 +364,7 @@ internal const val BACKGROUND_GRACE_MILLIS: Long = 60_000L
  */
 internal class BackgroundGraceController(
     private val scope: CoroutineScope,
-    private val graceMillis: Long,
+    private var graceMillis: Long,
     private val onGraceElapsed: suspend () -> Unit,
     private val onForeground: suspend (resumedWithinGrace: Boolean) -> Unit,
 ) {
@@ -374,6 +378,16 @@ internal class BackgroundGraceController(
      * needed). Reset on the next [onBackground].
      */
     private var teardownFired: Boolean = false
+
+    /**
+     * Update the grace window used by the next [onBackground] call. An
+     * already-running timer keeps its original deadline so changing Settings
+     * cannot unexpectedly prolong a backgrounded connection.
+     */
+    fun setGraceMillis(millis: Long) {
+        if (graceJob?.isActive == true || graceMillis == millis) return
+        graceMillis = millis
+    }
 
     fun onBackground() {
         // A second ON_STOP without an intervening ON_START should not

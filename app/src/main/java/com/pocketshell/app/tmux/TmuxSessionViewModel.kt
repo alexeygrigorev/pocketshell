@@ -2374,7 +2374,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
         )
         withContext(NonCancellable) {
-            closeCurrentConnectionAndJoin()
+            closeCurrentConnectionAndJoin(
+                cacheEviction = RuntimeCacheEviction.TargetRuntime(target.toRuntimeKey()),
+            )
         }
         activeAttachMilestone = null
         activeTarget = null
@@ -6591,6 +6593,7 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private suspend fun closeCurrentConnectionAndJoin(
         preserveConnectingTarget: ConnectionTarget? = null,
+        cacheEviction: RuntimeCacheEviction = RuntimeCacheEviction.HostWide,
     ) {
         val closingHostId = activeTarget?.hostId ?: registeredHostId
         // Issue #257: drain any background detach left in flight by a
@@ -6654,9 +6657,16 @@ public class TmuxSessionViewModel @Inject constructor(
         runCatching { clientRef?.detachCleanly() }
         clientRef = null
         unregisterCurrentClient()
-        closingHostId?.let { hostId ->
-            runtimeCache.removeHost(hostId).forEach { cached ->
-                cached.closeCachedRuntime()
+        when (cacheEviction) {
+            RuntimeCacheEviction.HostWide -> {
+                closingHostId?.let { hostId ->
+                    runtimeCache.removeHost(hostId).forEach { cached ->
+                        cached.closeCachedRuntime()
+                    }
+                }
+            }
+            is RuntimeCacheEviction.TargetRuntime -> {
+                runtimeCache.remove(cacheEviction.key)?.closeCachedRuntime()
             }
         }
         releaseCurrentLeaseOrCloseRawSession()
@@ -6673,6 +6683,11 @@ public class TmuxSessionViewModel @Inject constructor(
         remoteColumns = 0
         remoteRows = 0
         resetControlClientSizeForAttach()
+    }
+
+    private sealed interface RuntimeCacheEviction {
+        data object HostWide : RuntimeCacheEviction
+        data class TargetRuntime(val key: TmuxRuntimeKey) : RuntimeCacheEviction
     }
 
     /**

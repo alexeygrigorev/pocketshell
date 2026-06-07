@@ -7245,6 +7245,81 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    @Test
+    fun failedSameHostSwitchKeepsParkedRuntimeActivatable() = runTest {
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val vm = newVm(
+            registry = registry,
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val clientA = FakeTmuxClient().withSinglePane("work", "%0")
+        val clientB = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "list-panes"
+            closeAndThrowException = TmuxClientException("pane readiness failed")
+        }
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            when (sessionName) {
+                "work" -> clientA
+                "other" -> clientB
+                else -> error("unexpected tmux client request for $sessionName")
+            }
+        }
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertSame(clientA, registry.clients.value[1L]?.client)
+        assertEquals(1, connector.connectCount)
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "other",
+        )
+        advanceUntilIdle()
+
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed)
+        assertEquals(listOf(tmuxRuntimeKeyForTest("work")), runtimeCache.snapshotKeys())
+        assertFalse("failed switch must not close parked session A", clientA.closed)
+        assertTrue("failed session B client must be closed", clientB.closed)
+        assertFalse(runtimeCache.contains(tmuxRuntimeKeyForTest("other")))
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        runCurrent()
+
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertSame(clientA, registry.clients.value[1L]?.client)
+        assertFalse("restored parked session A must remain open", clientA.closed)
+        assertFalse(runtimeCache.contains(tmuxRuntimeKeyForTest("work")))
+    }
+
     // ─── Issue #437 (slice A): same-host switch must NOT blank to ───
     // the full-screen "Connecting" overlay. The cold same-host switch
     // (target not yet cached) enters the new [Switching] state, keeps the

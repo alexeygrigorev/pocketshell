@@ -85,6 +85,10 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         runtimes.keys.toList()
     }
 
+    internal fun remove(key: TmuxRuntimeKey): CachedTmuxRuntime? = synchronized(this) {
+        runtimes.remove(key)?.runtime
+    }
+
     internal fun removeHost(hostId: Long): List<CachedTmuxRuntime> = synchronized(this) {
         val removed = mutableListOf<CachedTmuxRuntime>()
         val iterator = runtimes.entries.iterator()

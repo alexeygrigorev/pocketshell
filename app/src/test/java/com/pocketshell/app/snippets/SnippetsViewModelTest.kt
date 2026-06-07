@@ -262,8 +262,8 @@ class SnippetsViewModelTest {
 
     @Test
     fun renameSnippet_setsExplicitOverride() = runTest {
-        // Issue #190: the long-press rename affordance must persist a
-        // user-chosen label and override the derived one.
+        // Issue #190: the rename affordance must persist a user-chosen
+        // label and override the derived one.
         val vm = SnippetsViewModel(db.snippetDao())
         vm.bindHost(hostId)
         vm.addSnippet(label = null, body = "echo first\necho second", kind = SnippetKind.Command)

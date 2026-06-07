@@ -66,9 +66,9 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *  - **Inline error banner** — surfaces DAO failures from the ViewModel.
  *  - **Filtered list** — shows one snippet kind at a time.
  *
- * Each row carries `Edit` and `Delete` text buttons. Delete shows a
- * confirmation dialog because the action is destructive and not undoable
- * (no soft-delete flag on [SnippetEntity]).
+ * Each row carries a kebab with edit, rename, and delete actions. Delete
+ * shows a confirmation dialog because the action is destructive and not
+ * undoable (no soft-delete flag on [SnippetEntity]).
  *
  * @param hostId the host whose library this screen renders. The ViewModel
  *               binds to this id; passing 0 / a non-existent id surfaces
@@ -95,10 +95,10 @@ public fun SnippetsScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingDelete: SnippetEntity? by remember { mutableStateOf(null) }
     var selectedKind by remember { mutableStateOf(SnippetKind.Prompt) }
-    // Issue #190: long-press surface for renaming a snippet without
-    // editing the body. Reuses the rename text field shape so the user
-    // can clear an override (returning to derived-label behaviour) or
-    // type a new override.
+    // Rename surface for changing a snippet label without editing the
+    // body. Reuses the rename text field shape so the user can clear an
+    // override (returning to derived-label behaviour) or type a new
+    // override.
     var renameTarget: SnippetEntity? by remember { mutableStateOf(null) }
 
     BackHandler {
@@ -250,7 +250,7 @@ public fun SnippetsScreen(
     }
 
     renameTarget?.let { target ->
-        // Issue #190: long-press rename — single text field pre-filled
+        // Single-field rename, pre-filled
         // with the current displayed label. Clearing the field reverts
         // to derived-label behaviour.
         SnippetRenameDialog(
@@ -415,11 +415,9 @@ internal fun snippetKindTabTag(kind: SnippetKind): String =
  * mono body preview in the subtitle slot (`bodyMono`); the [KindTag] command/
  * prompt pill and a per-row [Kebab] sit in the trailing slot.
  *
- * The former inline `Edit` / `Delete` text buttons and the long-press-only
- * rename gesture all collapse into the one kebab (§4 decision 4). Rename was
- * previously reachable only by long-press — folding it into the visible
- * overflow makes it discoverable, which the inline-buttons removal would
- * otherwise have hidden entirely.
+ * The former inline `Edit` / `Delete` text buttons and rename gesture all
+ * collapse into the one kebab (§4 decision 4), keeping row actions visible
+ * without widening the dense row.
  */
 @Composable
 private fun SnippetRow(
@@ -457,8 +455,8 @@ private fun SnippetRow(
 /**
  * Add dialog (issue #190). Single body text input + the command/prompt
  * kind toggle — no separate label field. The label is auto-derived from
- * the body's first line at read time; the user can rename via long-press
- * later if the derived label does not read well.
+ * the body's first line at read time; the user can rename from the row
+ * menu later if the derived label does not read well.
  */
 @Composable
 internal fun SnippetAddDialog(
@@ -488,7 +486,7 @@ internal fun SnippetAddDialog(
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "We'll use the first line as the label. " +
-                        "Long-press a snippet later to rename it.",
+                        "Use the row menu to rename it.",
                     color = PocketShellColors.TextMuted,
                     fontSize = 11.sp,
                 )

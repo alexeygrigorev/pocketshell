@@ -117,6 +117,12 @@ class SnippetsScreenTabsTest {
         }
 
         compose.onNodeWithText("Add prompt").performClick()
+        compose.onNodeWithText(
+            "We'll use the first line as the label. Use the row menu to rename it.",
+        ).assertIsDisplayed()
+        compose.onNodeWithText(
+            "We'll use the first line as the label. Long-press a snippet later to rename it.",
+        ).assertDoesNotExist()
         compose.onNodeWithText("Snippet text").performTextInput("Continue from the last plan.")
         compose.onNodeWithText("Save").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {

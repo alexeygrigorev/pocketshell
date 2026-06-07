@@ -252,10 +252,10 @@ public open class SnippetsViewModel @Inject constructor(
     }
 
     /**
-     * Rename a snippet via the long-press affordance on the picker /
-     * manage list (issue #190). Empty or whitespace-only input clears the
-     * override and reverts the row to the derived-label path. Other
-     * fields (body, kind, hostId) are preserved verbatim from [snippet].
+     * Rename a snippet from the picker / manage list row menu. Empty or
+     * whitespace-only input clears the override and reverts the row to the
+     * derived-label path. Other fields (body, kind, hostId) are preserved
+     * verbatim from [snippet].
      */
     public fun renameSnippet(snippet: SnippetEntity, newLabel: String?) {
         val normalised = newLabel?.trim()?.takeIf { it.isNotEmpty() }

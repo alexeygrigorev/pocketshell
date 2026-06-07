@@ -179,20 +179,6 @@
         </activity>
 
         <!--
-            Issue #138: receiver invoked when the user taps the
-            share-success notification. Copies the full remote path to
-            the system clipboard. Not exported — only PocketShell's own
-            PendingIntent triggers it.
-        -->
-        <receiver
-            android:name=".notifications.CopyRemotePathReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.pocketshell.app.notifications.action.COPY_REMOTE_PATH" />
-            </intent-filter>
-        </receiver>
-
-        <!--
             Issue #138 connected-emulator test: the share-target end-to-end
             test stages a temp file under the target app's cache and hands
             its URI to `ShareActivity`. The FileProvider is declared here

@@ -34,7 +34,7 @@ import java.util.TimeZone
  * 3. Ensures `~/inbox/pocketshell/` exists with `mkdir -p`.
  * 4. SCP-uploads the bytes via [SshSession.uploadFile] /
  *    [SshSession.uploadStream].
- * 5. Returns the absolute remote path so the notification + toast can
+ * 5. Returns the absolute remote path so the in-app result surface can
  *    display it.
  *
  * Errors map to human-readable strings via [errorMessage] so the

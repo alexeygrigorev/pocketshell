@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
  * Distinct from [com.pocketshell.app.MainActivity]: the share intent
  * launches into PocketShell as a one-shot transactional surface — the
  * user picks a host, the upload runs in the ViewModel, the activity
- * finishes itself when the result toast resolves. The host list +
+ * finishes itself when the user dismisses the result. The host list +
  * session navigation continue to live in MainActivity for the normal
  * launcher flow.
  */
@@ -63,12 +63,11 @@ class ShareActivity : FragmentActivity() {
             }
         }
 
-        // Bridge upload state -> Toast so users see a quick
-        // acknowledgement on the source app's surface in case they
-        // dismiss the result screen before tapping Done. Observe the
-        // flow imperatively on the activity's lifecycle scope so the
-        // toast is independent of Compose recomposition.
-        watchUploadStateForToasts()
+        // Keep failure feedback independent of Compose recomposition.
+        // Successful uploads stay quiet outside the in-app result
+        // surface; the share action was user-initiated and does not need
+        // an extra Android toast.
+        watchUploadStateForFailures()
 
         // Issue #560: when the user picked an active SESSION as the
         // destination, the ViewModel stages the file into that session's
@@ -105,21 +104,11 @@ class ShareActivity : FragmentActivity() {
             )
         }
 
-    private fun watchUploadStateForToasts() {
+    private fun watchUploadStateForFailures() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.uploadState.collect { state ->
                     when (state) {
-                        is UploadState.Success ->
-                            Toast.makeText(
-                                this@ShareActivity,
-                                if (state.totalCount > 1) {
-                                    "Uploaded ${state.successCount}/${state.totalCount} to ${state.hostName}"
-                                } else {
-                                    "Uploaded to ${state.hostName}: ${state.remotePath}"
-                                },
-                                Toast.LENGTH_LONG,
-                            ).show()
                         is UploadState.Failed ->
                             Toast.makeText(
                                 this@ShareActivity,

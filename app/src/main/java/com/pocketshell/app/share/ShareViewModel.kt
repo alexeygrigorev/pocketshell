@@ -48,7 +48,8 @@ import javax.inject.Inject
  * - Run the upload via [ShareUploader] and expose the [UploadState]
  *   so the activity can swap the picker for a progress / result
  *   surface.
- * - Drive notification + clipboard surface on success/failure.
+ * - Drive failure feedback while keeping successful share/upload completion
+ *   quiet outside the in-app result surface.
  * - Issue #193: surface a real "paste into active session" option
  *   driven by [ActiveTmuxClients]. When the user shares text and at
  *   least one host has a registered live `tmux -CC` client, the
@@ -536,7 +537,9 @@ internal class ShareViewModel @Inject constructor(
 
     /**
      * Map the accumulated per-file results into a single terminal
-     * [UploadState] and drive the matching notification.
+     * [UploadState]. Failed outcomes also drive the matching failure
+     * notification; successful uploads stay quiet outside the in-app
+     * result surface.
      *
      * - All succeeded -> [UploadState.Success] (detail is the single
      *   remote path for a one-file share, or an "N files" summary).
@@ -567,12 +570,6 @@ internal class ShareViewModel @Inject constructor(
                     copyText = copyText,
                     successCount = successCount,
                     totalCount = total,
-                )
-                ShareUploadNotifications.showSuccess(
-                    context = applicationContext,
-                    hostName = host.name,
-                    remotePath = detail,
-                    copyText = copyText,
                 )
             }
             successCount == 0 -> {
@@ -624,7 +621,7 @@ internal class ShareViewModel @Inject constructor(
      * Surfaces success/failure through the existing [UploadState]
      * machine so the picker UI does not need a parallel result surface.
      * The "remotePath" slot is repurposed for a one-line preview of the
-     * pasted text (truncated to keep the notification short).
+     * pasted text.
      */
     fun pasteIntoSession(host: HostEntity) {
         val staged = _items.value.firstOrNull()
@@ -659,7 +656,6 @@ internal class ShareViewModel @Inject constructor(
                         "share paste succeeded on ${host.name}: ${preview.length} chars",
                     )
                     _uploadState.value = UploadState.Success(host.name, preview)
-                    ShareUploadNotifications.showSuccess(applicationContext, host.name, preview)
                 },
                 onFailure = { error ->
                     val message = error.message ?: "Paste failed"
@@ -791,7 +787,7 @@ internal class ShareViewModel @Inject constructor(
  * paste-into-session path too — the `remotePath`-named field carries a
  * short text preview when the operation was a paste rather than an
  * upload. The field name is retained to avoid churning the existing
- * notification call sites; the renderer treats both paths uniformly.
+ * renderer treats both paths uniformly.
  */
 internal sealed interface UploadState {
     /** Nothing in flight; show the host picker (or the empty state). */
@@ -810,7 +806,7 @@ internal sealed interface UploadState {
      * (issue #258), [remotePath] includes a count header for readability
      * while [copyText] is just the newline-joined uploaded paths;
      * [successCount]/[totalCount] carry the counts so the result surface
-     * and toast can say "uploaded N/N".
+     * can say "uploaded N/N".
      *
      * For send-keys paste (issue #193), [remotePath] holds a short
      * preview of the pasted text — the field name is preserved for

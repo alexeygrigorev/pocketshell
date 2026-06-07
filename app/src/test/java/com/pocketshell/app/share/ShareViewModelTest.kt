@@ -1,5 +1,6 @@
 package com.pocketshell.app.share
 
+import android.app.NotificationManager
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -59,6 +60,7 @@ class ShareViewModelTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        context.getSystemService(NotificationManager::class.java).cancelAll()
         db = Room.inMemoryDatabaseBuilder(
             context,
             AppDatabase::class.java,
@@ -545,6 +547,56 @@ class ShareViewModelTest {
         assertEquals(2, failed.totalCount)
         assertEquals(0, failed.successCount)
         assertEquals(setOf("x.png", "y.png"), failed.failedNames.toSet())
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun startUploadSuccessDoesNotPostAndroidNotification() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 35L, name = "hetzner")
+        val fake = FakeUploader().also { vm.uploader = it }
+        vm.setItems(listOf(uriItem("a.png"), uriItem("b.png"), uriItem("c.png")))
+        val manager = context.getSystemService(NotificationManager::class.java)
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        val success = vm.uploadState.first { it is UploadState.Success }
+        assertTrue(success is UploadState.Success)
+        assertTrue(
+            "successful share uploads must not leave a status-bar notification; active=" +
+                manager.activeNotifications.map {
+                    it.notification.extras.getCharSequence("android.title")?.toString()
+                },
+            manager.activeNotifications.isEmpty(),
+        )
+        assertEquals(listOf("a.png", "b.png", "c.png"), fake.uploadedNames)
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun startUploadFailureStillPostsAndroidNotification() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 36L, name = "hetzner")
+        val fake = FakeUploader(failNames = setOf("bad.png")).also { vm.uploader = it }
+        vm.setItem(uriItem("bad.png"))
+        val manager = context.getSystemService(NotificationManager::class.java)
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals("Permission denied", failed.message)
+        val posted = manager.activeNotifications.singleOrNull()
+        assertEquals(
+            "failed share uploads must keep Android error feedback",
+            "Could not upload to hetzner",
+            posted?.notification?.extras?.getCharSequence("android.title")?.toString(),
+        )
+        assertEquals(
+            "Permission denied",
+            posted?.notification?.extras?.getCharSequence("android.text")?.toString(),
+        )
     }
 
     @Test

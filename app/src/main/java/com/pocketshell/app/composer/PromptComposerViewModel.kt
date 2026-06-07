@@ -470,6 +470,7 @@ public class PromptComposerViewModel @Inject constructor(
     private fun dispatchSendNow(withEnter: Boolean) {
         val draft = _uiState.value.draft
         val attachments = _uiState.value.attachments
+        val uploadInFlight = attachmentJob?.isActive == true
         // Issue #544: compose the outgoing prompt = the user's clean draft
         // + the "Attached files:" suffix appended at the END from whatever
         // tiles remain at send time. The draft stayed clean while composing;
@@ -492,8 +493,22 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #544/#566: clear the staged tiles now that they've been folded
         // into the dispatched prompt, so the next composer open is a clean
         // slate with no stale attachments.
-        if (attachments.isNotEmpty()) {
-            _uiState.update { it.copy(attachments = emptyList()) }
+        //
+        // Issue #570: if the user sends while an attachment upload is still
+        // stuck, treat that send as a text-only send and stop the unfinished
+        // upload from writing a late error/result back into the now-sent
+        // composer state.
+        if (uploadInFlight) {
+            attachmentJob?.cancel()
+            attachmentJob = null
+        }
+        if (attachments.isNotEmpty() || uploadInFlight) {
+            _uiState.update {
+                it.copy(
+                    attachments = emptyList(),
+                    attachmentUpload = AttachmentUploadState.Idle,
+                )
+            }
         }
         onDraftChange("")
     }

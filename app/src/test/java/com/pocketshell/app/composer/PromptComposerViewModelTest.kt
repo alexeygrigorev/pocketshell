@@ -2221,10 +2221,12 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun requestSendDuringAttachmentUploadSendsCurrentTextOnly() = runTest {
+    fun requestSendDuringAttachmentUploadSendsCurrentTextOnlyAndClearsBusyState() = runTest {
         // Issue #570: an in-flight upload should not disable the user's typed
         // prompt. Uploading files are not staged chips yet, so this sends the
-        // current text without waiting for the stalled attachment batch.
+        // current text without waiting for the stalled attachment batch and
+        // cancels the unfinished upload so it cannot write a late error into
+        // the now-sent composer state.
         val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
         val sent = collectSendRequests(vm)
         val uploadStarted = CompletableDeferred<Unit>()
@@ -2247,12 +2249,14 @@ class PromptComposerViewModelTest {
         assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.attachments.isEmpty())
         assertEquals(
-            PromptComposerViewModel.AttachmentUploadState.Uploading(2),
+            PromptComposerViewModel.AttachmentUploadState.Idle,
             vm.uiState.value.attachmentUpload,
         )
+        assertNull(vm.uiState.value.error)
 
-        uploadResult.complete(Result.success(emptyList()))
+        uploadResult.complete(Result.failure(IllegalStateException("late upload failure")))
         advanceUntilIdle()
+        assertNull(vm.uiState.value.error)
     }
 
     @Test

@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -519,35 +520,64 @@ internal fun AgentComposerSurface(
         )
     }
     val canSend = sendEnabled && fieldValue.text.isNotBlank()
-    Row(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
             .padding(top = PocketShellSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
-        ComposerDraftField(
-            value = fieldValue,
-            onValueChange = { newValue ->
-                fieldValue = newValue
-                if (newValue.text != value) {
-                    onValueChange(newValue.text)
+        val compact = maxWidth < AgentComposerCompactWidth
+        val field: @Composable (Modifier) -> Unit = { fieldSurfaceModifier ->
+            ComposerDraftField(
+                value = fieldValue,
+                onValueChange = { newValue ->
+                    fieldValue = newValue
+                    if (newValue.text != value) {
+                        onValueChange(newValue.text)
+                    }
+                },
+                placeholder = placeholder,
+                fieldTag = inputFieldTag,
+                // Keep long dictated prompts readable without letting the
+                // composer take over the whole pane under IME constraints.
+                minHeight = PocketShellDensity.tapTargetMin,
+                maxHeight = AgentComposerMaxDraftHeight,
+                singleLine = false,
+                modifier = fieldSurfaceModifier,
+            )
+        }
+        val sendButton: @Composable (Modifier) -> Unit = { sendModifier ->
+            ComposerSendEnterButton(
+                label = "Send",
+                tooltipLabel = AGENT_SEND_TOOLTIP_LABEL,
+                onClick = { onSend(fieldValue.text) },
+                enabled = canSend,
+                modifier = sendModifier.testTag(sendButtonTag),
+            )
+        }
+        if (compact) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+            ) {
+                field(Modifier.fillMaxWidth())
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    sendButton(Modifier)
                 }
-            },
-            placeholder = placeholder,
-            fieldTag = inputFieldTag,
-            // Single-row agent draft: keep the field on the 48dp touch floor.
-            minHeight = PocketShellDensity.tapTargetMin,
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-        )
-        ComposerSendEnterButton(
-            label = "Send",
-            tooltipLabel = AGENT_SEND_TOOLTIP_LABEL,
-            onClick = { onSend(fieldValue.text) },
-            enabled = canSend,
-            modifier = Modifier.testTag(sendButtonTag),
-        )
+            }
+            return@BoxWithConstraints
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        ) {
+            field(Modifier.weight(1f))
+            sendButton(Modifier)
+        }
     }
 }
 
@@ -607,6 +637,9 @@ internal fun UnsentPromptBanner(
  */
 internal const val AGENT_SEND_TOOLTIP_LABEL: String =
     "Send the message to the agent"
+
+private val AgentComposerCompactWidth = 360.dp
+private val AgentComposerMaxDraftHeight = 120.dp
 
 internal const val UNSENT_PROMPT_RETRY_TAG: String = "unsent-prompt-retry"
 internal const val UNSENT_PROMPT_DISCARD_TAG: String = "unsent-prompt-discard"

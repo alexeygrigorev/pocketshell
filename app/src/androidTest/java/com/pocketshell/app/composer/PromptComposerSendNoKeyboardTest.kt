@@ -1,10 +1,12 @@
 package com.pocketshell.app.composer
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -12,6 +14,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.voice.WhisperClient
@@ -232,6 +235,57 @@ class PromptComposerSendNoKeyboardTest {
         assertEquals(longDictation, sent)
     }
 
+    @Test
+    fun agentPaneCompactLayoutKeepsSendReachableForLongDictationAndAttachments() {
+        // Issue #567/#569: under mobile/IME-style width constraints, long
+        // dictated text plus the attachment suffix must not compress the
+        // agent composer into an unusable row. The compact layout stacks Send
+        // below the bounded draft field, keeping it visible and tappable.
+        var text by mutableStateOf("")
+        var sent: String? = null
+
+        compose.setContent {
+            PocketShellTheme {
+                AgentComposerSurface(
+                    value = text,
+                    onValueChange = { text = it },
+                    onSend = { liveText -> sent = liveText },
+                    inputFieldTag = "issue567:agent-input",
+                    sendButtonTag = "issue567:agent-send",
+                    modifier = Modifier.width(300.dp),
+                )
+            }
+        }
+
+        val prompt = buildString {
+            append("Please inspect this screenshot and explain the failure. ")
+            repeat(30) { append("This is dictated text that should stay editable and submit. ") }
+            append("\n\nAttached files:\n")
+            append("- ~/.pocketshell/attachments/host-1/issue-567-shot.png")
+        }
+        compose.onNodeWithTag("issue567:agent-input").performTextInput(prompt)
+        compose.waitForIdle()
+
+        val inputBounds = compose.onNodeWithTag("issue567:agent-input")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val sendBounds = compose.onNodeWithTag("issue567:agent-send")
+            .assertIsDisplayed()
+            .assertIsEnabled()
+            .fetchSemanticsNode()
+            .boundsInRoot
+
+        assertTrue(
+            "compact composer should stack Send below the draft instead of squeezing both into one row",
+            sendBounds.top >= inputBounds.bottom,
+        )
+
+        compose.onNodeWithTag("issue567:agent-send").performClick()
+        compose.waitForIdle()
+
+        assertEquals(prompt, sent)
+    }
+
     /**
      * Issue #570 / #544: staged attachment chips are a valid prompt even
      * without typed text. The ViewModel already composes attachment-only
@@ -330,7 +384,10 @@ class PromptComposerSendNoKeyboardTest {
         assertEquals(1, sent.size)
         assertEquals("send while screenshots are still uploading", sent[0].text)
         assertEquals(true, sent[0].withEnter)
-        assertTrue(vm.uiState.value.attachmentUpload is PromptComposerViewModel.AttachmentUploadState.Uploading)
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Idle,
+            vm.uiState.value.attachmentUpload,
+        )
 
         compose.onNodeWithTag(COMPOSER_MIC_TAG)
             .assertIsDisplayed()
@@ -345,10 +402,12 @@ class PromptComposerSendNoKeyboardTest {
         compose.runOnIdle {
             uploadResult.complete(Result.failure(java.io.IOException("degraded upload path")))
         }
-        compose.waitUntil(timeoutMillis = 5_000) {
-            vm.uiState.value.attachmentUpload == PromptComposerViewModel.AttachmentUploadState.Idle
-        }
-        assertTrue(vm.uiState.value.error.orEmpty().contains("Attachment upload failed"))
+        compose.waitForIdle()
+        assertEquals(
+            "late upload failures from a cancelled send-time upload must not dirty the composer",
+            null,
+            vm.uiState.value.error,
+        )
     }
 
     /**

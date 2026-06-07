@@ -2,12 +2,22 @@ package com.pocketshell.app.snippets
 
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.CommandTemplateEntity
+import java.util.regex.Pattern
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SnippetTemplateTest {
+
+    @Test
+    fun placeholderRegexPattern_escapesLiteralClosingBracesForAndroidIcu() {
+        assertEquals(
+            """\{\{\s*([A-Za-z][A-Za-z0-9_-]{0,39})\s*\}\}""",
+            PLACEHOLDER_REGEX_PATTERN,
+        )
+        Pattern.compile(PLACEHOLDER_REGEX_PATTERN)
+    }
 
     @Test
     fun templateParameters_areReturnedInFirstUseOrderWithoutDuplicates() {

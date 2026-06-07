@@ -3,7 +3,8 @@ package com.pocketshell.app.snippets
 import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 
-private val PLACEHOLDER_REGEX = Regex("""\{\{\s*([A-Za-z][A-Za-z0-9_-]{0,39})\s*}}""")
+internal const val PLACEHOLDER_REGEX_PATTERN = """\{\{\s*([A-Za-z][A-Za-z0-9_-]{0,39})\s*\}\}"""
+private val PLACEHOLDER_REGEX = Regex(PLACEHOLDER_REGEX_PATTERN)
 
 private const val BUILT_IN_GIT_COMMIT_PUSH_ID: Long = -556_001L
 private const val USER_COMMAND_TEMPLATE_SNIPPET_ID_OFFSET: Long = -1_556_000L

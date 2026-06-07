@@ -486,16 +486,23 @@ class BackgroundGraceControllerTest {
             "network fanout must remain blocked until the foreground grace decision completes",
             immediateDecision is TerminalNetworkDecision.Defer,
         )
+        assertEquals("defer", immediateDecision.gateDiagnostics.decision)
+        assertEquals("foreground_resume_pending", immediateDecision.gateDiagnostics.reason)
 
         val foregroundDecision = gate.onForegroundResumeFinished(
             resumedWithinGrace = true,
             hasLiveTerminalRuntime = true,
         )
+        val suppress = foregroundDecision as TerminalNetworkDecision.Suppress
         assertEquals(
             "a survived live runtime within grace must suppress queued network reconnect",
-            TerminalNetworkDecision.Suppress(change),
-            foregroundDecision,
+            change,
+            suppress.change,
         )
+        assertEquals("suppress", suppress.gateDiagnostics.decision)
+        assertEquals("within_grace_live_runtime", suppress.gateDiagnostics.reason)
+        assertEquals(true, suppress.gateDiagnostics.resumedWithinGrace)
+        assertEquals(true, suppress.gateDiagnostics.hasLiveTerminalRuntime)
     }
 
     @Test
@@ -517,11 +524,16 @@ class BackgroundGraceControllerTest {
             hasLiveTerminalRuntime = false,
         )
 
+        val dispatch = foregroundDecision as TerminalNetworkDecision.Dispatch
         assertEquals(
             "after grace teardown, the foreground path must still replay the queued reconnect signal",
-            TerminalNetworkDecision.Dispatch(change),
-            foregroundDecision,
+            change,
+            dispatch.change,
         )
+        assertEquals("dispatch", dispatch.gateDiagnostics.decision)
+        assertEquals("post_grace_foreground", dispatch.gateDiagnostics.reason)
+        assertEquals(false, dispatch.gateDiagnostics.resumedWithinGrace)
+        assertEquals(false, dispatch.gateDiagnostics.hasLiveTerminalRuntime)
     }
 
     @Test
@@ -535,19 +547,21 @@ class BackgroundGraceControllerTest {
         )
 
         gate.onForegroundResumeStarted()
-        assertEquals(
-            TerminalNetworkDecision.Suppress(null),
-            gate.onForegroundResumeFinished(
-                resumedWithinGrace = false,
-                hasLiveTerminalRuntime = false,
-            ),
-        )
+        val emptyForegroundDecision = gate.onForegroundResumeFinished(
+            resumedWithinGrace = false,
+            hasLiveTerminalRuntime = false,
+        ) as TerminalNetworkDecision.Suppress
+        assertEquals(null, emptyForegroundDecision.change)
+        assertEquals("no_pending_change", emptyForegroundDecision.gateDiagnostics.reason)
 
+        val foregroundDecision = gate.onNetworkChange(change) as TerminalNetworkDecision.Dispatch
         assertEquals(
             "normal active foreground fanout should not stay blocked after the foreground decision",
-            TerminalNetworkDecision.Dispatch(change),
-            gate.onNetworkChange(change),
+            change,
+            foregroundDecision.change,
         )
+        assertEquals("dispatch", foregroundDecision.gateDiagnostics.decision)
+        assertEquals("foreground_active", foregroundDecision.gateDiagnostics.reason)
     }
 
     @Test

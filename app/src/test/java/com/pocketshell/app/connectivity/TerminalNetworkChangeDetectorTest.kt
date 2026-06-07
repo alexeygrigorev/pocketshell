@@ -24,19 +24,63 @@ class TerminalNetworkChangeDetectorTest {
     @Test
     fun `validated default network change emits one reconnect event`() {
         val detector = TerminalNetworkChangeDetector(
-            initial = TerminalNetworkSnapshot.Validated("wifi"),
+            initial = TerminalNetworkSnapshot.Validated("wifi", setOf("WIFI")),
         )
 
         val change = detector.update(
-            snapshot = TerminalNetworkSnapshot.Validated("cell"),
+            snapshot = TerminalNetworkSnapshot.Validated("cell", setOf("CELLULAR", "VPN")),
             reason = "handoff",
         )
 
         assertTrue(change != null)
-        assertEquals(TerminalNetworkSnapshot.Validated("wifi"), change!!.previous)
-        assertEquals(TerminalNetworkSnapshot.Validated("cell"), change.current)
+        assertEquals(TerminalNetworkSnapshot.Validated("wifi", setOf("WIFI")), change!!.previous)
+        assertEquals(TerminalNetworkSnapshot.Validated("cell", setOf("CELLULAR", "VPN")), change.current)
         assertEquals("handoff", change.reason)
         assertEquals(1L, change.sequence)
+    }
+
+    @Test
+    fun `network diagnostic fields include handles and transport sets`() {
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi-handle", setOf("WIFI")),
+        )
+
+        val change = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("vpn-cell-handle", setOf("VPN", "CELLULAR")),
+            reason = "handoff",
+        )!!
+
+        val fields = change.networkDiagnosticFields().toMap()
+        assertEquals("wifi-handle", fields["previousNetworkHandle"])
+        assertEquals("vpn-cell-handle", fields["currentNetworkHandle"])
+        assertEquals("WIFI", fields["previousTransports"])
+        assertEquals("CELLULAR,VPN", fields["currentTransports"])
+        assertEquals("wifi-handle", fields["previousValidatedNetworkHandle"])
+        assertEquals("WIFI", fields["previousValidatedTransports"])
+    }
+
+    @Test
+    fun `same network handle with changed transport metadata does not emit reconnect event`() {
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("same-handle", setOf("WIFI")),
+        )
+
+        assertNull(
+            detector.update(
+                snapshot = TerminalNetworkSnapshot.Validated("same-handle", setOf("WIFI", "VPN")),
+                reason = "android-network-churn",
+            ),
+        )
+
+        val handoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("cell-handle", setOf("CELLULAR")),
+            reason = "real-handoff",
+        )
+
+        assertTrue(handoff != null)
+        assertEquals("same-handle", handoff!!.previousValidated!!.networkHandle)
+        assertEquals("VPN,WIFI", handoff.previousValidated!!.transportSetLogValue)
+        assertEquals("cell-handle", handoff.current.networkHandle)
     }
 
     @Test

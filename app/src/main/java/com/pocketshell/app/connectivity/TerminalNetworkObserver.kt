@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.util.Log
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -92,10 +93,7 @@ class TerminalNetworkObserver @Inject constructor(
         DiagnosticEvents.record(
             "network",
             "validated_default_changed",
-            "sequence" to change.sequence,
-            "reason" to change.reason,
-            "previous" to change.previous.logValue,
-            "current" to change.current.logValue,
+            *change.networkDiagnosticFields(),
         )
         _changes.tryEmit(change)
         return change
@@ -117,7 +115,10 @@ class TerminalNetworkObserver @Inject constructor(
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         ) {
-            TerminalNetworkSnapshot.Validated(network.networkHandle.toString())
+            TerminalNetworkSnapshot.Validated(
+                networkHandle = network.networkHandle.toString(),
+                transports = capabilities.transportNames(),
+            )
         } else {
             TerminalNetworkSnapshot.NoValidatedNetwork
         }
@@ -137,15 +138,83 @@ data class TerminalNetworkChange(
 
 sealed interface TerminalNetworkSnapshot {
     val logValue: String
+    val networkHandle: String?
+    val transportSetLogValue: String
 
-    data class Validated(val networkHandle: String) : TerminalNetworkSnapshot {
+    data class Validated(
+        override val networkHandle: String,
+        val transports: Set<String> = emptySet(),
+    ) : TerminalNetworkSnapshot {
         override val logValue: String = "validated:$networkHandle"
+        override val transportSetLogValue: String =
+            transports.toSortedSet().joinToString(",").ifBlank { "UNKNOWN" }
     }
 
     object NoValidatedNetwork : TerminalNetworkSnapshot {
         override val logValue: String = "none"
+        override val networkHandle: String? = null
+        override val transportSetLogValue: String = "none"
     }
 }
+
+internal fun TerminalNetworkChange.networkDiagnosticFields(): Array<Pair<String, Any?>> =
+    arrayOf(
+        "sequence" to sequence,
+        "reason" to reason,
+        "previous" to previous.logValue,
+        "current" to current.logValue,
+        "previousNetworkHandle" to previous.networkHandle,
+        "currentNetworkHandle" to current.networkHandle,
+        "previousTransports" to previous.transportSetLogValue,
+        "currentTransports" to current.transportSetLogValue,
+        "previousValidatedNetworkHandle" to previousValidated?.networkHandle,
+        "previousValidatedTransports" to previousValidated?.transportSetLogValue,
+    )
+
+internal fun TerminalNetworkSnapshot.Validated.hasSameNetworkIdentityAs(
+    other: TerminalNetworkSnapshot.Validated,
+): Boolean = networkHandle == other.networkHandle
+
+internal fun TerminalNetworkSnapshot.hasSameNetworkIdentityAs(
+    other: TerminalNetworkSnapshot,
+): Boolean =
+    when {
+        this is TerminalNetworkSnapshot.Validated && other is TerminalNetworkSnapshot.Validated ->
+            hasSameNetworkIdentityAs(other)
+        this is TerminalNetworkSnapshot.NoValidatedNetwork &&
+            other is TerminalNetworkSnapshot.NoValidatedNetwork -> true
+        else -> false
+    }
+
+private fun NetworkCapabilities.transportNames(): Set<String> =
+    buildSet {
+        TRANSPORT_PROBES.forEach { probe ->
+            if (probe.isPresentIn(this@transportNames)) add(probe.name)
+        }
+    }
+
+private data class TransportProbe(
+    val value: Int,
+    val name: String,
+    val minSdk: Int = Build.VERSION_CODES.M,
+) {
+    fun isPresentIn(capabilities: NetworkCapabilities): Boolean =
+        Build.VERSION.SDK_INT >= minSdk &&
+            runCatching { capabilities.hasTransport(value) }.getOrDefault(false)
+}
+
+private val TRANSPORT_PROBES = listOf(
+    TransportProbe(NetworkCapabilities.TRANSPORT_WIFI, "WIFI"),
+    TransportProbe(NetworkCapabilities.TRANSPORT_CELLULAR, "CELLULAR"),
+    TransportProbe(NetworkCapabilities.TRANSPORT_VPN, "VPN"),
+    TransportProbe(NetworkCapabilities.TRANSPORT_ETHERNET, "ETHERNET"),
+    TransportProbe(NetworkCapabilities.TRANSPORT_BLUETOOTH, "BLUETOOTH"),
+    TransportProbe(NetworkCapabilities.TRANSPORT_WIFI_AWARE, "WIFI_AWARE", Build.VERSION_CODES.O),
+    TransportProbe(NetworkCapabilities.TRANSPORT_LOWPAN, "LOWPAN", Build.VERSION_CODES.O_MR1),
+    TransportProbe(NetworkCapabilities.TRANSPORT_USB, "USB", Build.VERSION_CODES.S),
+    TransportProbe(NetworkCapabilities.TRANSPORT_THREAD, "THREAD", Build.VERSION_CODES.UPSIDE_DOWN_CAKE),
+    TransportProbe(NetworkCapabilities.TRANSPORT_SATELLITE, "SATELLITE", Build.VERSION_CODES.VANILLA_ICE_CREAM),
+)
 
 internal class TerminalNetworkChangeDetector(
     initial: TerminalNetworkSnapshot,
@@ -161,14 +230,21 @@ internal class TerminalNetworkChangeDetector(
     ): TerminalNetworkChange? {
         val previous = current
         val previousValidated = lastValidated
-        if (previous == snapshot) return null
+        if (previous.hasSameNetworkIdentityAs(snapshot)) {
+            current = snapshot
+            if (snapshot is TerminalNetworkSnapshot.Validated) lastValidated = snapshot
+            return null
+        }
         current = snapshot
         if (snapshot !is TerminalNetworkSnapshot.Validated) return null
         if (previousValidated == null) {
             lastValidated = snapshot
             return null
         }
-        if (snapshot == previousValidated) return null
+        if (snapshot.hasSameNetworkIdentityAs(previousValidated)) {
+            lastValidated = snapshot
+            return null
+        }
         lastValidated = snapshot
         sequence += 1L
         return TerminalNetworkChange(

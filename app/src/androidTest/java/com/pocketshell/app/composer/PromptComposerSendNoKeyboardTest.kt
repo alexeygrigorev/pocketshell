@@ -11,7 +11,9 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
@@ -322,6 +324,44 @@ class PromptComposerSendNoKeyboardTest {
         compose.waitForIdle()
 
         assertEquals(1, sendInvocations)
+    }
+
+    /**
+     * Issue #453 dogfood follow-up: the composer action row should use
+     * familiar icon controls, not a space-hungry "Attach" label or custom
+     * text glyphs. This pins the public semantics users/tests rely on while
+     * allowing the concrete Material vector implementation to evolve.
+     */
+    @Test
+    fun composerActionRowUsesSemanticIconControls() {
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(draft = ""),
+                    onClose = {},
+                    onDraftChange = {},
+                    onMicTap = {},
+                    onSend = {},
+                    onSnippets = {},
+                    onAttachFiles = {},
+                )
+            }
+        }
+
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+        compose.onNodeWithContentDescription("Attach files")
+            .assertIsDisplayed()
+
+        compose.onNodeWithTag(COMPOSER_SNIPPETS_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+        compose.onNodeWithContentDescription("Insert snippet")
+            .assertIsDisplayed()
+
+        compose.onNodeWithText("Attach").assertDoesNotExist()
+        compose.onNodeWithText("{ }").assertDoesNotExist()
     }
 
     /**

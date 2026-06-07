@@ -12,7 +12,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -35,11 +34,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.DataObject
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -65,15 +70,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -1082,7 +1080,12 @@ private fun SendButton(
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        SendArrowGlyph(color = contentColor)
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.Send,
+            contentDescription = null,
+            tint = contentColor,
+            modifier = Modifier.size(17.dp),
+        )
     }
 }
 
@@ -1156,7 +1159,12 @@ private fun StopSendButton(
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        SendArrowGlyph(color = PocketShellColors.OnAccent)
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.Send,
+            contentDescription = null,
+            tint = PocketShellColors.OnAccent,
+            modifier = Modifier.size(17.dp),
+        )
     }
 }
 
@@ -1488,14 +1496,13 @@ private const val ATTACHMENT_THUMBNAIL_MAX_PIXELS = 192 * 192
 internal val ATTACHMENT_TILE_SIZE = 64.dp
 internal val ATTACHMENT_TILE_REMOVE_TOUCH_SIZE = 48.dp
 private val ATTACHMENT_TILE_REMOVE_SIZE = 22.dp
+private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 44.dp
+private val COMPOSER_ACTION_ICON_SIZE = 22.dp
 
 /**
- * Issue #453: paperclip attach button (40dp tap target). Renders the
- * [AttachFileIcon] ImageVector via [Icon] — a crisp Material-style
- * paperclip — replacing the old hand-rolled [Canvas] arcs that rendered as
- * a distorted squiggle at 22dp. We build the vector inline (the same
- * pattern as [DictateDotIcon]) rather than pull in `material-icons-extended`
- * for one glyph.
+ * Issue #453: compact paperclip attach button. Uses the official Material
+ * attach-file icon rather than a hand-traced path, so the glyph weight and
+ * silhouette match the rest of the action row.
  */
 @Composable
 private fun AttachIconButton(
@@ -1503,72 +1510,29 @@ private fun AttachIconButton(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
-    Box(
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
         modifier = modifier
-            .size(44.dp)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .size(COMPOSER_ACTION_ICON_BUTTON_SIZE)
             .semantics { contentDescription = "Attach files" },
-        contentAlignment = Alignment.Center,
+        colors = IconButtonDefaults.iconButtonColors(
+            contentColor = PocketShellColors.TextSecondary,
+            disabledContentColor = PocketShellColors.TextMuted,
+        ),
     ) {
         Icon(
-            imageVector = AttachFileIcon,
+            imageVector = Icons.Outlined.AttachFile,
             contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(24.dp),
+            modifier = Modifier.size(COMPOSER_ACTION_ICON_SIZE),
         )
     }
 }
 
 /**
- * Issue #453: a clean Material-style paperclip ("attach file") [ImageVector],
- * built inline so we don't depend on `material-icons-extended`. Traces the
- * standard diagonal paperclip silhouette as one filled even-odd path: an
- * outer clip body that hooks the bottom and runs back up, with an inner
- * cut-out so it reads as a hollow clip rather than a solid blob. Sized for
- * a 22dp render in the composer's attach button.
- */
-private val AttachFileIcon: ImageVector = ImageVector.Builder(
-    name = "AttachFile",
-    defaultWidth = 24.dp,
-    defaultHeight = 24.dp,
-    viewportWidth = 24f,
-    viewportHeight = 24f,
-).run {
-    // Material's `Filled.AttachFile` path data (the canonical paperclip).
-    val builder = PathBuilder()
-    builder.moveTo(16.5f, 6f)
-    builder.verticalLineToRelative(11.5f)
-    builder.curveToRelative(0f, 2.21f, -1.79f, 4f, -4f, 4f)
-    builder.reflectiveCurveToRelative(-4f, -1.79f, -4f, -4f)
-    builder.verticalLineTo(5f)
-    builder.curveToRelative(0f, -1.38f, 1.12f, -2.5f, 2.5f, -2.5f)
-    builder.reflectiveCurveToRelative(2.5f, 1.12f, 2.5f, 2.5f)
-    builder.verticalLineToRelative(10.5f)
-    builder.curveToRelative(0f, 0.55f, -0.45f, 1f, -1f, 1f)
-    builder.reflectiveCurveToRelative(-1f, -0.45f, -1f, -1f)
-    builder.verticalLineTo(6f)
-    builder.horizontalLineTo(10.5f)
-    builder.verticalLineToRelative(9.5f)
-    builder.curveToRelative(0f, 1.38f, 1.12f, 2.5f, 2.5f, 2.5f)
-    builder.reflectiveCurveToRelative(2.5f, -1.12f, 2.5f, -2.5f)
-    builder.verticalLineTo(5f)
-    builder.curveToRelative(0f, -2.21f, -1.79f, -4f, -4f, -4f)
-    builder.reflectiveCurveToRelative(-4f, 1.79f, -4f, 4f)
-    builder.verticalLineToRelative(12.5f)
-    builder.curveToRelative(0f, 3.04f, 2.46f, 5.5f, 5.5f, 5.5f)
-    builder.reflectiveCurveToRelative(5.5f, -2.46f, 5.5f, -5.5f)
-    builder.verticalLineTo(6f)
-    builder.horizontalLineToRelative(-1.5f)
-    builder.close()
-    addPath(pathData = builder.nodes, fill = SolidColor(Color.White))
-    build()
-}
-
-/**
- * Issue #453: `{}` snippets button. Rendered as the literal curly-brace
- * glyphs (a stable monospace-friendly symbol, unlike an emoji), matching
- * the mockup's `{}` affordance.
+ * Issue #453: snippets button. Uses Material's data-object/code icon instead
+ * of a text `{ }` glyph, keeping the toolbar iconography consistent while
+ * preserving the curly-brace mental model from the mockup.
  */
 @Composable
 private fun SnippetsIconButton(
@@ -1576,45 +1540,22 @@ private fun SnippetsIconButton(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
-    Box(
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
         modifier = modifier
-            .size(44.dp)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .size(COMPOSER_ACTION_ICON_BUTTON_SIZE)
             .semantics { contentDescription = "Insert snippet" },
-        contentAlignment = Alignment.Center,
+        colors = IconButtonDefaults.iconButtonColors(
+            contentColor = PocketShellColors.TextSecondary,
+            disabledContentColor = PocketShellColors.TextMuted,
+        ),
     ) {
-        Text(
-            text = "{ }",
-            color = tint,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
+        Icon(
+            imageVector = Icons.Outlined.DataObject,
+            contentDescription = null,
+            modifier = Modifier.size(COMPOSER_ACTION_ICON_SIZE),
         )
-    }
-}
-
-/**
- * Issue #453: the send-arrow glyph in the primary Send button. A small
- * paper-plane-style arrow drawn with a [Canvas] so it matches the mockup's
- * send icon without an icon dependency.
- */
-@Composable
-private fun SendArrowGlyph(color: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier.size(16.dp)) {
-        val w = size.width
-        val h = size.height
-        // Upward-right arrow (↗): the send/submit direction in the mockup.
-        val stroke = Stroke(width = w * 0.14f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        val path = Path().apply {
-            // Shaft from bottom-left to top-right.
-            moveTo(w * 0.18f, h * 0.82f)
-            lineTo(w * 0.82f, h * 0.18f)
-            // Arrow head.
-            moveTo(w * 0.40f, h * 0.18f)
-            lineTo(w * 0.82f, h * 0.18f)
-            lineTo(w * 0.82f, h * 0.60f)
-        }
-        drawPath(path, color = color, style = stroke)
     }
 }
 

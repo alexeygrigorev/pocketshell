@@ -903,6 +903,7 @@ class ShareViewModelTest {
     // test drives the round-trip on a real scope and waits on the
     // one-shot launch event with a timeout.
     @Test
+    @Config(sdk = [28])
     fun stageIntoSessionUploadsToSessionScopeAndEmitsLaunch() {
         kotlinx.coroutines.runBlocking {
             // The ViewModel's `viewModelScope` is bound to the
@@ -915,6 +916,7 @@ class ShareViewModelTest {
                 val registry = ActiveTmuxClients()
                 val vm = newVm(registry)
                 val host = seededHost(id = 51L, name = "gpu-box")
+                val manager = context.getSystemService(NotificationManager::class.java)
                 registry.register(
                     hostId = host.id,
                     hostName = host.name,
@@ -967,6 +969,13 @@ class ShareViewModelTest {
                 assertTrue(
                     "the file bytes must have been uploaded",
                     fakeSession.uploadedRemotePaths.isNotEmpty(),
+                )
+                assertTrue(
+                    "successful attachment shares must stay silent; active=" +
+                        manager.activeNotifications.map {
+                            it.notification.extras.getCharSequence("android.title")?.toString()
+                        },
+                    manager.activeNotifications.isEmpty(),
                 )
                 assertTrue("the staging session must be closed", fakeSession.closed)
                 tempFile.delete()

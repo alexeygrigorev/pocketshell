@@ -56,8 +56,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
-import com.pocketshell.app.conversation.ConversationCopyAction
 import com.pocketshell.app.conversation.ConversationMessageTurn
+import com.pocketshell.app.conversation.ConversationTextSection
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.UnsentPromptBanner
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
@@ -71,10 +71,7 @@ import com.pocketshell.core.agents.ToolCallSummary
 import com.pocketshell.core.terminal.selection.ConversationLink
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.text.font.FontFamily
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.openUrlWithFallback
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
@@ -1030,44 +1027,11 @@ private fun ToolCallSection(
     body: String,
     copyTestTag: String,
 ) {
-    if (body.isEmpty()) return
-    val lineCount = body.count { it == '\n' } + 1
-    val tooLong = lineCount > 200 || body.length > 5000
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = label,
-                color = PocketShellColors.TextMuted,
-                fontSize = 10.sp,
-                modifier = Modifier.weight(1f),
-            )
-            ConversationCopyAction(
-                text = body,
-                testTag = copyTestTag,
-                clipboardLabel = "conversation tool $label",
-            )
-        }
-        val base = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.TermBg, shape = RoundedCornerShape(4.dp))
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-            .let { if (tooLong) it.heightIn(max = 240.dp) else it }
-        val scrollState = rememberScrollState()
-        val finalModifier = if (tooLong) base.verticalScroll(scrollState) else base
-        Column(modifier = finalModifier) {
-            Text(
-                text = body,
-                color = PocketShellColors.TermText,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
-    }
+    ConversationTextSection(
+        label = label,
+        body = body,
+        copyTestTag = copyTestTag,
+    )
 }
 
 private fun Map<String, ConversationEvent>.findToolResultFor(

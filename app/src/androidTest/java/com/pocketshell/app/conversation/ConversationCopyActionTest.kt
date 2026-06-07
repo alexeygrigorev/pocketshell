@@ -49,6 +49,29 @@ class ConversationCopyActionTest {
     }
 
     @Test
+    fun userMessageCopyPutsMessageTextOnClipboard() {
+        compose.setContent {
+            PocketShellTheme {
+                ConversationMessageTurn(
+                    event = ConversationEvent.Message(
+                        id = "user-message",
+                        agent = AgentKind.ClaudeCode,
+                        role = ConversationRole.User,
+                        text = "move this prompt into another window",
+                    ),
+                )
+            }
+        }
+
+        compose.onNodeWithTag(CONVERSATION_COPY_TAG_PREFIX + "user-message")
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitForIdle()
+
+        assertEquals("move this prompt into another window", clipboardText())
+    }
+
+    @Test
     fun expandedToolCallInputCopyPutsToolInputOnClipboard() {
         compose.setContent {
             PocketShellTheme {

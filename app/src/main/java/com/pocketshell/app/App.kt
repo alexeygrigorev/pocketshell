@@ -116,8 +116,7 @@ class App : Application() {
     private val terminalNetworkScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private var processForeground: Boolean = false
-    private var pendingTerminalNetworkChange: TerminalNetworkChange? = null
+    private val terminalNetworkLifecycleGate = TerminalNetworkLifecycleGate()
 
     /**
      * Issue #450: scope that runs the bounded grace-window timer. Uses
@@ -162,38 +161,16 @@ class App : Application() {
             // down, so reattach is a no-op and the user sees no
             // reconnect.
             sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_START)
-            val pendingNetworkChange = pendingTerminalNetworkChange
-            val shouldDispatchPendingNetworkChange = shouldDispatchPendingTerminalNetworkChange(
+            val networkDecision = terminalNetworkLifecycleGate.onForegroundResumeFinished(
                 resumedWithinGrace = resumedWithinGrace,
-                pendingChange = pendingNetworkChange,
-                hasLiveTerminalClient = activeTmuxClients.hasLiveTerminalClient(),
+                hasLiveTerminalRuntime = hasLiveTerminalRuntime(),
             )
             if (!resumedWithinGrace) {
                 dispatchTmuxForeground()
-                if (shouldDispatchPendingNetworkChange) {
-                    drainPendingTerminalNetworkChange()
-                } else {
-                    pendingTerminalNetworkChange = null
-                }
+                dispatchTerminalNetworkDecision(networkDecision)
                 terminalNetworkObserver.refresh("process-foreground")
-            } else if (shouldDispatchPendingNetworkChange) {
-                drainPendingTerminalNetworkChange()
             } else {
-                if (pendingNetworkChange != null && pendingNetworkChange.isRealValidatedIdentityChange) {
-                    Log.i(
-                        TERMINAL_NETWORK_TAG,
-                        "terminal-network-change-suppressed-within-grace " +
-                            "sequence=${pendingNetworkChange.sequence} " +
-                            "reason=${pendingNetworkChange.reason}",
-                    )
-                    DiagnosticEvents.record(
-                        "network",
-                        "change_suppressed_within_grace",
-                        "sequence" to pendingNetworkChange.sequence,
-                        "reason" to pendingNetworkChange.reason,
-                    )
-                }
-                pendingTerminalNetworkChange = null
+                dispatchTerminalNetworkDecision(networkDecision)
             }
         },
     )
@@ -201,7 +178,7 @@ class App : Application() {
     private val terminalLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         when (event) {
             Lifecycle.Event.ON_STOP -> {
-                processForeground = false
+                terminalNetworkLifecycleGate.onBackground()
                 DiagnosticEvents.record("app", "background")
                 backgroundGraceController.setGraceMillis(
                     settingsRepository.settings.value.backgroundGraceMillis,
@@ -209,7 +186,7 @@ class App : Application() {
                 backgroundGraceController.onBackground()
             }
             Lifecycle.Event.ON_START -> {
-                processForeground = true
+                terminalNetworkLifecycleGate.onForegroundResumeStarted()
                 DiagnosticEvents.record("app", "foreground")
                 backgroundGraceController.onForeground()
             }
@@ -246,33 +223,25 @@ class App : Application() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(terminalLifecycleObserver)
         terminalNetworkScope.launch {
             terminalNetworkObserver.changes.collect { change ->
-                if (processForeground) {
-                    dispatchTerminalNetworkChange(change)
-                } else {
-                    pendingTerminalNetworkChange = change
-                    Log.i(
-                        TERMINAL_NETWORK_TAG,
-                        "terminal-network-change-deferred sequence=${change.sequence} " +
-                            "reason=${change.reason}",
-                    )
-                    DiagnosticEvents.record(
-                        "network",
-                        "change_deferred",
-                        "sequence" to change.sequence,
-                        "reason" to change.reason,
-                        "previous" to change.previous.logValue,
-                        "current" to change.current.logValue,
-                    )
+                when (val decision = terminalNetworkLifecycleGate.onNetworkChange(change)) {
+                    is TerminalNetworkDecision.Dispatch ->
+                        dispatchTerminalNetworkChange(decision.change)
+                    is TerminalNetworkDecision.Defer ->
+                        logDeferredTerminalNetworkChange(decision.change)
+                    is TerminalNetworkDecision.Suppress -> Unit
                 }
             }
         }
         StartupTiming.mark("app-on-create-end")
     }
 
-    private fun drainPendingTerminalNetworkChange() {
-        val change = pendingTerminalNetworkChange ?: return
-        pendingTerminalNetworkChange = null
-        dispatchTerminalNetworkChange(change)
+    private fun dispatchTerminalNetworkDecision(decision: TerminalNetworkDecision) {
+        when (decision) {
+            is TerminalNetworkDecision.Dispatch -> dispatchTerminalNetworkChange(decision.change)
+            is TerminalNetworkDecision.Defer -> logDeferredTerminalNetworkChange(decision.change)
+            is TerminalNetworkDecision.Suppress ->
+                decision.change?.let { logSuppressedTerminalNetworkChange(it) }
+        }
     }
 
     private fun dispatchTerminalNetworkChange(change: TerminalNetworkChange) {
@@ -301,8 +270,42 @@ class App : Application() {
         }
     }
 
+    private fun logDeferredTerminalNetworkChange(change: TerminalNetworkChange) {
+        Log.i(
+            TERMINAL_NETWORK_TAG,
+            "terminal-network-change-deferred sequence=${change.sequence} " +
+                "reason=${change.reason}",
+        )
+        DiagnosticEvents.record(
+            "network",
+            "change_deferred",
+            "sequence" to change.sequence,
+            "reason" to change.reason,
+            "previous" to change.previous.logValue,
+            "current" to change.current.logValue,
+        )
+    }
+
+    private fun logSuppressedTerminalNetworkChange(change: TerminalNetworkChange) {
+        if (!change.isRealValidatedIdentityChange) return
+        Log.i(
+            TERMINAL_NETWORK_TAG,
+            "terminal-network-change-suppressed-within-grace " +
+                "sequence=${change.sequence} reason=${change.reason}",
+        )
+        DiagnosticEvents.record(
+            "network",
+            "change_suppressed_within_grace",
+            "sequence" to change.sequence,
+            "reason" to change.reason,
+        )
+    }
+
     private val TerminalNetworkChange.isRealValidatedIdentityChange: Boolean
         get() = previousValidated != null && previousValidated != current
+
+    private fun hasLiveTerminalRuntime(): Boolean =
+        activeTmuxClients.hasLiveTerminalClient() || tmuxRuntimeCache.hasLiveRuntime()
 
     private fun ActiveTmuxClients.hasLiveTerminalClient(): Boolean =
         clients.value.values.any { entry -> !entry.client.disconnected.value }
@@ -343,12 +346,61 @@ class App : Application() {
 internal fun shouldDispatchPendingTerminalNetworkChange(
     resumedWithinGrace: Boolean,
     pendingChange: TerminalNetworkChange?,
-    hasLiveTerminalClient: Boolean,
+    hasLiveTerminalRuntime: Boolean,
 ): Boolean {
     if (pendingChange == null) return false
     if (!resumedWithinGrace) return true
-    return !hasLiveTerminalClient && pendingChange.previousValidated != null &&
+    return !hasLiveTerminalRuntime && pendingChange.previousValidated != null &&
         pendingChange.previousValidated != pendingChange.current
+}
+
+internal class TerminalNetworkLifecycleGate {
+    private var processForeground: Boolean = false
+    private var foregroundResumePending: Boolean = false
+    private var pendingTerminalNetworkChange: TerminalNetworkChange? = null
+
+    fun onBackground() {
+        processForeground = false
+        foregroundResumePending = false
+    }
+
+    fun onForegroundResumeStarted() {
+        processForeground = true
+        foregroundResumePending = true
+    }
+
+    fun onForegroundResumeFinished(
+        resumedWithinGrace: Boolean,
+        hasLiveTerminalRuntime: Boolean,
+    ): TerminalNetworkDecision {
+        foregroundResumePending = false
+        val pendingChange = pendingTerminalNetworkChange
+        pendingTerminalNetworkChange = null
+        return if (shouldDispatchPendingTerminalNetworkChange(
+                resumedWithinGrace = resumedWithinGrace,
+                pendingChange = pendingChange,
+                hasLiveTerminalRuntime = hasLiveTerminalRuntime,
+            )
+        ) {
+            TerminalNetworkDecision.Dispatch(pendingChange!!)
+        } else {
+            TerminalNetworkDecision.Suppress(pendingChange)
+        }
+    }
+
+    fun onNetworkChange(change: TerminalNetworkChange): TerminalNetworkDecision =
+        if (processForeground && !foregroundResumePending) {
+            TerminalNetworkDecision.Dispatch(change)
+        } else {
+            pendingTerminalNetworkChange = change
+            TerminalNetworkDecision.Defer(change)
+        }
+}
+
+internal sealed interface TerminalNetworkDecision {
+    data class Dispatch(val change: TerminalNetworkChange) : TerminalNetworkDecision
+    data class Defer(val change: TerminalNetworkChange) : TerminalNetworkDecision
+    data class Suppress(val change: TerminalNetworkChange?) : TerminalNetworkDecision
 }
 
 /**

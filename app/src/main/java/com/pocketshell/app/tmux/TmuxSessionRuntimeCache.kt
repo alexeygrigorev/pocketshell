@@ -74,6 +74,13 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
 
     internal fun size(): Int = synchronized(this) { runtimes.size }
 
+    internal fun hasLiveRuntime(): Boolean = synchronized(this) {
+        runtimes.values.any { entry ->
+            !entry.runtime.client.disconnected.value &&
+                entry.runtime.session?.isConnected != false
+        }
+    }
+
     internal fun snapshotKeys(): List<TmuxRuntimeKey> = synchronized(this) {
         runtimes.keys.toList()
     }

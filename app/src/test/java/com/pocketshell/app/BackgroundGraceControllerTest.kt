@@ -230,7 +230,7 @@ class BackgroundGraceControllerTest {
                 if (shouldDispatchPendingTerminalNetworkChange(
                         resumedWithinGrace = resumedWithinGrace,
                         pendingChange = pendingNetworkChange,
-                        hasLiveTerminalClient = true,
+                        hasLiveTerminalRuntime = true,
                     )
                 ) {
                     events += "network:dispatch"
@@ -290,7 +290,7 @@ class BackgroundGraceControllerTest {
                     if (shouldDispatchPendingTerminalNetworkChange(
                             resumedWithinGrace = resumedWithinGrace,
                             pendingChange = pendingNetworkChange,
-                            hasLiveTerminalClient = false,
+                            hasLiveTerminalRuntime = false,
                         )
                     ) {
                         val change = pendingNetworkChange!!
@@ -302,7 +302,7 @@ class BackgroundGraceControllerTest {
                 } else if (shouldDispatchPendingTerminalNetworkChange(
                         resumedWithinGrace = resumedWithinGrace,
                         pendingChange = pendingNetworkChange,
-                        hasLiveTerminalClient = true,
+                        hasLiveTerminalRuntime = true,
                     )
                 ) {
                     val change = pendingNetworkChange!!
@@ -362,7 +362,7 @@ class BackgroundGraceControllerTest {
                 if (shouldDispatchPendingTerminalNetworkChange(
                         resumedWithinGrace = resumedWithinGrace,
                         pendingChange = pendingNetworkChange,
-                        hasLiveTerminalClient = false,
+                        hasLiveTerminalRuntime = false,
                     )
                 ) {
                     val change = pendingNetworkChange!!
@@ -419,6 +419,88 @@ class BackgroundGraceControllerTest {
         assertEquals(
             listOf("network:foreground-wifi-cellular-handoff"),
             events,
+        )
+    }
+
+    @Test
+    fun `network change after on start waits for grace decision and suppresses with live runtime`() {
+        val gate = TerminalNetworkLifecycleGate()
+        val change = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "default-network-capabilities",
+        )
+
+        gate.onBackground()
+        gate.onForegroundResumeStarted()
+
+        val immediateDecision = gate.onNetworkChange(change)
+        assertTrue(
+            "network fanout must remain blocked until the foreground grace decision completes",
+            immediateDecision is TerminalNetworkDecision.Defer,
+        )
+
+        val foregroundDecision = gate.onForegroundResumeFinished(
+            resumedWithinGrace = true,
+            hasLiveTerminalRuntime = true,
+        )
+        assertEquals(
+            "a survived live runtime within grace must suppress queued network reconnect",
+            TerminalNetworkDecision.Suppress(change),
+            foregroundDecision,
+        )
+    }
+
+    @Test
+    fun `queued network change dispatches after post grace foreground decision`() {
+        val gate = TerminalNetworkLifecycleGate()
+        val change = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "default-network-capabilities",
+        )
+
+        gate.onBackground()
+        gate.onForegroundResumeStarted()
+        assertTrue(gate.onNetworkChange(change) is TerminalNetworkDecision.Defer)
+
+        val foregroundDecision = gate.onForegroundResumeFinished(
+            resumedWithinGrace = false,
+            hasLiveTerminalRuntime = false,
+        )
+
+        assertEquals(
+            "after grace teardown, the foreground path must still replay the queued reconnect signal",
+            TerminalNetworkDecision.Dispatch(change),
+            foregroundDecision,
+        )
+    }
+
+    @Test
+    fun `foreground active network change dispatches immediately after resume decision`() {
+        val gate = TerminalNetworkLifecycleGate()
+        val change = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "foreground-wifi-cellular-handoff",
+        )
+
+        gate.onForegroundResumeStarted()
+        assertEquals(
+            TerminalNetworkDecision.Suppress(null),
+            gate.onForegroundResumeFinished(
+                resumedWithinGrace = false,
+                hasLiveTerminalRuntime = false,
+            ),
+        )
+
+        assertEquals(
+            "normal active foreground fanout should not stay blocked after the foreground decision",
+            TerminalNetworkDecision.Dispatch(change),
+            gate.onNetworkChange(change),
         )
     }
 

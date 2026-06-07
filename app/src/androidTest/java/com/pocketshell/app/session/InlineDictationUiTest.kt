@@ -1,5 +1,8 @@
 package com.pocketshell.app.session
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -10,6 +13,10 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
+import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.composerAttachmentChipTestTag
+import com.pocketshell.app.composer.composerAttachmentRemoveTestTag
 import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
@@ -94,6 +101,45 @@ class InlineDictationUiTest {
 
         assertEquals(listOf(SessionKeyBarEnterLabel), keyTaps)
         assertEquals(1, keyboardTaps)
+    }
+
+    @Test
+    fun rawSshStagedAttachmentRemainsRemovableAfterComposerSheetIsClosed() {
+        val attachment = PromptComposerViewModel.StagedAttachment(
+            remotePath = "~/.pocketshell/attachments/raw-host/shot.png",
+            displayName = "shot.png",
+        )
+        var staged by mutableStateOf(listOf(attachment))
+
+        compose.setContent {
+            PocketShellTheme {
+                RawSessionBottomControls(
+                    isImeVisible = false,
+                    showConversation = false,
+                    sessionLive = true,
+                    onKey = {},
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = null,
+                    onProjectNavigationTap = {},
+                    stagedAttachments = staged,
+                    onRemoveStagedAttachment = { remotePath ->
+                        staged = staged.filterNot { it.remotePath == remotePath }
+                    },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertDoesNotExist()
     }
 
     @Test

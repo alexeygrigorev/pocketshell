@@ -70,7 +70,9 @@ import com.pocketshell.app.conversation.timelineActorLabel
 import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.conversation.toolResultPairing
+import com.pocketshell.app.composer.AttachmentTileGrid
 import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.UnsentPromptBanner
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
@@ -189,6 +191,7 @@ public fun SessionScreen(
      */
     usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
+    promptComposerViewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #176: pulled in via Hilt so the Settings → Conversation →
     // "Show system notes" toggle reaches the in-session conversation pane
     // without restarting.
@@ -226,6 +229,7 @@ public fun SessionScreen(
     val assistantState by viewModel.assistantState.collectAsState()
     val projectNavigation by viewModel.projectNavigation.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
+    val promptComposerState by promptComposerViewModel.uiState.collectAsState()
     val appSettings by settingsViewModel.state.collectAsState()
     val keyBarModifierStates = remember(modifierStates) {
         modifierStates.mapKeys { (modifier, _) -> modifier.keyBarLabel }
@@ -443,6 +447,8 @@ public fun SessionScreen(
                     { showSnippetPicker = true }
                 } else null,
                 onProjectNavigationTap = { showProjectNavigation = true },
+                stagedAttachments = promptComposerState.attachments,
+                onRemoveStagedAttachment = promptComposerViewModel::removeAttachment,
             )
         }
 
@@ -493,6 +499,7 @@ public fun SessionScreen(
                 // connect never lands within the bounded wait.
                 viewModel.stagePromptAttachments(uris)
             },
+            viewModel = promptComposerViewModel,
         )
     }
 
@@ -1616,32 +1623,47 @@ internal fun RawSessionBottomControls(
     onShowKeyboardTap: () -> Unit,
     onAddSnippetTap: (() -> Unit)?,
     onProjectNavigationTap: () -> Unit,
+    stagedAttachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
+    onRemoveStagedAttachment: (String) -> Unit = {},
 ) {
-    // Raw SSH mirrors the tmux route: terminal key rows are Terminal-only.
-    // Conversation always sends through the unified composer surface, even if
-    // the IME is visible from an earlier terminal interaction.
-    if (isImeVisible && !showConversation) {
-        KeyBar(
-            keys = SessionTerminalKeyBarLayout,
-            onKey = if (sessionLive) onKey else { _ -> },
-            modifierStates = modifierStates,
-            onModifierStateChange = onModifierStateChange,
-        )
-    } else {
-        BottomChipControls(
-            chips = DefaultSessionChips,
-            onChipTap = onChipTap,
-            onDictateTap = onDictateTap,
-            onEnterTap = if (!showConversation) {
-                { onKey(KeyBinding(label = SessionKeyBarEnterLabel, kind = KeyKind.Regular)) }
-            } else null,
-            enterLabel = SessionKeyBarEnterLabel,
-            onShowKeyboardTap = onShowKeyboardTap,
-            onAddSnippetTap = onAddSnippetTap,
-            onProjectNavigationTap = onProjectNavigationTap,
-            // Issue #249: gate chips + dictate mic on liveness.
-            inputEnabled = sessionLive,
-        )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface),
+    ) {
+        if (stagedAttachments.isNotEmpty()) {
+            AttachmentTileGrid(
+                attachments = stagedAttachments,
+                onRemove = onRemoveStagedAttachment,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        // Raw SSH mirrors the tmux route: terminal key rows are Terminal-only.
+        // Conversation always sends through the unified composer surface, even if
+        // the IME is visible from an earlier terminal interaction.
+        if (isImeVisible && !showConversation) {
+            KeyBar(
+                keys = SessionTerminalKeyBarLayout,
+                onKey = if (sessionLive) onKey else { _ -> },
+                modifierStates = modifierStates,
+                onModifierStateChange = onModifierStateChange,
+            )
+        } else {
+            BottomChipControls(
+                chips = DefaultSessionChips,
+                onChipTap = onChipTap,
+                onDictateTap = onDictateTap,
+                onEnterTap = if (!showConversation) {
+                    { onKey(KeyBinding(label = SessionKeyBarEnterLabel, kind = KeyKind.Regular)) }
+                } else null,
+                enterLabel = SessionKeyBarEnterLabel,
+                onShowKeyboardTap = onShowKeyboardTap,
+                onAddSnippetTap = onAddSnippetTap,
+                onProjectNavigationTap = onProjectNavigationTap,
+                // Issue #249: gate chips + dictate mic on liveness.
+                inputEnabled = sessionLive,
+            )
+        }
     }
 }
 

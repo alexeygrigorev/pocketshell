@@ -520,7 +520,7 @@ private fun ComposerLauncherButton(
                 imageVector = ComposerLauncherIcon,
                 contentDescription = null,
                 tint = glyphColor,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(16.dp),
             )
         }
     }
@@ -646,7 +646,8 @@ internal const val SESSION_MIC_FAB_TAG: String = SESSION_COMPOSER_LAUNCHER_TAG
  * pocket-terminal silhouette from the launcher icon, then adds a compact
  * prompt/open-corner cue so the bottom FAB still reads as "open composer"
  * rather than dictation. Microphone glyphs stay reserved for real recording
- * controls.
+ * controls. The path stays inside 5..19 of the 24dp viewport so circular
+ * button masks and dense toolbar previews leave visible breathing room.
  */
 internal val ComposerLauncherIcon: ImageVector = ImageVector.Builder(
     name = "ComposerLauncher",
@@ -662,55 +663,55 @@ private fun ImageVector.Builder.addComposerLauncherPath(fill: SolidColor): Image
     val builder = PathBuilder()
 
     // Pocket-terminal frame, built from filled bars for stable 24dp rendering.
-    builder.moveTo(5f, 4f)
-    builder.lineToRelative(14f, 0f)
-    builder.lineToRelative(0f, 2f)
-    builder.lineToRelative(-14f, 0f)
+    builder.moveTo(6f, 5f)
+    builder.lineToRelative(12f, 0f)
+    builder.lineToRelative(0f, 1.8f)
+    builder.lineToRelative(-12f, 0f)
     builder.close()
 
-    builder.moveTo(4f, 5f)
-    builder.lineToRelative(2f, 0f)
-    builder.lineToRelative(0f, 14f)
-    builder.lineToRelative(-2f, 0f)
+    builder.moveTo(5f, 6f)
+    builder.lineToRelative(1.8f, 0f)
+    builder.lineToRelative(0f, 12f)
+    builder.lineToRelative(-1.8f, 0f)
     builder.close()
 
-    builder.moveTo(18f, 5f)
-    builder.lineToRelative(2f, 0f)
-    builder.lineToRelative(0f, 14f)
-    builder.lineToRelative(-2f, 0f)
+    builder.moveTo(17.2f, 6f)
+    builder.lineToRelative(1.8f, 0f)
+    builder.lineToRelative(0f, 12f)
+    builder.lineToRelative(-1.8f, 0f)
     builder.close()
 
-    builder.moveTo(5f, 18f)
-    builder.lineToRelative(14f, 0f)
-    builder.lineToRelative(0f, 2f)
-    builder.lineToRelative(-14f, 0f)
+    builder.moveTo(6f, 17.2f)
+    builder.lineToRelative(12f, 0f)
+    builder.lineToRelative(0f, 1.8f)
+    builder.lineToRelative(-12f, 0f)
     builder.close()
 
     // Prompt chevron.
-    builder.moveTo(7f, 9f)
-    builder.lineToRelative(1.6f, -1.4f)
-    builder.lineToRelative(4.4f, 4.4f)
-    builder.lineToRelative(-1.6f, 1.4f)
+    builder.moveTo(8f, 9.4f)
+    builder.lineToRelative(1.4f, -1.2f)
+    builder.lineToRelative(3.8f, 3.8f)
+    builder.lineToRelative(-1.4f, 1.2f)
     builder.close()
 
-    builder.moveTo(8.6f, 16.4f)
-    builder.lineToRelative(-1.6f, -1.4f)
-    builder.lineToRelative(4.4f, -4.4f)
-    builder.lineToRelative(1.6f, 1.4f)
+    builder.moveTo(9.4f, 15.8f)
+    builder.lineToRelative(-1.4f, -1.2f)
+    builder.lineToRelative(3.8f, -3.8f)
+    builder.lineToRelative(1.4f, 1.2f)
     builder.close()
 
     // Cursor block.
-    builder.moveTo(13.5f, 15f)
-    builder.lineToRelative(3.5f, 0f)
-    builder.lineToRelative(0f, 1.8f)
-    builder.lineToRelative(-3.5f, 0f)
+    builder.moveTo(13.6f, 14.8f)
+    builder.lineToRelative(3f, 0f)
+    builder.lineToRelative(0f, 1.6f)
+    builder.lineToRelative(-3f, 0f)
     builder.close()
 
     // Open-corner cue: enough to echo OpenInFull without becoming generic.
-    builder.moveTo(14.5f, 7.5f)
-    builder.lineToRelative(3f, 0f)
-    builder.lineToRelative(0f, 3f)
-    builder.lineToRelative(-1.4f, 0f)
+    builder.moveTo(14.2f, 7.4f)
+    builder.lineToRelative(2.8f, 0f)
+    builder.lineToRelative(0f, 2.8f)
+    builder.lineToRelative(-1.2f, 0f)
     builder.lineToRelative(0f, -1.6f)
     builder.lineToRelative(-1.6f, 0f)
     builder.close()

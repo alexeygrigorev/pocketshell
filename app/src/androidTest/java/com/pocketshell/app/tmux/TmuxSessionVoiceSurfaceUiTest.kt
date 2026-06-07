@@ -146,6 +146,45 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
+    fun composerLauncherIconKeepsAccentInkInsideSafeArea() {
+        compose.setContent {
+            PocketShellTheme {
+                BottomChipControls(
+                    chips = AgentExitChips,
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    addSnippetLabel = ADD_PROMPT_CHIP_LABEL,
+                    addSnippetIcon = null,
+                    onProjectNavigationTap = null,
+                )
+            }
+        }
+
+        val bitmap = compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+            .assertIsDisplayed()
+            .captureToImage()
+            .asAndroidBitmap()
+        val ink = accentInkBounds(bitmap)
+        assertTrue("composer launcher should render the accent mark", ink.count > 0)
+
+        val minEdgeMargin = minOf(
+            ink.left,
+            ink.top,
+            bitmap.width - 1 - ink.right,
+            bitmap.height - 1 - ink.bottom,
+        )
+        val requiredMargin = bitmap.width * 0.25f
+        assertTrue(
+            "composer launcher accent mark should stay inside the circular-button safe area; " +
+                "ink=$ink bitmap=${bitmap.width}x${bitmap.height} requiredMargin=$requiredMargin",
+            minEdgeMargin >= requiredMargin,
+        )
+    }
+
+    @Test
     fun stagedAttachmentRemainsRemovableAfterComposerSheetIsClosed() {
         val attachment = PromptComposerViewModel.StagedAttachment(
             remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
@@ -565,4 +604,37 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
     }
+
+    private fun accentInkBounds(bitmap: android.graphics.Bitmap): InkBounds {
+        var left = bitmap.width
+        var top = bitmap.height
+        var right = -1
+        var bottom = -1
+        var count = 0
+        for (y in 0 until bitmap.height) {
+            for (x in 0 until bitmap.width) {
+                val pixel = bitmap.getPixel(x, y)
+                val alpha = pixel ushr 24 and 0xFF
+                val red = pixel ushr 16 and 0xFF
+                val green = pixel ushr 8 and 0xFF
+                val blue = pixel and 0xFF
+                if (alpha > 180 && red <= 90 && green >= 175 && blue >= 190) {
+                    left = minOf(left, x)
+                    top = minOf(top, y)
+                    right = maxOf(right, x)
+                    bottom = maxOf(bottom, y)
+                    count++
+                }
+            }
+        }
+        return InkBounds(left = left, top = top, right = right, bottom = bottom, count = count)
+    }
+
+    private data class InkBounds(
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int,
+        val count: Int,
+    )
 }

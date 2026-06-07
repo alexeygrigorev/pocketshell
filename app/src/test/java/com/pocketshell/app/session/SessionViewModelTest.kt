@@ -319,7 +319,7 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun keyBarEnterFlushesSmartTextBeforeSendingCarriageReturn() = runBlocking {
+    fun keyBarEnterLabelsFlushSmartTextBeforeSendingCarriageReturn() = runBlocking {
         val vm = newVm()
         val stdin = ByteArrayOutputStream()
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -338,11 +338,15 @@ class SessionViewModelTest {
         }
 
         try {
+            vm.onKeyBarKey("⏎")
             vm.onKeyBarKey("Enter")
 
-            waitForStdin(stdin, "staged\r")
-            assertEquals(listOf(TerminalRawInputPolicy.FlushSmartText), policies)
-            assertEquals("staged\r", stdin.toString(Charsets.UTF_8.name()))
+            waitForStdin(stdin, "staged\rstaged\r")
+            assertEquals(
+                listOf(TerminalRawInputPolicy.FlushSmartText, TerminalRawInputPolicy.FlushSmartText),
+                policies,
+            )
+            assertEquals("staged\rstaged\r", stdin.toString(Charsets.UTF_8.name()))
         } finally {
             vm.terminalState.setSmartTextStagingBridgeForTest(null)
             producerJob.cancel()

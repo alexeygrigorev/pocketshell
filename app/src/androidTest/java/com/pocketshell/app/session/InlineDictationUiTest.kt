@@ -35,7 +35,7 @@ class InlineDictationUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun rawSshTerminalKeyBarExposesEmergencyKeysWhenRendered() {
+    fun rawSshTerminalKeyBarExposesEmergencyAndEnterKeysWhenRendered() {
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
@@ -46,14 +46,14 @@ class InlineDictationUiTest {
             }
         }
 
-        listOf("Esc", "Ctrl-C", "Ctrl-D").forEach { label ->
+        listOf("Esc", "Ctrl-C", SessionKeyBarEnterLabel, "Ctrl-D").forEach { label ->
             compose.onNodeWithText(label)
                 .assertIsDisplayed()
                 .assertHasClickAction()
                 .performClick()
         }
 
-        assertEquals(listOf("Esc", "Ctrl-C", "Ctrl-D"), taps)
+        assertEquals(listOf("Esc", "Ctrl-C", SessionKeyBarEnterLabel, "Ctrl-D"), taps)
     }
 
     @Test
@@ -85,13 +85,14 @@ class InlineDictationUiTest {
             .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
+        compose.onNodeWithText(SessionKeyBarEnterLabel).assertIsDisplayed()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG)
             .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
         compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed()
 
-        assertEquals(listOf("Enter"), keyTaps)
+        assertEquals(listOf(SessionKeyBarEnterLabel), keyTaps)
         assertEquals(1, keyboardTaps)
     }
 
@@ -145,6 +146,7 @@ class InlineDictationUiTest {
 
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("Ctrl-C").assertIsDisplayed()
+        compose.onNodeWithText(SessionKeyBarEnterLabel).assertIsDisplayed().assertHasClickAction()
         compose.onNodeWithText("Ctrl-D").assertIsDisplayed()
         compose.onNodeWithText("Tab").assertIsDisplayed()
         compose.onNodeWithText("Prompt").assertDoesNotExist()

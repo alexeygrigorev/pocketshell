@@ -1504,8 +1504,9 @@ internal fun RawSessionBottomControls(
             onChipTap = onChipTap,
             onDictateTap = onDictateTap,
             onEnterTap = if (!showConversation) {
-                { onKey(KeyBinding(label = "Enter", kind = KeyKind.Regular)) }
+                { onKey(KeyBinding(label = SessionKeyBarEnterLabel, kind = KeyKind.Regular)) }
             } else null,
+            enterLabel = SessionKeyBarEnterLabel,
             onShowKeyboardTap = onShowKeyboardTap,
             onAddSnippetTap = onAddSnippetTap,
             onProjectNavigationTap = onProjectNavigationTap,
@@ -1538,18 +1539,21 @@ private fun DirectoryShortcutRow(item: ProjectNavigationItem, onClick: () -> Uni
  * Terminal key row for raw SSH.
  *
  * The row keeps the original one-tap Esc/Tab/arrows and sticky Ctrl
- * affordances, and adds direct `Ctrl-C` / `Ctrl-D` emergency controls so
- * interrupt/EOF are one tap away while the software keyboard is open.
+ * affordances, adds direct `Ctrl-C` / `Ctrl-D` emergency controls, and mirrors
+ * the tmux key bar's dedicated `⏎` Enter/Return key so submit is one tap away
+ * while the software keyboard is open.
  *
  * `Ctrl` remains a [KeyKind.Modifier] so the ui-kit can render one-shot and
  * locked state while the screen mirrors those transitions into
  * [SessionViewModel].
  */
+internal const val SessionKeyBarEnterLabel: String = "⏎"
+
 internal val SessionTerminalKeyBarLayout: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
     KeyBinding(label = "Ctrl", kind = KeyKind.Modifier),
     KeyBinding(label = "Ctrl-C", kind = KeyKind.Regular),
-    KeyBinding(label = "Enter", kind = KeyKind.Regular),
+    KeyBinding(label = SessionKeyBarEnterLabel, kind = KeyKind.Regular),
     KeyBinding(label = "Ctrl-D", kind = KeyKind.Regular),
     KeyBinding(label = "Tab", kind = KeyKind.Regular),
     KeyBinding(label = "‹", kind = KeyKind.Arrow),

@@ -357,6 +357,7 @@ private fun PrimaryChipCluster(
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
+    enterLabel: String = ENTER_CHIP_LABEL,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     modifier: Modifier = Modifier,
@@ -370,7 +371,7 @@ private fun PrimaryChipCluster(
     ) {
         if (onEnterTap != null) {
             CommandChip(
-                label = ENTER_CHIP_LABEL,
+                label = enterLabel,
                 onClick = onEnterTap,
                 modifier = Modifier.testTag(SESSION_ENTER_CHIP_TAG),
             )
@@ -432,6 +433,7 @@ internal fun BottomChipControls(
     onEnterTap: (() -> Unit)? = null,
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
+    enterLabel: String = ENTER_CHIP_LABEL,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
@@ -463,6 +465,7 @@ internal fun BottomChipControls(
             },
             onShowKeyboardTap = onShowKeyboardTap,
             onAddSnippetTap = onAddSnippetTap,
+            enterLabel = enterLabel,
             addSnippetLabel = addSnippetLabel,
             addSnippetIcon = addSnippetIcon,
         )

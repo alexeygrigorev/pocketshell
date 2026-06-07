@@ -6,7 +6,8 @@ import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import org.junit.rules.TestWatcher
+import org.junit.rules.TestRule
+import org.junit.runners.model.Statement
 import org.junit.runner.Description
 
 /**
@@ -22,16 +23,33 @@ import org.junit.runner.Description
  * first time the test scope advances, which is what most of our
  * assertions expect ("the ViewModel state has settled by the time we
  * check it").
+ *
+ * `Dispatchers.Main` is a process-global singleton. Gradle may run
+ * multiple unit-test classes in the same JVM at once, and kotlinx-coroutines
+ * guards against reading `Main` while another thread is swapping it. Hold a
+ * shared lock across the whole test statement so every test using this rule
+ * sees a stable Main dispatcher until its `@After` cleanup has finished.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainDispatcherRule(
     private val dispatcher: TestDispatcher = UnconfinedTestDispatcher(),
-) : TestWatcher() {
-    override fun starting(description: Description) {
-        Dispatchers.setMain(dispatcher)
-    }
+) : TestRule {
 
-    override fun finished(description: Description) {
-        Dispatchers.resetMain()
+    override fun apply(base: Statement, description: Description): Statement =
+        object : Statement() {
+            override fun evaluate() {
+                synchronized(mainDispatcherLock) {
+                    Dispatchers.setMain(dispatcher)
+                    try {
+                        base.evaluate()
+                    } finally {
+                        Dispatchers.resetMain()
+                    }
+                }
+            }
+        }
+
+    private companion object {
+        private val mainDispatcherLock = Any()
     }
 }

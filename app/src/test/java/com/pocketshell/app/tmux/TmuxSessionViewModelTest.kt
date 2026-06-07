@@ -89,6 +89,7 @@ class TmuxSessionViewModelTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
 
     private fun newVm(
         registry: ActiveTmuxClients = ActiveTmuxClients(),
@@ -100,16 +101,21 @@ class TmuxSessionViewModelTest {
             idleTtlMillis = 0L,
         ),
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
-    ): TmuxSessionViewModel = TmuxSessionViewModel(
-        tmuxClientFactory = TmuxClientFactory(factoryScope),
-        activeTmuxClients = registry,
-        runtimeCache = runtimeCache,
-        sshLeaseManager = sshLeaseManager,
-        sessionLifecycleSignals = sessionLifecycleSignals,
-    )
+    ): TmuxSessionViewModel =
+        TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = registry,
+            runtimeCache = runtimeCache,
+            sshLeaseManager = sshLeaseManager,
+            sessionLifecycleSignals = sessionLifecycleSignals,
+        ).also { createdViewModels += it }
 
     @After
     fun tearDown() {
+        createdViewModels.asReversed().forEach { vm ->
+            runCatching { vm.clearForTest() }
+        }
+        createdViewModels.clear()
         factoryScope.cancel()
     }
 

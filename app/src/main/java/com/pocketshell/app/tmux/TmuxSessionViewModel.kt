@@ -1474,6 +1474,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * observer wired in [com.pocketshell.app.App.onCreate].
      */
     private fun installLifecycleHooks(hostId: Long) {
+        unregisterLifecycleHooks()
         lifecycleHookRegistration = activeTmuxClients.registerLifecycleHooks(
             hostId = hostId,
             hooks = ActiveTmuxClients.LifecycleHooks(

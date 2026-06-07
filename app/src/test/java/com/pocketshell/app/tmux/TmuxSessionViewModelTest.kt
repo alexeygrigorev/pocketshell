@@ -8263,6 +8263,56 @@ class TmuxSessionViewModelTest {
     }
 
     /**
+     * Issue #548: one VM can be reused for another host. Installing
+     * hooks for the new host must remove the prior host's hook; only
+     * client entries are allowed to churn independently across normal
+     * detach/attach cycles.
+     */
+    @Test
+    fun reinstallingLifecycleHooksForDifferentHostRemovesPreviousHook() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        vm.replaceClientForTest(
+            hostId = 21L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        assertEquals(1, registry.lifecycleHooksSnapshot().size)
+
+        vm.replaceClientForTest(
+            hostId = 22L,
+            hostName = "beta",
+            host = "beta.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/b",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+
+        assertEquals(
+            "reinstalling hooks for a different host must not leak the old host hook",
+            1,
+            registry.lifecycleHooksSnapshot().size,
+        )
+        assertTrue("old host client entry should be gone", 21L !in registry.clients.value)
+        assertTrue("new host client entry should be present", 22L in registry.clients.value)
+
+        vm.clearForTest()
+        advanceUntilIdle()
+
+        assertTrue(
+            "clearing the VM must remove the latest lifecycle hook",
+            registry.lifecycleHooksSnapshot().isEmpty(),
+        )
+    }
+
+    /**
      * Issue #548: a stale VM can finish teardown after a newer VM has
      * already attached to the same host. The stale teardown must not
      * evict the newer client entry or lifecycle hook.

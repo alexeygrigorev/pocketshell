@@ -2,10 +2,11 @@ package com.pocketshell.app.tmux
 
 import android.os.Looper
 import android.os.SystemClock
-import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -3540,6 +3541,40 @@ class TmuxSessionViewModelTest {
 
         assertEquals(SessionTab.Conversation, vm.agentConversations.value["%0"]!!.selectedTab)
         assertEquals(SessionTab.Terminal, vm.agentConversations.value["%1"]!!.selectedTab)
+    }
+
+    @Test
+    fun selectingTmuxConversationAndTerminalTabsRecordsExplicitDiagnostics() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            vm.attachClientForTest(FakeTmuxClient())
+            val event = ConversationEvent.Message(
+                id = "message-1",
+                agent = AgentKind.ClaudeCode,
+                role = ConversationRole.Assistant,
+                text = "do not record this transcript text",
+            )
+            vm.startAgentConversationForTest("%0", newClaudeDetection(), listOf(event))
+
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            vm.selectSessionTab("%0", SessionTab.Terminal)
+
+            val events = diagnostics.eventsNamed("conversation_terminal_tab_switch")
+            assertEquals(2, events.size)
+            assertEquals("tmux", events[0].fields["mode"])
+            assertEquals("%0", events[0].fields["paneId"])
+            assertEquals("Terminal", events[0].fields["fromTab"])
+            assertEquals("Conversation", events[0].fields["toTab"])
+            assertEquals("terminal_to_conversation", events[0].fields["direction"])
+            assertEquals(true, events[0].fields["hasConversation"])
+            assertEquals(1, events[0].fields["eventCount"])
+            assertEquals("Conversation", events[1].fields["fromTab"])
+            assertEquals("Terminal", events[1].fields["toTab"])
+            assertFalse(events[0].fields.containsValue(event.text))
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

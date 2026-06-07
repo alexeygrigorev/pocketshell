@@ -96,6 +96,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
+import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
 import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
@@ -1080,6 +1081,7 @@ public fun TmuxSessionScreen(
                         onQueryChange = { next ->
                             viewModel.setAgentSearchQuery(paneIdForSend, next)
                         },
+                        paneId = paneIdForSend,
                         syncStatus = visibleConversation.syncStatus,
                         onRetryAgentStream = {
                             viewModel.retryAgentConversationStreamForPane(paneIdForSend)
@@ -3188,6 +3190,7 @@ internal fun TmuxConversationPane(
     // search field still types. See [rememberHoistedQuery] below.
     query: String = "",
     onQueryChange: (String) -> Unit = NoOpStringChange,
+    paneId: String? = null,
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
     onRetryAgentStream: () -> Unit = {},
     // Issue #494: retry a failed optimistic user send (passes its optimistic
@@ -3314,33 +3317,33 @@ internal fun TmuxConversationPane(
                             event.id in filteredConversation.searchExpandedToolCallIds,
                         isMessageExpanded = expandedMessages.value.contains(event.id),
                         onToggleMessageExpand = { id ->
-                            DiagnosticEvents.record(
-                                "action",
-                                "conversation_row_toggle",
-                                "mode" to "tmux",
-                                "rowType" to "message",
-                                "expanded" to !expandedMessages.value.contains(id),
+                            ConversationDiagnostics.recordRowToggle(
+                                mode = "tmux",
+                                paneId = paneId,
+                                event = event,
+                                expanded = !expandedMessages.value.contains(id),
                             )
                             expandedMessages.value = expandedMessages.value.toggle(id)
                         },
                         onToggleExpand = { id ->
-                            DiagnosticEvents.record(
-                                "action",
-                                "conversation_row_toggle",
-                                "mode" to "tmux",
-                                "rowType" to "tool_call",
-                                "expanded" to !expandedToolCalls.value.contains(id),
+                            ConversationDiagnostics.recordRowToggle(
+                                mode = "tmux",
+                                paneId = paneId,
+                                event = event,
+                                expanded = !expandedToolCalls.value.contains(id),
+                                pairedToolResult = (event as? ConversationEvent.ToolCall)?.let { call ->
+                                    toolResultPairing.resultsByCallId[call.id]
+                                },
                             )
                             expandedToolCalls.value = expandedToolCalls.value.toggle(id)
                         },
                         isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
                         onToggleSystemNoteExpand = { id ->
-                            DiagnosticEvents.record(
-                                "action",
-                                "conversation_row_toggle",
-                                "mode" to "tmux",
-                                "rowType" to "system_note",
-                                "expanded" to !expandedSystemNotes.value.contains(id),
+                            ConversationDiagnostics.recordRowToggle(
+                                mode = "tmux",
+                                paneId = paneId,
+                                event = event,
+                                expanded = !expandedSystemNotes.value.contains(id),
                             )
                             expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
                         },

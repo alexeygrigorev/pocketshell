@@ -59,6 +59,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
+import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
 import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
@@ -695,35 +696,34 @@ internal fun ConversationPane(
                         isMessageExpanded = expandedMessages.value.contains(event.id),
                         onToggleMessageExpand = { id ->
                             val current = expandedMessages.value
-                            DiagnosticEvents.record(
-                                "action",
-                                "conversation_row_toggle",
-                                "mode" to "raw_ssh",
-                                "rowType" to "message",
-                                "expanded" to !current.contains(id),
+                            ConversationDiagnostics.recordRowToggle(
+                                mode = "raw_ssh",
+                                event = event,
+                                expanded = !current.contains(id),
                             )
                             expandedMessages.value = if (current.contains(id)) current - id else current + id
                         },
                         onToggleExpand = { id ->
                             val current = expandedToolCalls.value
-                            DiagnosticEvents.record(
-                                "action",
-                                "conversation_row_toggle",
-                                "mode" to "raw_ssh",
-                                "rowType" to "tool_call",
-                                "expanded" to !current.contains(id),
+                            ConversationDiagnostics.recordRowToggle(
+                                mode = "raw_ssh",
+                                event = event,
+                                expanded = !current.contains(id),
+                                pairedToolResult = (event as? ConversationEvent.ToolCall)?.let { call ->
+                                    eventsById.values
+                                        .filterIsInstance<ConversationEvent.ToolResult>()
+                                        .firstOrNull { it.toolCallId == call.id }
+                                },
                             )
                             expandedToolCalls.value = if (current.contains(id)) current - id else current + id
                         },
                         isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
                         onToggleSystemNoteExpand = { id ->
                             val current = expandedSystemNotes.value
-                            DiagnosticEvents.record(
-                                "action",
-                                "conversation_row_toggle",
-                                "mode" to "raw_ssh",
-                                "rowType" to "system_note",
-                                "expanded" to !current.contains(id),
+                            ConversationDiagnostics.recordRowToggle(
+                                mode = "raw_ssh",
+                                event = event,
+                                expanded = !current.contains(id),
                             )
                             expandedSystemNotes.value = if (current.contains(id)) current - id else current + id
                         },

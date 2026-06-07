@@ -20,6 +20,7 @@ import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
+import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -4823,6 +4824,15 @@ public class TmuxSessionViewModel @Inject constructor(
                 "paneId" to paneId,
                 "tab" to tab.name,
                 "hasConversation" to (before.detection != null),
+            )
+            ConversationDiagnostics.recordTabSwitch(
+                mode = "tmux",
+                paneId = paneId,
+                fromTab = before.selectedTab.name,
+                toTab = tab.name,
+                hasConversation = before.detection != null,
+                eventCount = before.events.size,
+                syncStatus = before.syncStatus.name,
             )
         }
         // Issue #495: remember the tab choice keyed by window so a reconnect

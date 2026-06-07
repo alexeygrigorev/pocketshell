@@ -2,6 +2,7 @@ package com.pocketshell.app.session
 
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.session.SessionViewModel.Modifier
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.dao.ProjectRootDao
@@ -1150,6 +1151,44 @@ class SessionViewModelTest {
         assertEquals(detection, state.detection)
         assertEquals(SessionTab.Conversation, state.selectedTab)
         assertEquals(listOf(event), state.events)
+    }
+
+    @Test
+    fun rawSshTabSwitchRecordsExplicitConversationTerminalDiagnostics() {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            val detection = AgentDetection(
+                agent = AgentKind.ClaudeCode,
+                sourcePath = "/home/u/.claude/sessions/abc.jsonl",
+                sessionId = "abc",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            )
+            val event = ConversationEvent.Message(
+                id = "message-1",
+                agent = AgentKind.ClaudeCode,
+                role = ConversationRole.Assistant,
+                text = "do not record this transcript text",
+            )
+            vm.startAgentConversationForTest(detection, listOf(event))
+
+            vm.selectSessionTab(SessionTab.Conversation)
+            vm.selectSessionTab(SessionTab.Terminal)
+
+            val events = diagnostics.eventsNamed("conversation_terminal_tab_switch")
+            assertEquals(2, events.size)
+            assertEquals("raw_ssh", events[0].fields["mode"])
+            assertEquals("Terminal", events[0].fields["fromTab"])
+            assertEquals("Conversation", events[0].fields["toTab"])
+            assertEquals("terminal_to_conversation", events[0].fields["direction"])
+            assertEquals(true, events[0].fields["hasConversation"])
+            assertEquals(1, events[0].fields["eventCount"])
+            assertEquals("Conversation", events[1].fields["fromTab"])
+            assertEquals("Terminal", events[1].fields["toTab"])
+            assertFalse(events[0].fields.containsValue(event.text))
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

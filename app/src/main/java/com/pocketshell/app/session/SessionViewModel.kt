@@ -16,6 +16,7 @@ import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.assistant.SessionActionBridge
+import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.snippets.snippetDispatchText
@@ -775,6 +776,14 @@ public class SessionViewModel @Inject constructor(
             "mode" to "raw_ssh",
             "tab" to tab.name,
             "hasConversation" to (before.detection != null),
+        )
+        ConversationDiagnostics.recordTabSwitch(
+            mode = "raw_ssh",
+            fromTab = before.selectedTab.name,
+            toTab = tab.name,
+            hasConversation = before.detection != null,
+            eventCount = before.events.size,
+            syncStatus = before.syncStatus.name,
         )
     }
 

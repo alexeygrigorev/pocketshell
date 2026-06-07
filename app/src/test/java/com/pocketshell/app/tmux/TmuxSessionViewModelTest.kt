@@ -1064,6 +1064,13 @@ class TmuxSessionViewModelTest {
             closeAndThrowException = TmuxClientException(
                 "tmux command `send-keys` timed out after 100ms",
             )
+            closeAndThrowDisconnectEvent = TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.CommandTimeout,
+                source = "command_timeout",
+                intent = "command_timeout",
+                commandKind = "send-keys",
+                timeoutMode = "fatal",
+            )
         }
         vm.attachClientForTest(client)
         runCurrent()
@@ -1081,7 +1088,7 @@ class TmuxSessionViewModelTest {
             status is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
         assertEquals(
-            "Disconnected from test@test:0. Tap Reconnect to retry.",
+            "Tmux command timed out from test@test:0. Tap Reconnect to retry.",
             (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
         )
     }

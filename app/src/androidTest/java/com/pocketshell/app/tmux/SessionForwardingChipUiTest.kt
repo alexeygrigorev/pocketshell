@@ -6,6 +6,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -20,8 +21,8 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #487, part 2: chrome-level coverage for the in-session "port
- * forwarding active for this host" chip ([SessionForwardingChip]). Mounts the
+ * Issue #487 / #601: chrome-level coverage for the in-session "port
+ * forwarding active for this host" indicator ([SessionForwardingChip]). Mounts the
  * composable directly (no Hilt / live tmux) so the affordance is verified at
  * the UI layer:
  *
@@ -32,7 +33,7 @@ import java.io.FileOutputStream
  *
  * The screen-level "show only while THIS host forwards / hide otherwise"
  * gating is driven by [SessionForwardingIndicatorState.visible] and covered by
- * the JVM unit tests; this test verifies the rendered chip itself.
+ * the JVM unit tests; this test verifies the rendered indicator itself.
  */
 @RunWith(AndroidJUnit4::class)
 class SessionForwardingChipUiTest {
@@ -55,6 +56,7 @@ class SessionForwardingChipUiTest {
         }
 
         compose.onNodeWithTag(TMUX_SESSION_FORWARDING_CHIP_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Ports 2").assertIsDisplayed()
         compose.onNodeWithContentDescription("2 ports forwarding active for this host")
             .assertIsDisplayed()
             .assertHasClickAction()
@@ -99,6 +101,55 @@ class SessionForwardingChipUiTest {
         }
 
         compose.onNodeWithContentDescription("Port forwarding restoring for this host")
+            .assertIsDisplayed()
+        compose.onNodeWithText("Ports").assertIsDisplayed()
+    }
+
+    @Test
+    fun fullChromeSurfacesForwardingIndicatorAndTapAction() {
+        var tapped = false
+        compose.setContent {
+            PocketShellTheme {
+                ConsolidatedTopChrome(
+                    sessionName = "main",
+                    onBack = {},
+                    onMore = {},
+                    forwardingState = SessionForwardingIndicatorState(
+                        active = true,
+                        tunnelCount = 3,
+                    ),
+                    onOpenPortForwarding = { tapped = true },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_SESSION_FORWARDING_CHIP_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Ports 3").assertIsDisplayed()
+        compose.onNodeWithContentDescription("3 ports forwarding active for this host")
+            .assertHasClickAction()
+            .performClick()
+        assertTrue("full chrome indicator must route to the port-forward panel", tapped)
+    }
+
+    @Test
+    fun compactChromeKeepsForwardingIndicatorVisible() {
+        compose.setContent {
+            PocketShellTheme {
+                CompactBreadcrumb(
+                    sessionName = "main",
+                    onBack = {},
+                    onMore = {},
+                    forwardingState = SessionForwardingIndicatorState(
+                        active = true,
+                        tunnelCount = 1,
+                    ),
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_SESSION_FORWARDING_CHIP_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Ports 1").assertIsDisplayed()
+        compose.onNodeWithContentDescription("1 port forwarding active for this host")
             .assertIsDisplayed()
     }
 }

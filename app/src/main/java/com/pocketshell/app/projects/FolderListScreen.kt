@@ -1509,28 +1509,38 @@ internal fun rootCountSubtitle(root: FolderTreeRoot): String {
 
 @Composable
 private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = treeProjectIndent)
-            .background(PocketShellColors.Surface.copy(alpha = 0.48f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .background(PocketShellColors.Surface.copy(alpha = 0.36f), RoundedCornerShape(6.dp))
+            .border(1.dp, PocketShellColors.BorderSoft.copy(alpha = 0.72f), RoundedCornerShape(6.dp))
+            .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
+            .testTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
+        StatusDot(active = false)
+        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = if (candidateCount > 0) {
-                "$candidateCount inactive project folders available."
+                "$candidateCount inactive project folders"
             } else {
-                "No project folders found under this watched root."
+                "No project folders found"
             },
-            color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.width(8.dp))
         CompactTreeIconButton(
             label = "+",
             contentDescription = "Add project",
             onClick = onCreate,
             accent = true,
+            size = 32.dp,
         )
     }
 }
@@ -2449,6 +2459,7 @@ const val FOLDER_LIST_LOADING_TAG: String = "folder-list:loading"
 const val FOLDER_LIST_ERROR_TAG: String = "folder-list:error"
 const val FOLDER_LIST_RETRY_TAG: String = "folder-list:retry"
 const val FOLDER_LIST_EMPTY_TAG: String = "folder-list:empty"
+const val FOLDER_LIST_EMPTY_ROOT_HINT_TAG: String = "folder-list:root:empty-hint"
 const val FOLDER_LIST_SHOW_ALL_TAG: String = "folder-list:show-all"
 const val FOLDER_LIST_FLAT_EMPTY_TAG: String = "folder-list:flat:empty"
 const val FOLDER_LIST_FLAT_HEADER_TAG: String = "folder-list:flat:header"

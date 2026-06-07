@@ -120,6 +120,13 @@ class FolderListScreenE2eTest {
                 path = "~/tmp",
             ),
         )
+        db.projectRootDao().insert(
+            ProjectRootEntity(
+                hostId = hostId,
+                label = "[02] archive",
+                path = "~/archive",
+            ),
+        )
     }
 
     @After
@@ -192,10 +199,12 @@ class FolderListScreenE2eTest {
                     "/home/u/tmp/notebooks",
                     "/home/u/tmp/old-run",
                 ),
+                "~/archive" to emptyList(),
             ),
             resolvedWatchedRootPaths = mapOf(
                 "~/git" to "/home/u/git",
                 "~/tmp" to "/home/u/tmp",
+                "~/archive" to "/home/u/archive",
             ),
         )
         // The view model attaches a ProcessLifecycleOwner observer in init
@@ -270,16 +279,24 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(folderTreeRootLabelTag(FolderListViewModel.OTHER_ROOT_PATH), useUnmergedTree = true).assertExists()
         val readyRoots = (viewModel.state.value as FolderListUiState.Ready).treeRoots
         assertEquals(
-            listOf("git", "tmp", FolderListViewModel.OTHER_ROOT_LABEL),
+            listOf("git", "tmp", "archive", FolderListViewModel.OTHER_ROOT_LABEL),
             readyRoots.map { it.label },
         )
-        assertEquals(listOf("~/git", "~/tmp", FolderListViewModel.OTHER_ROOT_PATH), readyRoots.map { it.path })
+        assertEquals(
+            listOf("~/git", "~/tmp", "~/archive", FolderListViewModel.OTHER_ROOT_PATH),
+            readyRoots.map { it.path },
+        )
         assertEquals(
             listOf("pocketshell", "llm-zoomcamp"),
             readyRoots[0].folders.map { it.label },
         )
         assertEquals(listOf("scratch", "notebooks"), readyRoots[1].folders.map { it.label })
-        assertEquals(listOf("demo"), readyRoots[2].folders.map { it.label })
+        assertEquals(emptyList<String>(), readyRoots[2].folders.map { it.label })
+        assertEquals(listOf("demo"), readyRoots[3].folders.map { it.label })
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG))
+        compose.onNodeWithTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG).assertIsDisplayed()
+        compose.onNodeWithText("No project folders found").assertIsDisplayed()
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
         compose.onAllNodesWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)

@@ -855,6 +855,8 @@ public fun TmuxSessionScreen(
                                     )
                                 },
                                 connectionStatus = status.toUiStatus(),
+                                forwardingState = sessionForwardingState,
+                                onOpenPortForwarding = onOpenPortForwarding,
                                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                             )
                             // Issue #192 / #156: per-window nav strip is
@@ -901,6 +903,8 @@ public fun TmuxSessionScreen(
                             showCommandPalette = paletteAgent != null,
                             onCommandPalette = { showAgentCommands = true },
                             connectionStatus = status.toUiStatus(),
+                            forwardingState = sessionForwardingState,
+                            onOpenPortForwarding = onOpenPortForwarding,
                             modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                         )
                     }
@@ -974,18 +978,6 @@ public fun TmuxSessionScreen(
                         provider = usageBadgeProvider,
                     )
                 }
-            }
-
-            // Issue #487: in-session "port forwarding active for THIS host"
-            // chip. Only renders while the current host has ≥1 active tunnel,
-            // so the user is reminded a tunnel is open on the server they're
-            // looking at. Tapping it opens the same per-host port-forward
-            // panel as the kebab's "Port forwarding" action.
-            if (sessionForwardingState.visible) {
-                SessionForwardingChip(
-                    state = sessionForwardingState,
-                    onClick = onOpenPortForwarding,
-                )
             }
 
             // Issue #192: the [WindowStrip] (rendered above with the top
@@ -2346,68 +2338,61 @@ internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
 internal const val TMUX_SESSION_FORWARDING_CHIP_TAG = "tmux:forwarding-chip"
 
 /**
- * Compact chip surfaced in the in-session chrome (issue #487) while ≥1 port
- * forward is active for the host this session belongs to. Built from the
- * shared [com.pocketshell.uikit.components.StatusDot] (#480) — Connected =
- * solid "active" green; Connecting pulse while a transport blip is restoring —
- * plus a short label, consistent with the design language. The whole chip is a
- * tap target into the per-host port-forward panel so the user can stop or
- * inspect a tunnel they'd otherwise forget was open.
+ * Compact ongoing indicator surfaced inside the session header chrome while
+ * port forwarding is active for the host this session belongs to. It deliberately
+ * stays out of the terminal content area (#601): a short "Ports N" label plus
+ * status dot is visible in both full and IME-compressed chrome, and taps through
+ * to the existing per-host port-forward panel.
  */
 @Composable
 internal fun SessionForwardingChip(
     state: com.pocketshell.app.portfwd.SessionForwardingIndicatorState,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+        modifier = modifier
+            .defaultMinSize(minWidth = 44.dp, minHeight = 36.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(18.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(18.dp),
+            )
+            .clickable(
+                role = androidx.compose.ui.semantics.Role.Button,
+                onClick = onClick,
+            )
+            .semantics { contentDescription = state.contentDescription }
+            .padding(horizontal = 10.dp, vertical = 7.dp)
             .testTag(TMUX_SESSION_FORWARDING_CHIP_TAG),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .background(
-                    color = PocketShellColors.SurfaceElev,
-                    shape = RoundedCornerShape(16.dp),
-                )
-                .border(
-                    width = 1.dp,
-                    color = PocketShellColors.BorderSoft,
-                    shape = RoundedCornerShape(16.dp),
-                )
-                .clickable(
-                    role = androidx.compose.ui.semantics.Role.Button,
-                    onClick = onClick,
-                )
-                .semantics { contentDescription = state.contentDescription }
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            com.pocketshell.uikit.components.StatusDot(
-                status = if (state.restoring) {
-                    com.pocketshell.uikit.model.ConnectionStatus.Connecting
-                } else {
-                    com.pocketshell.uikit.model.ConnectionStatus.Connected
-                },
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = if (state.restoring) {
-                    "Port forwarding · restoring"
-                } else {
-                    buildString {
-                        append("Port forwarding active")
-                        if (state.label.isNotEmpty()) append(" · ${state.label}")
-                    }
-                },
-                color = PocketShellColors.Text,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
+        com.pocketshell.uikit.components.StatusDot(
+            status = if (state.restoring) {
+                com.pocketshell.uikit.model.ConnectionStatus.Connecting
+            } else {
+                com.pocketshell.uikit.model.ConnectionStatus.Connected
+            },
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = buildString {
+                append("Ports")
+                if (!state.restoring && state.label.isNotEmpty()) {
+                    append(" ")
+                    append(state.label)
+                }
+            },
+            color = PocketShellColors.Text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -4144,6 +4129,9 @@ internal fun ConsolidatedTopChrome(
     // steady-state breadcrumb.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
+    forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
+        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
+    onOpenPortForwarding: () -> Unit = {},
 ) {
     Row(
         modifier = modifier
@@ -4208,6 +4196,13 @@ internal fun ConsolidatedTopChrome(
                 .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG),
         )
         ConnectionStatusPill(connectionStatus)
+        if (forwardingState.visible) {
+            Spacer(modifier = Modifier.width(4.dp))
+            SessionForwardingChip(
+                state = forwardingState,
+                onClick = onOpenPortForwarding,
+            )
+        }
 
         if (tabLabels.size > 1) {
             Spacer(modifier = Modifier.width(4.dp))
@@ -4549,6 +4544,9 @@ internal fun CompactBreadcrumb(
     // be able to tell the session is not live before they dictate into it.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
+    forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
+        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
+    onOpenPortForwarding: () -> Unit = {},
 ) {
     Row(
         modifier = modifier
@@ -4585,6 +4583,13 @@ internal fun CompactBreadcrumb(
             modifier = Modifier.weight(1f),
         )
         ConnectionStatusPill(connectionStatus)
+        if (forwardingState.visible) {
+            Spacer(modifier = Modifier.width(4.dp))
+            SessionForwardingChip(
+                state = forwardingState,
+                onClick = onOpenPortForwarding,
+            )
+        }
         Spacer(modifier = Modifier.width(4.dp))
         // Issue #462: the dedicated "/ commands" palette entry point, kept
         // reachable in the IME-up compact chrome too.

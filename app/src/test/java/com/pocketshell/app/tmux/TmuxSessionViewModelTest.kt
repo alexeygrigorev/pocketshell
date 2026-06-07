@@ -7076,6 +7076,43 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun sessionPrewarmBestEffortCaptureFailureCachesRuntimeAndKeepsClientOpen() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4").apply {
+            failBestEffortOnCommandPrefix = "capture-pane"
+            bestEffortException = TmuxClientException("tmux command `capture-pane` timed out")
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected prewarm seed to attempt capture best-effort, got ${prewarmClient.sentCommands}",
+            prewarmClient.sentCommands.contains("capture-pane -p -e -S -200 -t %4"),
+        )
+        assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")))
+        assertFalse("prewarm capture timeout must not close tmux client", prewarmClient.closed)
+        assertFalse("prewarm capture timeout must not mark tmux disconnected", prewarmClient.disconnected.value)
+    }
+
+    @Test
     fun switchingToPrewarmedTargetUsesCachedRuntimeFirstFramePath() = runTest {
         TmuxSessionLatencyTelemetry.resetForTest()
         val registry = ActiveTmuxClients()

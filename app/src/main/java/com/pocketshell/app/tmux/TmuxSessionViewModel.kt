@@ -1447,7 +1447,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // buffered live output is flushed in order rather than swallowed.
         var seeded = false
         try {
-            val capture = client.sendBestEffortCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+            val capture = runCatching {
+                client.sendBestEffortCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+            }.getOrNull() ?: return
             if (capture.isError || capture.output.isEmpty()) return
             val cursor = runCatching {
                 client.sendBestEffortCommand(

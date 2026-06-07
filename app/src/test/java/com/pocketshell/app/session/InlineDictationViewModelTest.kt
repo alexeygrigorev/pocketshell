@@ -1,16 +1,19 @@
 package com.pocketshell.app.session
 
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.session.InlineDictationViewModel.DictationMode
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.InlineDictationViewModel.RecordingState
+import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -22,6 +25,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -80,6 +84,7 @@ class InlineDictationViewModelTest {
      */
     private class FakeMicCapture(
         private val amplitudes: List<Float> = listOf(0.5f, 0.5f, 0.5f),
+        private val audio: ByteArray = SpeechAudioGuard.speechWavForTesting(),
         private val startFailure: AudioRecorderException? = null,
         private val stopFailure: AudioRecorderException? = null,
     ) : PromptComposerViewModel.MicCapture {
@@ -99,10 +104,7 @@ class InlineDictationViewModelTest {
             stopFailure?.let { throw it }
             stopCount++
             running = false
-            // Issue #452: return a WAV that passes the silence guard so the
-            // FSM tests reach Whisper. Silence-path coverage is in
-            // SpeechAudioGuardTest + the dedicated no-speech FSM test below.
-            return SpeechAudioGuard.speechWavForTesting()
+            return audio
         }
 
         override fun currentAmplitude(): Float {
@@ -110,6 +112,75 @@ class InlineDictationViewModelTest {
             val a = amplitudes.getOrElse(ampIndex) { amplitudes.lastOrNull() ?: 0f }
             ampIndex++
             return a
+        }
+    }
+
+    private class FakePendingQueue : PromptComposerViewModel.PendingTranscriptionQueue {
+        private val rows = linkedMapOf<String, PendingTranscriptionItem>()
+        private val audios = mutableMapOf<String, ByteArray>()
+        private val flow = MutableStateFlow<List<PendingTranscriptionItem>>(emptyList())
+        var nextId = "pending-1"
+        var enqueueCount = 0
+        val failureIds = mutableListOf<Pair<String, String>>()
+        val succeededIds = mutableListOf<String>()
+
+        override val items = flow
+
+        override suspend fun enqueueAudio(
+            audio: ByteArray,
+            destinationContext: String,
+            initialError: String?,
+        ): PendingTranscriptionItem {
+            enqueueCount++
+            val id = nextId
+            val item = PendingTranscriptionItem(
+                id = id,
+                recordingTimestampMs = 1L,
+                destinationContext = destinationContext,
+                retryCount = 0,
+                lastErrorMessage = initialError,
+                audioByteSize = audio.size.toLong(),
+            )
+            rows[id] = item
+            audios[id] = audio
+            emit()
+            return item
+        }
+
+        override suspend fun snapshot(): List<PendingTranscriptionItem> = rows.values.toList()
+        override suspend fun loadAudio(id: String): ByteArray? = audios[id]
+
+        override suspend fun markSucceeded(id: String) {
+            succeededIds += id
+            rows.remove(id)
+            audios.remove(id)
+            emit()
+        }
+
+        override suspend fun markFailure(id: String, errorMessage: String): PendingTranscriptionItem? {
+            failureIds += id to errorMessage
+            val current = rows[id] ?: return null
+            val updated = current.copy(
+                retryCount = current.retryCount + 1,
+                lastErrorMessage = errorMessage,
+            )
+            rows[id] = updated
+            emit()
+            return updated
+        }
+
+        override suspend fun discard(id: String) {
+            rows.remove(id)
+            audios.remove(id)
+            emit()
+        }
+
+        override suspend fun saveAsAudioFile(id: String): String? = null
+        override suspend fun reconcile() = Unit
+        fun storedAudio(id: String): ByteArray? = audios[id]
+
+        private fun emit() {
+            flow.value = rows.values.toList().asReversed()
         }
     }
 
@@ -141,6 +212,8 @@ class InlineDictationViewModelTest {
         samplerDispatcher: TestDispatcher? = null,
         clock: () -> Long = { System.currentTimeMillis() },
         voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
+        pendingQueue: PromptComposerViewModel.PendingTranscriptionQueue =
+            com.pocketshell.app.composer.DisabledPendingTranscriptionQueue,
     ): InlineDictationViewModel {
         val factory = WhisperClientFactory { whisper }
         val vm = InlineDictationViewModel(
@@ -148,6 +221,7 @@ class InlineDictationViewModelTest {
             whisperClientFactory = factory,
             apiKeyStorage = storage,
             voiceSettings = voiceSettings,
+            pendingTranscriptionStore = pendingQueue,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
         vm.clock = clock
@@ -498,6 +572,38 @@ class InlineDictationViewModelTest {
     }
 
     @Test
+    fun recoverableNoSpeechRejectionIsSavedForRetry() = runTest {
+        val marginalAudio = SpeechAudioGuard.speechWavForTesting(durationMs = 1_200, amplitude = 0.004f)
+        assertFalse(SpeechAudioGuard.hasSpeechEnergy(marginalAudio))
+        assertTrue(SpeechAudioGuard.isRecoverableNoSpeechRejection(marginalAudio))
+
+        var transcribeCalls = 0
+        val queue = FakePendingQueue()
+        val vm = newVm(
+            mic = FakeMicCapture(audio = marginalAudio),
+            whisper = fakeWhisperClient {
+                transcribeCalls++
+                Result.success("should not run")
+            },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            pendingQueue = queue,
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(0, transcribeCalls)
+        assertEquals(1, queue.enqueueCount)
+        assertTrue(queue.storedAudio("pending-1")!!.contentEquals(marginalAudio))
+        val row = queue.snapshot().single()
+        assertEquals(PendingTranscriptionEntity.DESTINATION_INLINE_DICTATION, row.destinationContext)
+        assertEquals(InlineDictationViewModel.SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE, row.lastErrorMessage)
+        assertEquals(InlineDictationViewModel.SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE, vm.uiState.value.error)
+    }
+
+    @Test
     fun hallucinationPhraseFromWhisperIsSuppressed() = runTest {
         // Energy guard passes (real-speech WAV) but Whisper still returns a
         // stock phrase — the backstop must drop it before terminal write.
@@ -522,6 +628,98 @@ class InlineDictationViewModelTest {
             InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE,
             vm.uiState.value.error,
         )
+        collector.cancel()
+    }
+
+    @Test
+    fun hallucinationPhraseFromWhisperKeepsInlineAudioQueued() = runTest {
+        val audio = SpeechAudioGuard.speechWavForTesting()
+        val queue = FakePendingQueue()
+        val vm = newVm(
+            mic = FakeMicCapture(audio = audio),
+            whisper = fakeWhisperClient { Result.success("시청해주셔서 감사합니다!") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            pendingQueue = queue,
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { received += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertTrue(received.isEmpty())
+        assertEquals(1, queue.enqueueCount)
+        assertTrue(queue.storedAudio("pending-1")!!.contentEquals(audio))
+        assertEquals(
+            listOf("pending-1" to InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE),
+            queue.failureIds,
+        )
+        assertTrue(queue.succeededIds.isEmpty())
+        assertEquals(InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE, vm.uiState.value.error)
+        collector.cancel()
+    }
+
+    @Test
+    fun emptyWhisperResponseKeepsInlineAudioQueued() = runTest {
+        val audio = SpeechAudioGuard.speechWavForTesting()
+        val queue = FakePendingQueue()
+        val vm = newVm(
+            mic = FakeMicCapture(audio = audio),
+            whisper = fakeWhisperClient { Result.success(" \n ") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            pendingQueue = queue,
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { received += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertTrue(received.isEmpty())
+        assertEquals(1, queue.enqueueCount)
+        assertTrue(queue.storedAudio("pending-1")!!.contentEquals(audio))
+        assertEquals(
+            listOf("pending-1" to InlineDictationViewModel.EMPTY_TRANSCRIPTION_RETRY_MESSAGE),
+            queue.failureIds,
+        )
+        assertTrue(queue.succeededIds.isEmpty())
+        assertEquals(InlineDictationViewModel.EMPTY_TRANSCRIPTION_RETRY_MESSAGE, vm.uiState.value.error)
+        collector.cancel()
+    }
+
+    @Test
+    fun successfulInlineTranscriptionDeletesPersistedAudio() = runTest {
+        val audio = SpeechAudioGuard.speechWavForTesting()
+        val queue = FakePendingQueue()
+        val vm = newVm(
+            mic = FakeMicCapture(audio = audio),
+            whisper = fakeWhisperClient { Result.success("git status") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            pendingQueue = queue,
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { received += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(listOf("git status"), received)
+        assertEquals(1, queue.enqueueCount)
+        assertEquals(listOf("pending-1"), queue.succeededIds)
+        assertNull(queue.storedAudio("pending-1"))
+        assertTrue(queue.failureIds.isEmpty())
         collector.cancel()
     }
 

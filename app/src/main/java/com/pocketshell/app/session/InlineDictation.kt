@@ -37,9 +37,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.composer.DisabledPendingTranscriptionQueue
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.voice.DictateDotIcon
+import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperException
@@ -146,6 +148,8 @@ public class InlineDictationViewModel @Inject constructor(
     internal val whisperClientFactory: WhisperClientFactory,
     internal val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
     internal val voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot,
+    internal val pendingTranscriptionStore: PromptComposerViewModel.PendingTranscriptionQueue =
+        DisabledPendingTranscriptionQueue,
 ) : ViewModel() {
 
     private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(UiState())
@@ -309,8 +313,34 @@ public class InlineDictationViewModel @Inject constructor(
         // Issue #452: silence guard — skip Whisper on silent / too-short /
         // low-energy audio so the model can't hallucinate a stock phrase
         // (e.g. the Korean "thanks for watching") straight into the
-        // terminal. Surface a "no speech detected" hint instead.
+        // terminal. Issue #587 mirrors the composer's recovery path for
+        // inline dictation: if the WAV has enough captured signal to look
+        // suspicious, save it for retry/export instead of dropping it.
         if (!SpeechAudioGuard.hasSpeechEnergy(audio)) {
+            if (SpeechAudioGuard.isRecoverableNoSpeechRejection(audio)) {
+                _uiState.update {
+                    it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
+                }
+                transcribeJob = viewModelScope.launch {
+                    val pendingId = pendingTranscriptionStore.enqueueAudio(
+                        audio = audio,
+                        destinationContext = PendingTranscriptionEntity.DESTINATION_INLINE_DICTATION,
+                        initialError = SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE,
+                    )?.id
+                    _uiState.update {
+                        it.copy(
+                            recording = RecordingState.Idle,
+                            amplitude = 0f,
+                            error = if (pendingId != null) {
+                                SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE
+                            } else {
+                                NO_SPEECH_DETECTED_MESSAGE
+                            },
+                        )
+                    }
+                }
+                return
+            }
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -335,6 +365,11 @@ public class InlineDictationViewModel @Inject constructor(
                 }
                 return@launch
             }
+            val pendingId = pendingTranscriptionStore.enqueueAudio(
+                audio = audio,
+                destinationContext = PendingTranscriptionEntity.DESTINATION_INLINE_DICTATION,
+                initialError = null,
+            )?.id
             val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
             result.fold(
                 onSuccess = { text ->
@@ -342,11 +377,43 @@ public class InlineDictationViewModel @Inject constructor(
                     // writing zero bytes is harmless but writing only a
                     // space-or-newline is a footgun on the shell side.
                     val trimmed = text.trim()
+                    if (trimmed.isEmpty()) {
+                        if (pendingId != null) {
+                            runCatching {
+                                pendingTranscriptionStore.markFailure(
+                                    pendingId,
+                                    EMPTY_TRANSCRIPTION_RETRY_MESSAGE,
+                                )
+                            }
+                        }
+                        _uiState.update {
+                            it.copy(
+                                recording = RecordingState.Idle,
+                                amplitude = 0f,
+                                error = if (pendingId != null) {
+                                    EMPTY_TRANSCRIPTION_RETRY_MESSAGE
+                                } else {
+                                    null
+                                },
+                            )
+                        }
+                        return@fold
+                    }
                     // Issue #452: secondary backstop — if Whisper still
                     // returned a known silence-hallucination phrase despite
                     // the energy gate, do NOT write it to the terminal.
-                    // Surface the "no speech" hint instead.
+                    // Surface the "no speech" hint instead. Keep the
+                    // persisted row when available so the same speech-like
+                    // audio can be retried or exported.
                     if (SpeechAudioGuard.isLikelyHallucination(trimmed)) {
+                        if (pendingId != null) {
+                            runCatching {
+                                pendingTranscriptionStore.markFailure(
+                                    pendingId,
+                                    NO_SPEECH_DETECTED_MESSAGE,
+                                )
+                            }
+                        }
                         _uiState.update {
                             it.copy(
                                 recording = RecordingState.Idle,
@@ -356,12 +423,13 @@ public class InlineDictationViewModel @Inject constructor(
                         }
                         return@fold
                     }
+                    if (pendingId != null) {
+                        runCatching { pendingTranscriptionStore.markSucceeded(pendingId) }
+                    }
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, amplitude = 0f, error = null)
                     }
-                    if (trimmed.isNotEmpty()) {
-                        _transcriptions.emit(trimmed)
-                    }
+                    _transcriptions.emit(trimmed)
                 },
                 onFailure = { t ->
                     val msg = when (t) {
@@ -371,6 +439,9 @@ public class InlineDictationViewModel @Inject constructor(
                         is WhisperException.Transport -> "Network error: ${t.message}"
                         is WhisperException.Parse -> "Unexpected response from Whisper."
                         else -> t.message ?: "Transcription failed"
+                    }
+                    if (pendingId != null) {
+                        runCatching { pendingTranscriptionStore.markFailure(pendingId, msg) }
                     }
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, amplitude = 0f, error = msg)
@@ -468,6 +539,20 @@ public class InlineDictationViewModel @Inject constructor(
          */
         public const val NO_SPEECH_DETECTED_MESSAGE: String =
             PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE
+
+        /**
+         * Issue #587: same recovery copy as the composer for no-speech
+         * rejections that still contain enough captured signal to save.
+         */
+        public const val SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE: String =
+            PromptComposerViewModel.SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE
+
+        /**
+         * Issue #587: empty Whisper text from speech-like inline audio is a
+         * failed transcription, not proof that the user said nothing.
+         */
+        public const val EMPTY_TRANSCRIPTION_RETRY_MESSAGE: String =
+            PromptComposerViewModel.EMPTY_TRANSCRIPTION_RETRY_MESSAGE
     }
 }
 

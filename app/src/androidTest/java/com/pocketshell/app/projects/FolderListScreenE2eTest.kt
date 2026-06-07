@@ -215,6 +215,7 @@ class FolderListScreenE2eTest {
         val dictationViewModel = noopAssistantDictationViewModel()
         var openedSettings = false
         var openedWorkspaceSettings = false
+        var openedPortForwarding = false
         var editedEnvPath: String? = null
 
         compose.setContent {
@@ -231,6 +232,7 @@ class FolderListScreenE2eTest {
                     onOpenSession = { _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
+                    onOpenPortForwarding = { openedPortForwarding = true },
                     onOpenSettings = { openedSettings = true },
                     onOpenWorkspaceSettings = { openedWorkspaceSettings = true },
                     onEditEnv = { path, _, _ -> editedEnvPath = path },
@@ -299,11 +301,32 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("No project folders found").assertIsDisplayed()
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
-        compose.onAllNodesWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
+        // #602: the host-detail Port forwarding entry point is intentionally
+        // available even before the host has discovered/active ports. Keep the
+        // empty-state copy quiet and avoid stale scanning/discovered-port text
+        // once the workspace tree is ready.
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(FOLDER_LIST_PORT_FORWARDING_TAG))
+        compose.onNodeWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+        compose.onNodeWithText("Port forwarding").assertIsDisplayed()
+        compose.onNodeWithText("Off").assertIsDisplayed()
+        compose.onNodeWithText("Auto-forward is off by default.").assertIsDisplayed()
+        compose.onAllNodesWithText("Checking remote ports.")
             .fetchSemanticsNodes()
             .also {
-                assertTrue("off/empty forwarding summary should not render above the tree", it.isEmpty())
+                assertTrue("ready empty forwarding summary should not keep scanning copy", it.isEmpty())
             }
+        compose.onAllNodesWithText("Tap to view discovered ports and forward.")
+            .fetchSemanticsNodes()
+            .also {
+                assertTrue("empty forwarding summary should not advertise discovered ports", it.isEmpty())
+            }
+        compose.onNodeWithTag(FOLDER_LIST_PORT_FORWARDING_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedPortForwarding }
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
         compose.onAllNodesWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG)
             .fetchSemanticsNodes()
             .also { assertTrue("Tree/Flat toggle should not render on host detail", it.isEmpty()) }

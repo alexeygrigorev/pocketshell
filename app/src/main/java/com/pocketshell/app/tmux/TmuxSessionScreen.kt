@@ -23,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -142,13 +143,22 @@ import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.KeyBar
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.Crumb
+import com.pocketshell.uikit.model.ConnectionStatus as UiConnectionStatus
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -1929,22 +1939,31 @@ internal fun TmuxSessionDrawer(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = PocketShellSpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
                 ) {
-                    // Issue #156 (4.1 / 4.2): group the host-scoped
-                    // actions in a labelled "Options" card so they read
-                    // as a distinct family from the available-sessions
-                    // list below — not a flat stack of buttons.
-                    item { TmuxSessionDrawerSectionHeader(text = "Options") }
-                    item {
-                        TmuxSessionDrawerOptionsCard(
-                            onCreate = onCreate,
-                            onRefresh = onRefresh,
+                    item { SectionHeader(label = "Options") }
+                    item(key = "create-session") {
+                        TmuxSessionDrawerOptionRow(
+                            label = "+ New session",
+                            sublabel = "Separate workspace on this host",
+                            onClick = onCreate,
+                            modifier = Modifier.testTag(TMUX_SESSION_DRAWER_CREATE_TAG),
+                        )
+                    }
+                    item(key = "refresh-sessions") {
+                        TmuxSessionDrawerOptionRow(
+                            label = "Refresh sessions",
+                            sublabel = null,
+                            onClick = onRefresh,
+                            modifier = Modifier.testTag(TMUX_SESSION_DRAWER_REFRESH_TAG),
                         )
                     }
                     item {
-                        TmuxSessionDrawerSectionHeader(text = "Available sessions")
+                        SectionHeader(
+                            label = "Available sessions",
+                            count = (state as? HostTmuxSessionPickerState.Ready)?.rows?.size,
+                        )
                     }
                     when (state) {
                         HostTmuxSessionPickerState.Idle,
@@ -2000,65 +2019,12 @@ private fun TmuxSessionDrawerMessage(text: String) {
     Text(
         text = text,
         color = PocketShellColors.TextSecondary,
-        fontSize = 13.sp,
+        style = PocketShellType.bodyDense,
         modifier = Modifier
             .fillMaxWidth()
             .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 12.dp),
     )
-}
-
-/**
- * Issue #156 (4.1 / 4.2): a small uppercase-ish section label that
- * groups the session drawer into "Options" and "Available sessions"
- * families so the hierarchy reads at a glance.
- */
-@Composable
-private fun TmuxSessionDrawerSectionHeader(text: String) {
-    Text(
-        text = text,
-        color = PocketShellColors.TextSecondary,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.Medium,
-        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
-    )
-}
-
-/**
- * Issue #156 (4.2): the host-scoped actions ("+ New session" and
- * "Refresh sessions") grouped into one bordered card so they read as a
- * distinct "what can I do here" cluster, visually separated from the
- * tappable session rows below.
- */
-@Composable
-private fun TmuxSessionDrawerOptionsCard(
-    onCreate: () -> Unit,
-    onRefresh: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = RoundedCornerShape(8.dp)),
-    ) {
-        TmuxSessionDrawerOptionRow(
-            label = "+ New session",
-            // Per #158: a tmux session is a separate workspace owned by
-            // the remote tmux server — distinct from "+ window" inside
-            // the current session. Spell that out so the user doesn't
-            // fork a workspace when they meant to add a window.
-            sublabel = "Separate workspace on this host",
-            onClick = onCreate,
-            modifier = Modifier.testTag(TMUX_SESSION_DRAWER_CREATE_TAG),
-        )
-        HorizontalDivider(color = PocketShellColors.BorderSoft)
-        TmuxSessionDrawerOptionRow(
-            label = "Refresh sessions",
-            sublabel = null,
-            onClick = onRefresh,
-            modifier = Modifier.testTag(TMUX_SESSION_DRAWER_REFRESH_TAG),
-        )
-    }
 }
 
 @Composable
@@ -2068,28 +2034,52 @@ private fun TmuxSessionDrawerOptionRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
-        modifier = modifier
+    Box(
+        modifier = Modifier
             .fillMaxWidth()
-            .clickable(
-                role = androidx.compose.ui.semantics.Role.Button,
-                onClick = onClick,
-            )
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = PocketShellShapes.small,
+            ),
     ) {
-        Text(
-            text = label,
-            color = PocketShellColors.Accent,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
+        ListRow(
+            title = label,
+            subtitle = sublabel,
+            onClick = onClick,
+            modifier = modifier,
+            trailing = {
+                Text(
+                    text = "›",
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            },
         )
-        if (sublabel != null) {
-            Text(
-                text = sublabel,
-                color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
+    }
+}
+
+@Composable
+private fun TmuxDrawerRowContainer(
+    selected: Boolean,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                color = if (selected) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev,
+                shape = PocketShellShapes.small,
             )
-        }
+            .border(
+                width = 1.dp,
+                color = if (selected) PocketShellColors.AccentDim else PocketShellColors.BorderSoft,
+                shape = PocketShellShapes.small,
+            ),
+    ) {
+        content()
     }
 }
 
@@ -2100,42 +2090,39 @@ private fun TmuxSessionDrawerRow(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(8.dp),
-            )
-            .clickable(
-                enabled = enabled,
-                role = androidx.compose.ui.semantics.Role.Button,
-                onClick = onClick,
-            )
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = row.name,
-                color = if (selected) PocketShellColors.Background else PocketShellColors.Text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = when {
-                    selected -> "current"
-                    row.attached -> "attached"
-                    else -> "available"
-                },
-                color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-            )
-        }
-        Text(
-            text = if (selected) "Open" else "Attach",
-            color = if (selected) PocketShellColors.Background else PocketShellColors.Accent,
-            fontSize = 13.sp,
+    TmuxDrawerRowContainer(selected = selected) {
+        ListRow(
+            title = row.name,
+            subtitle = when {
+                selected -> "current"
+                row.attached -> "attached"
+                else -> "available"
+            },
+            leading = {
+                StatusDot(
+                    status = if (row.attached || selected) {
+                        UiConnectionStatus.Connected
+                    } else {
+                        UiConnectionStatus.Idle
+                    },
+                )
+            },
+            trailing = {
+                Box(
+                    modifier = Modifier.defaultMinSize(minWidth = PocketShellDensity.tapTargetMin),
+                    contentAlignment = Alignment.CenterEnd,
+                ) {
+                    Badge(
+                        label = if (selected) "Open" else "Attach",
+                        role = if (selected) BadgeRole.Active else BadgeRole.Idle,
+                        mono = false,
+                    )
+                }
+            },
+            onClick = if (enabled) onClick else null,
+            modifier = Modifier
+                .padding(vertical = if (selected) 1.dp else 0.dp)
+                .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin),
         )
     }
 }

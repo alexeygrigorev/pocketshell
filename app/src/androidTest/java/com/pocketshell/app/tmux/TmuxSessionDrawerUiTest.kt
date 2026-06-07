@@ -102,6 +102,46 @@ class TmuxSessionDrawerUiTest {
         assertTrue(createClicked)
     }
 
+    @Test
+    fun longSessionNameKeepsTrailingAttachVisibleAndRowClickable() {
+        val longName = "feature/sync-audit-with-extra-long-branch-name-and-retry-investigation"
+        val events = mutableListOf<String>()
+        compose.setContent {
+            TmuxSessionDrawer(
+                visible = true,
+                state = HostTmuxSessionPickerState.Ready(
+                    request = request(),
+                    rows = listOf(
+                        HostTmuxSessionRow(
+                            name = "codex",
+                            createdAt = 1_000L,
+                            lastActivity = 2_000L,
+                            attached = true,
+                        ),
+                        HostTmuxSessionRow(
+                            name = longName,
+                            createdAt = 900L,
+                            lastActivity = 1_500L,
+                            attached = false,
+                        ),
+                    ),
+                    message = null,
+                ),
+                hostName = "Docker Agent",
+                currentSessionName = "codex",
+                onRefresh = {},
+                onDismiss = {},
+                onAttach = { events += "attach:$it" },
+                onCreate = {},
+            )
+        }
+
+        compose.onNodeWithText("Attach").assertExists()
+        compose.onNodeWithText(longName).performClick()
+
+        assertEquals(listOf("attach:$longName"), events)
+    }
+
     private fun request(): HostTmuxSessionPickerRequest =
         HostTmuxSessionPickerRequest(
             host = HostEntity(

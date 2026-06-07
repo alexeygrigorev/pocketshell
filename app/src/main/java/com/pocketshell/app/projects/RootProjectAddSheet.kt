@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -33,10 +34,13 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellType
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,14 +94,14 @@ internal fun RootProjectAddSheetContent(
         Text(
             text = root.label,
             color = PocketShellColors.Text,
-            fontSize = 18.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
         root.displayPath?.let { path ->
             Text(
                 text = path,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyMono,
             )
         }
         OutlinedTextField(
@@ -165,11 +169,11 @@ private fun RootQuickAction(
         Text(
             text = label,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.weight(1f),
         )
-        Text(text = "+", color = PocketShellColors.Accent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text(text = "+", color = PocketShellColors.Accent, style = PocketShellType.bodyDense, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -178,36 +182,19 @@ private fun RootProjectCandidateRow(
     candidate: RootProjectCandidate,
     onClick: () -> Unit,
 ) {
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
             .testTag(rootProjectCandidateTestTag(candidate.path)),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = candidate.label,
-            color = PocketShellColors.Text,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        ListRow(
+            title = candidate.label,
+            subtitle = candidatePathTail(candidate),
+            onClick = onClick,
+            trailing = { RootProjectSourceLabel(candidate) },
         )
-        candidatePathTail(candidate)?.let { tail ->
-            Spacer(modifier = Modifier.size(8.dp))
-            Text(
-                text = tail,
-                color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-        }
-        Spacer(modifier = Modifier.weight(1f))
-        RootProjectSourceLabel(candidate)
     }
 }
 
@@ -239,11 +226,10 @@ private fun RootProjectSourceLabel(candidate: RootProjectCandidate) {
         )
         return
     }
-    Text(
-        text = "Recent",
-        color = PocketShellColors.Accent,
-        fontSize = 10.sp,
-        fontWeight = FontWeight.Medium,
+    Badge(
+        label = "Recent",
+        role = BadgeRole.Agent,
+        mono = false,
         modifier = Modifier.testTag(rootProjectCandidateSourceTestTag(candidate.path)),
     )
 }
@@ -261,13 +247,13 @@ private fun RootProjectAddEmptyState(query: String) {
         Text(
             text = if (query.isBlank()) "No projects found" else "No matching projects",
             color = PocketShellColors.Text,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
             text = "Create a folder or clone a git repo into this root.",
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
         )
     }
 }

@@ -45,8 +45,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * session:
  *
  *  1. The tree lists two sessions under an expanded project.
- *  2. The user taps a session row's Stop kebab → the confirmation dialog
- *     appears.
+ *  2. The user taps a session row's kebab → a menu appears; choosing Stop
+ *     opens the confirmation dialog.
  *  3. Tapping Cancel does nothing — both rows remain.
  *  4. Tapping Stop again then confirming kills the session: the gateway is
  *     asked to kill exactly that session, the lifecycle signal is broadcast,
@@ -150,18 +150,29 @@ class FolderListStopSessionTest {
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Expand the project so the session rows show.
+        // Ensure the project is expanded so the session rows show.
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderHeaderClickTestTag(projectPath)))
-        compose.onNodeWithTag(folderHeaderClickTestTag(projectPath)).performClick()
+        if (compose.onAllNodesWithTag(folderDetailRowTestTag(projectPath, doomed))
+                .fetchSemanticsNodes().isEmpty()
+        ) {
+            compose.onNodeWithTag(folderHeaderClickTestTag(projectPath)).performClick()
+        }
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(folderDetailRowTestTag(projectPath, doomed))
                 .fetchSemanticsNodes().isNotEmpty()
         }
         captureViewport("before-stop-viewport.png")
 
-        // Open the Stop kebab for the doomed row → confirm dialog appears.
+        // Open the row kebab first. Destructive Stop must be a menu item, not
+        // a direct-to-confirm affordance.
         compose.onNodeWithTag(folderSessionStopTestTag(projectPath, doomed)).performClick()
+        compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, doomed)).assertExists()
+        assertTrue(
+            "confirmation must not open until the Stop menu item is chosen",
+            compose.onAllNodesWithTag(STOP_SESSION_DIALOG_TAG).fetchSemanticsNodes().isEmpty(),
+        )
+        compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, doomed)).performClick()
         compose.onNodeWithTag(STOP_SESSION_DIALOG_TAG).assertExists()
 
         // Cancel does nothing — the dialog closes and both rows stay.
@@ -172,8 +183,9 @@ class FolderListStopSessionTest {
         assertTrue("doomed row must remain after Cancel", gateway.killedSessions.isEmpty())
         compose.onNodeWithTag(folderDetailRowTestTag(projectPath, doomed)).assertExists()
 
-        // Now confirm the kill.
+        // Now choose Stop from the menu again, then confirm the kill.
         compose.onNodeWithTag(folderSessionStopTestTag(projectPath, doomed)).performClick()
+        compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, doomed)).performClick()
         compose.onNodeWithTag(STOP_SESSION_DIALOG_TAG).assertExists()
         compose.onNodeWithText("Stop").performClick()
 

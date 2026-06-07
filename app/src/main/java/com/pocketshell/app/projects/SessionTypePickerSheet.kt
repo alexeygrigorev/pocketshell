@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -32,11 +33,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Picker for "new session" type — issue #171 round 2.
@@ -111,13 +115,13 @@ internal fun SessionTypePickerContent(
         Text(
             text = "New session",
             color = PocketShellColors.Text,
-            fontSize = 18.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
             text = "in $folderLabel",
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyMono,
         )
 
         // Segmented control: Shell vs Agent.
@@ -183,7 +187,7 @@ internal fun SessionTypePickerContent(
                 Text(
                     text = "The CLI will auto-start in the new pane.",
                     color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                 )
 
                 // Skip-permissions toggle (issue #428). Hidden for
@@ -255,7 +259,7 @@ private fun SectionTitle(text: String) {
     Text(
         text = text,
         color = PocketShellColors.TextMuted,
-        fontSize = 11.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
     )
 }
@@ -283,7 +287,7 @@ private fun SegmentButton(
         Text(
             text = label,
             color = fg,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
         )
     }
@@ -298,31 +302,34 @@ private fun AgentCliRow(
     testTag: String,
 ) {
     val bg = if (selected) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev
-    val fg = if (selected) PocketShellColors.Accent else PocketShellColors.Text
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(bg)
-            .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-            .testTag(testTag),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            color = fg,
-            fontSize = 14.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            modifier = Modifier.weight(1f),
-        )
-        if (selected) {
-            Text(
-                text = "✓",
-                color = PocketShellColors.Accent,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .background(bg, PocketShellShapes.small)
+            .border(
+                width = if (selected) 1.dp else 0.dp,
+                color = if (selected) PocketShellColors.AccentDim else bg,
+                shape = PocketShellShapes.small,
             )
-        }
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .testTag(testTag),
+    ) {
+        ListRow(
+            title = label,
+            trailing = if (selected) {
+                {
+                    Text(
+                        text = "✓",
+                        color = PocketShellColors.Accent,
+                        style = PocketShellType.bodyDense,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            } else {
+                null
+            },
+        )
     }
 }
 
@@ -350,13 +357,13 @@ private fun SkipPermissionsRow(
             Text(
                 text = "Skip permissions",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.Medium,
             )
             Text(
                 text = "Launch without per-action approval prompts.",
                 color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
+                style = PocketShellType.labelMono,
             )
         }
     }

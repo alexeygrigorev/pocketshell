@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -995,6 +996,14 @@ private fun FolderListContent(
                                     null,
                                 )
                             },
+                            onOpen = {
+                                onSessionClick(
+                                    sessionFolderPaths[session.sessionName]
+                                        ?: FolderListViewModel.UNTRACKED_PATH,
+                                    session.sessionName,
+                                    null,
+                                )
+                            },
                             onStop = { onStopSession(session.sessionName) },
                         )
                     }
@@ -1016,6 +1025,14 @@ private fun FolderListContent(
                                 sessionFolderLabels = sessionFolderLabels,
                             ),
                             onClick = {
+                                onSessionClick(
+                                    sessionFolderPaths[session.sessionName]
+                                        ?: FolderListViewModel.UNTRACKED_PATH,
+                                    session.sessionName,
+                                    null,
+                                )
+                            },
+                            onOpen = {
                                 onSessionClick(
                                     sessionFolderPaths[session.sessionName]
                                         ?: FolderListViewModel.UNTRACKED_PATH,
@@ -1232,6 +1249,7 @@ private fun FlatSessionRow(
     session: FolderSessionEntry,
     folderLabel: String,
     onClick: () -> Unit,
+    onOpen: () -> Unit,
     onStop: () -> Unit,
 ) {
     val isAgent = session.agentKind.isAgent()
@@ -1262,13 +1280,14 @@ private fun FlatSessionRow(
                     modifier = Modifier.testTag(folderListFlatRowBadgeTestTag(session.sessionName)),
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                // "Stop session" kebab on the flat host-detail row too, so the
-                // affordance is discoverable in both host-detail views (#518).
-                CompactTreeIconButton(
-                    label = "⋮",
-                    contentDescription = "Stop session ${session.sessionName}",
-                    onClick = onStop,
-                    testTag = folderListFlatRowStopTestTag(session.sessionName),
+                // Session actions live behind an overflow menu: destructive
+                // Stop is a menu item first, then the existing confirmation.
+                SessionActionsKebab(
+                    sessionName = session.sessionName,
+                    triggerTestTag = folderListFlatRowStopTestTag(session.sessionName),
+                    stopItemTestTag = folderListFlatRowStopMenuItemTestTag(session.sessionName),
+                    onOpen = onOpen,
+                    onStop = onStop,
                 )
             }
         },
@@ -1702,7 +1721,6 @@ private fun FolderTreeSessionChildRow.connectorTestTag(folderPath: String): Stri
         )
     }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkspaceSessionRow(
     folderPath: String,
@@ -1717,14 +1735,7 @@ private fun WorkspaceSessionRow(
             // Compact paint via the density rung, but the interactive row keeps
             // the 48 dp a11y touch floor (#461 §6.1).
             .heightIn(min = PocketShellDensity.tapTargetMin)
-            // Tap opens the session; long-press reaches the same "Stop session"
-            // confirmation as the trailing kebab — discoverable without
-            // entering the session (#518).
-            .combinedClickable(
-                role = Role.Button,
-                onClick = onClick,
-                onLongClick = onStop,
-            )
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 6.dp, vertical = PocketShellDensity.rowPadV)
             .testTag(folderDetailRowTestTag(folderPath, session.sessionName)),
         verticalAlignment = Alignment.CenterVertically,
@@ -1765,14 +1776,44 @@ private fun WorkspaceSessionRow(
             modifier = Modifier.testTag(folderSessionBadgeTestTag(folderPath, session.sessionName)),
         )
         Spacer(modifier = Modifier.width(4.dp))
-        // Per-session "Stop session" kebab — discoverable without entering the
-        // session (#518). Opens the confirmation dialog; the actual kill runs
-        // only after the user confirms.
-        CompactTreeIconButton(
-            label = "⋮",
-            contentDescription = "Stop session ${session.sessionName}",
-            onClick = onStop,
-            testTag = folderSessionStopTestTag(folderPath, session.sessionName),
+        // Session actions live behind an overflow menu: destructive Stop is a
+        // menu item first, then the existing confirmation dialog.
+        SessionActionsKebab(
+            sessionName = session.sessionName,
+            triggerTestTag = folderSessionStopTestTag(folderPath, session.sessionName),
+            stopItemTestTag = folderSessionStopMenuItemTestTag(folderPath, session.sessionName),
+            onOpen = onClick,
+            onStop = onStop,
+        )
+    }
+}
+
+@Composable
+private fun SessionActionsKebab(
+    sessionName: String,
+    triggerTestTag: String,
+    stopItemTestTag: String,
+    onOpen: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.defaultMinSize(minWidth = PocketShellDensity.tapTargetMin),
+        contentAlignment = Alignment.CenterEnd,
+    ) {
+        Kebab(
+            contentDescription = "Session actions $sessionName",
+            triggerTestTag = triggerTestTag,
+            items = listOf(
+                KebabItem(
+                    label = "Open session",
+                    onClick = onOpen,
+                ),
+                KebabItem(
+                    label = "Stop session",
+                    onClick = onStop,
+                    testTag = stopItemTestTag,
+                ),
+            ),
         )
     }
 }
@@ -2352,6 +2393,8 @@ fun folderListFlatRowBadgeTestTag(sessionName: String): String =
 /** Tags the per-session "Stop session" kebab on a flat host-detail row (#518). */
 fun folderListFlatRowStopTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop"
+fun folderListFlatRowStopMenuItemTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:stop:item"
 fun folderDetailRowTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName"
 fun folderDetailCreateTestTag(folderPath: String): String =
@@ -2372,6 +2415,8 @@ fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
 /** Tags the per-session "Stop session" kebab on a tree session child row (#518). */
 fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop"
+fun folderSessionStopMenuItemTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:stop:item"
 /** Tags the `├─/└─` tree connector cell on an expanded session child row (#503). */
 fun folderSessionConnectorTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:connector"

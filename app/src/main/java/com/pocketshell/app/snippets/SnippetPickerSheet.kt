@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,20 +45,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SnippetEntity
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Modal bottom sheet listing the saved snippets for [hostId], with a
@@ -238,7 +237,7 @@ internal fun SnippetPickerContent(
         ) {
             Text(
                 text = "Snippets",
-                fontSize = 16.sp,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
             )
@@ -246,7 +245,7 @@ internal fun SnippetPickerContent(
                 Text(
                     text = "Manage",
                     color = PocketShellColors.Accent,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .clickable(onClick = onManageTap)
@@ -261,7 +260,7 @@ internal fun SnippetPickerContent(
                     Text(
                         text = "×",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 20.sp,
+                        style = MaterialTheme.typography.titleMedium,
                     )
                 }
             }
@@ -287,10 +286,7 @@ internal fun SnippetPickerContent(
                 value = query,
                 onValueChange = onQueryChange,
                 modifier = Modifier.fillMaxWidth(),
-                textStyle = TextStyle(
-                    color = PocketShellColors.Text,
-                    fontSize = 14.sp,
-                ),
+                textStyle = PocketShellType.bodyDense.copy(color = PocketShellColors.Text),
                 cursorBrush = SolidColor(PocketShellColors.Accent),
                 singleLine = true,
                 decorationBox = { inner ->
@@ -298,7 +294,7 @@ internal fun SnippetPickerContent(
                         Text(
                             text = "Search snippets...",
                             color = PocketShellColors.TextMuted,
-                            fontSize = 14.sp,
+                            style = PocketShellType.bodyDense,
                         )
                     }
                     inner()
@@ -324,7 +320,7 @@ internal fun SnippetPickerContent(
                 Text(
                     text = "No matches for \"$query\"",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                 )
             }
         } else {
@@ -384,53 +380,32 @@ private fun SnippetPickerRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(10.dp),
+                shape = PocketShellShapes.small,
             )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         // Row body: label + kind tag + optional one-line body preview.
         // No tap surface here — per D22 (issue #227) the only interactive
         // affordances on a row are the explicit Send / Send + ↵ chips
         // below. The row body is purely informational.
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = displayLabel,
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    KindTag(kind)
-                }
-                if (bodyPreview != null) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        // Issue #198: 12 sp monospace `TextMuted` mirrors
-                        // the host-card subtitle pattern in
-                        // `docs/design-system.md` so the picker reads
-                        // consistently with the rest of the surface.
-                        text = bodyPreview,
-                        color = PocketShellColors.TextMuted,
-                        fontFamily = JetBrainsMonoFamily,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.testTag(snippetBodyPreviewTag(snippet.id)),
-                    )
-                }
-            }
+        ListRow(
+            title = displayLabel,
+            trailing = { KindTag(kind) },
+        )
+        if (bodyPreview != null) {
+            Text(
+                text = bodyPreview,
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.bodyMono,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .padding(horizontal = 12.dp)
+                    .testTag(snippetBodyPreviewTag(snippet.id)),
+            )
         }
         Spacer(modifier = Modifier.height(10.dp))
         // Issue #187: explicit Send / Send + ↵ chip row, mirroring the
@@ -440,7 +415,9 @@ private fun SnippetPickerRow(
         // routes the body + a trailing newline through the same input
         // bridge the composer uses.
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             SnippetSendChip(
@@ -511,7 +488,7 @@ private fun SnippetSendChip(
         Text(
             text = label,
             color = labelColor,
-            fontSize = 12.sp,
+            style = PocketShellType.labelMono,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -680,7 +657,7 @@ internal fun KindTag(kind: SnippetKind) {
             } else {
                 PocketShellColors.TextSecondary
             },
-            fontSize = 10.sp,
+            style = PocketShellType.labelMono,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -713,7 +690,7 @@ private fun EmptyPickerState(kindFilter: SnippetKind?, onManageTap: () -> Unit) 
                     "Tap Manage to add a ${kindFilter.label.lowercase()} template"
                 },
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyDense,
             )
             Spacer(modifier = Modifier.height(12.dp))
             Box(
@@ -728,7 +705,7 @@ private fun EmptyPickerState(kindFilter: SnippetKind?, onManageTap: () -> Unit) 
                 Text(
                     text = "Manage snippets",
                     color = PocketShellColors.OnAccent,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.SemiBold,
                 )
             }

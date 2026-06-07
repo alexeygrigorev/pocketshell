@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -576,10 +577,8 @@ class TerminalSurfaceState internal constructor(
                 // If the producer flow completes naturally (SSH session
                 // closed), tear the bridge down so the View's references
                 // drop cleanly.
-                withContext(Dispatchers.Main.immediate) {
-                    if (bridge === newBridge) {
-                        detachExternalProducer()
-                    }
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    detachCompletedExternalProducer(newBridge)
                 }
             }
         }
@@ -599,6 +598,15 @@ class TerminalSurfaceState internal constructor(
         producerJob?.cancel()
         producerJob = null
         bridge?.stop()
+        bridge = null
+        sanitizeQueryResponses = false
+        detach()
+    }
+
+    private fun detachCompletedExternalProducer(completedBridge: SshTerminalBridge) {
+        if (bridge !== completedBridge) return
+        producerJob = null
+        completedBridge.stop()
         bridge = null
         sanitizeQueryResponses = false
         detach()

@@ -180,7 +180,9 @@ class TerminalSurfaceStateInputRoutingTest {
     @Test
     fun externalProducerFeedFailureInvokesLocalCallbackAndDoesNotFailParentScope() = runBlocking {
         val state = TerminalSurfaceState()
-        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val stdout = flow {
+            emit(ByteArray(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1))
+        }
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val failure = CompletableDeferred<Throwable>()
         val producerJob = state.attachExternalProducer(
@@ -192,18 +194,15 @@ class TerminalSurfaceStateInputRoutingTest {
                 failure.complete(cause)
             },
         )
-        yield()
 
         try {
-            stdout.emit(ByteArray(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1))
-
             val cause = withTimeout(2_000) { failure.await() }
             assertTrue(
                 "seed-gate feed overflow should surface through the local terminal callback",
                 cause is TerminalSeedGateOverflowException,
             )
             withTimeout(2_000) {
-                while (producerJob.isActive) {
+                while (!producerJob.isCompleted) {
                     shadowOf(Looper.getMainLooper()).idle()
                     delay(10)
                 }

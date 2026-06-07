@@ -4602,7 +4602,8 @@ class TmuxSessionViewModelTest {
         // Issue #494: a disconnected send no longer silently drops the
         // user's text. The optimistic turn is shown and flipped to Failed
         // (with a retry affordance), while the result still reports failure
-        // so the unified composer can keep the draft editable.
+        // so the unified composer can keep the draft editable. With no
+        // remembered target there is nothing send-time reconnect can dial.
         val vm = newVm()
         vm.startAgentConversationForTest("%0", newClaudeDetection())
 
@@ -4615,6 +4616,73 @@ class TmuxSessionViewModelTest {
         assertEquals(ConversationRole.User, failed.role)
         assertEquals(MessageSendState.Failed, failed.sendState)
         assertTrue(failed.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX))
+    }
+
+    @Test
+    fun sendToAgentPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "claude",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+
+        deadClient.disconnectedSignal.value = true
+        runCurrent()
+        assertTrue(
+            "precondition: passive EOF should surface a recoverable disconnected state",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+
+        val send = async { vm.sendToAgentPaneResult("%0", "send after return") }
+        advanceUntilIdle()
+        val result = send.await()
+
+        assertTrue("send should reconnect and deliver instead of dead-ending", result.isSuccess)
+        assertEquals(1, connector.connectCount)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'send after return'",
+                "send-keys -t %0 Enter",
+            ),
+            reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
+        )
+        val pending = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
+        assertEquals("send after return", pending.text)
+        assertEquals(MessageSendState.Pending, pending.sendState)
     }
 
     @Test

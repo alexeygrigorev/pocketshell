@@ -1562,12 +1562,12 @@ public fun TmuxSessionScreen(
             viewModel = promptComposerViewModel,
             onDismiss = { showMicSheet = false },
             onSend = { text, withEnter ->
-                // Issue #249: if the session dropped while the composer
-                // sheet was open, do NOT write into the dead pane and do
-                // NOT dismiss — keep the sheet (and the user's text) so
-                // nothing is lost; the user re-sends once reconnected.
+                // Issue #548: send is a connect-on-action path. If the
+                // control channel dropped while the composer was open, let
+                // the ViewModel kick/reuse reconnect and wait for the live
+                // client before returning failure to the composer.
                 val pane = currentPane
-                if (!sessionLive || pane == null) {
+                if (pane == null) {
                     false
                 } else {
                     val agent = currentAgentConversation?.detection?.agent

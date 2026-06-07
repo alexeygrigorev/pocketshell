@@ -4765,6 +4765,29 @@ public class TmuxSessionViewModel @Inject constructor(
         return sessionRef?.takeIf { it.isConnected }
     }
 
+    private suspend fun awaitLiveTmuxClientForSend(): TmuxClient? {
+        liveTmuxClientForSendOrNull()?.let { return it }
+        when (_connectionStatus.value) {
+            is ConnectionStatus.Connecting,
+            is ConnectionStatus.Reconnecting,
+            is ConnectionStatus.Switching,
+            -> Unit
+            else -> if (!reconnect()) return null
+        }
+        return withTimeoutOrNull(SEND_SESSION_WAIT_TIMEOUT_MS) {
+            while (currentCoroutineContext().isActive) {
+                liveTmuxClientForSendOrNull()?.let { return@withTimeoutOrNull it }
+                delay(SEND_SESSION_WAIT_POLL_MS)
+            }
+            null
+        }
+    }
+
+    private fun liveTmuxClientForSendOrNull(): TmuxClient? {
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return null
+        return clientRef?.takeUnless { it.disconnected.value }
+    }
+
     internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
@@ -4796,11 +4819,12 @@ public class TmuxSessionViewModel @Inject constructor(
             text = payload,
             sendState = com.pocketshell.core.agents.MessageSendState.Pending,
         )
-        appendAgentEvents(paneId, listOf(optimistic))
-        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+        if (awaitLiveTmuxClientForSend() == null) {
+            appendAgentEvents(paneId, listOf(optimistic))
             markOptimisticSendFailed(paneId, optimisticId)
             return Result.failure(IllegalStateException("Session is disconnected."))
         }
+        appendAgentEvents(paneId, listOf(optimistic))
         val result = sendAgentPayloadToPaneResult(paneId, payload, detection.agent)
         if (result.isFailure) {
             markOptimisticSendFailed(paneId, optimisticId)
@@ -5352,13 +5376,9 @@ public class TmuxSessionViewModel @Inject constructor(
 
     internal suspend fun writeInputToPaneResult(paneId: String, bytes: ByteArray): Result<Unit> {
         if (bytes.isEmpty()) return Result.success(Unit)
-        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+        val client = awaitLiveTmuxClientForSend()
+        if (client == null) {
             return Result.failure(IllegalStateException("Session is disconnected."))
-        }
-        val client = clientRef
-            ?: return Result.failure(IllegalStateException("No active tmux client for pane input."))
-        if (client.disconnected.value) {
-            return Result.failure(IllegalStateException("Tmux client is disconnected."))
         }
         return writeInputToPaneResult(client, paneId, bytes)
     }
@@ -7457,6 +7477,8 @@ internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS: Long = 250L
  */
 internal const val ATTACH_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_SESSION_WAIT_POLL_MS: Long = 100L
+internal const val SEND_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
+internal const val SEND_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
 internal const val TMUX_SESSION_PREWARM_MAX_TARGETS: Int = 2
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"

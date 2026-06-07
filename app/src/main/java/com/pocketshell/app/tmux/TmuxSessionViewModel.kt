@@ -2758,6 +2758,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 true
             } == true
             if (!ready) {
+                if (clientRef === replacement) {
+                    clientRef = staleClient
+                }
                 runCatching { replacement.close() }
                 return false
             }
@@ -2813,6 +2816,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 t,
             )
             runCatching { replacement.close() }
+            if (clientRef === replacement) {
+                clientRef = staleClient
+            }
             false
         }
     }
@@ -2871,10 +2877,30 @@ public class TmuxSessionViewModel @Inject constructor(
                 true
             } == true
             if (!ready) {
+                val leaseTarget = target.toSshLeaseTarget()
+                if (clientRef === replacement) {
+                    clientRef = staleClient
+                    sessionRef = null
+                    leaseRef = null
+                }
                 runCatching { replacement?.close() }
                 withContext(NonCancellable) {
-                    runCatching { acquiredLease?.release() }
+                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
                 }
+                DiagnosticEvents.record(
+                    "connection",
+                    "reconnect_fail",
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "user" to target.user,
+                    "session" to target.sessionName,
+                    "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                    "source" to "silent_transport_reattach",
+                    "cause" to "attach_not_ready",
+                    "evictedLease" to true,
+                    "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+                )
                 return false
             }
             val lease = acquiredLease ?: return false
@@ -2932,8 +2958,29 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             runCatching { replacement?.close() }
             withContext(NonCancellable) {
-                runCatching { acquiredLease?.release() }
+                val leaseTarget = target.toSshLeaseTarget()
+                runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
             }
+            if (clientRef === replacement) {
+                clientRef = staleClient
+                sessionRef = null
+                leaseRef = null
+            }
+            DiagnosticEvents.record(
+                "connection",
+                "reconnect_fail",
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                "source" to "silent_transport_reattach",
+                "cause" to t.javaClass.simpleName,
+                "message" to t.message,
+                "evictedLease" to true,
+                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+            )
             false
         }
     }

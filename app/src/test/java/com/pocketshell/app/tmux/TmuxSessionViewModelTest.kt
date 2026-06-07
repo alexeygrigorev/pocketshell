@@ -1215,6 +1215,79 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun failedSilentTransportReattachEvictsLeaseSoManualReconnectUsesFreshSession() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val failedReconnectSession = FakeSshSession()
+        val manualReconnectSession = FakeSshSession()
+        val connector = QueueLeaseConnector(failedReconnectSession, manualReconnectSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = manager,
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 100L, silentReattachTimeoutMs = 1L)
+        val deadClient = FakeTmuxClient()
+        val failedAttachClient = FakeTmuxClient()
+        val manualReconnectClient = FakeTmuxClient().withSinglePane("work", "%9")
+        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+        val clients = ArrayDeque(listOf(failedAttachClient, manualReconnectClient))
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            sessionsSeenByFactory += session
+            clients.removeFirstOrNull() ?: error("unexpected tmux client factory call")
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = FakeSshSession(isConnectedValue = false),
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertTrue(
+            "failed hidden reattach should surface manual reconnect",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            "failed hidden reattach must close the half-attached tmux client",
+            failedAttachClient.closed,
+        )
+        assertTrue(
+            "failed hidden reattach must evict the acquired SSH lease instead of idling it",
+            failedReconnectSession.closed,
+        )
+        assertEquals(1, connector.connectCount)
+
+        assertTrue("manual reconnect should be available after failed hidden reattach", vm.reconnect())
+        advanceUntilIdle()
+
+        assertEquals(
+            "manual reconnect must open a fresh SSH session, not reuse the failed hidden lease",
+            2,
+            connector.connectCount,
+        )
+        assertEquals(
+            listOf(failedReconnectSession, manualReconnectSession),
+            sessionsSeenByFactory,
+        )
+        assertSame(manualReconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
     fun networkChangeLifecycleHookEntersReconnectingWithoutConnectionError() = runTest {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())

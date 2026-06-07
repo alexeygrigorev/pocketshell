@@ -19,7 +19,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
-import com.pocketshell.app.diagnostics.DiagnosticEventSink
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
@@ -506,35 +505,6 @@ class BackgroundGraceReconnectE2eTest {
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
-
-    private data class RecordedDiagnosticEvent(
-        val category: String,
-        val name: String,
-        val fields: Map<String, Any?>,
-    )
-
-    private class RecordingDiagnosticSink : DiagnosticEventSink, AutoCloseable {
-        private val lock = Any()
-        private val recorded = mutableListOf<RecordedDiagnosticEvent>()
-
-        val events: List<RecordedDiagnosticEvent>
-            get() = synchronized(lock) { recorded.toList() }
-
-        override fun record(category: String, event: String, fields: Map<String, Any?>) {
-            synchronized(lock) { recorded += RecordedDiagnosticEvent(category, event, fields) }
-        }
-
-        fun eventsNamed(name: String): List<RecordedDiagnosticEvent> =
-            events.filter { it.name == name }
-
-        fun clear() {
-            synchronized(lock) { recorded.clear() }
-        }
-
-        override fun close() {
-            DiagnosticEvents.install(DiagnosticEventSink.Noop)
-        }
-    }
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"

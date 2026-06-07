@@ -12,13 +12,15 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
-import com.pocketshell.app.diagnostics.DiagnosticEventSink
+import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
+import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
@@ -26,13 +28,12 @@ import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_SURFACE_ERROR_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
-import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
+import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
-import com.pocketshell.core.tmux.TmuxClientDiagnosticSink
 import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
@@ -46,17 +47,20 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 
 /**
  * Live regression proof for a Codex-like dynamic terminal flood.
  *
  * Existing unit tests pin parser, renderer, and pane-backlog classification
  * behavior. This test covers the missing device path: production
- * MainActivity -> live SSH -> tmux -CC -> TerminalView, while the terminal is
- * also taking an IME/layout hit. The remote emitter produces carriage-return
- * rewrites, ANSI erase, long wrapped paths/URLs, fenced JSON/tool blocks, and
- * enough output to stress rendering without turning the default Docker gate
- * into a long-running soak.
+ * MainActivity -> live SSH -> tmux -CC -> prompt composer -> tmux send-keys,
+ * while a live pane is producing Codex-style carriage-return rewrites, ANSI
+ * erase, long wrapped paths/URLs, fenced JSON/tool blocks, and burst output.
+ * The large composer draft is submitted through the production `send-keys -H`
+ * bracketed-paste path so command timeouts, reader EOF, and reconnect
+ * misclassification all fail the proof instead of being hidden by a side
+ * channel.
  */
 @RunWith(AndroidJUnit4::class)
 class CodexOverflowNoReconnectE2eTest {
@@ -90,7 +94,7 @@ class CodexOverflowNoReconnectE2eTest {
     }
 
     @Test
-    fun codexStyleTerminalFloodWithImePressureDoesNotShowReconnect() = runBlocking<Unit> {
+    fun codexStyleTerminalFloodWithComposerSendKeysDoesNotShowReconnect() = runBlocking<Unit> {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -106,19 +110,26 @@ class CodexOverflowNoReconnectE2eTest {
         val gridBefore = terminalGrid()
         captureViewport("issue576-01-ready")
 
+        val prompt = openComposerAndFillLargePrompt()
+        assertTrue(
+            "composer prompt must stay inside the requested 32-128KiB proof range, bytes=${prompt.utf8Size()}",
+            prompt.utf8Size() in MIN_PROMPT_BYTES..MAX_PROMPT_BYTES,
+        )
+
         val start = SystemClock.elapsedRealtime()
         triggerRemoteFlood(key)
         waitForFloodStart()
-        tapShowKeyboardChip()
+        sendFilledComposerPrompt()
+        waitForRemotePromptReceipt(key)
 
         val outcome = waitForFloodDoneOrLocalOverflow()
         recordTiming("trigger-to-${outcome.label}", start)
         captureViewport("issue576-02-$outcome")
 
-        assertNoReconnectOrReaderExitDiagnostics(outcome)
+        assertNoReconnectOrReaderExitDiagnostics("after $outcome")
         assertNoVisibleReconnect("after $outcome")
         assertConnected("after $outcome")
-        assertKeyboardPathWasExercised()
+        assertComposerSendKeysPathWasExercised(prompt)
 
         if (outcome == FloodOutcome.OutputOverflow) {
             assertTrue(
@@ -144,8 +155,8 @@ class CodexOverflowNoReconnectE2eTest {
 
         val gridAfter = terminalGridOrNull()
         if (gridAfter != null) {
-            assertTrue("terminal grid should remain usable after IME pressure", gridAfter.columns > 0)
-            assertTrue("terminal grid should remain usable after IME pressure", gridAfter.rows > 0)
+            assertTrue("terminal grid should remain usable after composer send pressure", gridAfter.columns > 0)
+            assertTrue("terminal grid should remain usable after composer send pressure", gridAfter.rows > 0)
             Log.i(LOG_TAG, "grid before=$gridBefore after=$gridAfter")
         }
         writeTimings()
@@ -174,14 +185,44 @@ class CodexOverflowNoReconnectE2eTest {
         }
     }
 
-    private fun tapShowKeyboardChip() {
+    private fun openComposerAndFillLargePrompt(): String {
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        val prompt = buildLargeComposerPrompt()
+        val start = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        prompt.chunked(COMPOSER_INPUT_CHUNK_CHARS).forEachIndexed { index, chunk ->
+            compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+                .performTextInput(chunk)
+            if (index % 4 == 0) {
+                assertNoVisibleReconnect("while filling composer chunk $index")
+            }
+        }
+        recordTiming("composer-fill-${prompt.utf8Size()}B", start)
+
+        assertNoReconnectOrReaderExitDiagnostics("after composer fill")
+        return prompt
+    }
+
+    private fun sendFilledComposerPrompt() {
+        val sendStart = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        recordTiming("composer-send-click-to-dismiss", sendStart)
+        assertNoReconnectOrReaderExitDiagnostics("after composer send")
     }
 
     private fun waitForFloodDoneOrLocalOverflow(): FloodOutcome {
@@ -189,6 +230,7 @@ class CodexOverflowNoReconnectE2eTest {
         var lastTerminal = ""
         while (SystemClock.elapsedRealtime() < deadline) {
             assertNoVisibleReconnect("during flood")
+            assertNoReconnectOrReaderExitDiagnostics("during flood")
             val status = currentConnectionStatus()
             assertFalse(
                 "Codex-like terminal flood must not enter Reconnecting/Failed; observed=$status",
@@ -204,31 +246,73 @@ class CodexOverflowNoReconnectE2eTest {
         error("timed out waiting for $DONE_MARKER or local overflow; tail=${lastTerminal.takeLast(400)}")
     }
 
-    private fun assertNoReconnectOrReaderExitDiagnostics(outcome: FloodOutcome) {
+    private suspend fun waitForRemotePromptReceipt(key: String) {
+        val start = SystemClock.elapsedRealtime()
+        val deadline = start + PROMPT_RECEIPT_TIMEOUT_MS
+        var last = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            assertNoVisibleReconnect("while waiting for remote prompt receipt")
+            assertNoReconnectOrReaderExitDiagnostics("while waiting for remote prompt receipt")
+            val exec = runRemote(
+                key,
+                "test -s ${shellQuote(REMOTE_RECEIPT)} && cat ${shellQuote(REMOTE_RECEIPT)}",
+            )
+            if (exec?.exitCode == 0) {
+                last = exec.stdout.trim()
+                if (last.contains(PROMPT_RECEIVED_MARKER)) {
+                    recordTiming("composer-send-to-remote-receipt", start)
+                    return
+                }
+            } else {
+                last = "exit=${exec?.exitCode} stderr='${exec?.stderr}'"
+            }
+            SystemClock.sleep(500)
+        }
+        error("remote script did not acknowledge composer prompt receipt; last=$last")
+    }
+
+    private fun assertNoReconnectOrReaderExitDiagnostics(label: String) {
         val app = appDiagnostics!!
         assertTrue(
-            "Codex-like flood must not be logged as passive SSH/tmux EOF; outcome=$outcome events=${app.events}",
+            "Codex-like flood must not be logged as passive SSH/tmux EOF $label events=${app.events}",
             app.eventsNamed("passive_disconnect").isEmpty(),
         )
         assertTrue(
-            "Codex-like flood must not start reconnect; outcome=$outcome events=${app.events}",
+            "Codex-like flood must not start reconnect $label events=${app.events}",
             app.eventsNamed("reconnect_start").isEmpty(),
         )
         assertTrue(
-            "Codex-like flood must not start network reconnect; outcome=$outcome events=${app.events}",
+            "Codex-like flood must not start network reconnect $label events=${app.events}",
             app.eventsNamed("network_reconnect_start").isEmpty(),
         )
-        val readerExits = tmuxDiagnostics!!.eventsNamed("tmux_client_reader_exit")
+        val tmux = tmuxDiagnostics!!
+        val readerExits = tmux.eventsNamed("tmux_client_reader_exit")
         assertTrue(
-            "tmux reader must stay alive through the flood; outcome=$outcome readerExits=$readerExits",
+            "tmux reader must stay alive through the flood $label readerExits=$readerExits",
             readerExits.isEmpty(),
+        )
+        val commandTimeouts = tmux.eventsNamed("tmux_client_command_timeout")
+        assertTrue(
+            "tmux send-keys/control commands must not time out $label commandTimeouts=$commandTimeouts",
+            commandTimeouts.isEmpty(),
+        )
+        val forbiddenText = (app.events.map { "${it.category} ${it.name} ${it.fields}" } +
+            tmux.events.map { "${it.name} ${it.fields}" })
+            .filter { text ->
+                FORBIDDEN_DIAGNOSTIC_TEXT.any { forbidden ->
+                    text.lowercase(Locale.US).contains(forbidden)
+                }
+            }
+        assertTrue(
+            "diagnostics must not contain timeout/EOF/reconnect classifier text $label: $forbiddenText",
+            forbiddenText.isEmpty(),
         )
     }
 
-    private fun assertKeyboardPathWasExercised() {
+    private fun assertComposerSendKeysPathWasExercised(prompt: String) {
         assertTrue(
-            "test must exercise the production keyboard/IME path",
-            appDiagnostics!!.eventsNamed("keyboard_panel_show").any { it.fields["mode"] == "tmux" },
+            "test must exercise the production composer path with a large prompt",
+            prompt.contains(PROMPT_SENTINEL) && prompt.utf8Size() >= MIN_PROMPT_BYTES,
         )
     }
 
@@ -239,8 +323,16 @@ class CodexOverflowNoReconnectE2eTest {
         val reconnectText = compose.onAllNodesWithText("Reconnect", substring = true, useUnmergedTree = true)
             .fetchSemanticsNodes()
             .size
+        val disconnectedText = compose.onAllNodesWithText("Disconnected", substring = true, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+        val reconnectingText = compose.onAllNodesWithText("Reconnecting", substring = true, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
         assertEquals("expected no disconnect band for $label", 0, errorBands)
-        assertEquals("expected no visible reconnect text for $label", 0, reconnectText)
+        assertEquals("expected no visible Reconnect/Tap Reconnect text for $label", 0, reconnectText)
+        assertEquals("expected no visible Disconnected text for $label", 0, disconnectedText)
+        assertEquals("expected no visible Reconnecting text for $label", 0, reconnectingText)
     }
 
     private fun assertConnected(label: String) {
@@ -389,15 +481,20 @@ class CodexOverflowNoReconnectE2eTest {
         val script = """
             set -eu
             cat > ${shellQuote(REMOTE_SCRIPT)} <<'SH'
-            #!/bin/sh
+            #!/usr/bin/env bash
             set -u
             trigger=${REMOTE_TRIGGER}
-            rm -f "${'$'}trigger"
+            receipt=${REMOTE_RECEIPT}
+            rm -f "${'$'}trigger" "${'$'}receipt"
             printf '${READY_MARKER}\n'
             while [ ! -e "${'$'}trigger" ]; do sleep 0.1; done
-            printf '\033[?25l'
+            old_stty=${'$'}(stty -g 2>/dev/null || true)
+            stty raw -echo min 0 time 1 2>/dev/null || true
+            printf '\033[?2004h\033[?25l'
+            (
             i=0
-            while [ "${'$'}i" -lt ${FLOOD_LINES} ]; do
+            flood_deadline=${'$'}((SECONDS + ${FLOOD_MAX_SECONDS}))
+            while [ "${'$'}SECONDS" -lt "${'$'}flood_deadline" ]; do
                 printf '\r\033[K| codex indexing %04d/${FLOOD_LINES} very-long-stale-status-suffix-that-must-be-erased' "${'$'}i"
                 printf '\r\033[K/ codex indexing %04d/${FLOOD_LINES}\n' "${'$'}i"
                 printf 'changed-file-%04d M /workspace/mobile/android/app/src/main/java/com/pocketshell/feature/codex/VeryLongWrappedPath/File%04dViewModelWithAnExcessivelyLongName.kt https://example.test/org/repo/pull/%04d/checks?token=abcdefghijklmnopqrstuvwxyz0123456789\n' "${'$'}i" "${'$'}i" "${'$'}i"
@@ -409,10 +506,32 @@ class CodexOverflowNoReconnectE2eTest {
                 if [ ${'$'}((i % 17)) -eq 0 ]; then
                     printf 'tool_result_%04d: wrapped dynamic terminal output wrapped dynamic terminal output wrapped dynamic terminal output wrapped dynamic terminal output wrapped dynamic terminal output wrapped dynamic terminal output wrapped dynamic terminal output wrapped dynamic terminal output\n' "${'$'}i"
                 fi
-                if [ ${'$'}((i % 20)) -eq 0 ]; then sleep 0.1; fi
+                if [ -s "${'$'}receipt" ] && [ "${'$'}i" -ge ${FLOOD_LINES} ]; then break; fi
+                if [ ${'$'}((i % 20)) -eq 0 ]; then sleep 0.05; fi
                 i=${'$'}((i + 1))
             done
-            printf '\033[?25h\r\033[K${DONE_MARKER}\n'
+            ) &
+            flood_pid=${'$'}!
+            bytes=0
+            tail_buffer=
+            read_deadline=${'$'}((SECONDS + ${PROMPT_RECEIPT_TIMEOUT_SECONDS}))
+            while [ "${'$'}SECONDS" -lt "${'$'}read_deadline" ]; do
+                if IFS= read -rsn1 -t 0.1 ch; then
+                    bytes=${'$'}((bytes + 1))
+                    tail_buffer="${'$'}tail_buffer${'$'}ch"
+                    if [ ${'$'}{#tail_buffer} -gt 512 ]; then
+                        tail_buffer="${'$'}{tail_buffer: -512}"
+                    fi
+                    if [[ "${'$'}tail_buffer" == *"${PROMPT_SENTINEL}"* ]]; then
+                        printf '%s bytes=%d\n' '${PROMPT_RECEIVED_MARKER}' "${'$'}bytes" > "${'$'}receipt"
+                        printf '\r\033[K${PROMPT_RECEIVED_MARKER} bytes=%d\n' "${'$'}bytes"
+                        break
+                    fi
+                fi
+            done
+            wait "${'$'}flood_pid" 2>/dev/null || true
+            if [ -n "${'$'}old_stty" ]; then stty "${'$'}old_stty" 2>/dev/null || true; fi
+            printf '\033[?25h\033[?2004l\r\033[K${DONE_MARKER}\n'
             exec sh
             SH
             chmod +x ${shellQuote(REMOTE_SCRIPT)}
@@ -440,7 +559,8 @@ class CodexOverflowNoReconnectE2eTest {
             runRemote(
                 key,
                 "tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true; " +
-                    "rm -f ${shellQuote(REMOTE_SCRIPT)} ${shellQuote(REMOTE_TRIGGER)}",
+                    "rm -f ${shellQuote(REMOTE_SCRIPT)} ${shellQuote(REMOTE_TRIGGER)} " +
+                    shellQuote(REMOTE_RECEIPT),
             )
         }
     }
@@ -525,51 +645,22 @@ class CodexOverflowNoReconnectE2eTest {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
-    private data class RecordedDiagnosticEvent(
-        val category: String,
-        val name: String,
-        val fields: Map<String, Any?>,
-    )
-
-    private class RecordingDiagnosticSink : DiagnosticEventSink, AutoCloseable {
-        private val lock = Any()
-        private val recorded = mutableListOf<RecordedDiagnosticEvent>()
-
-        val events: List<RecordedDiagnosticEvent>
-            get() = synchronized(lock) { recorded.toList() }
-
-        override fun record(category: String, event: String, fields: Map<String, Any?>) {
-            synchronized(lock) { recorded += RecordedDiagnosticEvent(category, event, fields) }
+    private fun buildLargeComposerPrompt(): String {
+        val builder = StringBuilder()
+        builder.appendLine("ISSUE398-PROMPT-BEGIN")
+        var index = 0
+        while (builder.length < TARGET_PROMPT_BYTES - PROMPT_SENTINEL.length - 128) {
+            builder.append("issue398 codex overflow proof line ")
+            builder.append(index.toString().padStart(5, '0'))
+            builder.append(": rewrite pressure, send-keys chunking, reconnect classifier, ")
+            builder.append("and composer draft retention all stay on the production path.\n")
+            index += 1
         }
-
-        fun eventsNamed(name: String): List<RecordedDiagnosticEvent> =
-            events.filter { it.name == name }
-
-        override fun close() {
-            DiagnosticEvents.install(DiagnosticEventSink.Noop)
-        }
+        builder.append(PROMPT_SENTINEL)
+        return builder.toString()
     }
 
-    private data class RecordedTmuxDiagnosticEvent(
-        val name: String,
-        val fields: Map<String, Any?>,
-    )
-
-    private class RecordingTmuxDiagnosticSink : TmuxClientDiagnosticSink, AutoCloseable {
-        private val lock = Any()
-        private val recorded = mutableListOf<RecordedTmuxDiagnosticEvent>()
-
-        override fun record(event: String, fields: Map<String, Any?>) {
-            synchronized(lock) { recorded += RecordedTmuxDiagnosticEvent(event, fields) }
-        }
-
-        fun eventsNamed(name: String): List<RecordedTmuxDiagnosticEvent> =
-            synchronized(lock) { recorded.filter { it.name == name } }
-
-        override fun close() {
-            TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
-        }
-    }
+    private fun String.utf8Size(): Int = toByteArray(Charsets.UTF_8).size
 
     private enum class FloodOutcome(val label: String) {
         Completed("completed"),
@@ -585,9 +676,26 @@ class CodexOverflowNoReconnectE2eTest {
         const val SESSION_NAME: String = "issue576-codex-overflow"
         const val READY_MARKER: String = "ISSUE576-LIVE-READY"
         const val DONE_MARKER: String = "ISSUE576-LIVE-DONE"
+        const val PROMPT_SENTINEL: String = "ISSUE398-PROMPT-END"
+        const val PROMPT_RECEIVED_MARKER: String = "ISSUE398-PROMPT-RECEIVED"
         const val REMOTE_SCRIPT: String = "/tmp/pocketshell-issue576-codex-overflow.sh"
         const val REMOTE_TRIGGER: String = "/tmp/pocketshell-issue576-codex-overflow.trigger"
-        const val FLOOD_LINES: Int = 520
+        const val REMOTE_RECEIPT: String = "/tmp/pocketshell-issue398-codex-overflow.receipt"
+        const val FLOOD_LINES: Int = 640
+        const val FLOOD_MAX_SECONDS: Int = 50
+        const val PROMPT_RECEIPT_TIMEOUT_SECONDS: Int = 45
+        const val PROMPT_RECEIPT_TIMEOUT_MS: Long = 55_000L
         const val FLOOD_TIMEOUT_MS: Long = 75_000L
+        const val MIN_PROMPT_BYTES: Int = 32 * 1024
+        const val TARGET_PROMPT_BYTES: Int = 36 * 1024
+        const val MAX_PROMPT_BYTES: Int = 128 * 1024
+        const val COMPOSER_INPUT_CHUNK_CHARS: Int = 1024
+        val FORBIDDEN_DIAGNOSTIC_TEXT: Set<String> = setOf(
+            "tmux-command-timeout",
+            "tmux_client_command_timeout",
+            "read eof",
+            "network reconnect",
+            "network_reconnect_start",
+        )
     }
 }

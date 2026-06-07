@@ -179,6 +179,9 @@ internal class PortDetector(
          * false-positive guards as Conversation and terminal tap handling.
          * Regex matches use the same port-token boundary so `localhost:5173abc`
          * is not treated as a completed port.
+         * Agent prose often drops the colon/URL shape ("localhost port 3000",
+         * "port 5173 on 127.0.0.1"), so loopback-host + explicit "port N"
+         * phrases are included too while unrelated bare port prose is not.
          *
          * Anchored to "listening"-style phrasing or to a localhost/
          * loopback/0.0.0.0 URL so a bare "port 8080" mention in prose is
@@ -201,12 +204,31 @@ internal class PortDetector(
                 """(?i)running\s+(?:on|at)\s+(?:https?://)?""" +
                     """(?:[\w.-]+)?:?(?:port\s+)?(\d{2,5})$PORT_TOKEN_BOUNDARY""",
             ),
+            // Agent prose without URL punctuation:
+            // "localhost port 3000", "127.0.0.1 is running on port 5173",
+            // "0.0.0.0 bound to port 8080".
+            Regex(
+                """(?i)$LOOPBACK_HOST_TOKEN$AGENT_LOOPBACK_PORT_PHRASE_WORDS""" +
+                    """\s+port\s+(\d{2,5})$PORT_TOKEN_BOUNDARY""",
+            ),
+            // Same signal, reversed:
+            // "port 3000 on localhost", "port 5173 is ready at 127.0.0.1".
+            Regex(
+                """(?i)\bport\s+(\d{2,5})$PORT_TOKEN_BOUNDARY""" +
+                    """$AGENT_LOOPBACK_PORT_PHRASE_WORDS\s+$LOOPBACK_HOST_TOKEN""",
+            ),
             // Bare loopback/any URLs the regexes above didn't anchor:
             // "http://localhost:8888", "http://127.0.0.1:5173",
             // "http://0.0.0.0:9000". Loopback/any-host only, so a remote
             // URL in prose isn't matched.
             Regex("""https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})$PORT_TOKEN_BOUNDARY"""),
         )
+
+        private const val LOOPBACK_HOST_TOKEN =
+            """(?<![\w.-])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?![\w.-])"""
+
+        private const val AGENT_LOOPBACK_PORT_PHRASE_WORDS =
+            """(?:\s+(?:is|now|listening|running|serving|available|bound|reachable|ready|up|open|on|at|to|via|hosted|server|dev|preview))*"""
 
         private const val PORT_TOKEN_BOUNDARY =
             """(?=$|[/?#\s,;:)\]!?'"<>]|\.(?:$|\s|[)\]!?'"<>,;:]))"""

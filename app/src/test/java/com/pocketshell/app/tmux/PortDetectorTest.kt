@@ -97,6 +97,34 @@ class PortDetectorTest {
         )
     }
 
+    @Test
+    fun `matches loopback host port phrase`() {
+        assertEquals(
+            listOf(3000),
+            ports(PortDetector(), "Preview available on localhost port 3000.\n"),
+        )
+        assertEquals(
+            listOf(5173),
+            ports(PortDetector(), "127.0.0.1 is running on port 5173\n"),
+        )
+        assertEquals(
+            listOf(8080),
+            ports(PortDetector(), "0.0.0.0 bound to port 8080\n"),
+        )
+    }
+
+    @Test
+    fun `matches port phrase before loopback host`() {
+        assertEquals(
+            listOf(3000),
+            ports(PortDetector(), "Port 3000 on localhost is ready.\n"),
+        )
+        assertEquals(
+            listOf(5173),
+            ports(PortDetector(), "port 5173 is ready at 127.0.0.1\n"),
+        )
+    }
+
     // --- false positives the regex tolerates (confirm scan is the guard) ---
 
     @Test
@@ -110,6 +138,12 @@ class PortDetectorTest {
     }
 
     @Test
+    fun `ignores real host port phrases`() {
+        assertTrue(ports(PortDetector(), "example.com port 3000 is documented\n").isEmpty())
+        assertTrue(ports(PortDetector(), "port 3000 on example.com is documented\n").isEmpty())
+    }
+
+    @Test
     fun `ignores loopback substring inside larger hostname`() {
         val text = "notlocalhost:3000 localhost.evil.com:3001 http://example.com:3002\n"
         assertTrue(ports(PortDetector(), text).isEmpty())
@@ -118,7 +152,8 @@ class PortDetectorTest {
     @Test
     fun `ignores loopback prefix inside larger token`() {
         val text = "Open localhost:5173abc localhost:5173_ms localhost:5173.evil " +
-            "http://localhost:3000abc http://localhost:3000_ms http://localhost:3000.evil\n"
+            "http://localhost:3000abc http://localhost:3000_ms http://localhost:3000.evil " +
+            "localhost port 5173abc port 3000_ms on localhost\n"
         assertTrue(ports(PortDetector(), text).isEmpty())
     }
 

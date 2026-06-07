@@ -7529,6 +7529,31 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun assistantConversationLoopbackPortPhraseSurfacesPortForwardOverlay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(3000))
+        vm.attachForPortDetection(client, session)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        advanceUntilIdle()
+
+        vm.appendAgentEventsForTest(
+            "%0",
+            listOf(
+                ConversationEvent.Message(
+                    id = "assistant-localhost-port-phrase",
+                    agent = AgentKind.ClaudeCode,
+                    role = ConversationRole.Assistant,
+                    text = "Preview is running on localhost port 3000.",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(3000, vm.detectedPort.value)
+    }
+
+    @Test
     fun agentToolResultLoopbackPortSurfacesPortForwardOverlay() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

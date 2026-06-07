@@ -78,6 +78,9 @@ public class UsageRemoteSource @Inject constructor(
             val result = session.exec(command)
             if (result.exitCode == 127) return UsageFetchResult.ToolMissing
             if (result.exitCode != 0) {
+                parseProviderErrorStdout(result.stdout)?.let { records ->
+                    return UsageFetchResult.Success(records)
+                }
                 val reason = result.stderr.ifBlank { result.stdout }.ifBlank { "usage command exited ${result.exitCode}" }
                 return UsageFetchResult.Failed(reason)
             }
@@ -99,5 +102,14 @@ public class UsageRemoteSource @Inject constructor(
          * the PATH-robust [PocketshellCommand.wrap] of [DEFAULT_USAGE_ARGS].
          */
         public const val defaultUsageCommand: String = "pocketshell usage --json"
+    }
+
+    private fun parseProviderErrorStdout(stdout: String): List<UsageProviderRecord>? {
+        if (stdout.isBlank()) return null
+        return try {
+            parser.parse(stdout).takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
     }
 }

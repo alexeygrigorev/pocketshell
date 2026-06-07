@@ -110,6 +110,48 @@ class UsageRemoteSourceTest {
     }
 
     @Test
+    fun fetchUsage_nonzeroClaudeErrorRecordStillRendersActionableAuthState() = runTest {
+        // #591: provider auth failures can be returned as a normalized JSON
+        // record while the underlying provider probe exits non-zero. The app
+        // must keep that row instead of classifying the host as skipped.
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = """{"provider":"claude","status":"error","short_term":null,"long_term":null,"block_reason":null,"error":"HTTP Error 401: Unauthorized","details":{}}""",
+                    stderr = "",
+                    exitCode = 1,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue(result is UsageFetchResult.Success)
+        val record = (result as UsageFetchResult.Success).records.single()
+        assertEquals("claude", record.provider)
+        assertEquals(UsageStatus.Error, record.status)
+        assertEquals(
+            "Claude Code authentication failed on this host. Run `claude /login` in the host shell, then refresh usage.",
+            record.lastError,
+        )
+    }
+
+    @Test
+    fun fetchUsage_nonzeroNonJsonStillReportsFailure() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = "",
+                    stderr = "error: unknown provider",
+                    exitCode = 2,
+                ),
+            ),
+        )
+
+        assertEquals(UsageFetchResult.Failed("error: unknown provider"), source.fetchUsage(session))
+    }
+
+    @Test
     fun detectPocketshell_propagatesCancellation() = runTest {
         val session = ThrowingSshSession(CancellationException("cancelled"))
 

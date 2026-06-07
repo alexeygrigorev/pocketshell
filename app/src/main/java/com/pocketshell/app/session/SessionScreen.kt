@@ -62,10 +62,14 @@ import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
+import com.pocketshell.app.conversation.ToolResultPairing
+import com.pocketshell.app.conversation.filterConversationRows
 import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
+import com.pocketshell.app.conversation.runningToolCallIds
 import com.pocketshell.app.conversation.timelineActorLabel
 import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
+import com.pocketshell.app.conversation.toolResultPairing
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.UnsentPromptBanner
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -608,32 +612,22 @@ internal fun ConversationPane(
         val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
         if (showSystemNotes) timelineEvents else timelineEvents.filterNot { it is ConversationEvent.SystemNote }
     }
-    val filteredEvents = remember(visibleEvents, effectiveQuery) {
-        val q = effectiveQuery.trim()
-        val eventsById = visibleEvents.associateBy { it.id }
-        val rows = if (q.isBlank()) {
-            visibleEvents
-        } else {
-            visibleEvents.filter { event ->
-                event.searchText().contains(q, ignoreCase = true) ||
-                    (
-                        event is ConversationEvent.ToolCall &&
-                            visibleEvents.any {
-                                it is ConversationEvent.ToolResult &&
-                                    it.toolCallId == event.id &&
-                                    it.output.contains(q, ignoreCase = true)
-                            }
-                        )
-            }
-        }
-        rows.filterNot { it is ConversationEvent.ToolResult && it.hasVisibleParentToolCall(eventsById) }
+    val toolResultPairing = remember(visibleEvents) { visibleEvents.toolResultPairing() }
+    val filteredConversation = remember(visibleEvents, effectiveQuery, toolResultPairing) {
+        filterConversationRows(
+            events = visibleEvents,
+            query = effectiveQuery,
+            pairing = toolResultPairing,
+        )
     }
+    val filteredEvents = filteredConversation.events
     val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
     val expandedMessages = remember { mutableStateOf(setOf<String>()) }
     // Issue #176: SystemNote expand state — sticky for the pane lifetime.
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
-    val runningToolIds = remember(events) { runningToolCallIds(events) }
-    val eventsById = remember(events) { events.associateBy { it.id } }
+    val runningToolIds = remember(visibleEvents, toolResultPairing) {
+        runningToolCallIds(visibleEvents, toolResultPairing)
+    }
 
     // Issue #154 (acceptance criteria #1 & #3): tail-follow + jump-to-latest.
     // Same model as the tmux pane: hold the list state at this level,
@@ -691,8 +685,9 @@ internal fun ConversationPane(
                     ConversationEventRow(
                         event = event,
                         runningToolIds = runningToolIds,
-                        eventsById = eventsById,
-                        isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
+                        toolResultPairing = toolResultPairing,
+                        isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
+                            event.id in filteredConversation.searchExpandedToolCallIds,
                         isMessageExpanded = expandedMessages.value.contains(event.id),
                         onToggleMessageExpand = { id ->
                             val current = expandedMessages.value
@@ -710,9 +705,7 @@ internal fun ConversationPane(
                                 event = event,
                                 expanded = !current.contains(id),
                                 pairedToolResult = (event as? ConversationEvent.ToolCall)?.let { call ->
-                                    eventsById.values
-                                        .filterIsInstance<ConversationEvent.ToolResult>()
-                                        .firstOrNull { it.toolCallId == call.id }
+                                    toolResultPairing.resultsByCallId[call.id]
                                 },
                             )
                             expandedToolCalls.value = if (current.contains(id)) current - id else current + id
@@ -891,7 +884,7 @@ internal fun androidx.compose.foundation.lazy.LazyListState.isScrolledToBottom(
 private fun ConversationEventRow(
     event: ConversationEvent,
     runningToolIds: Set<String>,
-    eventsById: Map<String, ConversationEvent>,
+    toolResultPairing: ToolResultPairing,
     isExplicitlyExpanded: Boolean,
     isMessageExpanded: Boolean,
     onToggleMessageExpand: (String) -> Unit,
@@ -911,12 +904,16 @@ private fun ConversationEventRow(
         )
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
-            result = eventsById.findToolResultFor(event.id),
+            result = toolResultPairing.resultsByCallId[event.id],
             isRunning = event.id in runningToolIds,
             isExplicitlyExpanded = isExplicitlyExpanded,
             onToggle = { onToggleExpand(event.id) },
         )
-        is ConversationEvent.ToolResult -> ConversationToolResultRow(event)
+        is ConversationEvent.ToolResult -> {
+            if (event.id !in toolResultPairing.pairedResultIds) {
+                ConversationToolResultRow(event)
+            }
+        }
         is ConversationEvent.SystemNote -> ConversationSystemNoteRow(
             note = event,
             isExpanded = isSystemNoteExpanded,
@@ -1224,34 +1221,6 @@ private fun ToolCallSection(
         body = body,
         copyTestTag = copyTestTag,
     )
-}
-
-private fun Map<String, ConversationEvent>.findToolResultFor(
-    toolCallId: String,
-): ConversationEvent.ToolResult? =
-    values.firstOrNull { it is ConversationEvent.ToolResult && it.toolCallId == toolCallId }
-        as? ConversationEvent.ToolResult
-
-private fun ConversationEvent.ToolResult.hasVisibleParentToolCall(
-    eventsById: Map<String, ConversationEvent>,
-): Boolean = toolCallId?.let { eventsById[it] is ConversationEvent.ToolCall } == true
-
-internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
-    val resolved = events
-        .filterIsInstance<ConversationEvent.ToolResult>()
-        .mapNotNullTo(mutableSetOf()) { it.toolCallId }
-    return events
-        .filterIsInstance<ConversationEvent.ToolCall>()
-        .map { it.id }
-        .filter { it !in resolved }
-        .toSet()
-}
-
-private fun ConversationEvent.searchText(): String = when (this) {
-    is ConversationEvent.Message -> text
-    is ConversationEvent.ToolCall -> "$name $input"
-    is ConversationEvent.ToolResult -> output
-    is ConversationEvent.SystemNote -> "$tag $content"
 }
 
 @Composable

@@ -1,4 +1,4 @@
-package com.pocketshell.app.tmux
+package com.pocketshell.app.conversation
 
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent

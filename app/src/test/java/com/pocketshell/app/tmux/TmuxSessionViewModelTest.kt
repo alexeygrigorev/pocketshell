@@ -41,6 +41,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
@@ -1729,6 +1730,93 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun networkReconnectRetriesTransientFlapThenRecoversWithoutOverlappingAttempts() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = FailingThenConnectingLeaseConnector(
+            failures = listOf(
+                SshException("SSH connect to alex@alpha.example:22 failed: temporary link cut"),
+                SshException("SSH connect to alex@alpha.example:22 failed: transient latency timeout"),
+            ),
+            session = FakeSshSession(),
+        )
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 250L, 250L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "wifi-cellular-flap"),
+        )
+        runCurrent()
+
+        assertEquals(
+            "first network reconnect attempt should run immediately and fail transiently",
+            1,
+            connector.connectCount,
+        )
+        assertTrue(
+            "after the first transient failure the VM should stay in the bounded reconnect loop",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertEquals(1, TMUX_CONNECT_ATTEMPTS.get())
+
+        advanceTimeBy(250L)
+        runCurrent()
+
+        assertEquals(
+            "second network reconnect attempt should be the next bounded backoff step",
+            2,
+            connector.connectCount,
+        )
+        assertTrue(
+            "after the second transient failure the VM should still wait for the final retry",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertEquals(2, TMUX_CONNECT_ATTEMPTS.get())
+
+        advanceTimeBy(250L)
+        advanceUntilIdle()
+
+        assertEquals(
+            "third network reconnect attempt should recover when the link returns",
+            3,
+            connector.connectCount,
+        )
+        assertEquals(
+            "bounded reconnect loop must not overlap SSH dials while the network is flapping",
+            1,
+            connector.maxConcurrentConnects,
+        )
+        assertTrue("old tmux client must be closed during reconnect", oldClient.closed)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(
+            "expected network reconnect to recover to Connected, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(3, TMUX_CONNECT_ATTEMPTS.get())
+        assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
+    }
+
+    @Test
     fun eofDisconnectDoesNotBurnAutoReconnectAttempts() = runTest {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
@@ -2232,6 +2320,15 @@ class TmuxSessionViewModelTest {
         )
         runCurrent()
 
+        val emittedConnectionStatuses =
+            mutableListOf<TmuxSessionViewModel.ConnectionStatus>()
+        val statusCollector = launch {
+            vm.connectionStatus.collect { status ->
+                emittedConnectionStatuses += status
+            }
+        }
+        runCurrent()
+
         val state = vm.panes.value.single().terminalState
         val observedTerminalSideChannelChunks = AtomicInteger(0)
         val terminalSideChannelCollector = launch {
@@ -2291,6 +2388,27 @@ class TmuxSessionViewModelTest {
                 "some output should reach the terminal side-channel before local overflow recovery",
                 observedTerminalSideChannelChunks.get() > 0,
             )
+            val connectionFailureStatuses = emittedConnectionStatuses.filter { status ->
+                status is TmuxSessionViewModel.ConnectionStatus.Connecting ||
+                    status is TmuxSessionViewModel.ConnectionStatus.Reconnecting ||
+                    status is TmuxSessionViewModel.ConnectionStatus.Failed
+            }
+            assertTrue(
+                "Codex-like output overflow must not emit reconnect/disconnect VM states; " +
+                    "observed=$emittedConnectionStatuses",
+                connectionFailureStatuses.isEmpty(),
+            )
+            val disconnectUiStatuses = emittedConnectionStatuses
+                .map { it.toUiStatus() }
+                .filter { uiStatus ->
+                    uiStatus == com.pocketshell.uikit.model.ConnectionStatus.Connecting ||
+                        uiStatus == com.pocketshell.uikit.model.ConnectionStatus.Error
+                }
+            assertTrue(
+                "Codex-like output overflow must not map to the breadcrumb Reconnecting/Disconnected UI; " +
+                    "observed=${emittedConnectionStatuses.map { it.toUiStatus() }}",
+                disconnectUiStatuses.isEmpty(),
+            )
             assertTrue(
                 "output overflow is local terminal backpressure, not an SSH/tmux disconnect",
                 vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
@@ -2314,6 +2432,7 @@ class TmuxSessionViewModelTest {
                 vm.panes.value.single().surfaceError,
             )
         } finally {
+            statusCollector.cancel()
             terminalSideChannelCollector.cancel()
             slowPaneOutputCollector.cancel()
         }
@@ -7537,6 +7656,87 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun foregroundReturnWithinGraceRestoresParkedRuntimeWithoutVisibleReconnectState() = runTest {
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val firstVm = newVm(registry = registry, runtimeCache = runtimeCache)
+        val client = FakeTmuxClient()
+        val session = FakeSshSession()
+        firstVm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+            session = session,
+        )
+        firstVm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        firstVm.setProcessForegroundForClearedForTest(true)
+
+        firstVm.onScreenStopped()
+        firstVm.clearForTest()
+        runCurrent()
+
+        assertFalse("within-grace screen clear must keep tmux client live", client.closed)
+        assertFalse("within-grace screen clear must keep SSH session live", session.closed)
+        assertEquals(listOf(tmuxRuntimeKeyForTest("work")), runtimeCache.snapshotKeys())
+
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val restoredVm = newVm(
+            registry = registry,
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val observedStatuses = mutableListOf<TmuxSessionViewModel.ConnectionStatus>()
+        val statusJob = backgroundScope.launch {
+            restoredVm.connectionStatus.collect { observedStatuses += it }
+        }
+        runCurrent()
+
+        restoredVm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        runCurrent()
+        statusJob.cancel()
+
+        assertEquals("cache hit must avoid opening a fresh SSH lease", 0, connector.connectCount)
+        assertEquals(listOf("%0"), restoredVm.panes.value.map { it.paneId })
+        assertSame(client, registry.clients.value[1L]?.client)
+        assertTrue(restoredVm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertTrue(
+            "foreground return inside grace must not flash user-visible reconnect/teardown status; " +
+                "observed=$observedStatuses",
+            observedStatuses.none {
+                it is TmuxSessionViewModel.ConnectionStatus.Connecting ||
+                    it is TmuxSessionViewModel.ConnectionStatus.Switching ||
+                    it is TmuxSessionViewModel.ConnectionStatus.Reconnecting ||
+                    it is TmuxSessionViewModel.ConnectionStatus.Failed
+            },
+        )
+    }
+
+    @Test
     fun onAppBackgroundedClosesInactiveCachedRuntimesForHost() = runTest {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
@@ -8339,12 +8539,22 @@ class TmuxSessionViewModelTest {
     ) : SshLeaseConnector {
         var connectCount: Int = 0
             private set
+        private val inFlightConnects: AtomicInteger = AtomicInteger(0)
+
+        var maxConcurrentConnects: Int = 0
+            private set
 
         override suspend fun connect(target: SshLeaseTarget): Result<com.pocketshell.core.ssh.SshSession> {
-            val index = connectCount
-            connectCount += 1
-            return failures.getOrNull(index)?.let { Result.failure(it) }
-                ?: Result.success(session)
+            val inFlight = inFlightConnects.incrementAndGet()
+            maxConcurrentConnects = maxOf(maxConcurrentConnects, inFlight)
+            return try {
+                val index = connectCount
+                connectCount += 1
+                failures.getOrNull(index)?.let { Result.failure(it) }
+                    ?: Result.success(session)
+            } finally {
+                inFlightConnects.decrementAndGet()
+            }
         }
     }
 

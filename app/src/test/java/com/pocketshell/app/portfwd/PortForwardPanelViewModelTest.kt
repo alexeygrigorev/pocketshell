@@ -759,6 +759,71 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
+    fun dismissedPanelForwardingSurvivesServiceForcedReconnect() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val firstSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val recoveredSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(
+            listOf(Result.success(firstSession), Result.success(recoveredSession)),
+        )
+        val forwardingController = newForwardingController(connector)
+        val viewModel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+
+        viewModel.load(hostId, "/tmp/key", "secret".toCharArray())
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        viewModel.leavePanel()
+        runCurrent()
+
+        assertEquals(1, forwardingController.flowOfActiveHostCount().value)
+        assertEquals(1, forwardingController.flowOfTotalTunnelCount().value)
+        assertFalse("panel dismissal must not close the controller-owned SSH session", firstSession.closed)
+
+        firstSession.simulateDeadForwardButStillConnected()
+        val service = Robolectric.buildService(ForwardingService::class.java).get()
+        service.controller = forwardingController
+        service.handleDefaultNetworkLost()
+        service.handleDefaultNetworkAvailable()
+        advanceTimeBy(1_100L)
+        runCurrent()
+
+        assertEquals(
+            "service network recovery must reach the controller-owned supervisor after the panel is gone",
+            listOf("dev", "dev"),
+            connector.hosts,
+        )
+        assertEquals(listOf("secret", "secret"), connector.passphrases)
+        assertTrue("forced reconnect must close the stale session", firstSession.closed)
+        assertEquals(1, forwardingController.flowOfActiveHostCount().value)
+        assertEquals(1, forwardingController.flowOfTotalTunnelCount().value)
+        assertEquals(
+            mapOf(3000 to 3000),
+            forwardingController.flowOfHostSnapshots().value.getValue(hostId).forwardedPortMap,
+        )
+        assertTrue(recoveredSession.openedForwards.single().isActive)
+
+        val chipState = SessionForwardingIndicatorViewModel(forwardingController)
+            .stateFor(hostId)
+            .first { it.visible && it.tunnelCount == 1 }
+        assertFalse("restored forwarding should not leave the in-session chip stuck restoring", chipState.restoring)
+
+        forwardingController.stopForwarding(hostId)
+        runCurrent()
+
+        assertTrue(recoveredSession.closed)
+        assertFalse(recoveredSession.openedForwards.single().isActive)
+    }
+
+    @Test
     fun userToggleOnPersistsHostEnabledTrueOnSuccess() = runTest {
         val hostId = insertHost(enabled = false)
         val session = FakeSshSession(ssOutput = "")

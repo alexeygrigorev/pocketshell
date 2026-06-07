@@ -10,6 +10,7 @@ import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -167,6 +168,28 @@ class TmuxSessionScreenTest {
         )
 
         assertEquals(listOf("dismiss", "replace:logs"), events)
+    }
+
+    @Test
+    fun acceptedLocalhostForwardNavigationCarriesAutoOpenUrl() {
+        val localhostUrl = LocalhostUrl(
+            remotePort = 5173,
+            scheme = "https",
+            pathAndQuery = "/preview?tab=logs#tail",
+        )
+
+        val target = acceptedLocalhostForwardNavigation(localhostUrl)
+
+        assertEquals(5173, target.remotePort)
+        assertEquals(localhostUrl, target.autoOpenLocalhostUrl)
+    }
+
+    @Test
+    fun detectedPortForwardNavigationDoesNotRequestBrowserAutoOpen() {
+        val target = detectedPortForwardNavigation(5173)
+
+        assertEquals(5173, target.remotePort)
+        assertEquals(null, target.autoOpenLocalhostUrl)
     }
 
     @Test

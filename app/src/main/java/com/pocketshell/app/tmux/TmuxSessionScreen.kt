@@ -242,7 +242,9 @@ public fun TmuxSessionScreen(
     // Issue #448 (epic #432 slice C): the detection overlay's "Forward"
     // action opens the same panel pre-filled with the detected remote
     // port (#447 prefillRemotePort). MainActivity navigates with the
-    // port; back returns to this exact session.
+    // port; back returns to this exact session. Issue #608 extends this
+    // callback for accepted localhost URL taps: those carry the tapped URL so
+    // the port-forward panel can open the browser after the tunnel succeeds.
     onOpenPortForwardingWithPort: (remotePort: Int, autoOpenLocalhostUrl: LocalhostUrl?) -> Unit = { _, _ -> },
     /** Route an assistant-requested navigation (issue #266). */
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
@@ -1483,7 +1485,11 @@ public fun TmuxSessionScreen(
                 .imePadding(),
             onForward = {
                 val accepted = viewModel.acceptDetectedPort()
-                if (accepted != null) onOpenPortForwardingWithPort(accepted, null)
+                if (accepted != null) {
+                    detectedPortForwardNavigation(accepted).let { target ->
+                        onOpenPortForwardingWithPort(target.remotePort, target.autoOpenLocalhostUrl)
+                    }
+                }
             },
             onDismiss = { viewModel.dismissDetectedPort() },
         )
@@ -1509,9 +1515,9 @@ public fun TmuxSessionScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val port = pending.remotePort
+                        val target = acceptedLocalhostForwardNavigation(pending)
                         pendingLocalhostForward = null
-                        onOpenPortForwardingWithPort(port, pending)
+                        onOpenPortForwardingWithPort(target.remotePort, target.autoOpenLocalhostUrl)
                     },
                 ) {
                     Text("Forward")
@@ -1682,6 +1688,23 @@ public fun TmuxSessionScreen(
         )
     }
 }
+
+internal data class PortForwardNavigationTarget(
+    val remotePort: Int,
+    val autoOpenLocalhostUrl: LocalhostUrl?,
+)
+
+internal fun acceptedLocalhostForwardNavigation(localhostUrl: LocalhostUrl): PortForwardNavigationTarget =
+    PortForwardNavigationTarget(
+        remotePort = localhostUrl.remotePort,
+        autoOpenLocalhostUrl = localhostUrl,
+    )
+
+internal fun detectedPortForwardNavigation(remotePort: Int): PortForwardNavigationTarget =
+    PortForwardNavigationTarget(
+        remotePort = remotePort,
+        autoOpenLocalhostUrl = null,
+    )
 
 /**
  * Issue #448 (epic #432 slice C): the non-blocking "forward this newly

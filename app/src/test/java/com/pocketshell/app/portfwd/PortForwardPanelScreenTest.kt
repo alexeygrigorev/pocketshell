@@ -135,6 +135,16 @@ class PortForwardPanelScreenTest {
     }
 
     @Test
+    fun `shouldClearPendingForwardAutoOpen clears after connection error`() {
+        val state = PortForwardPanelState(
+            connectionState = PortForwardConnectionState.Error,
+            tunnels = emptyList(),
+        )
+
+        assertEquals(true, shouldClearPendingForwardAutoOpen(state, remotePort = 5173))
+    }
+
+    @Test
     fun `shouldClearPendingForwardAutoOpen keeps waiting while other ports fail`() {
         val state = PortForwardPanelState(
             connectionState = PortForwardConnectionState.Connected,

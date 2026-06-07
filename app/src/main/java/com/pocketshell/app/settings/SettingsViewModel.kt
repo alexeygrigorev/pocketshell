@@ -286,12 +286,12 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun onUpdateDownloadStarted(tagName: String) {
-        _updateCheckState.value = SettingsUpdateCheckState.DownloadStarted(tagName)
+    fun onUpdateDownloadStarted(info: ReleaseInfo) {
+        _updateCheckState.value = SettingsUpdateCheckState.DownloadStarted(info)
     }
 
-    fun onUpdateDownloadFailed(reason: String) {
-        _updateCheckState.value = SettingsUpdateCheckState.DownloadFailed(reason)
+    fun onUpdateDownloadFailed(info: ReleaseInfo, reason: String) {
+        _updateCheckState.value = SettingsUpdateCheckState.DownloadFailed(info, reason)
     }
 
     /**
@@ -461,6 +461,6 @@ sealed interface SettingsUpdateCheckState {
     data object UpToDate : SettingsUpdateCheckState
     data class UpdateAvailable(val info: ReleaseInfo) : SettingsUpdateCheckState
     data class Failed(val reason: String) : SettingsUpdateCheckState
-    data class DownloadStarted(val tagName: String) : SettingsUpdateCheckState
-    data class DownloadFailed(val reason: String) : SettingsUpdateCheckState
+    data class DownloadStarted(val info: ReleaseInfo) : SettingsUpdateCheckState
+    data class DownloadFailed(val info: ReleaseInfo, val reason: String) : SettingsUpdateCheckState
 }

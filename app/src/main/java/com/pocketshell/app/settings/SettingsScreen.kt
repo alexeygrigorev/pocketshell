@@ -266,8 +266,8 @@ fun SettingsScreen(
                         launchUpdateDownload(
                             context = context,
                             info = info,
-                            onStarted = viewModel::onUpdateDownloadStarted,
-                            onFailed = viewModel::onUpdateDownloadFailed,
+                            onStarted = { viewModel.onUpdateDownloadStarted(info) },
+                            onFailed = { reason -> viewModel.onUpdateDownloadFailed(info, reason) },
                         )
                     },
                 )
@@ -1866,7 +1866,7 @@ private fun SettingsUpdateCheckRow(
             detail = "Couldn't check for updates: ${state.reason}"
         }
         is SettingsUpdateCheckState.DownloadStarted -> {
-            label = "Downloading ${state.tagName}"
+            label = "Downloading ${state.info.tagName}"
             detail = "Check your notifications / Downloads."
         }
         is SettingsUpdateCheckState.DownloadFailed -> {
@@ -1878,6 +1878,8 @@ private fun SettingsUpdateCheckRow(
     val click = {
         when (state) {
             is SettingsUpdateCheckState.UpdateAvailable -> onDownloadUpdate(state.info)
+            is SettingsUpdateCheckState.DownloadStarted -> onDownloadUpdate(state.info)
+            is SettingsUpdateCheckState.DownloadFailed -> onDownloadUpdate(state.info)
             else -> onCheckForUpdates()
         }
     }

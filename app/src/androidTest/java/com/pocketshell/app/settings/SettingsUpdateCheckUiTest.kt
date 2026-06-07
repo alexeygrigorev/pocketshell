@@ -84,4 +84,29 @@ class SettingsUpdateCheckUiTest {
         assertEquals(1, retryCount)
     }
 
+    @Test
+    fun aboutFooter_downloadFailedRetriesKnownUpdateDownload() {
+        var checkCount = 0
+        var requestedDownload: ReleaseInfo? = null
+
+        compose.setContent {
+            AboutFooter(
+                appBuildInfo = appBuildInfo,
+                updateCheckState = SettingsUpdateCheckState.DownloadFailed(
+                    info = releaseInfo,
+                    reason = "no app can open the download link",
+                ),
+                onCheckForUpdates = { checkCount += 1 },
+                onDownloadUpdate = { info -> requestedDownload = info },
+            )
+        }
+
+        compose.onNodeWithText("Open update again").assertExists()
+        compose.onNodeWithText("Couldn't start the download", substring = true).assertExists()
+        compose.onNodeWithTag(ABOUT_UPDATE_CHECK_ROW_TAG).performClick()
+
+        assertEquals(0, checkCount)
+        assertEquals(releaseInfo, requestedDownload)
+    }
+
 }

@@ -412,14 +412,19 @@ class SettingsViewModelTest {
 
     @Test
     fun `Settings update download feedback is observable`() {
+        val info = ReleaseInfo(
+            tagName = "v9.9.9",
+            htmlUrl = "https://example.com/releases/v9.9.9",
+            apkUrl = "https://example.com/pocketshell-9.9.9-debug.apk",
+        )
         val vm = newVm()
 
-        vm.onUpdateDownloadStarted("v9.9.9")
-        assertEquals(SettingsUpdateCheckState.DownloadStarted("v9.9.9"), vm.updateCheckState.value)
+        vm.onUpdateDownloadStarted(info)
+        assertEquals(SettingsUpdateCheckState.DownloadStarted(info), vm.updateCheckState.value)
 
-        vm.onUpdateDownloadFailed("no app can open the download link")
+        vm.onUpdateDownloadFailed(info, "no app can open the download link")
         assertEquals(
-            SettingsUpdateCheckState.DownloadFailed("no app can open the download link"),
+            SettingsUpdateCheckState.DownloadFailed(info, "no app can open the download link"),
             vm.updateCheckState.value,
         )
     }

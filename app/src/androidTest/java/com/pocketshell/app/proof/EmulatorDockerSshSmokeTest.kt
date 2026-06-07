@@ -7,6 +7,7 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -712,24 +713,42 @@ class EmulatorDockerSshSmokeTest {
         // readline's input buffer, bash sees the concatenation
         // `[27;17Rsh /tmp/.../run.sh` and reports `-sh: [27: not found`.
         //
-        // To make the input deterministic, prepend `\x15` (Ctrl-U, the
-        // readline "kill-line" binding) so the shell discards anything
-        // already queued in the current input line before our command
-        // arrives. The Ctrl-U is a no-op on an empty line so it's safe
-        // when no CPR response is pending.
-        val text = buildString {
-            append('')
-            append(command)
-            if (!command.endsWith("\n")) append('\n')
+        // To make the input deterministic, send `\x15` (Ctrl-U, the readline
+        // "kill-line" binding) before typing the command so the shell
+        // discards anything already queued in the current input line. Keep
+        // Ctrl-U, printable command chunks, and Enter as separate IME commits:
+        // a single payload containing both control bytes and `\n` is routed
+        // through the tmux bracketed-paste path, not the keystroke path, and
+        // has been observed to leave only a suffix such as `ntf ...` at the
+        // prompt under emulator contention.
+        val typedCommand = command.removeSuffix("\n")
+        require('\n' !in typedCommand && '\r' !in typedCommand) {
+            "sendCommandViaTerminalInput expects a single shell command line"
         }
-        var committed = false
+
+        val clearCommitted = terminalInputConnection().commitText("\u0015", 1)
+        assertTrue("expected terminal input connection to clear current line for `$command`", clearCommitted)
+        SystemClock.sleep(35)
+
+        typedCommand.chunked(4).forEach { chunk ->
+            val committed = terminalInputConnection().commitText(chunk, 1)
+            assertTrue("expected terminal input connection to commit `$chunk` for `$command`", committed)
+            SystemClock.sleep(35)
+        }
+        val enterCommitted = terminalInputConnection().commitText("\n", 1)
+        assertTrue("expected terminal input connection to submit `$command`", enterCommitted)
+    }
+
+    private fun terminalInputConnection(): InputConnection {
+        var connection: InputConnection? = null
         launchedActivity?.onActivity { activity ->
-            val terminalView = activity.window.decorView.findTerminalView() ?: return@onActivity
+            val terminalView = activity.window.decorView.findTerminalView()
+            requireNotNull(terminalView) { "TerminalView was not found" }
             terminalView.requestFocus()
-            val connection = terminalView.onCreateInputConnection(EditorInfo())
-            committed = connection?.commitText(text, 1) == true
+            connection = terminalView.onCreateInputConnection(EditorInfo())
         }
-        assertTrue("expected terminal input connection to commit `$command`", committed)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        return requireNotNull(connection) { "TerminalView did not create an InputConnection" }
     }
 
     private fun waitForTerminalUsableByMarker(

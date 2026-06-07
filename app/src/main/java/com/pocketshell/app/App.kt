@@ -432,7 +432,7 @@ internal class TerminalNetworkLifecycleGate {
             )
         ) {
             TerminalNetworkDecision.Dispatch(
-                pendingChange!!,
+                pendingChange!!.copy(deferredFromBackground = true),
                 gateDiagnostics = TerminalNetworkGateDiagnostics(
                     decision = "dispatch",
                     reason = if (resumedWithinGrace) {

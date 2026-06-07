@@ -1528,6 +1528,85 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun sameNetworkHandleWithDifferentTransportsDoesNotEnterReconnecting() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("same-handle", setOf("WIFI")),
+                current = TerminalNetworkSnapshot.Validated("same-handle", setOf("VPN", "WIFI")),
+                previousValidated = TerminalNetworkSnapshot.Validated("same-handle", setOf("WIFI")),
+                reason = "same-handle-transport-metadata",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "same network handle with changed transports is metadata churn, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(0, connector.connectCount)
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+        assertSame(client, registry.clients.value[7L]?.client)
+    }
+
+    @Test
+    fun differentNetworkHandleStillEntersReconnecting() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi", setOf("WIFI")),
+                current = TerminalNetworkSnapshot.Validated("cell", setOf("CELLULAR")),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi", setOf("WIFI")),
+                reason = "different-network-handle",
+            ),
+        )
+        runCurrent()
+
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
+        assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
+        assertEquals(0, connector.connectCount)
+        assertTrue("network reconnect removes stale active client", registry.clients.value.isEmpty())
+    }
+
+    @Test
     fun restoredSameNetworkHintDuringActiveTerminalOutputDoesNotShowReconnect() = runTest {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
@@ -1840,6 +1919,73 @@ class TmuxSessionViewModelTest {
         assertSame(reconnectClient, registry.clients.value[7L]?.client)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
         assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
+    }
+
+    @Test
+    fun postGraceLifecycleReattachCoalescesDeferredNetworkReplay() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val lifecycleClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            lifecycleClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onBackground()
+        advanceUntilIdle()
+        assertTrue("background teardown should detach the stale control client", oldClient.closed)
+
+        registry.lifecycleHooksSnapshot().single().onForeground()
+        advanceUntilIdle()
+
+        assertEquals(1, connector.connectCount)
+        assertTrue(lifecycleClient.connectCalled)
+        assertSame(lifecycleClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "post-grace-deferred-network-replay",
+                sequence = 42L,
+                deferredFromBackground = true,
+            ),
+        )
+        runCurrent()
+
+        assertTrue(
+            "deferred replay after fresh lifecycle attach must stay connected, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(
+            "deferred replay must not schedule a second network reconnect",
+            TmuxConnectTrigger.LifecycleReattach,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertEquals(1, connector.connectCount)
+        assertEquals(1, TMUX_CONNECT_ATTEMPTS.get())
+        assertSame(lifecycleClient, registry.clients.value[7L]?.client)
     }
 
     @Test
@@ -9139,6 +9285,7 @@ class TmuxSessionViewModelTest {
             previous as? TerminalNetworkSnapshot.Validated,
         reason: String = "validated-default-network-changed",
         sequence: Long = 1L,
+        deferredFromBackground: Boolean = false,
     ): TerminalNetworkChange =
         TerminalNetworkChange(
             previous = previous,
@@ -9146,6 +9293,7 @@ class TmuxSessionViewModelTest {
             previousValidated = previousValidated,
             reason = reason,
             sequence = sequence,
+            deferredFromBackground = deferredFromBackground,
         )
 
     private class QueueLeaseConnector(

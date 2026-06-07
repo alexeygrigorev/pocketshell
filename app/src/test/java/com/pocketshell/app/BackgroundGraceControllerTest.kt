@@ -528,7 +528,7 @@ class BackgroundGraceControllerTest {
         val dispatch = foregroundDecision as TerminalNetworkDecision.Dispatch
         assertEquals(
             "after grace teardown, the foreground path must still replay the queued reconnect signal",
-            change,
+            change.copy(deferredFromBackground = true),
             dispatch.change,
         )
         assertEquals("dispatch", dispatch.gateDiagnostics.decision)

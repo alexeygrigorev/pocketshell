@@ -23,6 +23,7 @@ import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
@@ -346,6 +347,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
     private var passiveDisconnectGraceJob: Job? = null
+    private var lifecycleReattachNetworkCoalesce: LifecycleReattachNetworkCoalesce? = null
 
     // Issue #440: the cause of the most recent failed connect attempt, set
     // by [failConnectAttempt] and consulted by [scheduleAutoReconnect]. The
@@ -485,6 +487,7 @@ public class TmuxSessionViewModel @Inject constructor(
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
+        lifecycleReattachNetworkCoalesce = null
         val target = ConnectionTarget(
             hostId = hostId,
             hostName = hostName,
@@ -758,6 +761,21 @@ public class TmuxSessionViewModel @Inject constructor(
             left.keyPath == right.keyPath &&
             left.sessionName == right.sessionName &&
             left.startDirectory == right.startDirectory
+
+    private fun markSuccessfulAttachForNetworkCoalescing(
+        target: ConnectionTarget,
+        trigger: TmuxConnectTrigger,
+    ) {
+        lifecycleReattachNetworkCoalesce =
+            if (trigger == TmuxConnectTrigger.LifecycleReattach) {
+                LifecycleReattachNetworkCoalesce(
+                    target = target,
+                    generation = connectGeneration,
+                )
+            } else {
+                null
+            }
+    }
 
     private fun createTmuxClient(
         session: SshSession,
@@ -1538,7 +1556,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val reason = change.reason
         val previousValidated = change.previousValidated
         val realValidatedIdentityChange = previousValidated != null &&
-            previousValidated != change.current
+            !previousValidated.hasSameNetworkIdentityAs(change.current)
         if (!realValidatedIdentityChange) {
             Log.i(
                 ISSUE_548_NETWORK_TAG,
@@ -1564,6 +1582,39 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return
         }
+        val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
+        if (
+            change.deferredFromBackground &&
+            lifecycleCoalesce != null &&
+            lifecycleCoalesce.generation == connectGeneration &&
+            sameSessionIdentity(lifecycleCoalesce.target, target)
+        ) {
+            lifecycleReattachNetworkCoalesce = null
+            Log.i(
+                ISSUE_548_NETWORK_TAG,
+                "tmux-network-proactive-reconnect-skip reason=$reason " +
+                    "cause=coalesced-with-lifecycle-reattach " +
+                    "sequence=${change.sequence} generation=${lifecycleCoalesce.generation} " +
+                    targetLogFields(target),
+            )
+            DiagnosticEvents.record(
+                "connection",
+                "network_reconnect_skip",
+                "source" to "network_observer",
+                "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+                "reason" to reason,
+                "cause" to "coalesced_with_lifecycle_reattach",
+                "sequence" to change.sequence,
+                "generation" to lifecycleCoalesce.generation,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+            )
+            return
+        }
+        lifecycleReattachNetworkCoalesce = null
         val reconnectReason = "Network changed; reconnecting ${current.user}@${current.host}:${current.port}."
         Log.i(
             ISSUE_548_NETWORK_TAG,
@@ -1635,7 +1686,11 @@ public class TmuxSessionViewModel @Inject constructor(
             sameSessionIdentity(it.target, target)
         }?.generation ?: connectGeneration
         closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
-        restoreCachedRuntime(target, cached)
+        restoreCachedRuntime(
+            target = target,
+            runtime = cached,
+            trigger = trigger,
+        )
         StartupTiming.mark(
             "tmux-runtime-cache-hit",
             "attempt" to attempt,
@@ -1817,6 +1872,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun restoreCachedRuntime(
         target: ConnectionTarget,
         runtime: CachedTmuxRuntime,
+        trigger: TmuxConnectTrigger,
     ) {
         clientRef = runtime.client
         leaseRef = runtime.lease
@@ -1868,6 +1924,7 @@ public class TmuxSessionViewModel @Inject constructor(
             target.port,
             target.user,
         )
+        markSuccessfulAttachForNetworkCoalescing(target, trigger)
     }
 
     private fun launchCachedRuntimeRemoteRefresh(
@@ -2077,6 +2134,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.port,
                 target.user,
             )
+            markSuccessfulAttachForNetworkCoalescing(target, trigger)
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
@@ -2252,6 +2310,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.port,
                 target.user,
             )
+            markSuccessfulAttachForNetworkCoalescing(target, trigger)
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
@@ -3608,6 +3667,7 @@ public class TmuxSessionViewModel @Inject constructor(
             connectingTarget = null
             refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+            markSuccessfulAttachForNetworkCoalescing(target, trigger)
             recordWarmSwitchMilestone(
                 attempt = attempt,
                 target = target,
@@ -7143,6 +7203,11 @@ public class TmuxSessionViewModel @Inject constructor(
         val generation: Long,
         val intendedTarget: ConnectionTarget?,
         val intendedTrigger: TmuxConnectTrigger?,
+    )
+
+    private data class LifecycleReattachNetworkCoalesce(
+        val target: ConnectionTarget,
+        val generation: Long,
     )
 
     private data class PausedAutoReconnect(

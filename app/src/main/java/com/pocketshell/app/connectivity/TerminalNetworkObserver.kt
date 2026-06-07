@@ -134,6 +134,7 @@ data class TerminalNetworkChange(
     val previousValidated: TerminalNetworkSnapshot.Validated?,
     val reason: String,
     val sequence: Long,
+    val deferredFromBackground: Boolean = false,
 )
 
 sealed interface TerminalNetworkSnapshot {
@@ -169,6 +170,7 @@ internal fun TerminalNetworkChange.networkDiagnosticFields(): Array<Pair<String,
         "currentTransports" to current.transportSetLogValue,
         "previousValidatedNetworkHandle" to previousValidated?.networkHandle,
         "previousValidatedTransports" to previousValidated?.transportSetLogValue,
+        "deferredFromBackground" to deferredFromBackground,
     )
 
 internal fun TerminalNetworkSnapshot.Validated.hasSameNetworkIdentityAs(

@@ -143,7 +143,7 @@ wheels = [
 
 [[package]]
 name = "pocketshell"
-version = "0.3.26"
+version = "0.3.29"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

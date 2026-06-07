@@ -1273,6 +1273,7 @@ private fun AppNavigator(
                 )
             },
             onOpenUsage = { navigate(AppDestination.Usage) },
+            onOpenSettings = { navigate(AppDestination.Settings) },
             // Issue #445 (epic #432 slice A): kebab -> per-host port-forward
             // panel. Same hand-rolled back-stack as onOpenJobs above, so
             // onBack = ::back restores this exact tmux session/window.

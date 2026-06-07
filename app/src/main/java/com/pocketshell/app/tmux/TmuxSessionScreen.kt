@@ -226,6 +226,7 @@ public fun TmuxSessionScreen(
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
     onOpenJobs: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     // Issue #445 (epic #432 slice A): open the per-host port-forward panel
     // from inside a live tmux session. MainActivity wires this to
     // navigate(AppDestination.PortForwardPanel(...)); the hand-rolled
@@ -686,6 +687,10 @@ public fun TmuxSessionScreen(
             onOpenUsage = {
                 moreExpanded = false
                 onOpenUsage()
+            },
+            onOpenSettings = {
+                moreExpanded = false
+                onOpenSettings()
             },
             onOpenPortForwarding = {
                 moreExpanded = false
@@ -2535,6 +2540,8 @@ internal const val TMUX_DETACH_BUTTON_TAG = "tmux:session:detach-button"
  * kebab -> port-forward panel -> back-to-session.
  */
 internal const val TMUX_PORT_FORWARDING_BUTTON_TAG = "tmux:session:port-forwarding-button"
+/** Issue #592: stable test tag for the tmux kebab's global Settings item. */
+internal const val TMUX_SETTINGS_BUTTON_TAG = "tmux:session:settings-button"
 /**
  * Issue #497: stable test tags for the kebab's "Open file…" item and the
  * path-entry dialog it opens, so instrumentation can drive
@@ -4059,6 +4066,9 @@ internal fun TmuxMoreMenu(
     onSwitchSession: () -> Unit,
     onOpenJobs: () -> Unit,
     onOpenUsage: () -> Unit,
+    // Issue #592: direct global Settings shortcut from live session chrome.
+    // Defaulted so existing direct callers / tests stay source-compatible.
+    onOpenSettings: () -> Unit = {},
     // Issue #497: "Open file…" kebab item — opens the in-app file viewer
     // path-entry dialog. Defaulted so existing direct callers / tests of
     // TmuxMoreMenu stay source-compatible.
@@ -4165,6 +4175,11 @@ internal fun TmuxMoreMenu(
         // Issue #114 Fix A: jump to the cross-host Usage / quota
         // panel from inside a live tmux session.
         DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
+        DropdownMenuItem(
+            text = { Text("Settings") },
+            onClick = onOpenSettings,
+            modifier = Modifier.testTag(TMUX_SETTINGS_BUTTON_TAG),
+        )
     }
 }
 

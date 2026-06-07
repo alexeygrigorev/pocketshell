@@ -7,6 +7,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.service.ForwardingService
 import com.pocketshell.core.ssh.ExecResult
@@ -129,6 +130,47 @@ class PortForwardPanelViewModelTest {
         assertTrue(session.closed)
         assertFalse(session.openedForwards.single().isActive)
         assertEquals(emptyList<com.pocketshell.core.portfwd.TunnelInfo>(), viewModel.state.value.tunnels)
+    }
+
+    @Test
+    fun diagnosticsRecordAutoForwardToggleStartAndStop() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+            val session = FakeSshSession(
+                ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+            )
+            val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+            viewModel.load(hostId, "/tmp/key")
+            runCurrent()
+            viewModel.setAutoForwardEnabled(true)
+            runCurrent()
+            viewModel.setAutoForwardEnabled(false)
+            runCurrent()
+
+            val events = diagnostics.events
+            assertEquals(
+                listOf(true, false),
+                events.filter { it.name == "port_forward_auto_toggle" }
+                    .map { it.fields["enabled"] },
+            )
+            assertTrue(
+                events.any {
+                    it.name == "port_forward_auto_start_result" &&
+                        it.fields["status"] == "success" &&
+                        it.fields["hostId"] == hostId
+                },
+            )
+            assertTrue(
+                events.any {
+                    it.name == "port_forward_stop" &&
+                        it.fields["hostId"] == hostId
+                },
+            )
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

@@ -6,6 +6,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
 import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.RemotePort
@@ -291,6 +292,13 @@ class PortForwardPanelViewModel @Inject constructor(
     fun setShowAllPorts(showAll: Boolean) {
         if (showAll == _state.value.showAllPorts) return
         showAllPortsStore.setShowAll(showAll)
+        DiagnosticEvents.record(
+            "action",
+            "port_forward_show_all_toggle",
+            "enabled" to showAll,
+            "cachedPortCount" to lastDiscoveredPorts.size,
+            "hiddenPortCount" to InterestingPortFilter.hiddenCount(lastDiscoveredPorts),
+        )
         _state.value = if (!_state.value.autoForwardEnabled && lastDiscoveredPorts.isNotEmpty()) {
             val remappings = currentRemappings
             _state.value.copy(
@@ -305,6 +313,15 @@ class PortForwardPanelViewModel @Inject constructor(
     fun setAutoForwardEnabled(enabled: Boolean) {
         val host = _state.value.host ?: return
         if (enabled == _state.value.autoForwardEnabled) return
+        DiagnosticEvents.record(
+            "action",
+            "port_forward_auto_toggle",
+            "enabled" to enabled,
+            "hostId" to host.id,
+            "activeTunnelCount" to _state.value.tunnels.count {
+                it.status == TunnelInfo.Status.FORWARDING
+            },
+        )
         // User-driven disable: persist immediately. We don't wait for
         // anything else because there is no async success-or-fail path
         // on disable.
@@ -363,6 +380,13 @@ class PortForwardPanelViewModel @Inject constructor(
             }
             val sshSession = connected.getOrElse { failure ->
                 pendingStartPort = null
+                DiagnosticEvents.record(
+                    "action",
+                    "port_forward_auto_start_result",
+                    "status" to "failure",
+                    "hostId" to host.id,
+                    "cause" to failure.javaClass.simpleName,
+                )
                 _state.value = _state.value.copy(
                     autoForwardEnabled = false,
                     connectionState = PortForwardConnectionState.Error,
@@ -384,6 +408,13 @@ class PortForwardPanelViewModel @Inject constructor(
                 passphrase = requestPassphrase,
                 firstSession = sshSession,
                 initialRemappings = remappings,
+            )
+            DiagnosticEvents.record(
+                "action",
+                "port_forward_auto_start_result",
+                "status" to "success",
+                "hostId" to host.id,
+                "pendingStartPort" to (pendingStartPort != null),
             )
             attachForwardingObservers(host.id)
             pendingStartPort?.let { remotePort ->
@@ -410,11 +441,28 @@ class PortForwardPanelViewModel @Inject constructor(
 
     fun togglePort(remotePort: Int) {
         val hostId = _state.value.host?.id ?: return
+        DiagnosticEvents.record(
+            "action",
+            "port_forward_port_toggle",
+            "hostId" to hostId,
+            "remotePort" to remotePort,
+            "currentlyForwarding" to (
+                _state.value.tunnels.firstOrNull { it.remotePort == remotePort }?.status ==
+                    TunnelInfo.Status.FORWARDING
+                ),
+        )
         forwardingController.togglePort(hostId, remotePort)
     }
 
     fun startPort(remotePort: Int) {
         val hostId = _state.value.host?.id
+        DiagnosticEvents.record(
+            "action",
+            "port_forward_port_open",
+            "hostId" to hostId,
+            "remotePort" to remotePort,
+            "hostActive" to (hostId?.let { forwardingController.isHostActive(it) } == true),
+        )
         if (hostId == null || !forwardingController.isHostActive(hostId)) {
             pendingStartPort = remotePort
             setAutoForwardEnabled(true)
@@ -449,6 +497,14 @@ class PortForwardPanelViewModel @Inject constructor(
         detachForwardingObservers()
         val hostId = _state.value.host?.id ?: currentHostId
         if (hostId != null) {
+            DiagnosticEvents.record(
+                "action",
+                "port_forward_stop",
+                "hostId" to hostId,
+                "activeTunnelCount" to _state.value.tunnels.count {
+                    it.status == TunnelInfo.Status.FORWARDING
+                },
+            )
             forwardingController.stopForwarding(hostId)
         }
         pendingStartPort = null

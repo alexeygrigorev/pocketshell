@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptAttachmentStager
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.notifications.ShareUploadNotifications
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -327,8 +328,22 @@ internal class ShareViewModel @Inject constructor(
         val payload = _items.value
         if (payload.isEmpty()) return
         if (_uploadState.value is UploadState.Running) return
+        DiagnosticEvents.record(
+            "action",
+            "share_stage_into_session_start",
+            "hostId" to host.id,
+            "itemCount" to payload.size,
+            "uriCount" to payload.count { it is ShareableItem.UriItem },
+        )
         val entry = activeTmuxClients.clients.value[host.id]
         if (entry == null) {
+            DiagnosticEvents.record(
+                "action",
+                "share_stage_into_session_result",
+                "status" to "failure",
+                "hostId" to host.id,
+                "cause" to "NoActiveSession",
+            )
             val message = "No active session on ${host.name} — save to inbox instead"
             android.util.Log.w(LOG_TAG, "share into session aborted: $message")
             _uploadState.value = UploadState.Failed(host.name, message)
@@ -340,6 +355,13 @@ internal class ShareViewModel @Inject constructor(
         viewModelScope.launch {
             val keyEntity = sshKeyDao.getById(host.keyId)
             if (keyEntity == null) {
+                DiagnosticEvents.record(
+                    "action",
+                    "share_stage_into_session_result",
+                    "status" to "failure",
+                    "hostId" to host.id,
+                    "cause" to "MissingSshKey",
+                )
                 val message = "No SSH key for host ${host.name}"
                 android.util.Log.w(LOG_TAG, "share into session aborted: $message")
                 _uploadState.value = UploadState.Failed(host.name, message)
@@ -349,6 +371,13 @@ internal class ShareViewModel @Inject constructor(
 
             val connectResult = connectForStaging(host, keyEntity)
             val sshSession = connectResult.getOrElse { error ->
+                DiagnosticEvents.record(
+                    "action",
+                    "share_stage_into_session_result",
+                    "status" to "failure",
+                    "hostId" to host.id,
+                    "cause" to error.javaClass.simpleName,
+                )
                 val message = error.message ?: "Could not connect to ${host.name}"
                 android.util.Log.w(LOG_TAG, "share into session connect failed: $message", error)
                 _uploadState.value = UploadState.Failed(host.name, message)
@@ -377,6 +406,13 @@ internal class ShareViewModel @Inject constructor(
             result.fold(
                 onSuccess = { remotePaths ->
                     if (remotePaths.isEmpty()) {
+                        DiagnosticEvents.record(
+                            "action",
+                            "share_stage_into_session_result",
+                            "status" to "failure",
+                            "hostId" to host.id,
+                            "cause" to "NoFilesStaged",
+                        )
                         val message = "No files were staged into ${session.sessionName}"
                         _uploadState.value = UploadState.Failed(host.name, message)
                         ShareUploadNotifications.showFailure(applicationContext, host.name, message)
@@ -385,6 +421,13 @@ internal class ShareViewModel @Inject constructor(
                     android.util.Log.i(
                         LOG_TAG,
                         "staged ${remotePaths.size} file(s) into session ${session.sessionName}",
+                    )
+                    DiagnosticEvents.record(
+                        "action",
+                        "share_stage_into_session_result",
+                        "status" to "success",
+                        "hostId" to host.id,
+                        "stagedCount" to remotePaths.size,
                     )
                     _sessionLaunch.trySend(
                         SessionLaunch(
@@ -403,6 +446,13 @@ internal class ShareViewModel @Inject constructor(
                     // ends this surface.
                 },
                 onFailure = { error ->
+                    DiagnosticEvents.record(
+                        "action",
+                        "share_stage_into_session_result",
+                        "status" to "failure",
+                        "hostId" to host.id,
+                        "cause" to error.javaClass.simpleName,
+                    )
                     val message = error.message ?: "Could not stage into ${session.sessionName}"
                     android.util.Log.w(LOG_TAG, "share into session staging failed: $message", error)
                     _uploadState.value = UploadState.Failed(host.name, message)
@@ -486,11 +536,29 @@ internal class ShareViewModel @Inject constructor(
         val payload = _items.value
         if (payload.isEmpty()) return
         if (_uploadState.value is UploadState.Running) return
+        val targetName = target.diagnosticName()
+        DiagnosticEvents.record(
+            "action",
+            "share_upload_start",
+            "hostId" to host.id,
+            "itemCount" to payload.size,
+            "target" to targetName,
+        )
         _targetSelection.value = null
         _uploadState.value = UploadState.Running(host.name)
         viewModelScope.launch {
             val keyEntity = sshKeyDao.getById(host.keyId)
             if (keyEntity == null) {
+                DiagnosticEvents.record(
+                    "action",
+                    "share_upload_result",
+                    "status" to "failure",
+                    "hostId" to host.id,
+                    "target" to targetName,
+                    "totalCount" to payload.size,
+                    "successCount" to 0,
+                    "cause" to "MissingSshKey",
+                )
                 val message = "No SSH key for host ${host.name}"
                 android.util.Log.w(LOG_TAG, "share upload aborted: $message")
                 _uploadState.value =
@@ -529,6 +597,7 @@ internal class ShareViewModel @Inject constructor(
                 succeededPaths = succeededPaths,
                 failedNames = failedNames,
                 lastError = lastError,
+                targetName = targetName,
             )
         }
     }
@@ -551,10 +620,20 @@ internal class ShareViewModel @Inject constructor(
         succeededPaths: List<String>,
         failedNames: List<String>,
         lastError: String?,
+        targetName: String,
     ) {
         val successCount = succeededPaths.size
         when {
             failedNames.isEmpty() -> {
+                DiagnosticEvents.record(
+                    "action",
+                    "share_upload_result",
+                    "status" to "success",
+                    "hostId" to host.id,
+                    "target" to targetName,
+                    "totalCount" to total,
+                    "successCount" to successCount,
+                )
                 val copyText = succeededPaths.joinToString("\n")
                 val detail = if (total > 1) {
                     "$successCount files uploaded:\n$copyText"
@@ -570,6 +649,15 @@ internal class ShareViewModel @Inject constructor(
                 )
             }
             successCount == 0 -> {
+                DiagnosticEvents.record(
+                    "action",
+                    "share_upload_result",
+                    "status" to "failure",
+                    "hostId" to host.id,
+                    "target" to targetName,
+                    "totalCount" to total,
+                    "successCount" to 0,
+                )
                 val message = lastError ?: "Upload failed"
                 _uploadState.value = UploadState.Failed(
                     hostName = host.name,
@@ -581,6 +669,16 @@ internal class ShareViewModel @Inject constructor(
                 ShareUploadNotifications.showFailure(applicationContext, host.name, message)
             }
             else -> {
+                DiagnosticEvents.record(
+                    "action",
+                    "share_upload_result",
+                    "status" to "partial_failure",
+                    "hostId" to host.id,
+                    "target" to targetName,
+                    "totalCount" to total,
+                    "successCount" to successCount,
+                    "failureCount" to failedNames.size,
+                )
                 val message = buildString {
                     append("$successCount of $total uploaded. ")
                     append("Failed: ")
@@ -623,17 +721,37 @@ internal class ShareViewModel @Inject constructor(
     fun pasteIntoSession(host: HostEntity) {
         val staged = _items.value.firstOrNull()
         if (staged !is ShareableItem.TextItem) {
+            DiagnosticEvents.record(
+                "action",
+                "share_paste_into_session_result",
+                "status" to "failure",
+                "hostId" to host.id,
+                "cause" to "NoTextItem",
+            )
             val message = "Nothing to paste"
             _uploadState.value = UploadState.Failed(host.name, message)
             return
         }
         if (_uploadState.value is UploadState.Running) return
+        DiagnosticEvents.record(
+            "action",
+            "share_paste_into_session_start",
+            "hostId" to host.id,
+            "textBytes" to staged.text.toByteArray(Charsets.UTF_8).size,
+        )
         val entry = activeTmuxClients.clients.value[host.id]
         if (entry == null) {
             // Defensive — the picker should not surface this host as
             // tappable for paste, but if a race tore the client down
             // between rendering and tapping we degrade to a clear
             // message that points the user at the file-save fallback.
+            DiagnosticEvents.record(
+                "action",
+                "share_paste_into_session_result",
+                "status" to "failure",
+                "hostId" to host.id,
+                "cause" to "NoActiveSession",
+            )
             val message = "No active session on ${host.name} — save to inbox instead"
             android.util.Log.w(LOG_TAG, "share paste aborted: $message")
             _uploadState.value = UploadState.Failed(host.name, message)
@@ -648,6 +766,13 @@ internal class ShareViewModel @Inject constructor(
             sendResult.fold(
                 onSuccess = {
                     val preview = previewFor(staged.text)
+                    DiagnosticEvents.record(
+                        "action",
+                        "share_paste_into_session_result",
+                        "status" to "success",
+                        "hostId" to host.id,
+                        "textBytes" to staged.text.toByteArray(Charsets.UTF_8).size,
+                    )
                     android.util.Log.i(
                         LOG_TAG,
                         "share paste succeeded on ${host.name}: ${preview.length} chars",
@@ -655,6 +780,13 @@ internal class ShareViewModel @Inject constructor(
                     _uploadState.value = UploadState.Success(host.name, preview)
                 },
                 onFailure = { error ->
+                    DiagnosticEvents.record(
+                        "action",
+                        "share_paste_into_session_result",
+                        "status" to "failure",
+                        "hostId" to host.id,
+                        "cause" to error.javaClass.simpleName,
+                    )
                     val message = error.message ?: "Paste failed"
                     android.util.Log.w(LOG_TAG, "share paste failed: $message", error)
                     _uploadState.value = UploadState.Failed(host.name, message)
@@ -876,6 +1008,11 @@ internal data class ProjectTarget(
     val path: String,
     val label: String,
 )
+
+private fun ShareTarget.diagnosticName(): String = when (this) {
+    ShareTarget.HostInbox -> "host_inbox"
+    is ShareTarget.Project -> "project"
+}
 
 /**
  * Issue #473: the per-host target chooser state. Surfaced after the user

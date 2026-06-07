@@ -759,6 +759,9 @@ public class SessionViewModel @Inject constructor(
         reconcileAgentEvents(events, maxEvents = MaxAgentEvents)
 
     public fun selectSessionTab(tab: SessionTab) {
+        val before = _agentConversation.value
+        if (tab == SessionTab.Conversation && before.detection == null) return
+        if (before.selectedTab == tab) return
         _agentConversation.update { current ->
             if (tab == SessionTab.Conversation && current.detection == null) {
                 current
@@ -766,6 +769,13 @@ public class SessionViewModel @Inject constructor(
                 current.copy(selectedTab = tab)
             }
         }
+        DiagnosticEvents.record(
+            "action",
+            "session_tab_select",
+            "mode" to "raw_ssh",
+            "tab" to tab.name,
+            "hasConversation" to (before.detection != null),
+        )
     }
 
     /**
@@ -775,12 +785,19 @@ public class SessionViewModel @Inject constructor(
      * `onValueChange` inside [ConversationPane].
      */
     public fun setAgentSearchQuery(query: String) {
+        val before = _agentConversation.value.searchQuery
+        if (before == query) return
         _agentConversation.update { current ->
-            if (current.searchQuery == query) {
-                current
-            } else {
-                current.copy(searchQuery = query)
-            }
+            current.copy(searchQuery = query)
+        }
+        if (before.isEmpty() != query.isEmpty()) {
+            DiagnosticEvents.record(
+                "action",
+                "conversation_search_query_changed",
+                "mode" to "raw_ssh",
+                "empty" to query.isEmpty(),
+                "queryBytes" to query.toByteArray(Charsets.UTF_8).size,
+            )
         }
     }
 
@@ -794,6 +811,14 @@ public class SessionViewModel @Inject constructor(
     public fun onKeyBarKey(label: String) {
         val unmodified: ByteArray = unmodifiedBytesFor(label) ?: return
         val modified = applyArmedModifiers(unmodified, label)
+        DiagnosticEvents.record(
+            "action",
+            "shortcut_sent",
+            "mode" to "raw_ssh",
+            "key" to label,
+            "bytes" to modified.size,
+            "modified" to !unmodified.contentEquals(modified),
+        )
         terminalState.prepareForRawTerminalInput(smartTextPolicyForKeyBar(label))
         sendTerminalInput(modified)
         clearOneShotModifiers()

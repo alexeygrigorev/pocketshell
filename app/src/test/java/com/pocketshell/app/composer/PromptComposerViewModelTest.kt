@@ -3,6 +3,7 @@ package com.pocketshell.app.composer
 import androidx.lifecycle.SavedStateHandle
 import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.settings.VoiceTranscriptionProvider
@@ -211,6 +212,30 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun diagnosticsRecordAttachmentSeedAndRemove() {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+
+            vm.seedAttachment("/home/alexey/private/report.txt")
+            vm.removeAttachment("/home/alexey/private/report.txt")
+
+            assertEquals(
+                listOf("attachment_seeded_from_share", "attachment_remove"),
+                diagnostics.events.map { it.name },
+            )
+            assertEquals(1, diagnostics.events[0].fields["attachmentCount"])
+            assertEquals(1, diagnostics.events[1].fields["beforeCount"])
+            assertEquals(0, diagnostics.events[1].fields["afterCount"])
+            assertFalse(diagnostics.events.any { event ->
+                event.fields.values.any { it == "/home/alexey/private/report.txt" }
+            })
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
     fun micTapInIdleStartsRecording() = runTest {
         val mic = FakeMicCapture()
         val vm = newVm(mic = mic, samplerDispatcher = StandardTestDispatcher(testScheduler))
@@ -223,6 +248,46 @@ class PromptComposerViewModelTest {
         // dangling silence-watchdog loop would hang the test forever.
         vm.onMicTap()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun diagnosticsRecordWhisperRecordingSuccess() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f))
+            val vm = newVm(
+                mic = mic,
+                whisper = fakeWhisperClient { Result.success("hello world") },
+                samplerDispatcher = StandardTestDispatcher(testScheduler),
+            )
+
+            vm.onMicTap()
+            runCurrent()
+            vm.onMicTap()
+            advanceUntilIdle()
+
+            assertTrue(diagnostics.events.any {
+                it.name == "composer_recording_start_result" &&
+                    it.fields["provider"] == "OpenAiWhisper" &&
+                    it.fields["status"] == "success"
+            })
+            assertTrue(diagnostics.events.any {
+                it.name == "composer_recording_stop" &&
+                    it.fields["provider"] == "OpenAiWhisper" &&
+                    it.fields["status"] == "transcribing" &&
+                    (it.fields["audioBytes"] as Int) > 0
+            })
+            assertTrue(diagnostics.events.any {
+                it.name == "composer_transcription_result" &&
+                    it.fields["status"] == "success" &&
+                    it.fields["transcriptBytes"] == "hello world".toByteArray(Charsets.UTF_8).size
+            })
+            assertFalse(diagnostics.events.any { event ->
+                event.fields.values.any { it == "hello world" }
+            })
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

@@ -377,10 +377,12 @@ public class PromptComposerViewModel @Inject constructor(
     public fun seedAttachment(remotePath: String) {
         val trimmed = remotePath.trim()
         if (trimmed.isEmpty()) return
+        var seeded = false
         _uiState.update { current ->
             if (current.attachments.any { it.remotePath == trimmed }) {
                 current
             } else {
+                seeded = true
                 current.copy(
                     attachments = current.attachments +
                         StagedAttachment(
@@ -389,6 +391,13 @@ public class PromptComposerViewModel @Inject constructor(
                         ),
                 )
             }
+        }
+        if (seeded) {
+            DiagnosticEvents.record(
+                "action",
+                "attachment_seeded_from_share",
+                "attachmentCount" to _uiState.value.attachments.size,
+            )
         }
     }
 
@@ -399,13 +408,25 @@ public class PromptComposerViewModel @Inject constructor(
      * composed at send time from whatever tiles remain.
      */
     public fun removeAttachment(remotePath: String) {
+        var removed = false
+        var beforeCount = 0
         _uiState.update { current ->
+            beforeCount = current.attachments.size
             val filtered = current.attachments.filterNot { it.remotePath == remotePath }
             if (filtered.size == current.attachments.size) {
                 current
             } else {
+                removed = true
                 current.copy(attachments = filtered)
             }
+        }
+        if (removed) {
+            DiagnosticEvents.record(
+                "action",
+                "attachment_remove",
+                "beforeCount" to beforeCount,
+                "afterCount" to _uiState.value.attachments.size,
+            )
         }
     }
 
@@ -425,7 +446,11 @@ public class PromptComposerViewModel @Inject constructor(
         when (_uiState.value.recording) {
             RecordingState.Idle -> startRecording()
             RecordingState.Recording -> stopAndTranscribe()
-            RecordingState.Transcribing -> Unit // ignore — wait for Whisper
+            RecordingState.Transcribing -> DiagnosticEvents.record(
+                "action",
+                "composer_recording_tap_ignored",
+                "provider" to (activeProvider?.name ?: "unknown"),
+            )
         }
     }
 
@@ -575,6 +600,13 @@ public class PromptComposerViewModel @Inject constructor(
         // the user is not surprised by a successful recording that fails
         // at upload time.
         if (whisperClientFactory.create() == null) {
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                "status" to "failure",
+                "cause" to "MissingApiKey",
+            )
             _uiState.update {
                 it.copy(error = "No OpenAI API key saved. Open settings to add one.")
             }
@@ -586,6 +618,13 @@ public class PromptComposerViewModel @Inject constructor(
             audioRecorder.start()
         } catch (e: AudioRecorderException) {
             activeProvider = null
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                "status" to "failure",
+                "cause" to e.javaClass.simpleName,
+            )
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -617,6 +656,13 @@ public class PromptComposerViewModel @Inject constructor(
         // loop can publish a deterministic mm:ss elapsed timer onto
         // [UiState.recordingElapsedMs]. The clock seam keeps this testable.
         recordingStartedAtMs = clock()
+        DiagnosticEvents.record(
+            "action",
+            "composer_recording_start_result",
+            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+            "status" to "success",
+            "silenceWindowMs" to windowMs,
+        )
 
         _uiState.update {
             it.copy(
@@ -640,6 +686,13 @@ public class PromptComposerViewModel @Inject constructor(
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startAndroidSpeechRecognition() {
         if (!speechRecognitionProvider.isAvailable()) {
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+                "status" to "failure",
+                "cause" to "Unavailable",
+            )
             _uiState.update {
                 it.copy(error = ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
             }
@@ -684,6 +737,13 @@ public class PromptComposerViewModel @Inject constructor(
             speechRecognitionGeneration++
             liveSpeechBaseDraft = ""
             liveSpeechLastTranscript = ""
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+                "status" to "failure",
+                "cause" to "StartFailed",
+            )
             _uiState.update {
                 it.copy(error = ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
             }
@@ -693,6 +753,12 @@ public class PromptComposerViewModel @Inject constructor(
         speechRecognitionSession = session
         activeProvider = VoiceTranscriptionProvider.AndroidSpeech
         savedStateHandle[KEY_WAS_RECORDING] = true
+        DiagnosticEvents.record(
+            "action",
+            "composer_recording_start_result",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "success",
+        )
         _uiState.update {
             it.copy(
                 recording = RecordingState.Recording,
@@ -802,6 +868,14 @@ public class PromptComposerViewModel @Inject constructor(
             pendingSendOnTranscribeSuccess = false
             pendingSendWithEnter = false
             activeProvider = null
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_stop",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                "status" to "failure",
+                "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
+                "cause" to e.javaClass.simpleName,
+            )
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -822,6 +896,14 @@ public class PromptComposerViewModel @Inject constructor(
             pendingSendOnTranscribeSuccess = false
             pendingSendWithEnter = false
             activeProvider = null
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_stop",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                "status" to "empty_audio",
+                "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
+                "audioBytes" to 0,
+            )
             _uiState.update {
                 it.copy(recording = RecordingState.Idle, amplitude = 0f)
             }
@@ -838,7 +920,17 @@ public class PromptComposerViewModel @Inject constructor(
         if (!SpeechAudioGuard.hasSpeechEnergy(audio)) {
             pendingSendOnTranscribeSuccess = false
             pendingSendWithEnter = false
-            if (SpeechAudioGuard.isRecoverableNoSpeechRejection(audio)) {
+            val recoverableNoSpeech = SpeechAudioGuard.isRecoverableNoSpeechRejection(audio)
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_stop",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                "status" to "no_speech",
+                "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
+                "audioBytes" to audio.size,
+                "recoverable" to recoverableNoSpeech,
+            )
+            if (recoverableNoSpeech) {
                 _uiState.update {
                     it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
                 }
@@ -876,6 +968,14 @@ public class PromptComposerViewModel @Inject constructor(
             return
         }
 
+        DiagnosticEvents.record(
+            "action",
+            "composer_recording_stop",
+            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+            "status" to "transcribing",
+            "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
+            "audioBytes" to audio.size,
+        )
         _uiState.update {
             it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
         }
@@ -891,6 +991,14 @@ public class PromptComposerViewModel @Inject constructor(
                 pendingSendOnTranscribeSuccess = false
                 pendingSendWithEnter = false
                 activeProvider = null
+                DiagnosticEvents.record(
+                    "action",
+                    "composer_transcription_result",
+                    "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                    "status" to "failure",
+                    "cause" to "MissingApiKey",
+                    "audioBytes" to audio.size,
+                )
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -946,6 +1054,14 @@ public class PromptComposerViewModel @Inject constructor(
                 pendingSendOnTranscribeSuccess = false
                 pendingSendWithEnter = false
                 activeProvider = null
+                DiagnosticEvents.record(
+                    "action",
+                    "composer_transcription_result",
+                    "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                    "status" to "queued_offline",
+                    "audioBytes" to audio.size,
+                    "pendingQueued" to true,
+                )
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -977,6 +1093,14 @@ public class PromptComposerViewModel @Inject constructor(
                         pendingSendOnTranscribeSuccess = false
                         pendingSendWithEnter = false
                         activeProvider = null
+                        DiagnosticEvents.record(
+                            "action",
+                            "composer_transcription_result",
+                            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                            "status" to "empty",
+                            "audioBytes" to audio.size,
+                            "pendingQueued" to (pendingId != null),
+                        )
                         _uiState.update {
                             it.copy(
                                 recording = RecordingState.Idle,
@@ -1010,6 +1134,14 @@ public class PromptComposerViewModel @Inject constructor(
                         pendingSendOnTranscribeSuccess = false
                         pendingSendWithEnter = false
                         activeProvider = null
+                        DiagnosticEvents.record(
+                            "action",
+                            "composer_transcription_result",
+                            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                            "status" to "hallucination_filtered",
+                            "audioBytes" to audio.size,
+                            "pendingQueued" to (pendingId != null),
+                        )
                         _uiState.update {
                             it.copy(
                                 recording = RecordingState.Idle,
@@ -1046,6 +1178,16 @@ public class PromptComposerViewModel @Inject constructor(
                     // immediately so a recreate after a successful
                     // transcription still shows the dictated text.
                     savedStateHandle[KEY_DRAFT] = combinedDraft
+                    DiagnosticEvents.record(
+                        "action",
+                        "composer_transcription_result",
+                        "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                        "status" to "success",
+                        "audioBytes" to audio.size,
+                        "transcriptBytes" to trimmed.toByteArray(Charsets.UTF_8).size,
+                        "pendingQueued" to (pendingId != null),
+                        "queuedSend" to pendingSend,
+                    )
 
                     if (pendingSend) {
                         // Issue #211: the user queued a Send while we
@@ -1073,6 +1215,15 @@ public class PromptComposerViewModel @Inject constructor(
                     pendingSendOnTranscribeSuccess = false
                     pendingSendWithEnter = false
                     activeProvider = null
+                    DiagnosticEvents.record(
+                        "action",
+                        "composer_transcription_result",
+                        "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                        "status" to "failure",
+                        "audioBytes" to audio.size,
+                        "pendingQueued" to (pendingId != null),
+                        "cause" to t.javaClass.simpleName,
+                    )
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, error = msg)
                     }
@@ -1092,9 +1243,24 @@ public class PromptComposerViewModel @Inject constructor(
             return
         }
         runCatching { session.stopListening() }.onFailure {
+            DiagnosticEvents.record(
+                "action",
+                "composer_recording_stop",
+                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+                "status" to "failure",
+                "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
+                "cause" to it.javaClass.simpleName,
+            )
             failAndroidSpeechRecognition(it.message ?: ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
             return
         }
+        DiagnosticEvents.record(
+            "action",
+            "composer_recording_stop",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "transcribing",
+            "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
+        )
         _uiState.update {
             it.copy(
                 recording = RecordingState.Transcribing,
@@ -1158,6 +1324,14 @@ public class PromptComposerViewModel @Inject constructor(
         if (pendingSend) {
             dispatchSendNow(pendingWithEnter)
         }
+        DiagnosticEvents.record(
+            "action",
+            "composer_transcription_result",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "success",
+            "transcriptBytes" to text.toByteArray(Charsets.UTF_8).size,
+            "queuedSend" to pendingSend,
+        )
     }
 
     private fun failAndroidSpeechRecognition(message: String) {
@@ -1173,6 +1347,13 @@ public class PromptComposerViewModel @Inject constructor(
                 error = message.ifBlank { ANDROID_SPEECH_FAILED_MESSAGE },
             )
         }
+        DiagnosticEvents.record(
+            "action",
+            "composer_transcription_result",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "failure",
+            "cause" to "SpeechRecognitionError",
+        )
     }
 
     private fun cancelAndroidSpeechRecognition() {
@@ -1191,6 +1372,11 @@ public class PromptComposerViewModel @Inject constructor(
                 error = null,
             )
         }
+        DiagnosticEvents.record(
+            "action",
+            "composer_recording_cancel",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+        )
     }
 
     private fun clearAndroidSpeechSession() {

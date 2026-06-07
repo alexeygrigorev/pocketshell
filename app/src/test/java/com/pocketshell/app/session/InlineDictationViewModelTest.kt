@@ -1,6 +1,7 @@
 package com.pocketshell.app.session
 
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.session.InlineDictationViewModel.DictationMode
@@ -264,6 +265,45 @@ class InlineDictationViewModelTest {
         // dangling silence-watchdog coroutine.
         vm.onMicTap()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun diagnosticsRecordInlineRecordingSuccess() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f))
+            val vm = newVm(
+                mic = mic,
+                whisper = fakeWhisperClient { Result.success("git status") },
+                samplerDispatcher = StandardTestDispatcher(testScheduler),
+            )
+
+            vm.onMicTap()
+            runCurrent()
+            vm.onMicTap()
+            advanceUntilIdle()
+
+            assertTrue(diagnostics.events.any {
+                it.name == "inline_recording_start_result" &&
+                    it.fields["status"] == "success" &&
+                    it.fields["mode"] == DictationMode.Prompt.name
+            })
+            assertTrue(diagnostics.events.any {
+                it.name == "inline_recording_stop" &&
+                    it.fields["status"] == "transcribing" &&
+                    (it.fields["audioBytes"] as Int) > 0
+            })
+            assertTrue(diagnostics.events.any {
+                it.name == "inline_transcription_result" &&
+                    it.fields["status"] == "success" &&
+                    it.fields["transcriptBytes"] == "git status".toByteArray(Charsets.UTF_8).size
+            })
+            assertFalse(diagnostics.events.any { event ->
+                event.fields.values.any { it == "git status" }
+            })
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

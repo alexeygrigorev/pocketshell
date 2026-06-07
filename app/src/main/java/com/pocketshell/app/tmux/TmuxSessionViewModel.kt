@@ -4803,6 +4803,9 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
+        val before = _agentConversations.value[paneId] ?: return
+        if (tab == SessionTab.Conversation && before.detection == null) return
+        if (before.selectedTab == tab) return
         updateAgentConversation(paneId) { current ->
             if (tab == SessionTab.Conversation && current.detection == null) {
                 current
@@ -4810,6 +4813,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 current.copy(selectedTab = tab)
             }
         }
+        DiagnosticEvents.record(
+            "action",
+            "session_tab_select",
+            "mode" to "tmux",
+            "paneId" to paneId,
+            "tab" to tab.name,
+            "hasConversation" to (before.detection != null),
+        )
         // Issue #495: remember the tab choice keyed by window so a reconnect
         // puts the user back on whichever tab they were on.
         rememberAgentStatusForPane(paneId)
@@ -4823,8 +4834,20 @@ public class TmuxSessionViewModel @Inject constructor(
      * search field's `onValueChange` inside [TmuxConversationPane].
      */
     public fun setAgentSearchQuery(paneId: String, query: String) {
+        val before = _agentConversations.value[paneId]?.searchQuery ?: return
+        if (before == query) return
         updateAgentConversation(paneId) { current ->
-            if (current.searchQuery == query) current else current.copy(searchQuery = query)
+            current.copy(searchQuery = query)
+        }
+        if (before.isEmpty() != query.isEmpty()) {
+            DiagnosticEvents.record(
+                "action",
+                "conversation_search_query_changed",
+                "mode" to "tmux",
+                "paneId" to paneId,
+                "empty" to query.isEmpty(),
+                "queryBytes" to query.toByteArray(Charsets.UTF_8).size,
+            )
         }
     }
 
@@ -6069,6 +6092,14 @@ public class TmuxSessionViewModel @Inject constructor(
         // dedicated `^C`/`^D` keys use, so no terminal resize/redraw is
         // triggered. Locked stays armed for repeated chords.
         val ctrlArmed = _ctrlModifierState.value != KeyModifierState.Off
+        DiagnosticEvents.record(
+            "action",
+            "shortcut_sent",
+            "mode" to "tmux",
+            "paneId" to paneId,
+            "key" to label,
+            "ctrlArmed" to ctrlArmed,
+        )
         if (ctrlArmed) {
             consumeOneShotCtrl()
             // Ctrl + ASCII letter → the classic control byte (0x01..0x1A)

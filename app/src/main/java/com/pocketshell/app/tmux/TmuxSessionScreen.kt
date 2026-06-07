@@ -104,6 +104,7 @@ import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.ConversationLinkAction
@@ -1012,15 +1013,35 @@ public fun TmuxSessionScreen(
                 val local = com.pocketshell.core.terminal.selection
                     .classifyLocalhostUrl(url)
                 if (local == null) {
+                    DiagnosticEvents.record(
+                        "action",
+                        "open_url",
+                        "mode" to "tmux",
+                        "kind" to "external",
+                    )
                     com.pocketshell.core.terminal.ui
                         .openUrlWithFallback(context, url)
                 } else {
                     val localPort = sessionForwardingIndicatorViewModel
                         .forwardedLocalPortFor(hostId, local.remotePort)
                     if (localPort != null) {
+                        DiagnosticEvents.record(
+                            "action",
+                            "open_url",
+                            "mode" to "tmux",
+                            "kind" to "localhost_forwarded",
+                            "remotePort" to local.remotePort,
+                        )
                         com.pocketshell.core.terminal.ui
                             .openUrlWithFallback(context, local.toLocalUrl(localPort))
                     } else {
+                        DiagnosticEvents.record(
+                            "action",
+                            "open_url",
+                            "mode" to "tmux",
+                            "kind" to "localhost_needs_forward",
+                            "remotePort" to local.remotePort,
+                        )
                         pendingLocalhostForward = local
                     }
                 }
@@ -1067,12 +1088,36 @@ public fun TmuxSessionScreen(
                         onConversationLinkTap = { link ->
                             val cwd = currentPane!!.cwd.takeIf { it.isNotBlank() }
                             when (val action = conversationLinkAction(link, cwd)) {
-                                is ConversationLinkAction.OpenFile ->
+                                is ConversationLinkAction.OpenFile -> {
+                                    DiagnosticEvents.record(
+                                        "action",
+                                        "conversation_link_open",
+                                        "mode" to "tmux",
+                                        "kind" to "file",
+                                        "paneId" to paneIdForSend,
+                                    )
                                     onOpenFile(action.path, action.cwd)
-                                is ConversationLinkAction.BrowseDirectory ->
+                                }
+                                is ConversationLinkAction.BrowseDirectory -> {
+                                    DiagnosticEvents.record(
+                                        "action",
+                                        "conversation_link_open",
+                                        "mode" to "tmux",
+                                        "kind" to "directory",
+                                        "paneId" to paneIdForSend,
+                                    )
                                     onBrowseFiles(action.startDir)
-                                is ConversationLinkAction.OpenUrl ->
+                                }
+                                is ConversationLinkAction.OpenUrl -> {
+                                    DiagnosticEvents.record(
+                                        "action",
+                                        "conversation_link_open",
+                                        "mode" to "tmux",
+                                        "kind" to "url",
+                                        "paneId" to paneIdForSend,
+                                    )
                                     handleUrlTap(action.url)
+                                }
                             }
                         },
                     )
@@ -1182,6 +1227,12 @@ public fun TmuxSessionScreen(
                     // route too. The helper looks up the TerminalView of the
                     // currently visible pane.
                     onShowKeyboardTap = {
+                        DiagnosticEvents.record(
+                            "action",
+                            "keyboard_panel_show",
+                            "mode" to "tmux",
+                            "paneId" to pane.paneId,
+                        )
                         showTerminalSoftKeyboard(
                             composeRootView,
                             onLocalTerminalError = { cause ->
@@ -3254,13 +3305,34 @@ internal fun TmuxConversationPane(
                             event.id in filteredConversation.searchExpandedToolCallIds,
                         isMessageExpanded = expandedMessages.value.contains(event.id),
                         onToggleMessageExpand = { id ->
+                            DiagnosticEvents.record(
+                                "action",
+                                "conversation_row_toggle",
+                                "mode" to "tmux",
+                                "rowType" to "message",
+                                "expanded" to !expandedMessages.value.contains(id),
+                            )
                             expandedMessages.value = expandedMessages.value.toggle(id)
                         },
                         onToggleExpand = { id ->
+                            DiagnosticEvents.record(
+                                "action",
+                                "conversation_row_toggle",
+                                "mode" to "tmux",
+                                "rowType" to "tool_call",
+                                "expanded" to !expandedToolCalls.value.contains(id),
+                            )
                             expandedToolCalls.value = expandedToolCalls.value.toggle(id)
                         },
                         isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
                         onToggleSystemNoteExpand = { id ->
+                            DiagnosticEvents.record(
+                                "action",
+                                "conversation_row_toggle",
+                                "mode" to "tmux",
+                                "rowType" to "system_note",
+                                "expanded" to !expandedSystemNotes.value.contains(id),
+                            )
                             expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
                         },
                         onRetryFailedSend = onRetryFailedSend,
@@ -5057,8 +5129,14 @@ internal fun TmuxTerminalBottomControls(
                     // locally; it is never a keystroke. All other taps route
                     // to the pane.
                     when (binding.label) {
-                        TmuxKeyBarExpandLabel -> onKeyBarExpandedChange(true)
-                        TmuxKeyBarCollapseLabel -> onKeyBarExpandedChange(false)
+                        TmuxKeyBarExpandLabel -> {
+                            DiagnosticEvents.record("action", "hotkey_panel_show", "mode" to "tmux")
+                            onKeyBarExpandedChange(true)
+                        }
+                        TmuxKeyBarCollapseLabel -> {
+                            DiagnosticEvents.record("action", "hotkey_panel_hide", "mode" to "tmux")
+                            onKeyBarExpandedChange(false)
+                        }
                         else -> onKey(binding)
                     }
                 }

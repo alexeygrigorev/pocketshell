@@ -67,6 +67,7 @@ import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.UnsentPromptBanner
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
@@ -237,9 +238,18 @@ public fun SessionScreen(
     val context = LocalContext.current
     val handleConversationLinkTap: (ConversationLink) -> Unit = { link ->
         when (val action = conversationLinkAction(link, cwd = null)) {
-            is ConversationLinkAction.OpenFile -> onOpenFile(action.path, action.cwd)
-            is ConversationLinkAction.BrowseDirectory -> onBrowseFiles(action.startDir)
-            is ConversationLinkAction.OpenUrl -> openUrlWithFallback(context, action.url)
+            is ConversationLinkAction.OpenFile -> {
+                DiagnosticEvents.record("action", "conversation_link_open", "mode" to "raw_ssh", "kind" to "file")
+                onOpenFile(action.path, action.cwd)
+            }
+            is ConversationLinkAction.BrowseDirectory -> {
+                DiagnosticEvents.record("action", "conversation_link_open", "mode" to "raw_ssh", "kind" to "directory")
+                onBrowseFiles(action.startDir)
+            }
+            is ConversationLinkAction.OpenUrl -> {
+                DiagnosticEvents.record("action", "conversation_link_open", "mode" to "raw_ssh", "kind" to "url")
+                openUrlWithFallback(context, action.url)
+            }
         }
     }
     // Issue #131: the show-keyboard chip needs the Compose root view so it
@@ -420,7 +430,10 @@ public fun SessionScreen(
                 // is documented as an idempotent no-op when the keyboard
                 // is already up, which matches the "no-op when shown"
                 // contract from the issue.
-                onShowKeyboardTap = { showTerminalSoftKeyboard(composeRootView) },
+                onShowKeyboardTap = {
+                    DiagnosticEvents.record("action", "keyboard_panel_show", "mode" to "raw_ssh")
+                    showTerminalSoftKeyboard(composeRootView)
+                },
                 onAddSnippetTap = if (hostId != null) {
                     { showSnippetPicker = true }
                 } else null,
@@ -682,15 +695,36 @@ internal fun ConversationPane(
                         isMessageExpanded = expandedMessages.value.contains(event.id),
                         onToggleMessageExpand = { id ->
                             val current = expandedMessages.value
+                            DiagnosticEvents.record(
+                                "action",
+                                "conversation_row_toggle",
+                                "mode" to "raw_ssh",
+                                "rowType" to "message",
+                                "expanded" to !current.contains(id),
+                            )
                             expandedMessages.value = if (current.contains(id)) current - id else current + id
                         },
                         onToggleExpand = { id ->
                             val current = expandedToolCalls.value
+                            DiagnosticEvents.record(
+                                "action",
+                                "conversation_row_toggle",
+                                "mode" to "raw_ssh",
+                                "rowType" to "tool_call",
+                                "expanded" to !current.contains(id),
+                            )
                             expandedToolCalls.value = if (current.contains(id)) current - id else current + id
                         },
                         isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
                         onToggleSystemNoteExpand = { id ->
                             val current = expandedSystemNotes.value
+                            DiagnosticEvents.record(
+                                "action",
+                                "conversation_row_toggle",
+                                "mode" to "raw_ssh",
+                                "rowType" to "system_note",
+                                "expanded" to !current.contains(id),
+                            )
                             expandedSystemNotes.value = if (current.contains(id)) current - id else current + id
                         },
                         onRetryFailedSend = onRetryFailedSend,

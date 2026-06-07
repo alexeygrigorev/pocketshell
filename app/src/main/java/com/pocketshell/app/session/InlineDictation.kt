@@ -39,6 +39,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.DisabledPendingTranscriptionQueue
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
@@ -200,7 +201,10 @@ public class InlineDictationViewModel @Inject constructor(
         when (_uiState.value.recording) {
             RecordingState.Idle -> startRecording()
             RecordingState.Recording -> stopAndTranscribe()
-            RecordingState.Transcribing -> Unit // wait for Whisper
+            RecordingState.Transcribing -> DiagnosticEvents.record(
+                "action",
+                "inline_recording_tap_ignored",
+            )
         }
     }
 
@@ -215,6 +219,12 @@ public class InlineDictationViewModel @Inject constructor(
         // surfaces the key-entry path; the inline path just reports the
         // gap rather than capturing audio that can't be uploaded.
         if (whisperClientFactory.create() == null) {
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_start_result",
+                "status" to "failure",
+                "cause" to "MissingApiKey",
+            )
             _uiState.update {
                 it.copy(error = "No OpenAI API key saved. Open the composer to add one.")
             }
@@ -224,6 +234,12 @@ public class InlineDictationViewModel @Inject constructor(
         try {
             audioRecorder.start()
         } catch (e: AudioRecorderException) {
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_start_result",
+                "status" to "failure",
+                "cause" to e.javaClass.simpleName,
+            )
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -233,6 +249,13 @@ public class InlineDictationViewModel @Inject constructor(
             return
         }
 
+        DiagnosticEvents.record(
+            "action",
+            "inline_recording_start_result",
+            "status" to "success",
+            "mode" to _uiState.value.mode.name,
+            "silenceWindowMs" to voiceSettings.silenceWindowMs(),
+        )
         _uiState.update {
             it.copy(
                 recording = RecordingState.Recording,
@@ -295,6 +318,12 @@ public class InlineDictationViewModel @Inject constructor(
         val audio = try {
             audioRecorder.stop()
         } catch (e: AudioRecorderException) {
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_stop",
+                "status" to "failure",
+                "cause" to e.javaClass.simpleName,
+            )
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -306,6 +335,12 @@ public class InlineDictationViewModel @Inject constructor(
         }
 
         if (audio.isEmpty()) {
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_stop",
+                "status" to "empty_audio",
+                "audioBytes" to 0,
+            )
             _uiState.update { it.copy(recording = RecordingState.Idle, amplitude = 0f) }
             return
         }
@@ -317,7 +352,15 @@ public class InlineDictationViewModel @Inject constructor(
         // inline dictation: if the WAV has enough captured signal to look
         // suspicious, save it for retry/export instead of dropping it.
         if (!SpeechAudioGuard.hasSpeechEnergy(audio)) {
-            if (SpeechAudioGuard.isRecoverableNoSpeechRejection(audio)) {
+            val recoverableNoSpeech = SpeechAudioGuard.isRecoverableNoSpeechRejection(audio)
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_stop",
+                "status" to "no_speech",
+                "audioBytes" to audio.size,
+                "recoverable" to recoverableNoSpeech,
+            )
+            if (recoverableNoSpeech) {
                 _uiState.update {
                     it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
                 }
@@ -351,11 +394,25 @@ public class InlineDictationViewModel @Inject constructor(
             return
         }
 
+        DiagnosticEvents.record(
+            "action",
+            "inline_recording_stop",
+            "status" to "transcribing",
+            "audioBytes" to audio.size,
+            "mode" to _uiState.value.mode.name,
+        )
         _uiState.update { it.copy(recording = RecordingState.Transcribing, amplitude = 0f) }
 
         transcribeJob = viewModelScope.launch {
             val client = whisperClientFactory.create()
             if (client == null) {
+                DiagnosticEvents.record(
+                    "action",
+                    "inline_transcription_result",
+                    "status" to "failure",
+                    "audioBytes" to audio.size,
+                    "cause" to "MissingApiKey",
+                )
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -397,6 +454,13 @@ public class InlineDictationViewModel @Inject constructor(
                                 },
                             )
                         }
+                        DiagnosticEvents.record(
+                            "action",
+                            "inline_transcription_result",
+                            "status" to "empty",
+                            "audioBytes" to audio.size,
+                            "pendingQueued" to (pendingId != null),
+                        )
                         return@fold
                     }
                     // Issue #452: secondary backstop — if Whisper still
@@ -421,6 +485,13 @@ public class InlineDictationViewModel @Inject constructor(
                                 error = NO_SPEECH_DETECTED_MESSAGE,
                             )
                         }
+                        DiagnosticEvents.record(
+                            "action",
+                            "inline_transcription_result",
+                            "status" to "hallucination_filtered",
+                            "audioBytes" to audio.size,
+                            "pendingQueued" to (pendingId != null),
+                        )
                         return@fold
                     }
                     if (pendingId != null) {
@@ -429,6 +500,15 @@ public class InlineDictationViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, amplitude = 0f, error = null)
                     }
+                    DiagnosticEvents.record(
+                        "action",
+                        "inline_transcription_result",
+                        "status" to "success",
+                        "audioBytes" to audio.size,
+                        "transcriptBytes" to trimmed.toByteArray(Charsets.UTF_8).size,
+                        "pendingQueued" to (pendingId != null),
+                        "mode" to _uiState.value.mode.name,
+                    )
                     _transcriptions.emit(trimmed)
                 },
                 onFailure = { t ->
@@ -446,6 +526,14 @@ public class InlineDictationViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, amplitude = 0f, error = msg)
                     }
+                    DiagnosticEvents.record(
+                        "action",
+                        "inline_transcription_result",
+                        "status" to "failure",
+                        "audioBytes" to audio.size,
+                        "pendingQueued" to (pendingId != null),
+                        "cause" to t.javaClass.simpleName,
+                    )
                 },
             )
         }
@@ -482,6 +570,7 @@ public class InlineDictationViewModel @Inject constructor(
         transcribeJob?.cancel()
         if (_uiState.value.recording == RecordingState.Recording) {
             runCatching { audioRecorder.stop() }
+            DiagnosticEvents.record("action", "inline_recording_cancel")
         }
         super.onCleared()
     }

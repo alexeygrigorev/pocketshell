@@ -758,7 +758,12 @@ class TmuxClientTest {
                 1,
                 diagnosticEvents.size,
             )
-            assertEquals("%0", diagnosticEvents.single().second["pane"])
+            val fields = diagnosticEvents.single().second
+            assertEquals("%0", fields["pane"])
+            assertEquals("pocketshell", fields["session"])
+            assertTrue("overflow diagnostics should include stable client id", fields["clientId"] is Long)
+            assertTrue("overflow diagnostics should include client hash", fields["clientHash"] is Int)
+            assertEquals(4096, fields["capacity"])
             blockedPaneCollector.cancel()
         } finally {
             releasePaneCollector.complete(Unit)
@@ -798,6 +803,17 @@ class TmuxClientTest {
         val shell = FakeShell()
         val session = FakeSession(shell)
         val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields ->
+            if (
+                event == "tmux_client_command_timeout" ||
+                event == "tmux_client_reader_exit"
+            ) {
+                diagnosticEvents += event to fields
+            }
+        }
         try {
             client.connect()
             // Eat the spawn line so the command write is easy to assert.
@@ -820,6 +836,19 @@ class TmuxClientTest {
             assertEquals("send-keys -t %0 Enter\n", shell.stdinAsString())
             assertTrue("timeout must close the shell", shell.closed)
             assertTrue("timeout must trip the disconnected latch", client.disconnected.value)
+
+            val timeout = diagnosticEvents.first { it.first == "tmux_client_command_timeout" }.second
+            assertEquals("send-keys", timeout["commandKind"])
+            assertEquals("fatal", timeout["timeoutMode"])
+            assertEquals(100L, timeout["timeoutMs"])
+            assertEquals(true, timeout["writeCompleted"])
+            assertTrue("timeout diagnostics should include stable client id", timeout["clientId"] is Long)
+
+            val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+            assertEquals("command_timeout", exit["disconnectCause"])
+            assertEquals("command_timeout", exit["intent"])
+            assertEquals("send-keys", exit["commandKind"])
+            assertEquals("fatal", exit["timeoutMode"])
         } finally {
             client.close()
         }
@@ -1028,6 +1057,12 @@ class TmuxClientTest {
         val shell = FakeShell()
         val session = FakeSession(shell)
         val client = RealTmuxClient(session, scope)
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields ->
+            if (event == "tmux_client_reader_exit") diagnosticEvents += event to fields
+        }
         client.connect()
         // Eat the spawn line so the assertion below sees only the
         // detach traffic.
@@ -1064,6 +1099,68 @@ class TmuxClientTest {
             "expected client.disconnected to latch true after detachCleanly",
             client.disconnected.value,
         )
+        val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+        assertEquals("detach_or_replace", exit["disconnectCause"])
+        assertEquals("detach_or_replace", exit["intent"])
+        assertEquals("eof", exit["source"])
+        assertTrue("reader exit should include stable client id", exit["clientId"] is Long)
+    }
+
+    @Test
+    fun `reader EOF diagnostic is classified as remote read_eof`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields ->
+            if (event == "tmux_client_reader_exit") diagnosticEvents += event to fields
+        }
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+
+            shell.closeStdoutPipe()
+            withTimeout(3_000) {
+                while (!client.disconnected.value) { yield(); delay(10) }
+            }
+
+            val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+            assertEquals("read_eof", exit["disconnectCause"])
+            assertEquals("unknown", exit["intent"])
+            assertEquals("eof", exit["source"])
+            assertEquals(false, exit["closed"])
+            assertEquals(0, exit["eventBusDroppedEvents"])
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `reader exit after close is classified as local_close`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields ->
+            if (event == "tmux_client_reader_exit") diagnosticEvents += event to fields
+        }
+        client.connect()
+        withTimeout(2_000) {
+            while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+        }
+
+        client.close()
+
+        val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+        assertEquals("local_close", exit["disconnectCause"])
+        assertEquals("local_close", exit["intent"])
+        assertEquals(true, exit["closed"])
     }
 
     @Test
@@ -1294,6 +1391,21 @@ class TmuxClientTest {
             client.close()
         }
     }
+
+    private suspend fun waitForDiagnosticEvent(
+        events: List<Pair<String, Map<String, Any?>>>,
+        name: String,
+    ): Map<String, Any?> =
+        withTimeout(3_000) {
+            while (true) {
+                synchronized(events) {
+                    events.firstOrNull { it.first == name }?.second
+                }?.let { return@withTimeout it }
+                yield()
+                delay(10)
+            }
+            error("unreachable")
+        }
 
     // --- fakes --------------------------------------------------------------
 

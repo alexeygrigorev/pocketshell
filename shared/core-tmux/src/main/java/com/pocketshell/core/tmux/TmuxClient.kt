@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * High-level client wrapping a `tmux -CC` control channel running inside an
@@ -270,6 +271,8 @@ internal class RealTmuxClient(
     private val startDirectory: String? = null,
     private val commandTimeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
 ) : TmuxClient {
+    private val clientId: Long = NEXT_CLIENT_ID.incrementAndGet()
+    private val clientHash: Int = System.identityHashCode(this)
 
     // Child scope rooted under the caller's scope. SupervisorJob() so a
     // failing reader doesn't tear down peers; Dispatchers.IO because the
@@ -329,6 +332,17 @@ internal class RealTmuxClient(
     private val pendingQueue = ConcurrentLinkedDeque<PendingCommand>()
     private val responseCorrelationLock = Any()
     private var staleResponseBlocksToIgnore: Int = 0
+    private val eventBusDroppedEvents = AtomicInteger(0)
+    private val eventBusOverflowDiagnosticEmitted = AtomicBoolean(false)
+
+    @Volatile
+    private var readerExitIntent: ReaderExitIntent = ReaderExitIntent.Unknown
+
+    @Volatile
+    private var readerExitCommandKind: String? = null
+
+    @Volatile
+    private var readerExitTimeoutMode: CommandTimeoutMode? = null
 
     // Serialises concurrent sendCommand calls. tmux can only handle one
     // at a time; we queue on the Kotlin side instead of letting them
@@ -463,6 +477,11 @@ internal class RealTmuxClient(
             val exception = TmuxClientException(
                 "tmux command `$kind` timed out after ${commandTimeoutMs}ms",
             )
+            recordCommandTimeout(
+                kind = kind,
+                timeoutMode = timeoutMode,
+                writeCompleted = writeCompleted,
+            )
             if (timeoutMode != CommandTimeoutMode.FatalClose && writeCompleted) {
                 Log.w(
                     ISSUE_244_DIAG_TAG,
@@ -509,7 +528,11 @@ internal class RealTmuxClient(
             synchronized(responseCorrelationLock) {
                 pendingQueue.remove(pendingCmd)
             }
-            close()
+            closeInternal(
+                ReaderExitIntent.CommandTimeout,
+                commandKind = kind,
+                timeoutMode = timeoutMode,
+            )
             throw exception
         }
     }
@@ -520,6 +543,9 @@ internal class RealTmuxClient(
                 scope = clientScope,
                 onOverflow = { overflow ->
                     _outputBacklogOverflows.tryEmit(overflow)
+                },
+                diagnosticFields = {
+                    commonDiagnosticFields() + mapOf("session" to sessionName)
                 },
             )
         }.flow.asSharedFlow()
@@ -546,6 +572,7 @@ internal class RealTmuxClient(
     }
 
     override suspend fun detachCleanly(timeoutMs: Long) {
+        markReaderExitIntent(ReaderExitIntent.DetachOrReplace)
         // Idempotent — once we have already torn down, there is no
         // server-side state to release. Run [close] anyway so callers
         // can use this as their single teardown entry point without
@@ -599,7 +626,16 @@ internal class RealTmuxClient(
     }
 
     override fun close() {
+        closeInternal(ReaderExitIntent.LocalClose)
+    }
+
+    private fun closeInternal(
+        intent: ReaderExitIntent,
+        commandKind: String? = null,
+        timeoutMode: CommandTimeoutMode? = null,
+    ) {
         if (closed) return
+        markReaderExitIntent(intent, commandKind = commandKind, timeoutMode = timeoutMode)
         closed = true
         connected = false
         paneOutputPipes.values.forEach { it.close() }
@@ -623,6 +659,17 @@ internal class RealTmuxClient(
             )
         }
         clientScope.cancel()
+    }
+
+    private fun markReaderExitIntent(
+        intent: ReaderExitIntent,
+        commandKind: String? = null,
+        timeoutMode: CommandTimeoutMode? = null,
+    ) {
+        if (readerExitIntent.priority > intent.priority) return
+        readerExitIntent = intent
+        readerExitCommandKind = commandKind
+        readerExitTimeoutMode = timeoutMode
     }
 
     /**
@@ -796,14 +843,20 @@ internal class RealTmuxClient(
                 }
             }
         } finally {
+            val disconnectCause = classifyReaderExit(readerExitSource)
             TmuxClientDiagnostics.record(
                 "tmux_client_reader_exit",
                 buildMap {
                     put("session", sessionName)
                     put("source", readerExitSource)
-                    put("clientHash", System.identityHashCode(this@RealTmuxClient))
+                    put("disconnectCause", disconnectCause.logValue)
+                    put("intent", readerExitIntent.logValue)
+                    putAll(commonDiagnosticFields())
                     put("closed", closed)
                     put("connected", connected)
+                    put("eventBusDroppedEvents", eventBusDroppedEvents.get())
+                    readerExitCommandKind?.let { put("commandKind", it) }
+                    readerExitTimeoutMode?.let { put("timeoutMode", it.logName) }
                     readerFailureClass?.let { put("cause", it) }
                     readerFailureMessage?.let { put("message", it) }
                 },
@@ -848,12 +901,60 @@ internal class RealTmuxClient(
     private fun emitOutput(event: ControlEvent.Output) {
         paneOutputPipes[event.paneId]?.send(event)
         if (!eventBus.tryEmit(event)) {
+            val dropped = eventBusDroppedEvents.incrementAndGet()
+            if (eventBusOverflowDiagnosticEmitted.compareAndSet(false, true)) {
+                TmuxClientDiagnostics.record(
+                    "tmux_client_eventbus_overflow",
+                    commonDiagnosticFields() + mapOf(
+                        "session" to sessionName,
+                        "pane" to event.paneId,
+                        "bytes" to event.data.size,
+                        "droppedEvents" to dropped,
+                        "capacity" to EVENT_BUFFER,
+                    ),
+                )
+            }
             Log.w(
                 ISSUE_105_DIAG_TAG,
-                "tmux-output-eventbus-drop pane=${event.paneId} bytes=${event.data.size}",
+                "tmux-output-eventbus-drop pane=${event.paneId} bytes=${event.data.size} " +
+                    "droppedEvents=$dropped capacity=$EVENT_BUFFER",
             )
         }
     }
+
+    private fun recordCommandTimeout(
+        kind: String,
+        timeoutMode: CommandTimeoutMode,
+        writeCompleted: Boolean,
+    ) {
+        TmuxClientDiagnostics.record(
+            "tmux_client_command_timeout",
+            commonDiagnosticFields() + mapOf(
+                "session" to sessionName,
+                "commandKind" to kind,
+                "timeoutMode" to timeoutMode.logName,
+                "timeoutMs" to commandTimeoutMs,
+                "writeCompleted" to writeCompleted,
+            ),
+        )
+    }
+
+    private fun classifyReaderExit(source: String): ReaderDisconnectCause =
+        when {
+            readerExitIntent == ReaderExitIntent.CommandTimeout -> ReaderDisconnectCause.CommandTimeout
+            readerExitIntent == ReaderExitIntent.DetachOrReplace -> ReaderDisconnectCause.DetachOrReplace
+            closed && readerExitIntent == ReaderExitIntent.LocalClose -> ReaderDisconnectCause.LocalClose
+            source == "read_failure" -> ReaderDisconnectCause.ReadFailure
+            source == "eof" -> ReaderDisconnectCause.ReadEof
+            closed -> ReaderDisconnectCause.LocalClose
+            else -> ReaderDisconnectCause.Unknown
+        }
+
+    private fun commonDiagnosticFields(): Map<String, Any?> =
+        mapOf(
+            "clientId" to clientId,
+            "clientHash" to clientHash,
+        )
 
     /**
      * Write a single command line to [stdin], appending the `\n` tmux
@@ -871,6 +972,7 @@ internal class RealTmuxClient(
         private const val DEFAULT_SESSION_NAME = "pocketshell"
         private const val DEFAULT_COMMAND_TIMEOUT_MS = 10_000L
         private const val BEST_EFFORT_LATE_RESPONSE_DRAIN_MS = 1_000L
+        private val NEXT_CLIENT_ID = AtomicLong(0L)
 
         private fun escapeSingleQuoted(input: String): String =
             input.replace("'", "'\\''")
@@ -956,11 +1058,31 @@ internal class RealTmuxClient(
             }
     }
 
+    private enum class ReaderExitIntent(
+        val logValue: String,
+        val priority: Int,
+    ) {
+        Unknown("unknown", 0),
+        LocalClose("local_close", 1),
+        DetachOrReplace("detach_or_replace", 2),
+        CommandTimeout("command_timeout", 3),
+    }
+
+    private enum class ReaderDisconnectCause(val logValue: String) {
+        LocalClose("local_close"),
+        DetachOrReplace("detach_or_replace"),
+        CommandTimeout("command_timeout"),
+        ReadEof("read_eof"),
+        ReadFailure("read_failure"),
+        Unknown("unknown"),
+    }
+
     private class PaneOutputPipe private constructor(
         val flow: MutableSharedFlow<ControlEvent.Output>,
         private val channel: Channel<ControlEvent.Output>,
         private val job: Job,
         private val onOverflow: (TmuxOutputBacklogOverflow) -> Unit,
+        private val diagnosticFields: () -> Map<String, Any?>,
         private val droppedEvents: AtomicInteger = AtomicInteger(0),
         private val overflowDiagnosticEmitted: AtomicBoolean = AtomicBoolean(false),
     ) {
@@ -972,7 +1094,7 @@ internal class RealTmuxClient(
                 if (overflowDiagnosticEmitted.compareAndSet(false, true)) {
                     TmuxClientDiagnostics.record(
                         "tmux_client_pane_output_backlog_overflow",
-                        mapOf(
+                        diagnosticFields() + mapOf(
                             "pane" to event.paneId,
                             "bytes" to event.data.size,
                             "droppedEvents" to dropped,
@@ -999,6 +1121,7 @@ internal class RealTmuxClient(
             fun create(
                 scope: CoroutineScope,
                 onOverflow: (TmuxOutputBacklogOverflow) -> Unit,
+                diagnosticFields: () -> Map<String, Any?>,
             ): PaneOutputPipe {
                 val flow = MutableSharedFlow<ControlEvent.Output>(
                     replay = 0,
@@ -1015,6 +1138,7 @@ internal class RealTmuxClient(
                     channel = channel,
                     job = job,
                     onOverflow = onOverflow,
+                    diagnosticFields = diagnosticFields,
                 )
             }
         }

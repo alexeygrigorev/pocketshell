@@ -559,6 +559,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "trigger" to effectiveTrigger.logValue,
             "requestedTrigger" to trigger.logValue,
             "generation" to generation,
+            "previousClientHash" to clientRef?.let { System.identityHashCode(it) },
         )
         Log.i(
             ISSUE_145_RECONNECT_TAG,
@@ -1579,6 +1580,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 "port" to target.port,
                 "user" to target.user,
                 "session" to target.sessionName,
+                "generation" to connectGeneration,
+                "attempt" to activeAttachMilestone?.attempt,
+                "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
             )
             return
         }
@@ -1633,6 +1637,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "port" to target.port,
             "user" to target.user,
             "session" to target.sessionName,
+            "generation" to connectGeneration,
+            "attempt" to activeAttachMilestone?.attempt,
+            "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
             "clientHash" to clientRef?.let { System.identityHashCode(it) },
         )
         unregisterCurrentClient()
@@ -2158,6 +2165,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 "user" to target.user,
                 "session" to target.sessionName,
                 "trigger" to trigger.logValue,
+                "generation" to latestConnectIntent?.takeIf {
+                    sameSessionIdentity(it.target, target)
+                }?.generation,
                 "clientHash" to System.identityHashCode(client),
                 "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
             )
@@ -2777,6 +2787,9 @@ public class TmuxSessionViewModel @Inject constructor(
                     "user" to target?.user,
                     "session" to target?.sessionName,
                     "clientHash" to System.identityHashCode(client),
+                    "generation" to connectGeneration,
+                    "attempt" to activeAttachMilestone?.attempt,
+                    "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
                     "status" to _connectionStatus.value.javaClass.simpleName,
                 )
                 handlePassiveClientDisconnect(client)
@@ -3234,6 +3247,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "user" to (current?.user ?: target?.user.orEmpty()),
             "session" to (target?.sessionName ?: "unknown"),
             "clientHash" to System.identityHashCode(client),
+            "generation" to connectGeneration,
+            "attempt" to activeAttachMilestone?.attempt,
+            "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
         )
         unregisterCurrentClient()
         if (target != null) {
@@ -4192,6 +4208,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "user" to activeTarget?.user,
             "session" to activeTarget?.sessionName,
             "clientHash" to clientRef?.let { System.identityHashCode(it) },
+            "generation" to connectGeneration,
+            "attempt" to activeAttachMilestone?.attempt,
+            "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
         )
 
         paneProducerJobs.remove(overflow.paneId)?.cancel()

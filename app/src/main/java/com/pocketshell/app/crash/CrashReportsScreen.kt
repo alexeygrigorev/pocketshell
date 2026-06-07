@@ -91,9 +91,10 @@ fun CrashReportsScreen(
 
     fun shareSelected() {
         val body = selectedBody.takeIf { it.isNotBlank() } ?: return
+        val report = selected ?: return
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "PocketShell crash report")
+            putExtra(Intent.EXTRA_SUBJECT, crashReportShareSubject(report))
             putExtra(Intent.EXTRA_TEXT, body)
         }
         context.startActivity(Intent.createChooser(intent, "Share crash report"))
@@ -332,9 +333,9 @@ private fun CrashReportsAppBar(onBack: () -> Unit) {
 /**
  * A single crash-report row. Routes through the shared [ListRow] (#479 Slice C1)
  * for the dense 44/8/12 row density + 48dp touch floor; the summary is the row
- * title and the crash timestamp rides the [trailing] slot on the
- * `labelSmall`(11) caption rung. The selected report keeps its accent-bordered
- * card so the user can still see which report the detail pane below reflects.
+ * title with the crash timestamp in front, and the compact context summary
+ * stays in the subtitle. The selected report keeps its accent-bordered card so
+ * the user can still see which report the detail pane below reflects.
  */
 @Composable
 private fun CrashReportRow(
@@ -349,13 +350,6 @@ private fun CrashReportRow(
         modifier = Modifier
             .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
             .border(1.dp, border, RoundedCornerShape(8.dp)),
-        trailing = {
-            Text(
-                text = ReportTimeFormatter.format(report.timestamp.atZone(ZoneId.systemDefault())),
-                color = PocketShellColors.TextMuted,
-                style = MaterialTheme.typography.labelSmall,
-            )
-        },
         onClick = onClick,
     )
 }
@@ -377,23 +371,23 @@ private fun CrashReportDetail(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Selected report",
+                    text = crashReportRowTitle(report),
                     color = PocketShellColors.Text,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = report.id,
+                    text = "id=${report.id}",
                     color = PocketShellColors.TextMuted,
                     fontSize = 11.sp,
                 )
                 Text(
-                    text = ReportTimeFormatter.format(report.timestamp.atZone(ZoneId.systemDefault())),
+                    text = "context=${report.contextSummary}",
                     color = PocketShellColors.TextMuted,
                     fontSize = 11.sp,
                 )
                 Text(
-                    text = crashReportRowSubtitle(report),
+                    text = crashReportDetailMetadata(report),
                     color = PocketShellColors.TextMuted,
                     fontSize = 11.sp,
                 )
@@ -493,16 +487,49 @@ private fun ActionButton(
 private val ReportTimeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
 
-internal fun crashReportRowTitle(report: CrashReport): String =
-    report.summary
+internal fun crashReportTimestamp(
+    report: CrashReport,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): String = ReportTimeFormatter.format(report.timestamp.atZone(zoneId))
+
+internal fun crashReportRowTitle(
+    report: CrashReport,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): String = "${crashReportTimestamp(report, zoneId)} · ${report.summary}"
 
 internal fun crashReportRowSubtitle(report: CrashReport): String =
     listOfNotNull(
         report.contextSummary.takeIf { it.isNotBlank() },
         report.appVersion?.takeIf { it.isNotBlank() }?.let { "app=$it" },
-        report.topFrame?.takeIf { it.isNotBlank() }?.let { "top=$it" },
+        report.topFrame?.takeIf { it.isNotBlank() }?.let { "top=${it.toCrashReportTopFrameLabel()}" },
     ).joinToString(" · ")
         .ifBlank { "Context unavailable" }
+
+internal fun crashReportShareSubject(
+    report: CrashReport,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): String =
+    "PocketShell crash report - " +
+        listOfNotNull(
+            crashReportTimestamp(report, zoneId),
+            report.contextSummary.takeIf { it.isNotBlank() },
+            report.summary.takeIf { it.isNotBlank() },
+        ).joinToString(" - ")
+
+private fun crashReportDetailMetadata(report: CrashReport): String =
+    listOfNotNull(
+        report.appVersion?.takeIf { it.isNotBlank() }?.let { "app=$it" },
+        report.topFrame?.takeIf { it.isNotBlank() }?.let { "top=${it.toCrashReportTopFrameLabel()}" },
+    ).joinToString(" · ")
+        .ifBlank { "metadata unavailable" }
+
+private fun String.toCrashReportTopFrameLabel(): String {
+    val sourceLocation = substringAfterLast('(', missingDelimiterValue = "")
+        .removeSuffix(")")
+        .takeIf { it.isNotBlank() }
+    if (sourceLocation != null) return sourceLocation
+    return substringAfterLast('.').takeIf { it.isNotBlank() } ?: this
+}
 
 private fun shareReportsArchive(context: android.content.Context, archive: java.io.File) {
     val uri = FileProvider.getUriForFile(

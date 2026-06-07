@@ -4805,22 +4805,26 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
         val before = _agentConversations.value[paneId] ?: return
         if (tab == SessionTab.Conversation && before.detection == null) return
-        if (before.selectedTab == tab) return
-        updateAgentConversation(paneId) { current ->
-            if (tab == SessionTab.Conversation && current.detection == null) {
-                current
-            } else {
-                current.copy(selectedTab = tab)
+        val changed = before.selectedTab != tab
+        if (changed) {
+            updateAgentConversation(paneId) { current ->
+                if (tab == SessionTab.Conversation && current.detection == null) {
+                    current
+                } else {
+                    current.copy(selectedTab = tab)
+                }
             }
         }
-        DiagnosticEvents.record(
-            "action",
-            "session_tab_select",
-            "mode" to "tmux",
-            "paneId" to paneId,
-            "tab" to tab.name,
-            "hasConversation" to (before.detection != null),
-        )
+        if (changed) {
+            DiagnosticEvents.record(
+                "action",
+                "session_tab_select",
+                "mode" to "tmux",
+                "paneId" to paneId,
+                "tab" to tab.name,
+                "hasConversation" to (before.detection != null),
+            )
+        }
         // Issue #495: remember the tab choice keyed by window so a reconnect
         // puts the user back on whichever tab they were on.
         rememberAgentStatusForPane(paneId)

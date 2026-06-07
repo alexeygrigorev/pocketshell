@@ -4804,7 +4804,18 @@ public class TmuxSessionViewModel @Inject constructor(
         return clientRef?.takeUnless { it.disconnected.value }
     }
 
-    internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {
+    internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> =
+        sendToAgentPaneResult(
+            paneId = paneId,
+            text = text,
+            keepFailedOptimisticOnDeliveryFailure = false,
+        )
+
+    private suspend fun sendToAgentPaneResult(
+        paneId: String,
+        text: String,
+        keepFailedOptimisticOnDeliveryFailure: Boolean,
+    ): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
         DiagnosticEvents.record(
@@ -4821,10 +4832,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // delivery attempt — so the Conversation tab shows the user's own
         // message the instant they hit Send, not after the JSONL round-trip.
         // The turn starts as [MessageSendState.Pending] ("sending…") and is
-        // reconciled away when the real transcript entry arrives via the
-        // tail. If the send can't be delivered the turn flips to
-        // [MessageSendState.Failed] (with a retry affordance) so the user's
-        // text is never silently lost.
+        // reconciled away when the real transcript entry arrives via the tail.
+        // If the unified composer send fails, PromptComposerSheet keeps the
+        // draft, so we remove this temporary row to avoid showing the same text
+        // twice. Retry taps have no draft fallback and opt into leaving a
+        // failed row instead.
         val optimisticId = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}"
         val optimistic = ConversationEvent.Message(
             // Issue #160 round 2: see [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
@@ -4841,7 +4853,11 @@ public class TmuxSessionViewModel @Inject constructor(
         appendAgentEvents(paneId, listOf(optimistic))
         val result = sendAgentPayloadToPaneResult(paneId, payload, detection.agent)
         if (result.isFailure) {
-            markOptimisticSendFailed(paneId, optimisticId)
+            if (keepFailedOptimisticOnDeliveryFailure) {
+                markOptimisticSendFailed(paneId, optimisticId)
+            } else {
+                removeOptimisticSend(paneId, optimisticId)
+            }
         }
         return result
     }
@@ -4853,6 +4869,12 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun markOptimisticSendFailed(paneId: String, optimisticId: String) {
         updateAgentConversation(paneId) { current ->
             current.copy(events = current.events.markOptimisticFailed(optimisticId))
+        }
+    }
+
+    private fun removeOptimisticSend(paneId: String, optimisticId: String) {
+        updateAgentConversation(paneId) { current ->
+            current.copy(events = current.events.filterNot { it.id == optimisticId })
         }
     }
 
@@ -4872,7 +4894,23 @@ public class TmuxSessionViewModel @Inject constructor(
             current.copy(events = current.events.filterNot { it.id == optimisticId })
         }
         bridgeScope.launch {
-            sendToAgentPaneResult(paneId, failed.text)
+            val result = sendToAgentPaneResult(
+                paneId = paneId,
+                text = failed.text,
+                keepFailedOptimisticOnDeliveryFailure = true,
+            )
+            if (result.isFailure) {
+                val hasFailedRetryRow = _agentConversations.value[paneId]?.events
+                    ?.filterIsInstance<ConversationEvent.Message>()
+                    ?.any {
+                        it.text == failed.text &&
+                            it.role == ConversationRole.User &&
+                            it.sendState == com.pocketshell.core.agents.MessageSendState.Failed
+                    } == true
+                if (!hasFailedRetryRow) {
+                    appendAgentEvents(paneId, listOf(failed))
+                }
+            }
         }
     }
 

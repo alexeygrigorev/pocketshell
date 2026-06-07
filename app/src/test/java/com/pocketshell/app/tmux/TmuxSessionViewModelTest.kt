@@ -4479,7 +4479,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultFailureDuringLargePasteKeepsConversationAndReconnectAvailable() = runTest {
+    fun sendToAgentPaneResultFailureDuringLargePasteKeepsDraftOnlyAndReconnectAvailable() = runTest {
         val vm = newVm()
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient().apply {
@@ -4508,15 +4508,14 @@ class TmuxSessionViewModelTest {
         assertTrue("expected forced send failure", result.isFailure)
         assertTrue("forced failure should close fake client", client.closed)
         assertTrue("Reconnect must remain available after paste disconnect", vm.canReconnect.value)
-        // Issue #494: a failed send no longer drops the user's text. The
-        // optimistic turn is shown and flipped to Failed (with retry).
-        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
-        assertEquals(MessageSendState.Failed, failed.sendState)
-        assertTrue(failed.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX))
+        assertTrue(
+            "composer keeps the draft, so tmux delivery failure must not also leave a failed row",
+            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+        )
     }
 
     @Test
-    fun sendToAgentPaneResultPasteChunkTmuxErrorMarksOptimisticMessageFailed() = runTest {
+    fun sendToAgentPaneResultPasteChunkTmuxErrorRemovesOptimisticMessage() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             responses.addLast(CommandResponse(number = 1L, output = emptyList(), isError = false))
@@ -4538,9 +4537,10 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         assertTrue("expected tmux %error to fail the paste result", result.isFailure)
-        // Issue #494: the optimistic turn is shown and flipped to Failed.
-        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
-        assertEquals(MessageSendState.Failed, failed.sendState)
+        assertTrue(
+            "composer keeps failed draft; conversation must drop the temporary optimistic row",
+            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+        )
         assertTrue(
             "failed paste must stop before submitting Enter: ${client.sentCommands}",
             client.sentCommands.none { it == "send-keys -t %0 Enter" },
@@ -4548,7 +4548,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultFinalEnterTmuxErrorMarksOptimisticMessageFailed() = runTest {
+    fun sendToAgentPaneResultFinalEnterTmuxErrorRemovesOptimisticMessage() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             repeat(5) {
@@ -4574,9 +4574,10 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         assertTrue("expected tmux %error from final Enter to fail the send result", result.isFailure)
-        // Issue #494: the optimistic turn is shown and flipped to Failed.
-        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
-        assertEquals(MessageSendState.Failed, failed.sendState)
+        assertTrue(
+            "composer keeps failed draft; conversation must drop the temporary optimistic row",
+            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+        )
         assertEquals(
             "send-keys -t %0 Enter",
             client.sentCommands.filter { it.startsWith("send-keys") }.last(),
@@ -4784,17 +4785,17 @@ class TmuxSessionViewModelTest {
         // a fresh pending turn and submits the keys — exactly one user turn
         // remains (no double-send, no orphaned failed row).
         val vm = newVm()
-        val failingClient = FakeTmuxClient().apply {
-            closeAndThrowOnCommandPrefix = "send-keys"
-        }
-        vm.attachClientForTest(failingClient)
+        val failed = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}seed",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1L,
+            role = ConversationRole.User,
+            text = "retry me",
+            sendState = MessageSendState.Failed,
+        )
+        vm.attachClientForTest(FakeTmuxClient())
         vm.startAgentConversationForTest("%0", newClaudeDetection())
-
-        // First attempt: live tmux send error -> Failed turn.
-        assertTrue(vm.sendToAgentPaneResult("%0", "retry me").isFailure)
-        runCurrent()
-        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
-        assertEquals(MessageSendState.Failed, failed.sendState)
+        vm.appendAgentEventsForTest("%0", listOf(failed))
 
         // Bring up a live client and retry.
         val client = FakeTmuxClient()
@@ -4811,6 +4812,39 @@ class TmuxSessionViewModelTest {
         assertTrue(
             "retried send must submit Enter to the pane: ${client.sentCommands}",
             client.sentCommands.any { it == "send-keys -t %0 Enter" },
+        )
+    }
+
+    @Test
+    fun retryFailedAgentSendKeepsFailedTurnWhenRetryDeliveryFails() = runTest {
+        val vm = newVm()
+        val failed = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}seed",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1L,
+            role = ConversationRole.User,
+            text = "retry me",
+            sendState = MessageSendState.Failed,
+        )
+        val client = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "send-keys"
+        }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.appendAgentEventsForTest("%0", listOf(failed))
+
+        vm.retryFailedAgentSend("%0", failed.id)
+        advanceUntilIdle()
+
+        val events = vm.agentConversations.value["%0"]!!.events
+        assertEquals("failed retry must still leave one retryable row", 1, events.size)
+        val stillFailed = events.single() as ConversationEvent.Message
+        assertEquals("retry me", stillFailed.text)
+        assertEquals(MessageSendState.Failed, stillFailed.sendState)
+        assertTrue("retry should create a fresh optimistic id", stillFailed.id != failed.id)
+        assertTrue(
+            "retry delivery should attempt tmux send before failing: ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("send-keys") },
         )
     }
 

@@ -41,6 +41,22 @@ class TmuxSessionScreenTest {
     }
 
     @Test
+    fun toWindowSummariesPreservesTmuxWindowIndexForDirectNavigation() {
+        val panes = listOf(
+            pane(paneId = "%0", windowId = "@9", windowIndex = 1),
+            pane(paneId = "%1", windowId = "@4", windowIndex = 0),
+            pane(paneId = "%2", windowId = "@9", windowIndex = 1),
+        )
+
+        val windows = panes.toWindowSummaries()
+
+        assertEquals(
+            listOf(1, 0),
+            windows.map { it.windowIndex },
+        )
+    }
+
+    @Test
     fun sessionSwitcherPagesMirrorReadySessionRowsAndMarkCurrent() {
         val pages = sessionSwitcherPages(
             state = HostTmuxSessionPickerState.Ready(
@@ -266,11 +282,13 @@ class TmuxSessionScreenTest {
     private fun pane(
         paneId: String,
         windowId: String,
+        windowIndex: Int? = null,
         title: String = paneId,
     ): TmuxPaneState =
         TmuxPaneState(
             paneId = paneId,
             windowId = windowId,
+            windowIndex = windowIndex,
             sessionId = "\$0",
             title = title,
             terminalState = TerminalSurfaceState(),

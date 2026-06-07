@@ -163,6 +163,9 @@ sealed interface AppDestination {
      *   [com.pocketshell.core.tmux.TmuxClientFactory]'s default.
      * @property startDirectory optional start folder passed to tmux
      *   `new-session -A -c` when this destination came from a create flow.
+     * @property initialWindowIndex optional one-shot tmux `window_index`
+     *   requested by the host-detail tree. The tmux screen resolves this
+     *   to the runtime `window_id` after attach and selects it once.
      */
     data class TmuxSession(
         val hostId: Long,
@@ -174,6 +177,7 @@ sealed interface AppDestination {
         val passphrase: CharArray?,
         val sessionName: String,
         val startDirectory: String? = null,
+        val initialWindowIndex: Int? = null,
     ) : AppDestination
 
     /**

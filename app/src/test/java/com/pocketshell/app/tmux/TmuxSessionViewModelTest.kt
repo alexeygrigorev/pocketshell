@@ -4849,6 +4849,37 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun listPanesParserCapturesTmuxWindowIndex() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@7\t2\t\$0\twork\tshell\t0\t/workspace\tbash\t/dev/pts/3\t0"),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@7", name = ""),
+        )
+        advanceUntilIdle()
+
+        val pane = vm.panes.value.single()
+        assertEquals("@7", pane.windowId)
+        assertEquals(2, pane.windowIndex)
+    }
+
+    @Test
     fun paneModeChangedRefreshesCopyModeStateFromListPanes() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

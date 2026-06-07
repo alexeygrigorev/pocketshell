@@ -974,6 +974,22 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenSessionWindow = { sessionName, startDirectory, windowIndex ->
+                navigate(
+                    AppDestination.TmuxSession(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        sessionName = sessionName,
+                        startDirectory = startDirectory,
+                        initialWindowIndex = windowIndex,
+                    ),
+                )
+            },
             onSessionCreated = { sessionName, cwd ->
                 // Issue #171 round 2: the SessionTypePickerSheet has
                 // already created the tmux session on the remote (and
@@ -1223,14 +1239,19 @@ private fun AppNavigator(
             passphrase = dest.passphrase,
             sessionName = dest.sessionName,
             startDirectory = dest.startDirectory,
+            initialWindowIndex = dest.initialWindowIndex,
             onBack = ::back,
             onOpenTmuxSession = { sessionName, startDirectory ->
                 navigate(
-                    dest.copy(sessionName = sessionName, startDirectory = startDirectory),
+                    dest.copy(
+                        sessionName = sessionName,
+                        startDirectory = startDirectory,
+                        initialWindowIndex = null,
+                    ),
                 )
             },
             onReplaceTmuxSession = { sessionName ->
-                replace(dest.copy(sessionName = sessionName, startDirectory = null))
+                replace(dest.copy(sessionName = sessionName, startDirectory = null, initialWindowIndex = null))
             },
             onOpenJobs = {
                 navigate(

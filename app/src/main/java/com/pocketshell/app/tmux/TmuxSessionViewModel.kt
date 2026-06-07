@@ -1316,7 +1316,7 @@ public class TmuxSessionViewModel @Inject constructor(
             val parsed = response.output
                 .mapNotNull { parsePaneRow(it) }
                 .filter { it.sessionName == target.sessionName }
-                .sortedWith(compareBy({ it.windowId }, { it.paneIndex }, { it.paneId }))
+                .sortedWith(compareBy({ it.windowIndex ?: Int.MAX_VALUE }, { it.windowId }, { it.paneIndex }, { it.paneId }))
             for (pane in parsed) {
                 val state = TerminalSurfaceState()
                 val producerJob = state.attachExternalProducer(
@@ -1337,6 +1337,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 val row = TmuxPaneState(
                     paneId = pane.paneId,
                     windowId = pane.windowId,
+                    windowIndex = pane.windowIndex,
                     sessionId = pane.sessionId,
                     title = pane.title,
                     cwd = pane.cwd,
@@ -3460,6 +3461,8 @@ public class TmuxSessionViewModel @Inject constructor(
         append(LIST_PANES_FIELD_SEPARATOR)
         append("#{window_id}")
         append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{window_index}")
+        append(LIST_PANES_FIELD_SEPARATOR)
         append("#{session_id}")
         append(LIST_PANES_FIELD_SEPARATOR)
         append("#{session_name}")
@@ -3496,7 +3499,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget
         val sorted = parsed
             .filter { pane -> target == null || pane.sessionName == target.sessionName }
-            .sortedWith(compareBy({ it.windowId }, { it.paneIndex }, { it.paneId }))
+            .sortedWith(compareBy({ it.windowIndex ?: Int.MAX_VALUE }, { it.windowId }, { it.paneIndex }, { it.paneId }))
 
         val nextById: MutableMap<String, TmuxPaneState> = LinkedHashMap()
         val newRows = mutableListOf<TmuxPaneState>()
@@ -3508,6 +3511,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // immutable metadata if it changed.
                 existing.copy(
                     windowId = p.windowId,
+                    windowIndex = p.windowIndex,
                     sessionId = p.sessionId,
                     title = p.title,
                     cwd = p.cwd,
@@ -3541,6 +3545,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 TmuxPaneState(
                     paneId = p.paneId,
                     windowId = p.windowId,
+                    windowIndex = p.windowIndex,
                     sessionId = p.sessionId,
                     title = p.title,
                     cwd = p.cwd,
@@ -6486,27 +6491,34 @@ public class TmuxSessionViewModel @Inject constructor(
         if (parts.size < 5) return null
         val paneId = parts[0].takeIf { it.startsWith("%") } ?: return null
         val windowId = parts[1].takeIf { it.startsWith("@") } ?: return null
-        val sessionId = parts[2].takeIf { it.startsWith("$") } ?: return null
-        val hasSessionName = parts.size >= 6
-        val sessionName = if (hasSessionName) parts[3] else ""
-        val title = if (hasSessionName) parts[4] else parts[3]
-        val paneIndex = parts[if (hasSessionName) 5 else 4].trim().toIntOrNull() ?: 0
+        val hasWindowIndex = parts.getOrNull(2)?.startsWith("$") == false
+        val windowIndex = if (hasWindowIndex) parts[2].trim().toIntOrNull() else null
+        val sessionIdIndex = if (hasWindowIndex) 3 else 2
+        val sessionId = parts.getOrNull(sessionIdIndex)?.takeIf { it.startsWith("$") } ?: return null
+        val hasSessionName = parts.size >= sessionIdIndex + 4
+        val sessionNameIndex = sessionIdIndex + 1
+        val titleIndex = if (hasSessionName) sessionIdIndex + 2 else sessionIdIndex + 1
+        val paneIndexIndex = if (hasSessionName) sessionIdIndex + 3 else sessionIdIndex + 2
+        val sessionName = if (hasSessionName) parts[sessionNameIndex] else ""
+        val title = parts.getOrNull(titleIndex).orEmpty()
+        val paneIndex = parts.getOrNull(paneIndexIndex)?.trim()?.toIntOrNull() ?: 0
         return ParsedPane(
             paneId = paneId,
             windowId = windowId,
+            windowIndex = windowIndex,
             sessionId = sessionId,
             title = title,
             paneIndex = paneIndex,
-            cwd = parts.getOrNull(if (hasSessionName) 6 else 5).orEmpty(),
-            currentCommand = parts.getOrNull(if (hasSessionName) 7 else 6).orEmpty(),
+            cwd = parts.getOrNull(paneIndexIndex + 1).orEmpty(),
+            currentCommand = parts.getOrNull(paneIndexIndex + 2).orEmpty(),
             // Issue #186: `#{pane_tty}` is the 9th (or 8th, without
             // session_name) field in the format string above. Older
             // tmux versions that omit the field simply return empty,
             // in which case per-pane agent detection skips this pane
             // (see [detectForPane]) rather than fall back to a
             // host-wide scan.
-            paneTty = parts.getOrNull(if (hasSessionName) 8 else 7).orEmpty(),
-            inCopyMode = parseTmuxBoolean(parts.getOrNull(if (hasSessionName) 9 else 8)),
+            paneTty = parts.getOrNull(paneIndexIndex + 3).orEmpty(),
+            inCopyMode = parseTmuxBoolean(parts.getOrNull(paneIndexIndex + 4)),
             sessionName = sessionName,
         )
     }
@@ -6525,6 +6537,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val sessionId: String,
         val title: String,
         val paneIndex: Int,
+        val windowIndex: Int? = null,
         val cwd: String = "",
         val currentCommand: String = "",
         // Issue #186: per-pane TTY captured from `#{pane_tty}` so

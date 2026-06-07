@@ -386,6 +386,85 @@ class FolderListGroupingTest {
     }
 
     @Test
+    fun treeChildRowsExpandOnlyMultiWindowSessions() {
+        val single = FolderSessionEntry(
+            sessionName = "plain-shell",
+            lastActivity = 1_000L,
+            attached = false,
+            agentKind = SessionAgentKind.Shell,
+            windows = listOf(
+                FolderSessionWindowEntry(
+                    index = 0,
+                    name = "bash",
+                    active = true,
+                    command = "bash",
+                    agentKind = SessionAgentKind.Shell,
+                ),
+            ),
+        )
+        val multi = FolderSessionEntry(
+            sessionName = "git-zoom-calls",
+            lastActivity = 2_000L,
+            attached = false,
+            agentKind = SessionAgentKind.Claude,
+            windows = listOf(
+                FolderSessionWindowEntry(
+                    index = 1,
+                    name = "bash",
+                    active = false,
+                    command = "bash",
+                    agentKind = SessionAgentKind.Shell,
+                ),
+                FolderSessionWindowEntry(
+                    index = 0,
+                    name = "claude",
+                    active = true,
+                    command = "claude",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+        )
+
+        val rows = folderTreeSessionChildRows(listOf(single, multi))
+
+        assertEquals(4, rows.size)
+        assertEquals("plain-shell", (rows[0] as FolderTreeSessionChildRow.Session).session.sessionName)
+        assertEquals("git-zoom-calls", (rows[1] as FolderTreeSessionChildRow.Session).session.sessionName)
+        assertEquals(0, (rows[2] as FolderTreeSessionChildRow.Window).window.index)
+        assertEquals(SessionAgentKind.Claude, (rows[2] as FolderTreeSessionChildRow.Window).window.agentKind)
+        assertEquals(1, (rows[3] as FolderTreeSessionChildRow.Window).window.index)
+        assertEquals(SessionAgentKind.Shell, (rows[3] as FolderTreeSessionChildRow.Window).window.agentKind)
+    }
+
+    @Test
+    fun windowDisplayTitleUsesWindowIndexAndCommand() {
+        assertEquals(
+            "w0 claude",
+            windowDisplayTitle(
+                FolderSessionWindowEntry(
+                    index = 0,
+                    name = "renamed",
+                    active = true,
+                    command = "claude",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+        )
+        assertEquals(
+            "w1 bash",
+            windowDisplayTitle(
+                FolderSessionWindowEntry(
+                    index = 1,
+                    name = "bash",
+                    active = false,
+                    command = null,
+                    agentKind = SessionAgentKind.Shell,
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun buildFolderTreeMatchesTildeWatchedRootToAbsoluteProjectsAndSessions() {
         val sessions = listOf(
             entry("codex-pocketshell", 3_000L, kind = SessionAgentKind.Codex),

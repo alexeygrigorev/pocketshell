@@ -136,6 +136,8 @@ fun FolderListScreen(
     passphrase: CharArray?,
     onBack: () -> Unit,
     onOpenSession: (sessionName: String, startDirectory: String?) -> Unit,
+    onOpenSessionWindow: (sessionName: String, startDirectory: String?, windowIndex: Int?) -> Unit =
+        { sessionName, startDirectory, _ -> onOpenSession(sessionName, startDirectory) },
     /**
      * Fired after the SessionTypePickerSheet successfully created a
      * session on the remote. The caller (MainActivity) routes to
@@ -312,10 +314,11 @@ fun FolderListScreen(
                     actionStatus = actionStatus,
                     onDismissActionStatus = viewModel::clearActionStatus,
                     onOpenPortForwarding = onOpenPortForwarding,
-                    onSessionClick = { folderPath, sessionName ->
-                        onOpenSession(
+                    onSessionClick = { folderPath, sessionName, windowIndex ->
+                        onOpenSessionWindow(
                             sessionName,
                             folderPath.takeUnless { it == FolderListViewModel.UNTRACKED_PATH },
+                            windowIndex,
                         )
                     },
                     onStopSession = { sessionName -> stopSessionTarget = sessionName },
@@ -899,7 +902,7 @@ private fun FolderListContent(
     actionStatus: FolderActionStatus,
     onDismissActionStatus: () -> Unit,
     onOpenPortForwarding: () -> Unit,
-    onSessionClick: (folderPath: String, sessionName: String) -> Unit,
+    onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
@@ -989,6 +992,7 @@ private fun FolderListContent(
                                     sessionFolderPaths[session.sessionName]
                                         ?: FolderListViewModel.UNTRACKED_PATH,
                                     session.sessionName,
+                                    null,
                                 )
                             },
                             onStop = { onStopSession(session.sessionName) },
@@ -1016,6 +1020,7 @@ private fun FolderListContent(
                                     sessionFolderPaths[session.sessionName]
                                         ?: FolderListViewModel.UNTRACKED_PATH,
                                     session.sessionName,
+                                    null,
                                 )
                             },
                             onStop = { onStopSession(session.sessionName) },
@@ -1304,7 +1309,7 @@ private fun FlatEmptyState() {
 private fun FolderTreeRootGroup(
     root: FolderTreeRoot,
     expandedProjectPaths: Set<String>,
-    onSessionClick: (folderPath: String, sessionName: String) -> Unit,
+    onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
@@ -1488,7 +1493,7 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
 private fun FolderGroup(
     folder: FolderRow,
     expanded: Boolean,
-    onSessionClick: (folderPath: String, sessionName: String) -> Unit,
+    onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onToggleExpanded: () -> Unit,
@@ -1520,21 +1525,30 @@ private fun FolderGroup(
                 modifier = Modifier.padding(start = treeChildIndent),
                 verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
-                folder.sessions.forEachIndexed { index, session ->
+                val childRows = folderTreeSessionChildRows(folder.sessions)
+                childRows.forEachIndexed { index, row ->
                     TreeChildRow(
-                        last = index == folder.sessions.lastIndex,
-                        connectorTestTag = folderSessionConnectorTestTag(
-                            folder.path,
-                            session.sessionName,
-                        ),
+                        last = index == childRows.lastIndex,
+                        connectorTestTag = row.connectorTestTag(folder.path),
                     ) {
-                        WorkspaceSessionRow(
-                            folderPath = folder.path,
-                            session = session,
-                            onClick = { onSessionClick(folder.path, session.sessionName) },
-                            onStop = { onStopSession(session.sessionName) },
-                            modifier = Modifier.weight(1f),
-                        )
+                        when (row) {
+                            is FolderTreeSessionChildRow.Session -> WorkspaceSessionRow(
+                                folderPath = folder.path,
+                                session = row.session,
+                                onClick = { onSessionClick(folder.path, row.session.sessionName, null) },
+                                onStop = { onStopSession(row.session.sessionName) },
+                                modifier = Modifier.weight(1f),
+                            )
+                            is FolderTreeSessionChildRow.Window -> WorkspaceSessionWindowRow(
+                                folderPath = folder.path,
+                                sessionName = row.sessionName,
+                                window = row.window,
+                                onClick = {
+                                    onSessionClick(folder.path, row.sessionName, row.window.index)
+                                },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                     }
                 }
             }
@@ -1648,6 +1662,46 @@ private fun FolderHeader(
     }
 }
 
+internal sealed interface FolderTreeSessionChildRow {
+    data class Session(val session: FolderSessionEntry) : FolderTreeSessionChildRow
+    data class Window(
+        val sessionName: String,
+        val window: FolderSessionWindowEntry,
+    ) : FolderTreeSessionChildRow
+}
+
+internal fun folderTreeSessionChildRows(
+    sessions: List<FolderSessionEntry>,
+): List<FolderTreeSessionChildRow> =
+    sessions.flatMap { session ->
+        val windows = sortedSessionWindows(session)
+        if (windows.size <= 1) {
+            listOf(FolderTreeSessionChildRow.Session(session))
+        } else {
+            listOf(FolderTreeSessionChildRow.Session(session)) +
+                windows.map { window ->
+                    FolderTreeSessionChildRow.Window(
+                        sessionName = session.sessionName,
+                        window = window,
+                    )
+                }
+        }
+    }
+
+private fun FolderTreeSessionChildRow.connectorTestTag(folderPath: String): String =
+    when (this) {
+        is FolderTreeSessionChildRow.Session -> folderSessionConnectorTestTag(
+            folderPath,
+            session.sessionName,
+        )
+        is FolderTreeSessionChildRow.Window -> folderSessionWindowConnectorTestTag(
+            folderPath,
+            sessionName,
+            window.index,
+            window.name,
+        )
+    }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkspaceSessionRow(
@@ -1723,6 +1777,65 @@ private fun WorkspaceSessionRow(
     }
 }
 
+@Composable
+private fun WorkspaceSessionWindowRow(
+    folderPath: String,
+    sessionName: String,
+    window: FolderSessionWindowEntry,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val isAgent = window.agentKind.isAgent()
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = PocketShellDensity.tapTargetMin)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = PocketShellDensity.rowPadV)
+            .testTag(folderSessionWindowRowTestTag(folderPath, sessionName, window.index, window.name)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Spacer(modifier = Modifier.width(treeWindowChildIndent))
+        StatusDot(
+            active = window.active || isAgent,
+            modifier = Modifier.testTag(
+                folderSessionWindowStatusDotTestTag(folderPath, sessionName, window.index, window.name),
+            ),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        SessionTileGlyph(
+            modifier = Modifier.testTag(
+                folderSessionWindowTileTestTag(folderPath, sessionName, window.index, window.name),
+            ),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = windowDisplayTitle(window),
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        AgentTypeBadge(
+            label = sessionBadgeLabel(
+                FolderSessionEntry(
+                    sessionName = sessionName,
+                    lastActivity = null,
+                    attached = false,
+                    agentKind = window.agentKind,
+                ),
+            ),
+            isAgent = isAgent,
+            modifier = Modifier.testTag(
+                folderSessionWindowBadgeTestTag(folderPath, sessionName, window.index, window.name),
+            ),
+        )
+    }
+}
+
 /**
  * Right-aligned agent-type pill on a session row — issue #478. Mockup colours:
  * Codex/Claude/OpenCode = purple (`agentAccent`), Shell = grey/neutral. The
@@ -1734,9 +1847,20 @@ private fun AgentTypeBadge(
     session: FolderSessionEntry,
     modifier: Modifier = Modifier,
 ) {
+    AgentTypeBadge(
+        label = sessionBadgeLabel(session),
+        isAgent = session.agentKind.isAgent(),
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun AgentTypeBadge(
+    label: String,
+    isAgent: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val semantic = LocalPocketShellSemantic.current
-    val isAgent = session.agentKind.isAgent()
-    val label = sessionBadgeLabel(session)
     val fg = if (isAgent) semantic.agentAccent else PocketShellColors.TextSecondary
     val bg = if (isAgent) {
         semantic.agentAccent.copy(alpha = 0.16f)
@@ -1774,6 +1898,9 @@ private val treeProjectIndent = PocketShellSpacing.sm
  * sub-tree.
  */
 private val treeChildIndent = PocketShellSpacing.sm
+
+/** Extra offset that makes window rows read as children of a session row. */
+private val treeWindowChildIndent = PocketShellSpacing.lg
 
 /** Width of the per-row connector cell that carries the spine + horizontal stub. */
 private val treeConnectorCellWidth = PocketShellSpacing.lg
@@ -2051,8 +2178,7 @@ private fun sessionDisplayTitle(session: FolderSessionEntry): String {
 }
 
 private fun sessionSecondaryText(session: FolderSessionEntry): String? {
-    val windows = session.windows
-        .sortedWith(compareBy<FolderSessionWindowEntry> { it.index ?: Int.MAX_VALUE }.thenBy { it.name.orEmpty() })
+    val windows = sortedSessionWindows(session)
     if (windows.size <= 1) return null
     val visible = windows.take(3).joinToString(" · ") { window ->
         val identity = window.index?.let { "w$it" } ?: "window"
@@ -2069,6 +2195,19 @@ private fun sessionSecondaryText(session: FolderSessionEntry): String? {
     }
     val remaining = windows.size - 3
     return if (remaining > 0) "$visible · +$remaining" else visible
+}
+
+private fun sortedSessionWindows(session: FolderSessionEntry): List<FolderSessionWindowEntry> =
+    session.windows.sortedWith(
+        compareBy<FolderSessionWindowEntry> { it.index ?: Int.MAX_VALUE }
+            .thenBy { it.name.orEmpty() },
+    )
+
+internal fun windowDisplayTitle(window: FolderSessionWindowEntry): String {
+    val identity = window.index?.let { "w$it" } ?: "window"
+    val hint = window.command?.trim()?.takeIf { it.isNotEmpty() }
+        ?: window.name?.trim()?.takeIf { it.isNotEmpty() }
+    return if (hint == null) identity else "$identity $hint"
 }
 
 @Composable
@@ -2236,8 +2375,41 @@ fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
 /** Tags the `├─/└─` tree connector cell on an expanded session child row (#503). */
 fun folderSessionConnectorTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:connector"
+fun folderSessionWindowConnectorTestTag(
+    folderPath: String,
+    sessionName: String,
+    windowIndex: Int?,
+    windowName: String?,
+): String = "folder-list:detail:$folderPath:$sessionName:window:${windowStableKey(windowIndex, windowName)}:connector"
+fun folderSessionWindowRowTestTag(
+    folderPath: String,
+    sessionName: String,
+    windowIndex: Int?,
+    windowName: String?,
+): String = "folder-list:detail:$folderPath:$sessionName:window:${windowStableKey(windowIndex, windowName)}"
+fun folderSessionWindowStatusDotTestTag(
+    folderPath: String,
+    sessionName: String,
+    windowIndex: Int?,
+    windowName: String?,
+): String = "${folderSessionWindowRowTestTag(folderPath, sessionName, windowIndex, windowName)}:status"
+fun folderSessionWindowTileTestTag(
+    folderPath: String,
+    sessionName: String,
+    windowIndex: Int?,
+    windowName: String?,
+): String = "${folderSessionWindowRowTestTag(folderPath, sessionName, windowIndex, windowName)}:tile"
+fun folderSessionWindowBadgeTestTag(
+    folderPath: String,
+    sessionName: String,
+    windowIndex: Int?,
+    windowName: String?,
+): String = "${folderSessionWindowRowTestTag(folderPath, sessionName, windowIndex, windowName)}:badge"
 fun folderTreeRootTestTag(path: String): String = "folder-list:tree-root:$path"
 fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:label"
 fun folderTreeRootCountTag(path: String): String = "folder-list:tree-root:$path:count"
 fun folderTreeRootCreateTestTag(path: String): String = "folder-list:tree-root:$path:create"
 fun folderTreeRootActionsTestTag(path: String): String = "folder-list:tree-root:$path:actions"
+
+private fun windowStableKey(windowIndex: Int?, windowName: String?): String =
+    windowIndex?.let { "w$it" } ?: windowName?.ifBlank { null } ?: "unknown"

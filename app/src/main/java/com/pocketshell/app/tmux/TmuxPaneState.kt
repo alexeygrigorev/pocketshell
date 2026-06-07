@@ -30,6 +30,9 @@ import com.pocketshell.core.terminal.ui.TerminalSurfaceState
  * @property windowId tmux window identifier the pane currently lives in,
  *   e.g. `@0`. May change if tmux re-parents a pane (rare in practice but
  *   the protocol permits it).
+ * @property windowIndex tmux `#{window_index}` for this pane's window.
+ *   Used only for one-shot navigation from the host-detail tree, where
+ *   the tree already knows `w0`/`w1` but not the runtime `@N` id yet.
  * @property sessionId tmux session identifier the pane currently lives in,
  *   e.g. `$0`. Same caveat as [windowId].
  * @property title human-readable pane title from
@@ -46,6 +49,7 @@ import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 public data class TmuxPaneState(
     val paneId: String,
     val windowId: String,
+    val windowIndex: Int? = null,
     val sessionId: String,
     val title: String,
     val cwd: String = "",

@@ -188,6 +188,7 @@ public fun TmuxSessionScreen(
     passphrase: CharArray? = null,
     sessionName: String,
     startDirectory: String? = null,
+    initialWindowIndex: Int? = null,
     modifier: Modifier = Modifier,
     sessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
@@ -621,6 +622,19 @@ public fun TmuxSessionScreen(
         val page = panes.indexOfFirst { it.windowId == window.windowId }
         if (page >= 0) {
             scope.launch { pagerState.animateScrollToPage(page) }
+        }
+    }
+
+    var consumedInitialWindowTarget by remember(sessionName, initialWindowIndex) { mutableStateOf(false) }
+    LaunchedEffect(panes, initialWindowIndex, consumedInitialWindowTarget) {
+        val requestedIndex = initialWindowIndex ?: return@LaunchedEffect
+        if (consumedInitialWindowTarget) return@LaunchedEffect
+        val targetPane = panes.firstOrNull { it.windowIndex == requestedIndex } ?: return@LaunchedEffect
+        consumedInitialWindowTarget = true
+        viewModel.selectWindow(targetPane.windowId)
+        val page = panes.indexOfFirst { it.windowId == targetPane.windowId }
+        if (page >= 0) {
+            pagerState.scrollToPage(page)
         }
     }
 
@@ -2236,6 +2250,7 @@ internal fun sessionSwitcherPages(
 internal data class WindowSummary(
     val windowId: String,
     val title: String,
+    val windowIndex: Int? = null,
 )
 
 /**
@@ -2257,6 +2272,7 @@ internal fun List<TmuxPaneState>.toWindowSummaries(): List<WindowSummary> =
             WindowSummary(
                 windowId = pane.windowId,
                 title = "Window ${index + 1}",
+                windowIndex = pane.windowIndex,
             )
         }
 

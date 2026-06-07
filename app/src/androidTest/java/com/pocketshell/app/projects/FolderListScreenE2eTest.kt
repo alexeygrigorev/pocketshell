@@ -135,6 +135,60 @@ class FolderListScreenE2eTest {
     }
 
     @Test
+    fun hostOverflowSettingsAndWorkspaceSettingsRouteSeparately() {
+        val fakeGateway = FakeFolderListGateway(
+            rows = emptyList(),
+            projectFoldersByRoot = mapOf("~/git" to emptyList()),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
+        var openedSettings = false
+        var openedWorkspaceSettings = false
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue592-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue592",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onOpenSettings = { openedSettings = true },
+                    onOpenWorkspaceSettings = { openedWorkspaceSettings = true },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(FOLDER_LIST_OVERFLOW_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
+        compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG)
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedSettings }
+        assertEquals(false, openedWorkspaceSettings)
+
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
+        compose.onNodeWithTag(FOLDER_LIST_WORKSPACE_SETTINGS_TAG)
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedWorkspaceSettings }
+    }
+
+    @Test
     fun folderListRendersGroupedSessionsAndPickerOpens() {
         val fakeGateway = FakeFolderListGateway(
             rows = listOf(

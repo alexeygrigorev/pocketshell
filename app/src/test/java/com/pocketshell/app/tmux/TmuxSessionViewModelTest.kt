@@ -1288,6 +1288,83 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun manualReconnectCancelsInFlightSilentTransportReattachAndUsesFreshSession() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val hiddenReconnectSession = FakeSshSession()
+        val manualReconnectSession = FakeSshSession()
+        val connector = QueueLeaseConnector(hiddenReconnectSession, manualReconnectSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = manager,
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 60_000L, silentReattachTimeoutMs = 60_000L)
+        val deadClient = FakeTmuxClient()
+        val hiddenAttachGate = CompletableDeferred<Unit>()
+        val hiddenAttachClient = FakeTmuxClient().apply {
+            sendCommandGatePrefix = "list-panes"
+            sendCommandGate = hiddenAttachGate
+        }
+        val manualReconnectClient = FakeTmuxClient().withSinglePane("work", "%9")
+        val clients = ArrayDeque(listOf(hiddenAttachClient, manualReconnectClient))
+        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            sessionsSeenByFactory += session
+            clients.removeFirstOrNull() ?: error("unexpected tmux client factory call")
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = FakeSshSession(isConnectedValue = false),
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        runCurrent()
+
+        assertTrue(
+            "hidden reattach should be stalled while waiting for panes",
+            hiddenAttachClient.sentCommands.any { it.startsWith("list-panes") },
+        )
+        assertEquals(1, connector.connectCount)
+
+        assertTrue("manual reconnect should be accepted while hidden reattach is in flight", vm.reconnect())
+        advanceUntilIdle()
+
+        assertTrue(
+            "interrupted hidden reattach must close its half-attached tmux client",
+            hiddenAttachClient.closed,
+        )
+        assertTrue(
+            "interrupted hidden reattach must evict its fresh SSH lease",
+            hiddenReconnectSession.closed,
+        )
+        assertEquals(
+            "manual reconnect must open a fresh SSH session after interrupting hidden reattach",
+            2,
+            connector.connectCount,
+        )
+        assertEquals(
+            listOf(hiddenReconnectSession, manualReconnectSession),
+            sessionsSeenByFactory,
+        )
+        assertSame(manualReconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
     fun networkChangeLifecycleHookEntersReconnectingWithoutConnectionError() = runTest {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())

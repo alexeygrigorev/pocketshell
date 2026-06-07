@@ -477,6 +477,7 @@ public class TmuxSessionViewModel @Inject constructor(
         startDirectory: String? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
     ) {
+        val interruptedPassiveRecovery = passiveDisconnectGraceJob?.isActive == true
         passiveDisconnectGraceJob?.cancel()
         passiveDisconnectGraceJob = null
         pausedAutoReconnect = null
@@ -494,7 +495,13 @@ public class TmuxSessionViewModel @Inject constructor(
             startDirectory = startDirectory,
         )
         if (connectJob?.isActive == true && connectingTarget == target) return
-        if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
+        if (
+            !interruptedPassiveRecovery &&
+            _connectionStatus.value is ConnectionStatus.Connected &&
+            activeTarget == target
+        ) {
+            return
+        }
 
         val previousActiveTarget = activeTarget
         val previousSession = sessionRef
@@ -2807,7 +2814,13 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             true
         } catch (t: Throwable) {
-            if (t is CancellationException) throw t
+            if (t is CancellationException) {
+                if (clientRef === replacement) {
+                    clientRef = staleClient
+                }
+                runCatching { replacement.close() }
+                throw t
+            }
             Log.w(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-passive-disconnect-silent-reattach-failed " +
@@ -2948,7 +2961,19 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             true
         } catch (t: Throwable) {
-            if (t is CancellationException) throw t
+            if (t is CancellationException) {
+                if (clientRef === replacement) {
+                    clientRef = staleClient
+                    sessionRef = null
+                    leaseRef = null
+                }
+                runCatching { replacement?.close() }
+                withContext(NonCancellable) {
+                    val leaseTarget = target.toSshLeaseTarget()
+                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                }
+                throw t
+            }
             Log.w(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-passive-disconnect-silent-transport-reattach-failed " +

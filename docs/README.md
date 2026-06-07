@@ -7,16 +7,19 @@ context; the README and current feature docs track released behavior.
 |---|---|
 | [vision.md](vision.md) | Original product brief — the why and the desired UX |
 | [architecture.md](architecture.md) | Composition layout, tech stack, three load-bearing decisions |
-| [input-methods.md](input-methods.md) | Voice, key bar, chord palette, snippets — the alternative-to-typing strategy |
+| [input-methods.md](input-methods.md) | Voice, key bar, snippets, and composer behaviour — the alternative-to-typing strategy |
 | [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
 | [agent-awareness.md](agent-awareness.md) | Detecting Claude Code, Codex, and OpenCode in a tmux pane and showing a clean conversation view |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side `pocketshell usage` over SSH — zero credentials on the phone |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
+| [design-system.md](design-system.md) | Codified dark dev-tool design tokens and shared UI primitives |
+| [server-setup.md](server-setup.md) | Server-side `pocketshell` helper install, PATH, and troubleshooting |
 | [ux-rules.md](ux-rules.md) | Placement + transition rules across journeys (codified from #163); cite from every UX-touching issue |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
 | [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
+| [walkthrough-visual-pass.md](walkthrough-visual-pass.md) | Real emulator screenshot capture workflow for visual review |
 | [tmux-socket-recovery.md](tmux-socket-recovery.md) | Default tmux socket split-brain detection, safe recovery, and automation namespace guardrails |
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
 | [../agents.md](../agents.md) | Orchestrator + sub-agent process (auto-loaded via [../CLAUDE.md](../CLAUDE.md)) |

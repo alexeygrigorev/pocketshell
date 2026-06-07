@@ -64,9 +64,9 @@ class ShareActivity : FragmentActivity() {
         }
 
         // Keep failure feedback independent of Compose recomposition.
-        // Successful uploads stay quiet outside the in-app result
-        // surface; the share action was user-initiated and does not need
-        // an extra Android toast.
+        // Successful file uploads stay quiet and finish the one-shot
+        // share surface; the share action was user-initiated and does
+        // not need an extra Android toast.
         watchUploadStateForFailures()
 
         // Issue #560: when the user picked an active SESSION as the

@@ -1,7 +1,6 @@
 package com.pocketshell.app.share
 
 import android.content.Context
-import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -190,42 +189,11 @@ class ShareTargetE2eTest {
             // pick "Host inbox" to keep the original upload path.
             clickHostInboxTarget()
 
-            try {
-                compose.waitUntil(timeoutMillis = 60_000) {
-                    val success = compose
-                        .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                    val failure = compose
-                        .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                    success || failure
-                }
-            } catch (e: Throwable) {
-                throw IllegalStateException(
-                    "upload result tag never appeared after picker click",
-                    e,
-                )
-            }
-            // Surface the failure path as a clean assertion message,
-            // including the detail text so the reviewer can tell at a
-            // glance whether the upload was rejected by the remote.
-            val showedFailure = compose
-                .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            if (showedFailure) {
-                val detailText = compose
-                    .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .joinToString(" / ") { it.toString() }
-                throw AssertionError("upload reported a failure state in the share UI: $detailText")
-            }
-
             val remoteListing = withTimeout(20_000) {
                 pollRemoteUntilFileExists(key, marker)
             }
+            assertNoShareFailure("upload reported a failure state in the share UI")
+            assertNoShareSuccessSurface()
             assertNotNull(
                 "expected at least one share-target file under ~/inbox/pocketshell/ on remote",
                 remoteListing,
@@ -239,18 +207,6 @@ class ShareTargetE2eTest {
                 "expected the remote filename to carry the marker '$marker' but got $remotePath",
                 remotePath.contains(marker),
             )
-            // The success surface copies the user-visible display path
-            // (`~/inbox/pocketshell/<name>`), while [remotePath] is the
-            // `$HOME`-expanded form used for the remote `cat`. Compare the
-            // clipboard against the display form built from the same
-            // remote filename.
-            val displayPath = "~/inbox/pocketshell/" + remotePath.substringAfterLast('/')
-            compose.onNodeWithTag(SHARE_RESULT_COPY_TAG, useUnmergedTree = true)
-                .performClick()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                clipboardText(targetContext) == displayPath
-            }
-
             val readBack = SshConnection.connect(
                 host = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -344,35 +300,14 @@ class ShareTargetE2eTest {
             // Issue #473: pick "Host inbox" in the per-host target chooser.
             clickHostInboxTarget()
 
-            compose.waitUntil(timeoutMillis = 90_000) {
-                val success = compose
-                    .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-                val failure = compose
-                    .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-                success || failure
-            }
-            val showedFailure = compose
-                .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            if (showedFailure) {
-                val detailText = compose
-                    .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .joinToString(" / ") { it.toString() }
-                throw AssertionError("multi-file upload reported a failure state: $detailText")
-            }
-
             // Every staged file must have landed under the inbox with
             // its own marker and round-tripped contents.
             for ((fileMarker, _, contents) in staged) {
                 val remoteListing = withTimeout(30_000) {
                     pollRemoteUntilFileExists(key, fileMarker)
                 }
+                assertNoShareFailure("multi-file upload reported a failure state")
+                assertNoShareSuccessSurface()
                 assertNotNull(
                     "expected file with marker '$fileMarker' under ~/inbox/pocketshell/",
                     remoteListing,
@@ -494,33 +429,12 @@ class ShareTargetE2eTest {
             }
             compose.onNodeWithTag(projectTag, useUnmergedTree = true).performClick()
 
-            compose.waitUntil(timeoutMillis = 60_000) {
-                val success = compose
-                    .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-                val failure = compose
-                    .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-                success || failure
-            }
-            val showedFailure = compose
-                .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            if (showedFailure) {
-                val detailText = compose
-                    .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .joinToString(" / ") { it.toString() }
-                throw AssertionError("project upload reported a failure state: $detailText")
-            }
-
             // The file must exist in <project>/.inbox/ on the remote.
             val remoteName = withTimeout(20_000) {
                 pollRemoteUntilProjectFileExists(key, projectPath, marker)
             }
+            assertNoShareFailure("project upload reported a failure state")
+            assertNoShareSuccessSurface()
             assertNotNull(
                 "expected a share file under $projectPath/.inbox/ on remote",
                 remoteName,
@@ -698,32 +612,11 @@ class ShareTargetE2eTest {
             compose.onNodeWithTag(SHARE_TARGET_ACTIVE_PROJECT_TAG, useUnmergedTree = true)
                 .performClick()
 
-            compose.waitUntil(timeoutMillis = 60_000) {
-                val success = compose
-                    .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-                val failure = compose
-                    .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-                success || failure
-            }
-            val showedFailure = compose
-                .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            if (showedFailure) {
-                val detailText = compose
-                    .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .joinToString(" / ") { it.toString() }
-                throw AssertionError("session-project upload reported a failure: $detailText")
-            }
-
             val remoteName = withTimeout(20_000) {
                 pollRemoteUntilProjectFileExists(key, projectPath, marker)
             }
+            assertNoShareFailure("session-project upload reported a failure")
+            assertNoShareSuccessSurface()
             assertNotNull(
                 "expected a share file under $projectPath/.inbox/ on remote",
                 remoteName,
@@ -1172,12 +1065,27 @@ class ShareTargetE2eTest {
         }
     }
 
-    private fun clipboardText(context: Context): String? {
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        return clipboard.primaryClip
-            ?.getItemAt(0)
-            ?.coerceToText(context)
-            ?.toString()
+    private fun assertNoShareFailure(message: String) {
+        val failureNodes = compose
+            .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        if (failureNodes.isNotEmpty()) {
+            val detailText = compose
+                .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .joinToString(" / ") { it.toString() }
+            throw AssertionError("$message: $detailText")
+        }
+    }
+
+    private fun assertNoShareSuccessSurface() {
+        val successNodes = compose
+            .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        assertTrue(
+            "successful file shares must not render the old upload-complete result surface",
+            successNodes.isEmpty(),
+        )
     }
 
     private fun stageSharedFile(context: Context, marker: String): Pair<File, String> {

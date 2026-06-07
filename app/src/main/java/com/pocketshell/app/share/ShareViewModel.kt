@@ -45,10 +45,10 @@ import javax.inject.Inject
  * - Hold the [ShareableItem] handed in from the share intent (set by
  *   the activity in `onCreate`).
  * - Run the upload via [ShareUploader] and expose the [UploadState]
- *   so the activity can swap the picker for a progress / result
- *   surface.
- * - Drive failure feedback while keeping successful share/upload completion
- *   quiet outside the in-app result surface.
+ *   so the activity can swap the picker for progress and failure
+ *   surfaces.
+ * - Drive failure feedback while keeping successful file-share upload
+ *   completion quiet.
  * - Issue #193: surface a real "paste into active session" option
  *   driven by [ActiveTmuxClients]. When the user shares text and at
  *   least one host has a registered live `tmux -CC` client, the
@@ -477,11 +477,10 @@ internal class ShareViewModel @Inject constructor(
      * the host inbox or a specific project's `.inbox/` per [target].
      *
      * Issue #258: a multi-file share stages more than one item; the loop
-     * uploads each in turn and aggregates the outcome so the result
-     * surface can report partial failure ("3 of 4 uploaded" / lists the
-     * names that failed) rather than silently dropping files. A single-
-     * file share still produces the familiar one-path success/failure
-     * surface because [UploadState.totalCount] is 1.
+     * uploads each in turn and aggregates the outcome so partial
+     * failures can report "3 of 4 uploaded" / list the names that
+     * failed rather than silently dropping files. Fully successful file
+     * shares finish quietly.
      */
     fun startUpload(host: HostEntity, target: ShareTarget = ShareTarget.HostInbox) {
         val payload = _items.value
@@ -537,8 +536,7 @@ internal class ShareViewModel @Inject constructor(
     /**
      * Map the accumulated per-file results into a single terminal
      * [UploadState]. Failed outcomes also drive the matching failure
-     * notification; successful uploads stay quiet outside the in-app
-     * result surface.
+     * notification; successful uploads stay quiet.
      *
      * - All succeeded -> [UploadState.Success] (detail is the single
      *   remote path for a one-file share, or an "N files" summary).
@@ -804,8 +802,8 @@ internal sealed interface UploadState {
      * `$HOME/inbox/pocketshell/<filename>`). For a multi-file share
      * (issue #258), [remotePath] includes a count header for readability
      * while [copyText] is just the newline-joined uploaded paths;
-     * [successCount]/[totalCount] carry the counts so the result surface
-     * can say "uploaded N/N".
+     * [successCount]/[totalCount] carry the counts for tests and any
+     * non-visual follow-up handling.
      *
      * For send-keys paste (issue #193), [remotePath] holds a short
      * preview of the pasted text — the field name is preserved for

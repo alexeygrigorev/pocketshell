@@ -821,10 +821,16 @@ public class TmuxSessionViewModel @Inject constructor(
      * for direct programmatic callers.
      */
     public fun reconnect(): Boolean {
+        if (activeTarget == null && connectingTarget == null) return false
+        startReconnectForSend()
+        return true
+    }
+
+    private fun startReconnectForSend(): Job? {
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
-        val target = activeTarget ?: connectingTarget ?: return false
+        val target = activeTarget ?: connectingTarget ?: return null
         DiagnosticEvents.record(
             "action",
             "reconnect_tapped",
@@ -846,7 +852,7 @@ public class TmuxSessionViewModel @Inject constructor(
             startDirectory = target.startDirectory,
             trigger = TmuxConnectTrigger.Reconnect,
         )
-        return true
+        return connectJob
     }
 
     @androidx.annotation.VisibleForTesting
@@ -4767,12 +4773,22 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private suspend fun awaitLiveTmuxClientForSend(): TmuxClient? {
         liveTmuxClientForSendOrNull()?.let { return it }
+        if (
+            _connectionStatus.value is ConnectionStatus.Failed &&
+            isNonRetryableConnectFailure(lastConnectFailureCause)
+        ) {
+            return null
+        }
         when (_connectionStatus.value) {
             is ConnectionStatus.Connecting,
             is ConnectionStatus.Reconnecting,
             is ConnectionStatus.Switching,
             -> Unit
-            else -> if (!reconnect()) return null
+            else -> {
+                val reconnectJob = startReconnectForSend()
+                    ?: return liveTmuxClientForSendOrNull()
+                reconnectJob.join()
+            }
         }
         return withTimeoutOrNull(SEND_SESSION_WAIT_TIMEOUT_MS) {
             while (currentCoroutineContext().isActive) {
@@ -4820,8 +4836,6 @@ public class TmuxSessionViewModel @Inject constructor(
             sendState = com.pocketshell.core.agents.MessageSendState.Pending,
         )
         if (awaitLiveTmuxClientForSend() == null) {
-            appendAgentEvents(paneId, listOf(optimistic))
-            markOptimisticSendFailed(paneId, optimisticId)
             return Result.failure(IllegalStateException("Session is disconnected."))
         }
         appendAgentEvents(paneId, listOf(optimistic))
@@ -4867,9 +4881,18 @@ public class TmuxSessionViewModel @Inject constructor(
         payload: String,
         agent: AgentKind,
     ): Result<Unit> {
+        val client = awaitLiveTmuxClientForSend()
+            ?: return Result.failure(IllegalStateException("Session is disconnected."))
+        return sendAgentPayloadToPaneResult(client, paneId, payload, agent)
+    }
+
+    private suspend fun sendAgentPayloadToPaneResult(
+        client: TmuxClient,
+        paneId: String,
+        payload: String,
+        agent: AgentKind,
+    ): Result<Unit> {
         val payloadBytes = payload.toByteArray(Charsets.UTF_8)
-        val client = clientRef
-            ?: return Result.failure(IllegalStateException("No active tmux client for pane input."))
         if (client.disconnected.value) {
             return Result.failure(IllegalStateException("Tmux client is disconnected."))
         }

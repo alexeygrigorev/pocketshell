@@ -4598,12 +4598,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultMarksOptimisticMessageFailedWhenDisconnected() = runTest {
-        // Issue #494: a disconnected send no longer silently drops the
-        // user's text. The optimistic turn is shown and flipped to Failed
-        // (with a retry affordance), while the result still reports failure
-        // so the unified composer can keep the draft editable. With no
-        // remembered target there is nothing send-time reconnect can dial.
+    fun sendToAgentPaneResultDoesNotAppendOptimisticMessageWhenReconnectCannotStart() = runTest {
+        // Issue #548 follow-up: if send-time reconnect cannot even start
+        // (no remembered target), the unified composer keeps the draft.
+        // Do not also append a failed optimistic row, or the next
+        // successful send can show the same text twice.
         val vm = newVm()
         vm.startAgentConversationForTest("%0", newClaudeDetection())
 
@@ -4611,11 +4610,7 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         assertTrue("disconnected tmux agent send must report failure", result.isFailure)
-        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
-        assertEquals("preserve this prompt", failed.text)
-        assertEquals(ConversationRole.User, failed.role)
-        assertEquals(MessageSendState.Failed, failed.sendState)
-        assertTrue(failed.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX))
+        assertTrue(vm.agentConversations.value["%0"]!!.events.isEmpty())
     }
 
     @Test
@@ -4686,15 +4681,116 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun sendAgentPayloadToPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "codex",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+
+        deadClient.disconnectedSignal.value = true
+        runCurrent()
+
+        val send = async {
+            vm.sendAgentPayloadToPaneResult("%0", "codex terminal send", AgentKind.Codex)
+        }
+        advanceUntilIdle()
+        val result = send.await()
+
+        assertTrue("Codex Terminal-tab Send+Enter must reconnect before send", result.isSuccess)
+        assertEquals(1, connector.connectCount)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'codex terminal send'",
+                "send-keys -t %0 Enter",
+            ),
+            reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
+    fun sendToAgentPaneResultDoesNotRetryNonRetryableFailedConnection() = runTest {
+        val authFailure = UserAuthException("bad key")
+        val connector = FailingLeaseConnector(authFailure)
+        val vm = newVm(
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        deadClient.disconnectedSignal.value = true
+        runCurrent()
+
+        val first = async { vm.sendToAgentPaneResult("%0", "auth blocked") }
+        advanceUntilIdle()
+        assertTrue(first.await().isFailure)
+        assertEquals(1, connector.connectCount)
+        assertTrue(vm.agentConversations.value["%0"]?.events.orEmpty().isEmpty())
+
+        val second = vm.sendToAgentPaneResult("%0", "auth blocked")
+        runCurrent()
+
+        assertTrue("non-retryable failed state must fail immediately", second.isFailure)
+        assertEquals("send must not redial after non-retryable auth failure", 1, connector.connectCount)
+        assertTrue(vm.agentConversations.value["%0"]?.events.orEmpty().isEmpty())
+    }
+
+    @Test
     fun retryFailedAgentSendDropsFailedTurnAndReSendsWithoutDoubleSend() = runTest {
         // Issue #494: retrying a failed tmux send drops the failed
         // placeholder and re-sends. With a live client the re-send inserts
         // a fresh pending turn and submits the keys — exactly one user turn
         // remains (no double-send, no orphaned failed row).
         val vm = newVm()
+        val failingClient = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "send-keys"
+        }
+        vm.attachClientForTest(failingClient)
         vm.startAgentConversationForTest("%0", newClaudeDetection())
 
-        // First attempt: disconnected -> Failed turn.
+        // First attempt: live tmux send error -> Failed turn.
         assertTrue(vm.sendToAgentPaneResult("%0", "retry me").isFailure)
         runCurrent()
         val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message

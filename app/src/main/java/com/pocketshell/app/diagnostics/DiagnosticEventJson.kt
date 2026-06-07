@@ -13,6 +13,35 @@ data class DiagnosticsEvent(
     val metadata: Map<String, Any?> = emptyMap(),
 )
 
+data class DiagnosticEventFilter(
+    val category: String? = null,
+    val name: String? = null,
+    val sinceSequenceExclusive: Long? = null,
+    val maxEvents: Int? = null,
+) {
+    init {
+        require(maxEvents == null || maxEvents > 0) { "maxEvents must be positive when set" }
+    }
+
+    internal fun matches(event: DiagnosticsEvent): Boolean =
+        (category == null || event.category == category) &&
+            (name == null || event.name == name) &&
+            (sinceSequenceExclusive == null || event.sequence > sinceSequenceExclusive)
+
+    internal fun limit(events: List<DiagnosticsEvent>): List<DiagnosticsEvent> =
+        maxEvents?.let(events::takeLast) ?: events
+
+    internal fun limitLines(lines: List<Pair<String, DiagnosticsEvent>>): List<Pair<String, DiagnosticsEvent>> =
+        maxEvents?.let(lines::takeLast) ?: lines
+
+    companion object {
+        val All: DiagnosticEventFilter = DiagnosticEventFilter()
+
+        fun recent(maxEvents: Int): DiagnosticEventFilter =
+            DiagnosticEventFilter(maxEvents = maxEvents)
+    }
+}
+
 internal object DiagnosticEventJson {
     fun encode(event: DiagnosticsEvent): String {
         val root = JSONObject()

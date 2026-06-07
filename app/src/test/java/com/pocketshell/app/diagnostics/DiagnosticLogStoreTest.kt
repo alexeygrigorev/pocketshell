@@ -137,14 +137,59 @@ class DiagnosticLogStoreTest {
         assertEquals(3L, store.lastSequence())
     }
 
-    private fun eventLine(sequence: Long): String =
+    @Test
+    fun `readEvents filters by recent category name and sequence floor`() {
+        val store = newStore()
+        store.appendLine(eventLine(sequence = 1L, category = "app", name = "foreground"))
+        store.appendLine(eventLine(sequence = 2L, category = "connection", name = "connect_start"))
+        store.appendLine(eventLine(sequence = 3L, category = "connection", name = "connect_fail"))
+        store.appendLine(eventLine(sequence = 4L, category = "connection", name = "connect_start"))
+        store.appendLine(eventLine(sequence = 5L, category = "app", name = "background"))
+        store.appendLine(eventLine(sequence = 6L, category = "connection", name = "connect_start"))
+
+        val events = store.readEvents(
+            DiagnosticEventFilter(
+                category = "connection",
+                name = "connect_start",
+                sinceSequenceExclusive = 2L,
+                maxEvents = 2,
+            ),
+        )
+
+        assertEquals(listOf(4L, 6L), events.map { it.sequence })
+    }
+
+    @Test
+    fun `exportSnapshot can write only recent matching events`() {
+        val store = newStore()
+        store.appendLine(eventLine(sequence = 1L, category = "app", name = "foreground"))
+        store.appendLine(eventLine(sequence = 2L, category = "connection", name = "connect_start"))
+        store.appendLine(eventLine(sequence = 3L, category = "connection", name = "connect_fail"))
+        store.appendLine(eventLine(sequence = 4L, category = "connection", name = "connect_start"))
+
+        val exported = store.exportSnapshot(
+            deviceLabel = "Pixel Test",
+            filter = DiagnosticEventFilter(category = "connection", maxEvents = 2),
+        )
+
+        assertNotNull(exported)
+        val exportedEvents = exported!!.readLines().mapNotNull(DiagnosticEventJson::decode)
+        assertEquals(listOf(3L, 4L), exportedEvents.map { it.sequence })
+        assertTrue(exportedEvents.all { it.category == "connection" })
+    }
+
+    private fun eventLine(
+        sequence: Long,
+        category: String = "app",
+        name: String = "event",
+    ): String =
         DiagnosticEventJson.encode(
             DiagnosticsEvent(
                 sequence = sequence,
                 wallClockTime = Instant.parse("2026-06-07T10:15:30Z"),
                 monotonicTimestampNanos = sequence,
-                category = "app",
-                name = "event",
+                category = category,
+                name = name,
             ),
         )
 

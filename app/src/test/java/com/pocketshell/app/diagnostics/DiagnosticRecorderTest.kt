@@ -76,6 +76,23 @@ class DiagnosticRecorderTest {
     }
 
     @Test
+    fun `readEvents can return recent matching events`() = runTest {
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+
+        recorder.record("app", "created")
+        recorder.record("connection", "connect_start")
+        recorder.record("connection", "connect_fail")
+        recorder.record("connection", "connect_start")
+
+        val events = recorder.readEvents(
+            DiagnosticEventFilter.recent(2).copy(category = "connection"),
+        )
+
+        assertEquals(listOf(3L, 4L), events.map { it.sequence })
+        assertTrue(events.all { it.category == "connection" })
+    }
+
+    @Test
     fun `recorder redacts sensitive metadata before export`() = runTest {
         val recorder = DiagnosticRecorder(context, settingsRepository)
 

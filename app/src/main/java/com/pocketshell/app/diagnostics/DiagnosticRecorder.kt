@@ -77,17 +77,17 @@ class DiagnosticRecorder @Inject constructor(
         done.await()
     }
 
-    suspend fun exportSnapshot(): File? {
+    suspend fun exportSnapshot(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): File? {
         flush()
         return withContext(Dispatchers.IO) {
-            store.exportSnapshot(deviceLabel())
+            store.exportSnapshot(deviceLabel(), filter)
         }
     }
 
-    suspend fun readEvents(): List<DiagnosticsEvent> {
+    suspend fun readEvents(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): List<DiagnosticsEvent> {
         flush()
         return withContext(Dispatchers.IO) {
-            store.readEvents()
+            store.readEvents(filter)
         }
     }
 

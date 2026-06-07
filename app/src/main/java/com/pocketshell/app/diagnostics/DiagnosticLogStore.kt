@@ -24,24 +24,45 @@ internal class DiagnosticLogStore(
         }
     }
 
-    fun exportSnapshot(deviceLabel: String = "device"): File? {
+    fun exportSnapshot(
+        deviceLabel: String = "device",
+        filter: DiagnosticEventFilter = DiagnosticEventFilter.All,
+    ): File? {
         if (!logFile.isFile || logFile.length() == 0L) return null
         exportDirectory.mkdirs()
         val file = File(exportDirectory, exportFileName(deviceLabel))
-        logFile.copyTo(file, overwrite = true)
+        if (filter == DiagnosticEventFilter.All) {
+            logFile.copyTo(file, overwrite = true)
+        } else {
+            val lines = readLines(filter)
+            if (lines.isEmpty()) return null
+            file.writeText(lines.joinToString(separator = "\n", postfix = "\n"))
+        }
         return file
     }
 
     fun readText(): String = if (logFile.isFile) logFile.readText() else ""
 
-    fun readEvents(): List<DiagnosticsEvent> =
+    fun readEvents(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): List<DiagnosticsEvent> =
         if (!logFile.isFile) {
             emptyList()
         } else {
-            logFile.readLines().mapNotNull(DiagnosticEventJson::decode)
+            filter.limit(
+                logFile.readLines()
+                    .mapNotNull(DiagnosticEventJson::decode)
+                    .filter(filter::matches),
+            )
         }
 
     fun lastSequence(): Long = readEvents().maxOfOrNull { it.sequence } ?: 0L
+
+    private fun readLines(filter: DiagnosticEventFilter): List<String> =
+        filter.limitLines(
+            logFile.readLines().mapNotNull { line ->
+                val event = DiagnosticEventJson.decode(line) ?: return@mapNotNull null
+                if (filter.matches(event)) line to event else null
+            },
+        ).map { (line, _) -> line }
 
     private fun trimToLimit() {
         if (!logFile.isFile) return

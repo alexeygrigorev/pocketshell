@@ -245,6 +245,8 @@ public class TmuxSessionViewModel @Inject constructor(
     private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
     private var activeAttachMilestone: AttachMilestone? = null
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
+    private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
+    private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
 
     /**
      * Issue #188: one-shot user-facing message for a failed `kill-window`
@@ -338,6 +340,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var eventsJob: Job? = null
     private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
+    private var passiveDisconnectGraceJob: Job? = null
 
     // Issue #440: the cause of the most recent failed connect attempt, set
     // by [failConnectAttempt] and consulted by [scheduleAutoReconnect]. The
@@ -471,6 +474,8 @@ public class TmuxSessionViewModel @Inject constructor(
         startDirectory: String? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
     ) {
+        passiveDisconnectGraceJob?.cancel()
+        passiveDisconnectGraceJob = null
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
@@ -797,6 +802,15 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setAutoReconnectDelaysForTest(delaysMs: List<Long>) {
         autoReconnectDelaysMs = delaysMs
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setPassiveDisconnectRecoveryForTest(
+        graceMs: Long = passiveDisconnectGraceMs,
+        silentReattachTimeoutMs: Long = this.silentReattachTimeoutMs,
+    ) {
+        passiveDisconnectGraceMs = graceMs
+        this.silentReattachTimeoutMs = silentReattachTimeoutMs
     }
 
     private fun refreshReconnectAvailability() {
@@ -1565,6 +1579,8 @@ public class TmuxSessionViewModel @Inject constructor(
         eventsJob = null
         outputOverflowJob?.cancel()
         outputOverflowJob = null
+        passiveDisconnectGraceJob?.cancel()
+        passiveDisconnectGraceJob = null
         disconnectedJob?.cancel()
         disconnectedJob = null
         projectRootsJob?.cancel()
@@ -2513,41 +2529,317 @@ public class TmuxSessionViewModel @Inject constructor(
         disconnectedJob = bridgeScope.launch {
             client.disconnected.collect { dead ->
                 if (!dead) return@collect
-                val current = _connectionStatus.value
-                if (current !is ConnectionStatus.Connected) return@collect
-                // Only react if this is still THE active client. The
-                // `connect()` race-recovery path attaches a fresh
-                // [TmuxClient] and closes the old one inside the same
-                // VM; the old client's disconnected signal must not
-                // overwrite the new client's Connected status.
-                if (clientRef !== client) return@collect
-                // Issue #145: prefer the actionable phrasing — host
-                // coordinates plus "Tap Reconnect to retry." — over the
-                // bare diagnostic so the in-session disconnect band
-                // tells the user both WHERE they were and WHAT to do
-                // next. The screen renders a Reconnect button alongside
-                // this message (see [FailedConnectionRow] in
-                // [TmuxSessionScreen]) gated on [canReconnect]. Logged
-                // under the dedicated tag so the connected
-                // disconnect+reconnect test can correlate with the
-                // connect-attempt counter.
-                Log.w(
-                    ISSUE_145_RECONNECT_TAG,
-                    "tmux-mid-session-disconnect host=${current.host} " +
-                        "port=${current.port} user=${current.user}",
-                )
-                registeredHostId?.let { activeTmuxClients.unregister(it) }
-                registeredHostId = null
-                val reason = "Disconnected from ${current.user}@${current.host}:${current.port}. " +
-                    "Tap Reconnect to retry."
-                val target = activeTarget ?: connectingTarget
-                if (target == null) {
-                    _connectionStatus.value = ConnectionStatus.Failed(reason)
-                } else {
-                    scheduleAutoReconnect(target, reason)
-                }
+                handlePassiveClientDisconnect(client)
             }
         }
+    }
+
+    private fun handlePassiveClientDisconnect(client: TmuxClient) {
+        val current = _connectionStatus.value
+        if (current !is ConnectionStatus.Connected) return
+        // Only react if this is still THE active client. The `connect()`
+        // race-recovery path attaches a fresh [TmuxClient] and closes the
+        // old one inside the same VM; the old client's disconnected signal
+        // must not overwrite the new client's Connected status.
+        if (clientRef !== client) return
+        val target = activeTarget ?: connectingTarget
+        val reason = "Disconnected from ${current.user}@${current.host}:${current.port}. " +
+            "Tap Reconnect to retry."
+        passiveDisconnectGraceJob?.cancel()
+        val graceJob = viewModelScope.launch {
+            val recovered = target != null && silentlyReattachWithinPassiveGrace(
+                staleClient = client,
+                target = target,
+            )
+            if (recovered) {
+                passiveDisconnectGraceJob = null
+                return@launch
+            }
+            passiveDisconnectGraceJob = null
+            surfacePassiveDisconnect(client = client, reason = reason, target = target)
+        }
+        passiveDisconnectGraceJob = graceJob
+        graceJob.invokeOnCompletion {
+            if (passiveDisconnectGraceJob == graceJob) {
+                passiveDisconnectGraceJob = null
+            }
+        }
+    }
+
+    private suspend fun silentlyReattachWithinPassiveGrace(
+        staleClient: TmuxClient,
+        target: ConnectionTarget,
+    ): Boolean {
+        if (passiveDisconnectGraceMs <= 0L) return false
+        val preferFreshTransport = leaseRef != null
+        var transportReattachTried = false
+        return withTimeoutOrNull<Boolean>(passiveDisconnectGraceMs) {
+            while (true) {
+                if (!appActive) return@withTimeoutOrNull false
+                if (_connectionStatus.value !is ConnectionStatus.Connected) return@withTimeoutOrNull false
+                val currentClient = clientRef
+                if (currentClient !== staleClient && currentClient?.disconnected?.value != true) {
+                    return@withTimeoutOrNull true
+                }
+                val shouldProbeTransport = !transportReattachTried
+                if (preferFreshTransport && shouldProbeTransport) {
+                    transportReattachTried = true
+                    if (silentlyReconnectTransportAfterPassiveDisconnect(
+                            staleClient = staleClient,
+                            target = target,
+                            timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
+                        )
+                    ) {
+                        return@withTimeoutOrNull true
+                    }
+                }
+                if (silentlyReattachAfterPassiveDisconnect(
+                        staleClient = staleClient,
+                        target = target,
+                        timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
+                    )
+                ) {
+                    return@withTimeoutOrNull true
+                }
+                if (!preferFreshTransport && shouldProbeTransport) {
+                    transportReattachTried = true
+                    if (silentlyReconnectTransportAfterPassiveDisconnect(
+                            staleClient = staleClient,
+                            target = target,
+                            timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
+                        )
+                    ) {
+                        return@withTimeoutOrNull true
+                    }
+                }
+                val retryDelayMs = PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS
+                delay(retryDelayMs)
+            }
+            false
+        } == true
+    }
+
+    private suspend fun silentlyReattachAfterPassiveDisconnect(
+        staleClient: TmuxClient,
+        target: ConnectionTarget,
+        timeoutMs: Long,
+    ): Boolean {
+        val session = sessionRef?.takeIf { it.isConnected } ?: return false
+        val startedAtMs = SystemClock.elapsedRealtime()
+        val replacement = createTmuxClient(session, target.sessionName, target.startDirectory)
+        return try {
+            val ready = withTimeoutOrNull(timeoutMs) {
+                eventsJob?.cancelAndJoin()
+                eventsJob = null
+                outputOverflowJob?.cancelAndJoin()
+                outputOverflowJob = null
+                disconnectedJob?.cancelAndJoin()
+                disconnectedJob = null
+                runCatching { staleClient.close() }
+                clientRef = replacement
+                bindClientObservers(replacement)
+                replacement.connect()
+                activeAttachMilestone = AttachMilestone(
+                    attempt = TMUX_CONNECT_ATTEMPTS.get(),
+                    sessionName = target.sessionName,
+                    startedAtMs = startedAtMs,
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                )
+                awaitPanesReadyForAttach(
+                    target = target,
+                    attempt = TMUX_CONNECT_ATTEMPTS.get(),
+                    startedAtMs = startedAtMs,
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                )
+                reseedAllVisiblePanes(
+                    RuntimeRefreshGuard(
+                        generation = connectGeneration,
+                        target = target,
+                        client = replacement,
+                    ),
+                )
+                maybeRefreshControlClientSize()
+                true
+            } == true
+            if (!ready) {
+                runCatching { replacement.close() }
+                return false
+            }
+            activeTmuxClients.register(
+                hostId = target.hostId,
+                hostName = target.hostName,
+                hostname = target.host,
+                port = target.port,
+                username = target.user,
+                keyPath = target.keyPath,
+                client = replacement,
+                startDirectoryExists = { directory ->
+                    remoteStartDirectoryExists(session, directory)
+                },
+            )
+            registeredHostId = target.hostId
+            installLifecycleHooks(target.hostId)
+            bindProjectRootsForHost(target.hostId)
+            activeTarget = target
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Connected(
+                target.host,
+                target.port,
+                target.user,
+            )
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-passive-disconnect-silent-reattach " +
+                    targetLogFields(target) +
+                    " elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}",
+            )
+            true
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            Log.w(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-passive-disconnect-silent-reattach-failed " +
+                    "cause=${t.javaClass.simpleName}: ${t.message} " +
+                    targetLogFields(target),
+                t,
+            )
+            runCatching { replacement.close() }
+            false
+        }
+    }
+
+    private suspend fun silentlyReconnectTransportAfterPassiveDisconnect(
+        staleClient: TmuxClient,
+        target: ConnectionTarget,
+        timeoutMs: Long,
+    ): Boolean {
+        val startedAtMs = SystemClock.elapsedRealtime()
+        var acquiredLease: SshLease? = null
+        var replacement: TmuxClient? = null
+        return try {
+            val ready = withTimeoutOrNull(timeoutMs) {
+                val leaseTarget = target.toSshLeaseTarget()
+                withContext(NonCancellable) {
+                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                }
+                val lease = sshLeaseManager.acquire(leaseTarget).getOrThrow()
+                acquiredLease = lease
+                val session = lease.session
+                val newClient = createTmuxClient(session, target.sessionName, target.startDirectory)
+                replacement = newClient
+                eventsJob?.cancelAndJoin()
+                eventsJob = null
+                outputOverflowJob?.cancelAndJoin()
+                outputOverflowJob = null
+                disconnectedJob?.cancelAndJoin()
+                disconnectedJob = null
+                runCatching { staleClient.close() }
+                leaseRef = lease
+                sessionRef = session
+                clientRef = newClient
+                bindClientObservers(newClient)
+                newClient.connect()
+                activeAttachMilestone = AttachMilestone(
+                    attempt = TMUX_CONNECT_ATTEMPTS.get(),
+                    sessionName = target.sessionName,
+                    startedAtMs = startedAtMs,
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                )
+                awaitPanesReadyForAttach(
+                    target = target,
+                    attempt = TMUX_CONNECT_ATTEMPTS.get(),
+                    startedAtMs = startedAtMs,
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                )
+                reseedAllVisiblePanes(
+                    RuntimeRefreshGuard(
+                        generation = connectGeneration,
+                        target = target,
+                        client = newClient,
+                    ),
+                )
+                maybeRefreshControlClientSize()
+                true
+            } == true
+            if (!ready) {
+                runCatching { replacement?.close() }
+                withContext(NonCancellable) {
+                    runCatching { acquiredLease?.release() }
+                }
+                return false
+            }
+            val lease = acquiredLease ?: return false
+            val newClient = replacement ?: return false
+            activeTmuxClients.register(
+                hostId = target.hostId,
+                hostName = target.hostName,
+                hostname = target.host,
+                port = target.port,
+                username = target.user,
+                keyPath = target.keyPath,
+                client = newClient,
+                startDirectoryExists = { directory ->
+                    remoteStartDirectoryExists(lease.session, directory)
+                },
+            )
+            registeredHostId = target.hostId
+            installLifecycleHooks(target.hostId)
+            bindProjectRootsForHost(target.hostId)
+            activeTarget = target
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Connected(
+                target.host,
+                target.port,
+                target.user,
+            )
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-passive-disconnect-silent-transport-reattach " +
+                    targetLogFields(target) +
+                    " elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}",
+            )
+            true
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            Log.w(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-passive-disconnect-silent-transport-reattach-failed " +
+                    "cause=${t.javaClass.simpleName}: ${t.message} " +
+                    targetLogFields(target),
+                t,
+            )
+            runCatching { replacement?.close() }
+            withContext(NonCancellable) {
+                runCatching { acquiredLease?.release() }
+            }
+            false
+        }
+    }
+
+    private fun surfacePassiveDisconnect(
+        client: TmuxClient,
+        reason: String,
+        target: ConnectionTarget?,
+    ) {
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return
+        if (clientRef !== client && clientRef?.disconnected?.value != true) return
+        val current = _connectionStatus.value as? ConnectionStatus.Connected
+        Log.w(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-mid-session-disconnect host=${current?.host ?: target?.host.orEmpty()} " +
+                "port=${current?.port ?: target?.port ?: 0} " +
+                "user=${current?.user ?: target?.user.orEmpty()}",
+        )
+        registeredHostId?.let { activeTmuxClients.unregister(it) }
+        registeredHostId = null
+        if (target != null) {
+            activeTarget = target
+            connectingTarget = null
+            refreshReconnectAvailability()
+        }
+        _connectionStatus.value = ConnectionStatus.Failed(reason)
     }
 
     private fun scheduleAutoReconnect(
@@ -2555,6 +2847,8 @@ public class TmuxSessionViewModel @Inject constructor(
         reason: String,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.AutoReconnect,
     ) {
+        passiveDisconnectGraceJob?.cancel()
+        passiveDisconnectGraceJob = null
         if (!appActive) {
             activeTarget = target
             connectingTarget = null
@@ -5842,6 +6136,8 @@ public class TmuxSessionViewModel @Inject constructor(
         orphanDetachJob = null
         sessionPrewarmJob?.cancelAndJoin()
         sessionPrewarmJob = null
+        passiveDisconnectGraceJob?.cancelAndJoin()
+        passiveDisconnectGraceJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
         outputOverflowJob?.cancelAndJoin()
@@ -5941,6 +6237,8 @@ public class TmuxSessionViewModel @Inject constructor(
         eventsJob = null
         outputOverflowJob?.cancelAndJoin()
         outputOverflowJob = null
+        passiveDisconnectGraceJob?.cancelAndJoin()
+        passiveDisconnectGraceJob = null
         disconnectedJob?.cancelAndJoin()
         disconnectedJob = null
         projectRootsJob?.cancelAndJoin()
@@ -6061,6 +6359,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // the explicit cancel keeps the state field tidy.
         orphanDetachJob?.cancel()
         orphanDetachJob = null
+        passiveDisconnectGraceJob?.cancel()
+        passiveDisconnectGraceJob = null
         eventsJob?.cancel()
         eventsJob = null
         outputOverflowJob?.cancel()
@@ -6857,6 +7157,17 @@ internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
+
+/**
+ * Issue #552: a passive tmux reader EOF during a brief foreground network
+ * starvation is not enough proof that the user should see a disconnect band.
+ * Hold the visible Connected frame while we try a silent same-SSH control
+ * client reattach. A sustained outage still falls through to the existing
+ * auto-reconnect path after this bounded foreground-only window.
+ */
+internal const val PASSIVE_DISCONNECT_GRACE_MS: Long = 8_000L
+internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS: Long = 2_000L
+internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS: Long = 250L
 
 /**
  * Issue #451: how long [TmuxSessionViewModel.stagePromptAttachments] waits

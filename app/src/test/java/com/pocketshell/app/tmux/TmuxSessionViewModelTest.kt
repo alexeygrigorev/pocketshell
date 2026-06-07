@@ -954,6 +954,7 @@ class TmuxSessionViewModelTest {
     fun eofDisconnectUnregistersDeadClientAndPreservesReconnectTarget() = runTest {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -980,23 +981,24 @@ class TmuxSessionViewModelTest {
         assertTrue("Reconnect must remain available after EOF disconnect", vm.canReconnect.value)
         val status = vm.connectionStatus.value
         assertTrue(
-            "expected Reconnecting after EOF disconnect, got $status",
-            status is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+            "expected Failed after EOF disconnect, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
         assertEquals(
             "Disconnected from alex@alpha.example:22. Tap Reconnect to retry.",
-            (status as TmuxSessionViewModel.ConnectionStatus.Reconnecting).reason,
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
         )
     }
 
     @Test
-    fun eofDisconnectAutoReconnectsTmuxSession() = runTest {
+    fun eofDisconnectWaitsForExplicitReconnect() = runTest {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(0L))
         val deadClient = FakeTmuxClient()
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
@@ -1016,12 +1018,164 @@ class TmuxSessionViewModelTest {
         )
 
         deadClient.disconnectedSignal.value = true
+        runCurrent()
+
+        assertEquals(
+            "passive EOF should not start a visible auto-reconnect loop before the user taps Reconnect",
+            0,
+            connector.connectCount,
+        )
+        assertEquals("work", vm.activeSessionNameForTest())
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed)
+        assertTrue("manual reconnect must remain available after EOF disconnect", vm.canReconnect.value)
+
+        assertTrue(vm.reconnect())
         advanceUntilIdle()
 
         assertEquals(1, connector.connectCount)
         assertSame(reconnectClient, registry.clients.value[7L]?.client)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
         assertEquals("work", vm.activeSessionNameForTest())
+    }
+
+    @Test
+    fun briefPassiveEofSilentlyReattachesWithoutDisconnectBandOrConnectAttempt() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 1_000L, silentReattachTimeoutMs = 1_000L)
+        val session = FakeSshSession()
+        val deadClient = FakeTmuxClient()
+        val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            replacementClient
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = session,
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertSame(replacementClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals("work", vm.activeSessionNameForTest())
+        assertEquals(
+            "silent same-SSH reattach must not count as a logical reconnect attempt",
+            1,
+            TMUX_CONNECT_ATTEMPTS.get(),
+        )
+        assertTrue("stale client should be closed after silent reattach", deadClient.closed)
+        assertTrue("replacement control client should be opened", replacementClient.connectCalled)
+    }
+
+    @Test
+    fun passiveEofShowsReconnectOnlyAfterSilentGraceExpires() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = FailingLeaseConnector(IOException("network still unavailable"))
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 500L, silentReattachTimeoutMs = 500L)
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = FakeSshSession(isConnectedValue = false),
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        advanceTimeBy(499L)
+        runCurrent()
+
+        assertTrue(
+            "disconnect band must be suppressed during the bounded grace",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertSame(
+            "dashboard registry should still point at the held client during grace",
+            deadClient,
+            registry.clients.value[7L]?.client,
+        )
+        assertEquals(
+            "silent fresh-transport probing must be bounded during grace",
+            1,
+            connector.connectCount,
+        )
+
+        advanceTimeBy(2L)
+        runCurrent()
+
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "sustained passive EOF should surface the manual reconnect state after grace, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(registry.clients.value.isEmpty())
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+    }
+
+    @Test
+    fun passiveEofSilentlyReacquiresTransportWhenOldSessionIsBroken() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 1_000L, silentReattachTimeoutMs = 1_000L)
+        val deadClient = FakeTmuxClient()
+        val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            replacementClient
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = FakeSshSession(isConnectedValue = false),
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertEquals(1, connector.connectCount)
+        assertSame(replacementClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(
+            "hidden fresh-transport recovery must not increment the user-visible connect counter",
+            1,
+            TMUX_CONNECT_ATTEMPTS.get(),
+        )
+        assertTrue(replacementClient.connectCalled)
     }
 
     @Test
@@ -1389,9 +1543,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun eofDisconnectAutoReconnectStopsAfterBoundedFailures() = runTest {
+    fun eofDisconnectDoesNotBurnAutoReconnectAttempts() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
         val deadClient = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -1410,22 +1566,23 @@ class TmuxSessionViewModelTest {
 
         val status = vm.connectionStatus.value
         assertTrue(
-            "expected bounded auto reconnect failure, got $status",
+            "expected manual reconnect failure state, got $status",
             status is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
-        assertTrue(
+        assertEquals(
+            "Disconnected from alex@alpha.example:22. Tap Reconnect to retry.",
             (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
-            status.message.contains("Auto reconnect failed after 2 attempts."),
         )
-        assertEquals("work", vm.connectingSessionNameForTest())
-        assertTrue("manual reconnect must remain available after bounded auto failure", vm.canReconnect.value)
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+        assertEquals("work", vm.activeSessionNameForTest())
+        assertTrue("manual reconnect must remain available after passive EOF", vm.canReconnect.value)
     }
 
     @Test
-    fun eofDisconnectAutoReconnectAbortsImmediatelyOnNonRetryableAuthFailure() = runTest {
+    fun explicitReconnectAfterEofReportsNonRetryableAuthFailureOnce() = runTest {
         // Issue #440: a non-retryable failure (auth rejection) must NOT burn
-        // the whole backoff schedule — the first failed reconnect attempt
-        // should fall straight back to the manual Reconnect affordance.
+        // the whole backoff schedule when a passive EOF has already surfaced
+        // the manual Reconnect affordance.
         val registry = ActiveTmuxClients()
         val connector = FailingLeaseConnector(
             SshException(
@@ -1437,6 +1594,7 @@ class TmuxSessionViewModelTest {
             registry = registry,
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         // Four delays available — if the abort fails, all four would be used.
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L, 0L))
         val deadClient = FakeTmuxClient()
@@ -1452,10 +1610,16 @@ class TmuxSessionViewModelTest {
         )
 
         deadClient.disconnectedSignal.value = true
+        runCurrent()
+
+        assertEquals(0, connector.connectCount)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed)
+
+        assertTrue(vm.reconnect())
         advanceUntilIdle()
 
         assertEquals(
-            "non-retryable auth failure must stop after a single reconnect attempt",
+            "explicit reconnect after passive EOF must make one SSH attempt",
             1,
             connector.connectCount,
         )
@@ -1467,21 +1631,19 @@ class TmuxSessionViewModelTest {
         val message = (status as TmuxSessionViewModel.ConnectionStatus.Failed).message
         assertTrue(
             "Failed message must explain the non-retryable cause, was: $message",
-            message.contains("authentication failed"),
+            message.contains("auth fail") || message.contains("authentication failed"),
         )
         assertFalse(
             "non-retryable abort must not report exhausting all attempts, was: $message",
             message.contains("Auto reconnect failed after"),
         )
-        assertTrue("manual reconnect must remain available after non-retryable abort", vm.canReconnect.value)
     }
 
     @Test
-    fun eofDisconnectAutoReconnectRetriesTransientFailures() = runTest {
+    fun explicitReconnectAfterEofDoesNotLoopOnTransientFailure() = runTest {
         // Issue #440: a transient transport failure (e.g. connection refused
-        // while the host reboots) is retryable, so the backoff loop keeps
-        // trying. A connection that fails twice then succeeds must recover
-        // without manual input.
+        // while the host reboots) should not become a reconnect storm after a
+        // passive EOF has surfaced the manual Reconnect affordance.
         val registry = ActiveTmuxClients()
         val connector = FailingThenConnectingLeaseConnector(
             failures = listOf(
@@ -1497,6 +1659,7 @@ class TmuxSessionViewModelTest {
             registry = registry,
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
             reconnectClient
@@ -1515,18 +1678,23 @@ class TmuxSessionViewModelTest {
         )
 
         deadClient.disconnectedSignal.value = true
+        runCurrent()
+
+        assertEquals(0, connector.connectCount)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed)
+
+        assertTrue(vm.reconnect())
         advanceUntilIdle()
 
         assertEquals(
-            "transient failure must be retried until the connect succeeds",
-            2,
+            "explicit reconnect after passive EOF should not retry in a tight loop",
+            1,
             connector.connectCount,
         )
         assertTrue(
-            "expected Connected after a retried transient failure, got ${vm.connectionStatus.value}",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            "expected Failed after one transient reconnect failure, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
-        assertSame(reconnectClient, registry.clients.value[7L]?.client)
     }
 
     @Test
@@ -1537,8 +1705,9 @@ class TmuxSessionViewModelTest {
             registry = registry,
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
-        val deadClient = FakeTmuxClient()
+        val client = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,
             hostName = "alpha",
@@ -1547,13 +1716,15 @@ class TmuxSessionViewModelTest {
             user = "alex",
             keyPath = "/keys/a",
             sessionName = "work",
-            client = deadClient,
+            client = client,
         )
 
-        deadClient.disconnectedSignal.value = true
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "validated-default-network-changed"),
+        )
         runCurrent()
         assertTrue(
-            "disconnect must enter retry delay before background",
+            "network reconnect must enter retry delay before background",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
 
@@ -1589,12 +1760,13 @@ class TmuxSessionViewModelTest {
             registry = registry,
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
             reconnectClient
         }
-        val deadClient = FakeTmuxClient()
+        val client = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,
             hostName = "alpha",
@@ -1603,13 +1775,15 @@ class TmuxSessionViewModelTest {
             user = "alex",
             keyPath = "/keys/a",
             sessionName = "work",
-            client = deadClient,
+            client = client,
         )
 
-        deadClient.disconnectedSignal.value = true
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "validated-default-network-changed"),
+        )
         runCurrent()
         assertTrue(
-            "disconnect must be waiting in auto-reconnect delay before background",
+            "network reconnect must be waiting in auto-reconnect delay before background",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
 
@@ -5564,6 +5738,7 @@ class TmuxSessionViewModelTest {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val session = FakeSshSession()
         val clientA = FakeTmuxClient()
@@ -5621,7 +5796,7 @@ class TmuxSessionViewModelTest {
 
         assertTrue(
             "restored cached client must use the normal disconnected observer",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
         assertNull(registry.clients.value[1L])
     }

@@ -150,7 +150,8 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
 
         val matcher = Patterns.WEB_URL.matcher(line)
         while (matcher.find()) {
-            var raw = matcher.group() ?: continue
+            val start = matcher.start()
+            var raw = line.substring(start, extendSchemedUrlEnd(line, matcher.end()))
             // Only schemed URLs. Bare-domain matches (`example.com`) are
             // skipped — they are almost always mentioned-in-prose, not a
             // tap-to-open target.
@@ -167,7 +168,6 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
             if (endTrim != raw.length) {
                 raw = raw.substring(0, endTrim)
             }
-            val start = matcher.start()
             claimedStarts += start
             // Map the (possibly wrapped) logical span back onto every visual row
             // it covers, emitting one region per row — all carrying the FULL url
@@ -218,6 +218,18 @@ private fun emitUrlRegions(
         )
     }
 }
+
+private fun extendSchemedUrlEnd(line: String, initialEnd: Int): Int {
+    var end = initialEnd
+    while (end < line.length && line[end] !in URL_HARD_DELIMITERS) {
+        end += 1
+    }
+    return end
+}
+
+private val URL_HARD_DELIMITERS: Set<Char> = setOf(
+    ' ', '\t', '\n', '\r', '`', '"', '\'', '<', '>',
+)
 
 /** Punctuation characters stripped from URL tails — matches the smart-selection matcher. */
 private val URL_TRAILING_PUNCTUATION: Set<Char> = setOf(

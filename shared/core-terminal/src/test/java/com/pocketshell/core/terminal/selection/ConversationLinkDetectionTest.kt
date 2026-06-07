@@ -80,6 +80,25 @@ class ConversationLinkDetectionTest {
         assertEquals(ConversationLinkKind.FILE, out[0].kind)
     }
 
+    @Test
+    fun detectsLineWrappedGeneratedImageFileUriAsDecodedFileLink() {
+        val decoded =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1.png"
+        val uri = "file://$decoded"
+        val splitAt = uri.indexOf("ig_")
+        val line = "generated image: ${uri.take(splitAt)}\n  ${uri.drop(splitAt)}"
+
+        val out = links(line)
+
+        assertEquals(1, out.size)
+        assertEquals(decoded, out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+        assertEquals(line.indexOf("file://"), out[0].start)
+        assertEquals(line.length, out[0].endExclusive)
+    }
+
     // --- Directories --------------------------------------------------------
 
     @Test
@@ -113,6 +132,32 @@ class ConversationLinkDetectionTest {
         val out = links("docs at https://github.com/owner/repo here")
         assertEquals(1, out.size)
         assertEquals("https://github.com/owner/repo", out[0].text)
+        assertEquals(ConversationLinkKind.URL, out[0].kind)
+    }
+
+    @Test
+    fun detectsLineWrappedHttpsUrlAsOneUrlLink() {
+        val url =
+            "https://github.com/alexeygrigorev/pocketshell/issues/558" +
+                "#issuecomment-4638326371"
+        val splitAt = url.indexOf("#issuecomment") + 4
+        val line = "docs at ${url.take(splitAt)}\n  ${url.drop(splitAt)}"
+
+        val out = links(line)
+
+        assertEquals(1, out.size)
+        assertEquals(url, out[0].text)
+        assertEquals(ConversationLinkKind.URL, out[0].kind)
+        assertEquals(line.indexOf("https://"), out[0].start)
+        assertEquals(line.length, out[0].endExclusive)
+    }
+
+    @Test
+    fun ordinaryParagraphBreakDoesNotExtendUrlIntoNextLine() {
+        val out = links("docs at https://x.io/y\nand then continue")
+
+        assertEquals(1, out.size)
+        assertEquals("https://x.io/y", out[0].text)
         assertEquals(ConversationLinkKind.URL, out[0].kind)
     }
 

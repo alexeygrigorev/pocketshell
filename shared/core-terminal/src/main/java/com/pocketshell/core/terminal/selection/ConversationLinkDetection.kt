@@ -68,32 +68,101 @@ public fun detectConversationLinks(line: String): List<ConversationLink> {
     fun overlapsClaimed(start: Int, endExclusive: Int): Boolean =
         claimed.any { start < it.last + 1 && it.first < endExclusive }
 
-    // 1. URLs (schemed http/https + loopback literals), reusing the terminal
-    //    URL shapes.
-    for (url in detectUrlsInLine(line)) {
-        if (overlapsClaimed(url.start, url.endExclusive)) continue
-        claimed += url.start until url.endExclusive
-        out += ConversationLink(url.text, url.start, url.endExclusive, ConversationLinkKind.URL)
+    fun addCandidate(candidate: ConversationScanText) {
+        // 1. URLs (schemed http/https + loopback literals), reusing the
+        //    terminal URL shapes.
+        for (url in detectUrlsInLine(candidate.text)) {
+            val start = candidate.originalOffset(url.start) ?: continue
+            val endExclusive = candidate.originalEndExclusive(url.endExclusive) ?: continue
+            if (overlapsClaimed(start, endExclusive)) continue
+            claimed += start until endExclusive
+            out += ConversationLink(url.text, start, endExclusive, ConversationLinkKind.URL)
+        }
+
+        // 2. File paths — exactly the terminal's conservative detector,
+        //    excluding any URL spans already claimed.
+        val urlSpans = out.filter { it.kind == ConversationLinkKind.URL }
+            .map { it.start until it.endExclusive }
+        for (path in detectFilePathsInLine(candidate.text, candidate.toScannedRanges(urlSpans))) {
+            val start = candidate.originalOffset(path.start) ?: continue
+            val endExclusive = candidate.originalEndExclusive(path.endExclusive) ?: continue
+            if (overlapsClaimed(start, endExclusive)) continue
+            claimed += start until endExclusive
+            out += ConversationLink(path.path, start, endExclusive, ConversationLinkKind.FILE)
+        }
+
+        // 3. Directories — explicit-root paths without a known file extension.
+        for (dir in detectDirectoriesInLine(candidate.text)) {
+            val start = candidate.originalOffset(dir.start) ?: continue
+            val endExclusive = candidate.originalEndExclusive(dir.endExclusive) ?: continue
+            if (overlapsClaimed(start, endExclusive)) continue
+            claimed += start until endExclusive
+            out += ConversationLink(dir.path, start, endExclusive, ConversationLinkKind.DIRECTORY)
+        }
     }
 
-    // 2. File paths — exactly the terminal's conservative detector, excluding
-    //    any URL spans already claimed.
-    val urlSpans = out.filter { it.kind == ConversationLinkKind.URL }
-        .map { it.start until it.endExclusive }
-    for (path in detectFilePathsInLine(line, urlSpans)) {
-        if (overlapsClaimed(path.start, path.endExclusive)) continue
-        claimed += path.start until path.endExclusive
-        out += ConversationLink(path.path, path.start, path.endExclusive, ConversationLinkKind.FILE)
+    val compacted = ConversationScanText.compactSoftBreaks(line)
+    if (compacted != null) {
+        addCandidate(compacted)
     }
-
-    // 3. Directories — explicit-root paths without a known file extension.
-    for (dir in detectDirectoriesInLine(line)) {
-        if (overlapsClaimed(dir.start, dir.endExclusive)) continue
-        claimed += dir.start until dir.endExclusive
-        out += ConversationLink(dir.path, dir.start, dir.endExclusive, ConversationLinkKind.DIRECTORY)
-    }
+    addCandidate(ConversationScanText.original(line))
 
     return out.sortedBy { it.start }
+}
+
+private data class ConversationScanText(
+    val text: String,
+    val originalOffsets: IntArray,
+) {
+    fun originalOffset(scannedOffset: Int): Int? =
+        originalOffsets.getOrNull(scannedOffset)
+
+    fun originalEndExclusive(scannedEndExclusive: Int): Int? {
+        if (scannedEndExclusive <= 0) return null
+        return originalOffsets.getOrNull(scannedEndExclusive - 1)?.plus(1)
+    }
+
+    fun toScannedRanges(originalRanges: List<IntRange>): List<IntRange> =
+        originalRanges.mapNotNull { range ->
+            val start = originalOffsets.indexOfFirst { it >= range.first }
+            if (start < 0) return@mapNotNull null
+            val endExclusive = originalOffsets.indexOfFirst { it >= range.last + 1 }
+                .let { if (it < 0) originalOffsets.size else it }
+            if (start >= endExclusive) null else start until endExclusive
+        }
+
+    companion object {
+        fun original(text: String): ConversationScanText =
+            ConversationScanText(text, IntArray(text.length) { it })
+
+        fun compactSoftBreaks(text: String): ConversationScanText? {
+            if (text.indexOf('\n') < 0 && text.indexOf('\r') < 0) return null
+            val compacted = StringBuilder(text.length)
+            val offsets = ArrayList<Int>(text.length)
+            var index = 0
+            var changed = false
+            while (index < text.length) {
+                val ch = text[index]
+                if (ch == '\r' || ch == '\n') {
+                    var next = index + 1
+                    if (ch == '\r' && text.getOrNull(next) == '\n') next += 1
+                    var afterIndent = next
+                    while (text.getOrNull(afterIndent) == ' ' || text.getOrNull(afterIndent) == '\t') {
+                        afterIndent += 1
+                    }
+                    if (afterIndent > next) {
+                        changed = true
+                        index = afterIndent
+                        continue
+                    }
+                }
+                compacted.append(ch)
+                offsets += index
+                index += 1
+            }
+            return if (changed) ConversationScanText(compacted.toString(), offsets.toIntArray()) else null
+        }
+    }
 }
 
 /** A `(text, start, endExclusive)` URL match on a plain string. */
@@ -112,7 +181,8 @@ private fun detectUrlsInLine(line: String): List<DetectedUrl> {
 
     val matcher = Patterns.WEB_URL.matcher(line)
     while (matcher.find()) {
-        var raw = matcher.group() ?: continue
+        val start = matcher.start()
+        var raw = line.substring(start, extendSchemedUrlEnd(line, matcher.end()))
         if (!(raw.startsWith("http://", ignoreCase = true) ||
                 raw.startsWith("https://", ignoreCase = true))
         ) {
@@ -122,7 +192,6 @@ private fun detectUrlsInLine(line: String): List<DetectedUrl> {
         while (endTrim > 0 && raw[endTrim - 1] in CONVO_URL_TRAILING_PUNCTUATION) endTrim--
         if (endTrim <= 0) continue
         if (endTrim != raw.length) raw = raw.substring(0, endTrim)
-        val start = matcher.start()
         claimedStarts += start
         out += DetectedUrl(raw, start, start + raw.length)
     }
@@ -184,6 +253,18 @@ private val CONVO_URL_TRAILING_PUNCTUATION: Set<Char> = setOf(
 
 private val DIR_TRAILING_PUNCTUATION: Set<Char> = setOf(
     '.', ',', ';', ':', ')', ']', '}', '!', '?', '\'', '"', '>', '<',
+)
+
+private fun extendSchemedUrlEnd(line: String, initialEnd: Int): Int {
+    var end = initialEnd
+    while (end < line.length && line[end] !in URL_HARD_DELIMITERS) {
+        end += 1
+    }
+    return end
+}
+
+private val URL_HARD_DELIMITERS: Set<Char> = setOf(
+    ' ', '\t', '\n', '\r', '`', '"', '\'', '<', '>',
 )
 
 /**

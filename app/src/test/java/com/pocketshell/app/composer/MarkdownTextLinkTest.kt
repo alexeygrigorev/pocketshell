@@ -76,6 +76,30 @@ class MarkdownTextLinkTest {
     }
 
     @Test
+    fun lineWrappedAttachmentBulletBecomesOneClickableHomeRelativeFileLink() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-course-management-platform/" +
+                "20260607-115723-01-Screenshot_20260607-115718.png"
+        val bullet = parseMarkdownBlocks(
+            """
+            - ~/.pocketshell/attachments/host-1-git-course-management-
+              platform/20260607-115723-01-Screenshot_20260607-115718.png
+            """.trimIndent(),
+        ).single() as MarkdownBlock.Bullet
+        val tapped = mutableListOf<ConversationLink>()
+
+        val rendered = renderInline(bullet.text) { tapped += it }
+        val links = clickableLinks(rendered)
+        assertEquals(1, links.size)
+
+        links[0].linkInteractionListener?.onClick(links[0])
+        assertEquals(1, tapped.size)
+        assertEquals(ConversationLinkKind.FILE, tapped[0].kind)
+        assertEquals(attachment, tapped[0].text)
+        assertTrue(tapped[0].text.startsWith("~/"))
+    }
+
+    @Test
     fun noLinkTapHandlerLeavesTextWithoutClickableLinks() {
         val rendered = renderInline("Wrote out/report.png to disk")
         assertTrue(clickableLinks(rendered).isEmpty())

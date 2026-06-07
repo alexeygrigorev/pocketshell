@@ -240,18 +240,30 @@ internal fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
         val unordered = UnorderedBulletRegex.matchEntire(line)
         if (unordered != null) {
             flushParagraph()
-            blocks += MarkdownBlock.Bullet("•", unordered.groupValues[2].trim())
             index += 1
+            val text = StringBuilder(unordered.groupValues[2].trim())
+            while (index < lines.size && isIndentedContinuationLine(lines[index])) {
+                text.append('\n')
+                text.append(lines[index].trimStart())
+                index += 1
+            }
+            blocks += MarkdownBlock.Bullet("•", text.toString())
             continue
         }
         val ordered = OrderedBulletRegex.matchEntire(line)
         if (ordered != null) {
             flushParagraph()
+            index += 1
+            val text = StringBuilder(ordered.groupValues[3].trim())
+            while (index < lines.size && isIndentedContinuationLine(lines[index])) {
+                text.append('\n')
+                text.append(lines[index].trimStart())
+                index += 1
+            }
             blocks += MarkdownBlock.Bullet(
                 marker = "${ordered.groupValues[2]}.",
-                text = ordered.groupValues[3].trim(),
+                text = text.toString(),
             )
-            index += 1
             continue
         }
         if (paragraph.isNotEmpty()) paragraph.append('\n')
@@ -261,6 +273,13 @@ internal fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
     flushParagraph()
     return blocks
 }
+
+private fun isIndentedContinuationLine(line: String): Boolean =
+    line.isNotBlank() &&
+        (line.startsWith(" ") || line.startsWith("\t")) &&
+        HeadingRegex.matchEntire(line.trimStart()) == null &&
+        UnorderedBulletRegex.matchEntire(line) == null &&
+        OrderedBulletRegex.matchEntire(line) == null
 
 /**
  * Build a Compose [AnnotatedString] from a Markdown line. Visible for

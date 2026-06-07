@@ -241,7 +241,10 @@ class App : Application() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(terminalLifecycleObserver)
         terminalNetworkScope.launch {
             terminalNetworkObserver.changes.collect { change ->
-                when (val decision = terminalNetworkLifecycleGate.onNetworkChange(change)) {
+                when (val decision = terminalNetworkLifecycleGate.onNetworkChange(
+                    change = change,
+                    hasLiveTerminalRuntime = hasLiveTerminalRuntime(),
+                )) {
                     is TerminalNetworkDecision.Dispatch ->
                         dispatchTerminalNetworkChange(decision.change, decision.gateDiagnostics)
                     is TerminalNetworkDecision.Defer ->
@@ -414,15 +417,17 @@ internal class TerminalNetworkLifecycleGate(
     private var processForeground: Boolean = false
     private var foregroundResumePending: Boolean = false
     private var pendingTerminalNetworkChange: TerminalNetworkChange? = null
-    // Android can deliver the background interval's default-network callback
-    // after ON_START. Suppress only one callback within this bounded
-    // attribution window; later active foreground handoffs still dispatch.
-    private var suppressPostResumeNetworkChangeUntilMillis: Long? = null
+    private var backgroundCycleId: Long = 0L
+    // Android can deliver default-network callbacks caused by the just-ended
+    // background interval after ON_START. Keep suppressing callbacks for that
+    // same cycle until the bounded attribution window expires.
+    private var postResumeNetworkSuppression: PostResumeNetworkSuppression? = null
 
     fun onBackground() {
+        backgroundCycleId += 1L
         processForeground = false
         foregroundResumePending = false
-        suppressPostResumeNetworkChangeUntilMillis = null
+        postResumeNetworkSuppression = null
     }
 
     fun onForegroundResumeStarted() {
@@ -442,9 +447,12 @@ internal class TerminalNetworkLifecycleGate(
             pendingChange = pendingChange,
             hasLiveTerminalRuntime = hasLiveTerminalRuntime,
         )
-        suppressPostResumeNetworkChangeUntilMillis =
-            if (resumedWithinGrace && hasLiveTerminalRuntime && pendingChange == null) {
-                nowMillis() + POST_RESUME_NETWORK_ATTRIBUTION_MILLIS
+        postResumeNetworkSuppression =
+            if (resumedWithinGrace && hasLiveTerminalRuntime) {
+                PostResumeNetworkSuppression(
+                    backgroundCycleId = backgroundCycleId,
+                    untilMillis = nowMillis() + POST_RESUME_NETWORK_ATTRIBUTION_MILLIS,
+                )
             } else {
                 null
             }
@@ -462,6 +470,7 @@ internal class TerminalNetworkLifecycleGate(
                     foregroundResumePending = false,
                     resumedWithinGrace = resumedWithinGrace,
                     hasLiveTerminalRuntime = hasLiveTerminalRuntime,
+                    backgroundCycleId = backgroundCycleId,
                 ),
             )
         } else {
@@ -478,16 +487,19 @@ internal class TerminalNetworkLifecycleGate(
                     foregroundResumePending = false,
                     resumedWithinGrace = resumedWithinGrace,
                     hasLiveTerminalRuntime = hasLiveTerminalRuntime,
+                    backgroundCycleId = backgroundCycleId,
                 ),
             )
         }
     }
 
-    fun onNetworkChange(change: TerminalNetworkChange): TerminalNetworkDecision {
-        val suppressionDeadline = suppressPostResumeNetworkChangeUntilMillis
-        if (suppressionDeadline != null) {
-            suppressPostResumeNetworkChangeUntilMillis = null
-            if (nowMillis() <= suppressionDeadline) {
+    fun onNetworkChange(
+        change: TerminalNetworkChange,
+        hasLiveTerminalRuntime: Boolean = true,
+    ): TerminalNetworkDecision {
+        val suppression = postResumeNetworkSuppression
+        if (suppression != null) {
+            if (nowMillis() <= suppression.untilMillis && hasLiveTerminalRuntime) {
                 return TerminalNetworkDecision.Suppress(
                     change,
                     gateDiagnostics = TerminalNetworkGateDiagnostics(
@@ -497,9 +509,11 @@ internal class TerminalNetworkLifecycleGate(
                         foregroundResumePending = foregroundResumePending,
                         resumedWithinGrace = true,
                         hasLiveTerminalRuntime = true,
+                        backgroundCycleId = suppression.backgroundCycleId,
                     ),
                 )
             }
+            postResumeNetworkSuppression = null
         }
 
         return if (processForeground && !foregroundResumePending) {
@@ -510,6 +524,8 @@ internal class TerminalNetworkLifecycleGate(
                     reason = "foreground_active",
                     processForeground = processForeground,
                     foregroundResumePending = foregroundResumePending,
+                    hasLiveTerminalRuntime = hasLiveTerminalRuntime,
+                    backgroundCycleId = backgroundCycleId,
                 ),
             )
         } else {
@@ -525,10 +541,17 @@ internal class TerminalNetworkLifecycleGate(
                     },
                     processForeground = processForeground,
                     foregroundResumePending = foregroundResumePending,
+                    hasLiveTerminalRuntime = hasLiveTerminalRuntime,
+                    backgroundCycleId = backgroundCycleId,
                 ),
             )
         }
     }
+
+    private data class PostResumeNetworkSuppression(
+        val backgroundCycleId: Long,
+        val untilMillis: Long,
+    )
 }
 
 internal data class TerminalNetworkGateDiagnostics(
@@ -538,6 +561,7 @@ internal data class TerminalNetworkGateDiagnostics(
     val foregroundResumePending: Boolean,
     val resumedWithinGrace: Boolean? = null,
     val hasLiveTerminalRuntime: Boolean? = null,
+    val backgroundCycleId: Long? = null,
 ) {
     fun diagnosticFields(): List<Pair<String, Any?>> =
         buildList {
@@ -547,6 +571,7 @@ internal data class TerminalNetworkGateDiagnostics(
             add("foregroundResumePending" to foregroundResumePending)
             resumedWithinGrace?.let { add("resumedWithinGrace" to it) }
             hasLiveTerminalRuntime?.let { add("hasLiveTerminalRuntime" to it) }
+            backgroundCycleId?.let { add("backgroundCycleId" to it) }
         }
 }
 

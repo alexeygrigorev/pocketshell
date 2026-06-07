@@ -538,7 +538,7 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
-    fun `late post resume network callback over one second after within grace live runtime does not fan out`() = runTest {
+    fun `late post resume network callbacks within grace live runtime do not fan out`() = runTest {
         val events = mutableListOf<String>()
         val activeTmuxClients = ActiveTmuxClients()
         activeTmuxClients.registerLifecycleHooks(
@@ -556,6 +556,13 @@ class BackgroundGraceControllerTest {
             current = TerminalNetworkSnapshot.Validated("cell"),
             previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
             reason = "late-background-default-network-capabilities",
+        )
+        val secondChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("cell"),
+            current = TerminalNetworkSnapshot.Validated("wifi"),
+            previousValidated = TerminalNetworkSnapshot.Validated("cell"),
+            reason = "late-background-network-available",
+            sequence = 2L,
         )
 
         gate.onBackground()
@@ -583,11 +590,70 @@ class BackgroundGraceControllerTest {
         assertEquals("post_resume_within_grace_live_runtime", suppress.gateDiagnostics.reason)
         assertEquals(true, suppress.gateDiagnostics.resumedWithinGrace)
         assertEquals(true, suppress.gateDiagnostics.hasLiveTerminalRuntime)
-        assertEquals("late post-resume callback must not fan out to terminal reconnect", emptyList<String>(), events)
+        assertEquals(1L, suppress.gateDiagnostics.backgroundCycleId)
+
+        now += 1_000L
+        val secondLateDecision = gate.onNetworkChange(secondChange)
+        if (secondLateDecision is TerminalNetworkDecision.Dispatch) {
+            activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(secondLateDecision.change) }
+        }
+        val secondSuppress = secondLateDecision as TerminalNetworkDecision.Suppress
+        assertEquals(
+            "all late callbacks inside the attribution window must remain suppressed for the same background cycle",
+            secondChange,
+            secondSuppress.change,
+        )
+        assertEquals("post_resume_within_grace_live_runtime", secondSuppress.gateDiagnostics.reason)
+        assertEquals(1L, secondSuppress.gateDiagnostics.backgroundCycleId)
+        assertEquals("late post-resume callbacks must not fan out to terminal reconnect", emptyList<String>(), events)
     }
 
     @Test
-    fun `second foreground handoff dispatches after one post resume suppression`() {
+    fun `suppressed pending background change still arms post resume suppression`() {
+        var now = 20_000L
+        val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
+        val pendingBackgroundChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "background-wifi-cellular-handoff",
+        )
+        val lateBackgroundChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("cell"),
+            current = TerminalNetworkSnapshot.Validated("wifi"),
+            previousValidated = TerminalNetworkSnapshot.Validated("cell"),
+            reason = "late-background-default-network-capabilities",
+            sequence = 2L,
+        )
+
+        gate.onBackground()
+        assertTrue(gate.onNetworkChange(pendingBackgroundChange) is TerminalNetworkDecision.Defer)
+        gate.onForegroundResumeStarted()
+        val foregroundDecision = gate.onForegroundResumeFinished(
+            resumedWithinGrace = true,
+            hasLiveTerminalRuntime = true,
+        ) as TerminalNetworkDecision.Suppress
+        assertEquals(
+            "the pending background handoff must be consumed without forcing a live runtime reconnect",
+            pendingBackgroundChange,
+            foregroundDecision.change,
+        )
+        assertEquals("within_grace_live_runtime", foregroundDecision.gateDiagnostics.reason)
+        assertEquals(1L, foregroundDecision.gateDiagnostics.backgroundCycleId)
+
+        now += 1_500L
+        val lateDecision = gate.onNetworkChange(lateBackgroundChange) as TerminalNetworkDecision.Suppress
+        assertEquals(
+            "suppressing a pending change must still suppress later callbacks from that same background cycle",
+            lateBackgroundChange,
+            lateDecision.change,
+        )
+        assertEquals("post_resume_within_grace_live_runtime", lateDecision.gateDiagnostics.reason)
+        assertEquals(1L, lateDecision.gateDiagnostics.backgroundCycleId)
+    }
+
+    @Test
+    fun `foreground handoff after post resume attribution window dispatches after earlier suppression`() {
         var now = 20_000L
         val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
         val lateBackgroundChange = terminalNetworkChange(
@@ -616,9 +682,10 @@ class BackgroundGraceControllerTest {
         now += 1_500L
         assertTrue(gate.onNetworkChange(lateBackgroundChange) is TerminalNetworkDecision.Suppress)
 
+        now += POST_RESUME_NETWORK_ATTRIBUTION_MILLIS + 1
         val foregroundDecision = gate.onNetworkChange(foregroundChange) as TerminalNetworkDecision.Dispatch
         assertEquals(
-            "only the first late callback is suppressed; later foreground handoffs must still reconnect",
+            "a real foreground handoff after the bounded attribution window must still reconnect",
             foregroundChange,
             foregroundDecision.change,
         )

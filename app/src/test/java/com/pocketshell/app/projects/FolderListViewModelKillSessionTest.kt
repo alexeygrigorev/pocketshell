@@ -244,6 +244,71 @@ class FolderListViewModelKillSessionTest {
         }
     }
 
+    @Test
+    fun renameSessionFromTreeUpdatesRowAndGateway() = runTest {
+        val signals = SessionLifecycleSignals()
+        val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+            assertEquals(setOf("alpha", "beta"), readySessionNames(vm))
+
+            vm.renameSession("beta", "renamed")
+            runCurrent()
+
+            assertEquals(
+                "gateway must be asked to rename the targeted session",
+                listOf("beta" to "renamed"),
+                gateway.renamedSessionNames,
+            )
+            assertEquals(
+                "renamed row should replace the old name in the tree",
+                setOf("alpha", "renamed"),
+                readySessionNames(vm),
+            )
+            assertTrue(
+                "rename success should surface a visible action status",
+                vm.actionStatus.value is FolderActionStatus.Succeeded,
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun failedRenameKeepsOriginalRow() = runTest {
+        val signals = SessionLifecycleSignals()
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha"), sessionRow("beta")),
+            renameSucceeds = false,
+        )
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+
+            vm.renameSession("beta", "renamed")
+            runCurrent()
+
+            assertEquals(
+                "a failed rename must leave the original row visible",
+                setOf("alpha", "beta"),
+                readySessionNames(vm),
+            )
+            assertTrue(
+                "a failed rename surfaces an error action status",
+                vm.actionStatus.value is FolderActionStatus.Failed,
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
     private fun TestScope.launchKilledCollector(
         signals: SessionLifecycleSignals,
         sink: MutableList<KilledSession>,
@@ -309,9 +374,12 @@ class FolderListViewModelKillSessionTest {
         // the gateway's reported set (the next probe agrees the kill landed);
         // when false it fails so the failure path can be asserted.
         @Volatile var killSucceeds: Boolean = true,
+        @Volatile var renameSucceeds: Boolean = true,
     ) : FolderListGateway {
         @Volatile
         var killedSessionNames: MutableList<String> = mutableListOf()
+        @Volatile
+        var renamedSessionNames: MutableList<Pair<String, String>> = mutableListOf()
 
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
@@ -356,6 +424,23 @@ class FolderListViewModelKillSessionTest {
             }
             killedSessionNames.add(sessionName)
             rows = rows.filterNot { it.sessionName == sessionName }
+            return Result.success(Unit)
+        }
+
+        override suspend fun renameSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            oldName: String,
+            newName: String,
+        ): Result<Unit> {
+            if (!renameSucceeds) {
+                return Result.failure(RuntimeException("rename failed"))
+            }
+            renamedSessionNames.add(oldName to newName)
+            rows = rows.map { row ->
+                if (row.sessionName == oldName) row.copy(sessionName = newName) else row
+            }
             return Result.success(Unit)
         }
     }

@@ -673,6 +673,58 @@ class FolderListViewModel internal constructor(
         }
     }
 
+    fun renameSession(oldName: String, newName: String) {
+        val params = bound ?: return
+        val oldTarget = oldName.trim()
+        val newTarget = newName.trim()
+        if (oldTarget.isEmpty() || newTarget.isEmpty() || oldTarget == newTarget) return
+        viewModelScope.launch {
+            _actionStatus.value = FolderActionStatus.Running("Renaming $oldTarget")
+            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
+                _actionStatus.value = FolderActionStatus.Failed("Host not found.")
+                return@launch
+            }
+            val result = gateway.renameSession(
+                host = host,
+                keyPath = params.keyPath,
+                passphrase = params.passphrase,
+                oldName = oldTarget,
+                newName = newTarget,
+            )
+            result.fold(
+                onSuccess = {
+                    _actionStatus.value = FolderActionStatus.Succeeded("Renamed $oldTarget to $newTarget")
+                    renameSessionSnapshot(oldTarget = oldTarget, newTarget = newTarget)
+                    refresh()
+                },
+                onFailure = { error ->
+                    _actionStatus.value = FolderActionStatus.Failed(
+                        "Couldn't rename $oldTarget: ${error.message ?: error.javaClass.simpleName}",
+                    )
+                },
+            )
+        }
+    }
+
+    private fun renameSessionSnapshot(oldTarget: String, newTarget: String) {
+        if (!hasSessionProbeSnapshot) return
+        var changed = false
+        lastSessions = lastSessions.map { session ->
+            if (session.sessionName == oldTarget) {
+                changed = true
+                session.copy(sessionName = newTarget)
+            } else {
+                session
+            }
+        }
+        val folderPath = lastSessionFolderPaths[oldTarget]
+        if (folderPath != null) {
+            lastSessionFolderPaths = lastSessionFolderPaths - oldTarget + (newTarget to folderPath)
+            changed = true
+        }
+        if (changed) emitReady()
+    }
+
     fun createEmptyProject(parentPath: String, folderName: String) {
         val params = bound ?: return
         viewModelScope.launch {

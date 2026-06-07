@@ -212,6 +212,7 @@ fun FolderListScreen(
     // Issue #518: the session pending a "Stop session" confirmation. Non-null
     // means the confirm dialog is up; confirming kills it, Cancel clears it.
     var stopSessionTarget by remember { mutableStateOf<String?>(null) }
+    var renameSessionTarget by remember { mutableStateOf<String?>(null) }
     var showAssistant by remember { mutableStateOf(false) }
     var dictationTarget by remember { mutableStateOf(AssistantDictationTarget.Prompt) }
     var dictationEventId by remember { mutableStateOf(0L) }
@@ -322,6 +323,7 @@ fun FolderListScreen(
                             windowIndex,
                         )
                     },
+                    onRenameSession = { sessionName -> renameSessionTarget = sessionName },
                     onStopSession = { sessionName -> stopSessionTarget = sessionName },
                     onFolderActions = { row ->
                         // Copy-source set = every real (non-untracked)
@@ -509,6 +511,17 @@ fun FolderListScreen(
             onConfirm = {
                 stopSessionTarget = null
                 viewModel.killSession(sessionName)
+            },
+        )
+    }
+
+    renameSessionTarget?.let { sessionName ->
+        RenameSessionDialog(
+            sessionName = sessionName,
+            onDismiss = { renameSessionTarget = null },
+            onConfirm = { newName ->
+                renameSessionTarget = null
+                viewModel.renameSession(sessionName, newName)
             },
         )
     }
@@ -904,6 +917,7 @@ private fun FolderListContent(
     onDismissActionStatus: () -> Unit,
     onOpenPortForwarding: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
+    onRenameSession: (sessionName: String) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
@@ -1004,6 +1018,7 @@ private fun FolderListContent(
                                     null,
                                 )
                             },
+                            onRename = { onRenameSession(session.sessionName) },
                             onStop = { onStopSession(session.sessionName) },
                         )
                     }
@@ -1040,6 +1055,7 @@ private fun FolderListContent(
                                     null,
                                 )
                             },
+                            onRename = { onRenameSession(session.sessionName) },
                             onStop = { onStopSession(session.sessionName) },
                         )
                     }
@@ -1055,6 +1071,7 @@ private fun FolderListContent(
                     root = root,
                     expandedProjectPaths = expandedProjectPaths,
                     onSessionClick = onSessionClick,
+                    onRenameSession = onRenameSession,
                     onStopSession = onStopSession,
                     onFolderActions = onFolderActions,
                     onCreateInRoot = onCreateInRoot,
@@ -1250,6 +1267,7 @@ private fun FlatSessionRow(
     folderLabel: String,
     onClick: () -> Unit,
     onOpen: () -> Unit,
+    onRename: () -> Unit,
     onStop: () -> Unit,
 ) {
     val isAgent = session.agentKind.isAgent()
@@ -1285,8 +1303,10 @@ private fun FlatSessionRow(
                 SessionActionsKebab(
                     sessionName = session.sessionName,
                     triggerTestTag = folderListFlatRowStopTestTag(session.sessionName),
+                    renameItemTestTag = folderListFlatRowRenameMenuItemTestTag(session.sessionName),
                     stopItemTestTag = folderListFlatRowStopMenuItemTestTag(session.sessionName),
                     onOpen = onOpen,
+                    onRename = onRename,
                     onStop = onStop,
                 )
             }
@@ -1329,6 +1349,7 @@ private fun FolderTreeRootGroup(
     root: FolderTreeRoot,
     expandedProjectPaths: Set<String>,
     onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
+    onRenameSession: (sessionName: String) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
@@ -1358,6 +1379,7 @@ private fun FolderTreeRootGroup(
                         folder = folder,
                         expanded = folder.path in expandedProjectPaths,
                         onSessionClick = onSessionClick,
+                        onRenameSession = onRenameSession,
                         onStopSession = onStopSession,
                         onFolderActions = onFolderActions,
                         onToggleExpanded = { onToggleProjectExpanded(folder) },
@@ -1513,6 +1535,7 @@ private fun FolderGroup(
     folder: FolderRow,
     expanded: Boolean,
     onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
+    onRenameSession: (sessionName: String) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onToggleExpanded: () -> Unit,
@@ -1555,6 +1578,7 @@ private fun FolderGroup(
                                 folderPath = folder.path,
                                 session = row.session,
                                 onClick = { onSessionClick(folder.path, row.session.sessionName, null) },
+                                onRename = { onRenameSession(row.session.sessionName) },
                                 onStop = { onStopSession(row.session.sessionName) },
                                 modifier = Modifier.weight(1f),
                             )
@@ -1726,6 +1750,7 @@ private fun WorkspaceSessionRow(
     folderPath: String,
     session: FolderSessionEntry,
     onClick: () -> Unit,
+    onRename: () -> Unit,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1781,8 +1806,10 @@ private fun WorkspaceSessionRow(
         SessionActionsKebab(
             sessionName = session.sessionName,
             triggerTestTag = folderSessionStopTestTag(folderPath, session.sessionName),
+            renameItemTestTag = folderSessionRenameMenuItemTestTag(folderPath, session.sessionName),
             stopItemTestTag = folderSessionStopMenuItemTestTag(folderPath, session.sessionName),
             onOpen = onClick,
+            onRename = onRename,
             onStop = onStop,
         )
     }
@@ -1792,8 +1819,10 @@ private fun WorkspaceSessionRow(
 private fun SessionActionsKebab(
     sessionName: String,
     triggerTestTag: String,
+    renameItemTestTag: String,
     stopItemTestTag: String,
     onOpen: () -> Unit,
+    onRename: () -> Unit,
     onStop: () -> Unit,
 ) {
     Box(
@@ -1807,6 +1836,11 @@ private fun SessionActionsKebab(
                 KebabItem(
                     label = "Open session",
                     onClick = onOpen,
+                ),
+                KebabItem(
+                    label = "Rename session",
+                    onClick = onRename,
+                    testTag = renameItemTestTag,
                 ),
                 KebabItem(
                     label = "Stop session",
@@ -2280,6 +2314,64 @@ private fun SessionAgentKind.isAgent(): Boolean = when (this) {
     SessionAgentKind.Shell -> false
 }
 
+@Composable
+private fun RenameSessionDialog(
+    sessionName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var newName by remember(sessionName) { mutableStateOf(sessionName) }
+    val trimmed = newName.trim()
+    val canRename = trimmed.isNotEmpty() && trimmed != sessionName
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PocketShellColors.Surface,
+        title = {
+            Text(
+                text = "Rename session",
+                color = PocketShellColors.Text,
+                fontWeight = FontWeight.SemiBold,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Rename $sessionName on this host.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                )
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    singleLine = true,
+                    label = { Text("Session name") },
+                    keyboardActions = KeyboardActions(onDone = {
+                        if (canRename) onConfirm(trimmed)
+                    }),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(RENAME_SESSION_FIELD_TAG),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(trimmed) },
+                enabled = canRename,
+                modifier = Modifier.testTag(RENAME_SESSION_CONFIRM_TAG),
+            ) {
+                Text("Rename")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, modifier = Modifier.testTag(RENAME_SESSION_CANCEL_TAG)) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        modifier = Modifier.testTag(RENAME_SESSION_DIALOG_TAG),
+    )
+}
+
 /**
  * Confirmation dialog for the host-detail "Stop session" action (#518).
  *
@@ -2377,6 +2469,10 @@ const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-st
 const val STOP_SESSION_DIALOG_TAG: String = "folder-list:stop-session:dialog"
 const val STOP_SESSION_CONFIRM_TAG: String = "folder-list:stop-session:confirm"
 const val STOP_SESSION_CANCEL_TAG: String = "folder-list:stop-session:cancel"
+const val RENAME_SESSION_DIALOG_TAG: String = "folder-list:rename-session:dialog"
+const val RENAME_SESSION_FIELD_TAG: String = "folder-list:rename-session:field"
+const val RENAME_SESSION_CONFIRM_TAG: String = "folder-list:rename-session:confirm"
+const val RENAME_SESSION_CANCEL_TAG: String = "folder-list:rename-session:cancel"
 
 fun folderRowTestTag(path: String): String = "folder-list:row:$path"
 fun folderHeaderClickTestTag(path: String): String = "folder-list:header-click:$path"
@@ -2393,6 +2489,8 @@ fun folderListFlatRowBadgeTestTag(sessionName: String): String =
 /** Tags the per-session "Stop session" kebab on a flat host-detail row (#518). */
 fun folderListFlatRowStopTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop"
+fun folderListFlatRowRenameMenuItemTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:rename:item"
 fun folderListFlatRowStopMenuItemTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop:item"
 fun folderDetailRowTestTag(folderPath: String, sessionName: String): String =
@@ -2415,6 +2513,8 @@ fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
 /** Tags the per-session "Stop session" kebab on a tree session child row (#518). */
 fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop"
+fun folderSessionRenameMenuItemTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:rename:item"
 fun folderSessionStopMenuItemTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop:item"
 /** Tags the `├─/└─` tree connector cell on an expanded session child row (#503). */

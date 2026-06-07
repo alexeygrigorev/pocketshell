@@ -90,6 +90,47 @@ class FolderListGatewaySshLeaseTest {
         assertTrue("cancelled folder poll should release and close the lease", session.closed)
     }
 
+    @Test
+    fun renameSessionRunsTmuxRenameAndVerifiesResult() = runTest {
+        val session = FakeSshSession { command ->
+            when {
+                command.contains("has-session -t 'old'\\''s'") ->
+                    ExecResult(stdout = "", stderr = "", exitCode = 1)
+                command.contains("has-session -t 'new name'") ->
+                    ExecResult(stdout = "", stderr = "", exitCode = 0)
+                else ->
+                    ExecResult(stdout = "", stderr = "", exitCode = 0)
+            }
+        }
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = ActiveTmuxClients(),
+            sshLeaseManager = SshLeaseManager(
+                connector = CountingConnector(session),
+                scope = this,
+                idleTtlMillis = 30_000L,
+            ),
+        )
+
+        val result = gateway.renameSession(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            oldName = "old's",
+            newName = "new name",
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            listOf(
+                "tmux rename-session -t 'old'\\''s' 'new name'",
+                "tmux has-session -t 'old'\\''s'",
+                "tmux has-session -t 'new name'",
+            ).map { ReposRemoteSource.pathAwareCommand(it) },
+            session.execCommands,
+        )
+    }
+
     private class CountingConnector(
         private val session: FakeSshSession,
     ) : SshLeaseConnector {
@@ -103,6 +144,7 @@ class FolderListGatewaySshLeaseTest {
 
     private class FakeSshSession(
         private val cancelOnExec: Boolean = false,
+        private val resultForCommand: (String) -> ExecResult = { ExecResult(stdout = "", stderr = "", exitCode = 0) },
     ) : SshSession {
         val execCommands: MutableList<String> = mutableListOf()
         var closed: Boolean = false
@@ -116,7 +158,7 @@ class FolderListGatewaySshLeaseTest {
                 throw CancellationException("cancelled during folder poll")
             }
             execCommands += command
-            return ExecResult(stdout = "", stderr = "", exitCode = 0)
+            return resultForCommand(command)
         }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job =

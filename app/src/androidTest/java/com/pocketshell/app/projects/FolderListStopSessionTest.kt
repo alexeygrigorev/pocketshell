@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextReplacement
 import androidx.core.graphics.createBitmap
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -205,6 +206,97 @@ class FolderListStopSessionTest {
         )
     }
 
+    @Test
+    fun sessionRowMenuContainsRenameAndRenamesSession() {
+        val oldName = doomed
+        val newName = "renamed-agent"
+        val gateway = MutableKillGateway(
+            initialRows = listOf(
+                FolderSessionRow(
+                    sessionName = oldName,
+                    lastActivity = 1_700_004_000L,
+                    attached = true,
+                    cwd = projectPath,
+                    agentKind = SessionAgentKind.Claude,
+                ),
+                FolderSessionRow(
+                    sessionName = keep,
+                    lastActivity = 1_700_003_500L,
+                    attached = false,
+                    cwd = projectPath,
+                    agentKind = SessionAgentKind.Shell,
+                ),
+            ),
+            projectFoldersByRoot = mapOf("~/git" to listOf(projectPath)),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val signals = SessionLifecycleSignals()
+        val viewModel = constructFolderListViewModel(gateway, signals)
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue600-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue518",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            gateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderHeaderClickTestTag(projectPath)))
+        if (compose.onAllNodesWithTag(folderDetailRowTestTag(projectPath, oldName))
+                .fetchSemanticsNodes().isEmpty()
+        ) {
+            compose.onNodeWithTag(folderHeaderClickTestTag(projectPath)).performClick()
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(folderDetailRowTestTag(projectPath, oldName))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        compose.onNodeWithTag(folderSessionStopTestTag(projectPath, oldName)).performClick()
+        compose.onNodeWithText("Open session").assertExists()
+        compose.onNodeWithTag(folderSessionRenameMenuItemTestTag(projectPath, oldName)).assertExists()
+        compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, oldName)).assertExists()
+        assertTrue(
+            "Stop confirmation must remain gated behind the Stop menu item",
+            compose.onAllNodesWithTag(STOP_SESSION_DIALOG_TAG).fetchSemanticsNodes().isEmpty(),
+        )
+
+        compose.onNodeWithTag(folderSessionRenameMenuItemTestTag(projectPath, oldName)).performClick()
+        compose.onNodeWithTag(RENAME_SESSION_DIALOG_TAG).assertExists()
+        compose.onNodeWithTag(RENAME_SESSION_FIELD_TAG).performTextReplacement(newName)
+        compose.onNodeWithTag(RENAME_SESSION_CONFIRM_TAG).performClick()
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(folderDetailRowTestTag(projectPath, newName))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        assertTrue(
+            "old session row should disappear after rename",
+            compose.onAllNodesWithTag(folderDetailRowTestTag(projectPath, oldName))
+                .fetchSemanticsNodes().isEmpty(),
+        )
+        assertEquals(listOf(oldName to newName), gateway.renamedSessions.toList())
+    }
+
     private fun constructFolderListViewModel(
         gateway: FolderListGateway,
         signals: SessionLifecycleSignals,
@@ -280,6 +372,7 @@ class FolderListStopSessionTest {
         private var rows: List<FolderSessionRow> = initialRows
         val callCount: AtomicInteger = AtomicInteger(0)
         val killedSessions: CopyOnWriteArrayList<String> = CopyOnWriteArrayList()
+        val renamedSessions: CopyOnWriteArrayList<Pair<String, String>> = CopyOnWriteArrayList()
 
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
@@ -328,6 +421,20 @@ class FolderListStopSessionTest {
         ): Result<Unit> {
             killedSessions.add(sessionName)
             rows = rows.filterNot { it.sessionName == sessionName }
+            return Result.success(Unit)
+        }
+
+        override suspend fun renameSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            oldName: String,
+            newName: String,
+        ): Result<Unit> {
+            renamedSessions.add(oldName to newName)
+            rows = rows.map { row ->
+                if (row.sessionName == oldName) row.copy(sessionName = newName) else row
+            }
             return Result.success(Unit)
         }
     }

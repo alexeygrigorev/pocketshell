@@ -241,6 +241,19 @@ interface FolderListGateway {
         passphrase: CharArray?,
         sessionName: String,
     ): Result<Unit>
+
+    /**
+     * Rename a tmux session on the remote host. The default keeps existing
+     * test fakes honest without forcing every unrelated fake gateway to learn
+     * rename behavior; production overrides it below.
+     */
+    suspend fun renameSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        oldName: String,
+        newName: String,
+    ): Result<Unit> = Result.failure(UnsupportedOperationException("Session rename is not available."))
 }
 
 data class FolderImportPayload(
@@ -808,6 +821,34 @@ class SshFolderListGateway internal constructor(
             )
             if (hasSession.exitCode == 0) {
                 throw RuntimeException("tmux session '$target' is still running.")
+            }
+        }
+    }
+
+    override suspend fun renameSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        oldName: String,
+        newName: String,
+    ): Result<Unit> {
+        val oldTarget = oldName.trim()
+        val newTarget = newName.trim()
+        if (oldTarget.isEmpty() || newTarget.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Enter a session name."))
+        }
+        if (oldTarget == newTarget) return Result.success(Unit)
+        return withLeaseSession(host, keyPath, passphrase) { session ->
+            val quotedOld = shellQuote(oldTarget)
+            val quotedNew = shellQuote(newTarget)
+            val rename = session.exec(pathAware("tmux rename-session -t $quotedOld $quotedNew"))
+            if (rename.exitCode != 0) {
+                throw RuntimeException(rename.stderr.ifBlank { rename.stdout }.trim())
+            }
+            val oldExists = session.exec(pathAware("tmux has-session -t $quotedOld"))
+            val newExists = session.exec(pathAware("tmux has-session -t $quotedNew"))
+            if (oldExists.exitCode == 0 || newExists.exitCode != 0) {
+                throw RuntimeException("tmux session '$oldTarget' was not renamed to '$newTarget'.")
             }
         }
     }

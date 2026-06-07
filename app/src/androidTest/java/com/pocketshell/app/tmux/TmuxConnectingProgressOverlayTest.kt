@@ -1,8 +1,11 @@
 package com.pocketshell.app.tmux
 
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -165,5 +168,114 @@ class TmuxConnectingProgressOverlayTest {
         // After 8s of accumulated advancement (>= 5s) the slow-hint
         // subline must be displayed.
         compose.onNodeWithTag(TMUX_CONNECTING_SLOW_HINT_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun reconnectingDelayedStateShowsCancelAndRetryNowActions() {
+        var retryCalls = 0
+        var cancelCalls = 0
+        compose.setContent {
+            PocketShellTheme {
+                ReconnectingProgressRow(
+                    status = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
+                        host = "10.0.2.2",
+                        port = 22,
+                        user = "alex",
+                        attempt = 2,
+                        maxAttempts = 4,
+                        retryDelayMs = 60_000,
+                        reason = "Network changed; reconnecting.",
+                    ),
+                    sessionLabel = "tmux work",
+                    onRetryNow = { retryCalls += 1 },
+                    onCancel = { cancelCalls += 1 },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_CONNECTING_PROGRESS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_CONNECTING_PROGRESS_BAR_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_CONNECTING_SLOW_HINT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_RECONNECTING_RETRY_NOW_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_CONNECTING_CANCEL_TAG).assertIsDisplayed()
+
+        compose.onNodeWithTag(TMUX_RECONNECTING_RETRY_NOW_TAG).performClick()
+        compose.onNodeWithTag(TMUX_CONNECTING_CANCEL_TAG).performClick()
+
+        assertEquals("Retry now must route through the reconnect callback", 1, retryCalls)
+        assertEquals("Cancel must route through the cancel callback", 1, cancelCalls)
+    }
+
+    @Test
+    fun reconnectingCancelTransitionsToFailedWithReconnectActionAvailable() {
+        var reconnectCalls = 0
+        compose.setContent {
+            PocketShellTheme {
+                val status = remember {
+                    mutableStateOf<TmuxSessionViewModel.ConnectionStatus>(
+                        TmuxSessionViewModel.ConnectionStatus.Reconnecting(
+                            host = "10.0.2.2",
+                            port = 22,
+                            user = "alex",
+                            attempt = 3,
+                            maxAttempts = 4,
+                            retryDelayMs = 120_000,
+                            reason = "Network changed; reconnecting.",
+                        ),
+                    )
+                }
+                when (val current = status.value) {
+                    is TmuxSessionViewModel.ConnectionStatus.Reconnecting -> {
+                        ReconnectingProgressRow(
+                            status = current,
+                            sessionLabel = "tmux work",
+                            onRetryNow = {},
+                            onCancel = {
+                                status.value = TmuxSessionViewModel.ConnectionStatus.Failed(
+                                    "Connect cancelled by user.",
+                                )
+                            },
+                        )
+                    }
+
+                    is TmuxSessionViewModel.ConnectionStatus.Failed -> {
+                        FailedConnectionRow(
+                            message = current.message,
+                            onReconnect = { reconnectCalls += 1 },
+                            canReconnect = true,
+                        )
+                    }
+
+                    else -> Unit
+                }
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_CONNECTING_CANCEL_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_CONNECTING_CANCEL_TAG).performClick()
+
+        compose.onNodeWithTag(TMUX_SESSION_ERROR_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).performClick()
+
+        assertEquals("Reconnect button must remain available after cancel", 1, reconnectCalls)
+    }
+
+    @Test
+    fun failedWithoutReconnectExplainsHowToRecoverAndHidesReconnectAction() {
+        compose.setContent {
+            PocketShellTheme {
+                FailedConnectionRow(
+                    message = "Disconnected.",
+                    onReconnect = {},
+                    canReconnect = false,
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_SESSION_ERROR_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Disconnected. Open the session again to reconnect.")
+            .assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).assertDoesNotExist()
     }
 }

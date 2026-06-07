@@ -954,6 +954,7 @@ public fun TmuxSessionScreen(
                 ReconnectingProgressRow(
                     status = it,
                     sessionLabel = "tmux $sessionName",
+                    onRetryNow = { viewModel.reconnect() },
                     onCancel = { viewModel.cancelConnect() },
                 )
             }
@@ -2592,6 +2593,7 @@ internal const val TMUX_CONNECTING_PROGRESS_TAG = "tmux:session:connecting"
 internal const val TMUX_CONNECTING_PROGRESS_BAR_TAG = "tmux:session:connecting:bar"
 internal const val TMUX_CONNECTING_SLOW_HINT_TAG = "tmux:session:connecting:slow-hint"
 internal const val TMUX_CONNECTING_CANCEL_TAG = "tmux:session:connecting:cancel"
+internal const val TMUX_RECONNECTING_RETRY_NOW_TAG = "tmux:session:reconnecting:retry-now"
 
 // Issue #437 (slice A): tag on the unobtrusive inline same-host
 // switch indicator (a thin progress bar above the still-painted
@@ -2848,9 +2850,10 @@ internal fun ConnectingProgressOverlay(
 }
 
 @Composable
-private fun ReconnectingProgressRow(
+internal fun ReconnectingProgressRow(
     status: ConnectionStatus.Reconnecting,
     sessionLabel: String,
+    onRetryNow: () -> Unit,
     onCancel: () -> Unit,
 ) {
     Column(
@@ -2880,6 +2883,12 @@ private fun ReconnectingProgressRow(
                 fontSize = 13.sp,
                 modifier = Modifier.weight(1f),
             )
+            TextButton(
+                onClick = onRetryNow,
+                modifier = Modifier.testTag(TMUX_RECONNECTING_RETRY_NOW_TAG),
+            ) {
+                Text("Retry now")
+            }
             TextButton(
                 onClick = onCancel,
                 modifier = Modifier.testTag(TMUX_CONNECTING_CANCEL_TAG),
@@ -2944,7 +2953,7 @@ private fun SwitchingIndicatorRow() {
  * on the message string.
  */
 @Composable
-private fun FailedConnectionRow(
+internal fun FailedConnectionRow(
     message: String,
     onReconnect: () -> Unit,
     canReconnect: Boolean,
@@ -2958,7 +2967,11 @@ private fun FailedConnectionRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = message,
+            text = if (canReconnect) {
+                message
+            } else {
+                "$message Open the session again to reconnect."
+            },
             // Design-system error token (`docs/design-system.md` §1).
             // The disconnect band is the canonical "error status"
             // surface for the tmux route and so reaches for [Red]

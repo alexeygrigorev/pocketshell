@@ -170,8 +170,11 @@ class FolderListStopSessionTest {
 
         // Open the row kebab first. Destructive Stop must be a menu item, not
         // a direct-to-confirm affordance.
-        compose.onNodeWithTag(folderSessionStopTestTag(projectPath, doomed)).performClick()
+        compose.onNodeWithTag(folderSessionActionsTestTag(projectPath, doomed)).performClick()
         compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, doomed)).assertExists()
+        compose.onNodeWithText("Open session").assertExists()
+        compose.onNodeWithText("Rename session").assertExists()
+        compose.onNodeWithText("Stop session").assertExists()
         assertTrue(
             "confirmation must not open until the Stop menu item is chosen",
             compose.onAllNodesWithTag(STOP_SESSION_DIALOG_TAG).fetchSemanticsNodes().isEmpty(),
@@ -188,7 +191,7 @@ class FolderListStopSessionTest {
         compose.onNodeWithTag(folderDetailRowTestTag(projectPath, doomed)).assertExists()
 
         // Now choose Stop from the menu again, then confirm the kill.
-        compose.onNodeWithTag(folderSessionStopTestTag(projectPath, doomed)).performClick()
+        compose.onNodeWithTag(folderSessionActionsTestTag(projectPath, doomed)).performClick()
         compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, doomed)).performClick()
         compose.onNodeWithTag(STOP_SESSION_DIALOG_TAG).assertExists()
         compose.onNodeWithText("Stop").performClick()
@@ -274,7 +277,7 @@ class FolderListStopSessionTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
 
-        compose.onNodeWithTag(folderSessionStopTestTag(projectPath, oldName)).performClick()
+        compose.onNodeWithTag(folderSessionActionsTestTag(projectPath, oldName)).performClick()
         compose.onNodeWithTag(folderSessionOpenMenuItemTestTag(projectPath, oldName)).assertExists()
         compose.onNodeWithTag(folderSessionRenameMenuItemTestTag(projectPath, oldName)).assertExists()
         compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, oldName)).assertExists()
@@ -308,7 +311,7 @@ class FolderListStopSessionTest {
             longName = longName,
             mode = HostDetailViewMode.Tree,
             rowTag = folderDetailRowTestTag(projectPath, longName),
-            triggerTag = folderSessionStopTestTag(projectPath, longName),
+            triggerTag = folderSessionActionsTestTag(projectPath, longName),
             openItemTag = folderSessionOpenMenuItemTestTag(projectPath, longName),
             renameItemTag = folderSessionRenameMenuItemTestTag(projectPath, longName),
             stopItemTag = folderSessionStopMenuItemTestTag(projectPath, longName),
@@ -324,7 +327,7 @@ class FolderListStopSessionTest {
             longName = longName,
             mode = HostDetailViewMode.Flat,
             rowTag = folderListFlatRowTestTag(longName),
-            triggerTag = folderListFlatRowStopTestTag(longName),
+            triggerTag = folderListFlatRowActionsTestTag(longName),
             openItemTag = folderListFlatRowOpenMenuItemTestTag(longName),
             renameItemTag = folderListFlatRowRenameMenuItemTestTag(longName),
             stopItemTag = folderListFlatRowStopMenuItemTestTag(longName),

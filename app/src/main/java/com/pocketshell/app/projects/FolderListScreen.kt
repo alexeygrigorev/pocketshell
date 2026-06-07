@@ -1340,7 +1340,7 @@ private fun FlatSessionRow(
                 // Stop is a menu item first, then the existing confirmation.
                 SessionActionsKebab(
                     sessionName = session.sessionName,
-                    triggerTestTag = folderListFlatRowStopTestTag(session.sessionName),
+                    triggerTestTag = folderListFlatRowActionsTestTag(session.sessionName),
                     openItemTestTag = folderListFlatRowOpenMenuItemTestTag(session.sessionName),
                     renameItemTestTag = folderListFlatRowRenameMenuItemTestTag(session.sessionName),
                     stopItemTestTag = folderListFlatRowStopMenuItemTestTag(session.sessionName),
@@ -1855,7 +1855,7 @@ private fun WorkspaceSessionRow(
         // menu item first, then the existing confirmation dialog.
         SessionActionsKebab(
             sessionName = session.sessionName,
-            triggerTestTag = folderSessionStopTestTag(folderPath, session.sessionName),
+            triggerTestTag = folderSessionActionsTestTag(folderPath, session.sessionName),
             openItemTestTag = folderSessionOpenMenuItemTestTag(folderPath, session.sessionName),
             renameItemTestTag = folderSessionRenameMenuItemTestTag(folderPath, session.sessionName),
             stopItemTestTag = folderSessionStopMenuItemTestTag(folderPath, session.sessionName),
@@ -1893,7 +1893,7 @@ private fun SessionActionsKebab(
             onExpandedChange = { expanded = it },
             items = listOf(
                 KebabItem(
-                    label = "Open / Attach",
+                    label = "Open session",
                     onClick = onOpen,
                     testTag = openItemTestTag,
                 ),
@@ -2575,9 +2575,12 @@ fun folderListFlatRowTileTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:tile"
 fun folderListFlatRowBadgeTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:badge"
-/** Tags the per-session "Stop session" kebab on a flat host-detail row (#518). */
-fun folderListFlatRowStopTestTag(sessionName: String): String =
+fun folderListFlatRowActionsTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop"
+
+/** Back-compat alias for tests/tools that still use the pre-#598 stop-specific name. */
+fun folderListFlatRowStopTestTag(sessionName: String): String =
+    folderListFlatRowActionsTestTag(sessionName)
 fun folderListFlatRowOpenMenuItemTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:open:item"
 fun folderListFlatRowRenameMenuItemTestTag(sessionName: String): String =
@@ -2601,9 +2604,12 @@ fun folderSessionTileTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:tile"
 fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:badge"
-/** Tags the per-session "Stop session" kebab on a tree session child row (#518). */
-fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
+fun folderSessionActionsTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop"
+
+/** Back-compat alias for tests/tools that still use the pre-#598 stop-specific name. */
+fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
+    folderSessionActionsTestTag(folderPath, sessionName)
 fun folderSessionOpenMenuItemTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:open:item"
 fun folderSessionRenameMenuItemTestTag(folderPath: String, sessionName: String): String =

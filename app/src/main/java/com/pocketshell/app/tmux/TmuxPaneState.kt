@@ -35,6 +35,9 @@ import com.pocketshell.core.terminal.ui.TerminalSurfaceState
  * @property title human-readable pane title from
  *   `display-message -p -t %N '#{pane_title}'`. Empty string when tmux
  *   has not yet been queried (initial bootstrap, between events).
+ * @property inCopyMode true when tmux reports the pane is in a special
+ *   mode (`#{pane_in_mode}`), including copy-mode. Input dispatch exits
+ *   that mode before writing so keystrokes reach the foreground process.
  * @property terminalState the Compose-friendly state holder rendering this
  *   pane. Already attached to the [com.pocketshell.core.tmux.TmuxClient]'s
  *   per-pane output flow by [TmuxSessionViewModel]. The view simply hands
@@ -54,6 +57,7 @@ public data class TmuxPaneState(
     // Empty when tmux has not yet been queried (initial bootstrap)
     // or when an older tmux fails to emit the field.
     val paneTty: String = "",
+    val inCopyMode: Boolean = false,
     val terminalState: TerminalSurfaceState,
     // Issue #423: set when the local terminal surface for this pane has
     // failed to recover after repeated IME/resize/render exceptions inside

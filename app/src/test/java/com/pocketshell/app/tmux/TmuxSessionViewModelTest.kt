@@ -921,6 +921,41 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun writeInputToPaneExitsTmuxCopyModeBeforeSendingBytes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "shell",
+                    paneIndex = 0,
+                    inCopyMode = true,
+                ),
+            ),
+        )
+
+        val result = vm.writeInputToPaneResult("%0", "ls\r".toByteArray(Charsets.UTF_8))
+        runCurrent()
+
+        assertTrue("copy-mode recovery should keep pane input successful", result.isSuccess)
+        assertFalse("copy-mode recovery must not mark tmux disconnected", client.disconnected.value)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(
+            listOf(
+                "send-keys -X -t %0 cancel",
+                "send-keys -l -t %0 -- 'ls'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+        assertFalse(vm.panes.value.single { it.paneId == "%0" }.inCopyMode)
+    }
+
+    @Test
     fun writeInputToPaneSendKeysFailureSurfacesFailedStatus() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
@@ -3817,6 +3852,42 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun sendToAgentPaneExitsTmuxCopyModeBeforeTypingPrompt() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "claude",
+                    paneIndex = 0,
+                    inCopyMode = true,
+                ),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val result = vm.sendToAgentPaneResult("%0", "  run tests  ")
+        runCurrent()
+
+        assertTrue("agent prompt should be delivered after copy-mode recovery", result.isSuccess)
+        assertFalse("copy-mode recovery must not mark tmux disconnected", client.disconnected.value)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(
+            listOf(
+                "send-keys -X -t %0 cancel",
+                "send-keys -l -t %0 -- 'run tests'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+        assertFalse(vm.panes.value.single { it.paneId == "%0" }.inCopyMode)
+    }
+
+    @Test
     fun codexAgentSubmitDelaysFinalEnterAfterTextInsertion() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -4767,9 +4838,44 @@ class TmuxSessionViewModelTest {
             "list-panes format must include #{pane_tty}; got `$listPanesCmd`",
             listPanesCmd.contains("#{pane_tty}"),
         )
+        assertTrue(
+            "list-panes format must include #{pane_in_mode}; got `$listPanesCmd`",
+            listPanesCmd.contains("#{pane_in_mode}"),
+        )
 
         val pane = vm.panes.value.single()
         assertEquals("/dev/pts/3", pane.paneTty)
+        assertFalse(pane.inCopyMode)
+    }
+
+    @Test
+    fun paneModeChangedRefreshesCopyModeStateFromListPanes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0\t/workspace\tbash\t/dev/pts/3\t1"),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        client.emittedEvents.emit(ControlEvent.PaneModeChanged("%0"))
+        advanceUntilIdle()
+
+        val pane = vm.panes.value.single()
+        assertEquals("%0", pane.paneId)
+        assertTrue("pane_in_mode=1 must mark the pane as copy-mode/action mode", pane.inCopyMode)
     }
 
     @Test

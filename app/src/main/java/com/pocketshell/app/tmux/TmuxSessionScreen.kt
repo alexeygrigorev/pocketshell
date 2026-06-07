@@ -145,6 +145,7 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
 import com.pocketshell.core.terminal.selection.ConversationLink
+import com.pocketshell.core.terminal.selection.LocalhostUrl
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
@@ -242,7 +243,7 @@ public fun TmuxSessionScreen(
     // action opens the same panel pre-filled with the detected remote
     // port (#447 prefillRemotePort). MainActivity navigates with the
     // port; back returns to this exact session.
-    onOpenPortForwardingWithPort: (remotePort: Int, openBrowserWhenForwarded: Boolean) -> Unit = { _, _ -> },
+    onOpenPortForwardingWithPort: (remotePort: Int, autoOpenLocalhostUrl: LocalhostUrl?) -> Unit = { _, _ -> },
     /** Route an assistant-requested navigation (issue #266). */
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
@@ -544,7 +545,7 @@ public fun TmuxSessionScreen(
     // the tunnel. If this prompt is accepted, the panel opens the working local
     // URL once the tunnel reports its actual device-side port.
     var pendingLocalhostForward by remember {
-        mutableStateOf<com.pocketshell.core.terminal.selection.LocalhostUrl?>(null)
+        mutableStateOf<LocalhostUrl?>(null)
     }
 
     // Issue #184 Layer 1: when the IME comes up, snap the active
@@ -1483,7 +1484,7 @@ public fun TmuxSessionScreen(
                 .imePadding(),
             onForward = {
                 val accepted = viewModel.acceptDetectedPort()
-                if (accepted != null) onOpenPortForwardingWithPort(accepted, false)
+                if (accepted != null) onOpenPortForwardingWithPort(accepted, null)
             },
             onDismiss = { viewModel.dismissDetectedPort() },
         )
@@ -1511,7 +1512,7 @@ public fun TmuxSessionScreen(
                     onClick = {
                         val port = pending.remotePort
                         pendingLocalhostForward = null
-                        onOpenPortForwardingWithPort(port, true)
+                        onOpenPortForwardingWithPort(port, pending)
                     },
                 ) {
                     Text("Forward")

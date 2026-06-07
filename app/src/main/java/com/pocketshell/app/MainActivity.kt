@@ -915,6 +915,7 @@ private fun AppNavigator(
             passphrase = dest.passphrase,
             prefillRemotePort = dest.prefillRemotePort,
             openBrowserWhenForwardedRemotePort = dest.openBrowserWhenForwardedRemotePort,
+            openBrowserWhenForwardedLocalhostUrl = dest.openBrowserWhenForwardedLocalhostUrl,
             onBack = ::back,
         )
 
@@ -1291,14 +1292,14 @@ private fun AppNavigator(
             // Forward action opens the same panel pre-filled with the
             // detected port (#447 prefillRemotePort). Back returns to this
             // exact session via the hand-rolled back-stack.
-            onOpenPortForwardingWithPort = { remotePort, openBrowserWhenForwarded ->
+            onOpenPortForwardingWithPort = { remotePort, autoOpenLocalhostUrl ->
                 navigate(
                     AppDestination.PortForwardPanel(
                         hostId = dest.hostId,
                         keyPath = dest.keyPath,
                         passphrase = dest.passphrase,
                         prefillRemotePort = remotePort,
-                        openBrowserWhenForwardedRemotePort = remotePort.takeIf { openBrowserWhenForwarded },
+                        openBrowserWhenForwardedLocalhostUrl = autoOpenLocalhostUrl,
                     ),
                 )
             },

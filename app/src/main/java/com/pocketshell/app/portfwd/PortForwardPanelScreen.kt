@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.portfwd.TunnelInfo
+import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.terminal.ui.openUrlWithFallback
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -67,14 +68,29 @@ fun PortForwardPanelScreen(
     // (discovery scan + tap a row to forward).
     prefillRemotePort: Int? = null,
     openBrowserWhenForwardedRemotePort: Int? = null,
+    openBrowserWhenForwardedLocalhostUrl: LocalhostUrl? = null,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: PortForwardPanelViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
-    var pendingAutoOpenRemotePort by remember(hostId, openBrowserWhenForwardedRemotePort) {
-        mutableStateOf(openBrowserWhenForwardedRemotePort)
+    val initialAutoOpen = remember(
+        hostId,
+        openBrowserWhenForwardedRemotePort,
+        openBrowserWhenForwardedLocalhostUrl,
+    ) {
+        openBrowserWhenForwardedLocalhostUrl
+            ?: openBrowserWhenForwardedRemotePort?.let {
+                LocalhostUrl(remotePort = it, scheme = "http", pathAndQuery = "")
+            }
+    }
+    var pendingAutoOpen by remember(
+        hostId,
+        openBrowserWhenForwardedRemotePort,
+        openBrowserWhenForwardedLocalhostUrl,
+    ) {
+        mutableStateOf(initialAutoOpen)
     }
 
     fun leave() {
@@ -106,13 +122,13 @@ fun PortForwardPanelScreen(
         )
     }
 
-    val autoOpenUrl = pendingAutoOpenRemotePort?.let { remotePort ->
-        localForwardedUrlFor(state.tunnels, remotePort)
+    val autoOpenUrl = pendingAutoOpen?.let { request ->
+        localForwardedUrlFor(state.tunnels, request)
     }
     LaunchedEffect(autoOpenUrl) {
         val url = autoOpenUrl ?: return@LaunchedEffect
-        val remotePort = pendingAutoOpenRemotePort ?: return@LaunchedEffect
-        pendingAutoOpenRemotePort = null
+        val remotePort = pendingAutoOpen?.remotePort ?: return@LaunchedEffect
+        pendingAutoOpen = null
         DiagnosticEvents.record(
             "action",
             "port_forward_auto_open_url",
@@ -122,12 +138,12 @@ fun PortForwardPanelScreen(
         openUrlWithFallback(context, url)
     }
 
-    val autoOpenFailed = pendingAutoOpenRemotePort?.let { remotePort ->
-        shouldClearPendingForwardAutoOpen(state, remotePort)
+    val autoOpenFailed = pendingAutoOpen?.let { request ->
+        shouldClearPendingForwardAutoOpen(state, request.remotePort)
     } == true
     LaunchedEffect(autoOpenFailed) {
         if (autoOpenFailed) {
-            pendingAutoOpenRemotePort = null
+            pendingAutoOpen = null
         }
     }
 
@@ -231,10 +247,17 @@ fun PortForwardPanelScreen(
 }
 
 internal fun localForwardedUrlFor(tunnels: List<TunnelInfo>, remotePort: Int): String? {
+    return localForwardedUrlFor(
+        tunnels = tunnels,
+        localhostUrl = LocalhostUrl(remotePort = remotePort, scheme = "http", pathAndQuery = ""),
+    )
+}
+
+internal fun localForwardedUrlFor(tunnels: List<TunnelInfo>, localhostUrl: LocalhostUrl): String? {
     val tunnel = tunnels.firstOrNull {
-        it.remotePort == remotePort && it.status == TunnelInfo.Status.FORWARDING
+        it.remotePort == localhostUrl.remotePort && it.status == TunnelInfo.Status.FORWARDING
     } ?: return null
-    return "http://127.0.0.1:${tunnel.localPort}"
+    return localhostUrl.toLocalUrl(tunnel.localPort)
 }
 
 internal fun shouldClearPendingForwardAutoOpen(state: PortForwardPanelState, remotePort: Int): Boolean =

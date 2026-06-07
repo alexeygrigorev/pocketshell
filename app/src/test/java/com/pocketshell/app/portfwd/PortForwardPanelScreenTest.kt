@@ -1,6 +1,7 @@
 package com.pocketshell.app.portfwd
 
 import com.pocketshell.core.portfwd.TunnelInfo
+import com.pocketshell.core.terminal.selection.LocalhostUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -19,6 +20,28 @@ class PortForwardPanelScreenTest {
         )
 
         assertEquals("http://127.0.0.1:15173", localForwardedUrlFor(tunnels, remotePort = 5173))
+    }
+
+    @Test
+    fun `localForwardedUrlFor preserves tapped localhost url target`() {
+        val tunnels = listOf(
+            TunnelInfo(
+                remotePort = 8443,
+                localPort = 18443,
+                process = "vite",
+                status = TunnelInfo.Status.FORWARDING,
+            ),
+        )
+        val localhostUrl = LocalhostUrl(
+            remotePort = 8443,
+            scheme = "https",
+            pathAndQuery = "/admin?tab=logs#tail",
+        )
+
+        assertEquals(
+            "https://127.0.0.1:18443/admin?tab=logs#tail",
+            localForwardedUrlFor(tunnels, localhostUrl),
+        )
     }
 
     @Test

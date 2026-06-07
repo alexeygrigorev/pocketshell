@@ -1,5 +1,7 @@
 package com.pocketshell.app.nav
 
+import com.pocketshell.core.terminal.selection.LocalhostUrl
+
 /**
  * Simple Compose state-based navigator destinations.
  *
@@ -103,6 +105,7 @@ sealed interface AppDestination {
         // Issue #608: when a localhost link created this prefilled forward,
         // open the browser once the requested remote port is actually mapped.
         val openBrowserWhenForwardedRemotePort: Int? = null,
+        val openBrowserWhenForwardedLocalhostUrl: LocalhostUrl? = null,
     ) : AppDestination
 
     /**

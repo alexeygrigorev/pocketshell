@@ -538,6 +538,126 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
+    fun `post resume network callback after within grace live runtime does not fan out`() = runTest {
+        val events = mutableListOf<String>()
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = {},
+                onForeground = {},
+                onNetworkChanged = { change -> events += "network:${change.reason}" },
+            ),
+        )
+        var now = 10_000L
+        val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
+        val change = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "late-background-default-network-capabilities",
+        )
+
+        gate.onBackground()
+        gate.onForegroundResumeStarted()
+        val foregroundDecision = gate.onForegroundResumeFinished(
+            resumedWithinGrace = true,
+            hasLiveTerminalRuntime = true,
+        ) as TerminalNetworkDecision.Suppress
+        assertEquals(null, foregroundDecision.change)
+        assertEquals("no_pending_change", foregroundDecision.gateDiagnostics.reason)
+
+        now += POST_RESUME_NETWORK_SUPPRESSION_MILLIS / 2
+        val lateDecision = gate.onNetworkChange(change)
+        if (lateDecision is TerminalNetworkDecision.Dispatch) {
+            activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(lateDecision.change) }
+        }
+
+        val suppress = lateDecision as TerminalNetworkDecision.Suppress
+        assertEquals(
+            "a live runtime that survived a within-grace background must suppress the first late network callback",
+            change,
+            suppress.change,
+        )
+        assertEquals("suppress", suppress.gateDiagnostics.decision)
+        assertEquals("post_resume_within_grace_live_runtime", suppress.gateDiagnostics.reason)
+        assertEquals(true, suppress.gateDiagnostics.resumedWithinGrace)
+        assertEquals(true, suppress.gateDiagnostics.hasLiveTerminalRuntime)
+        assertEquals("late post-resume callback must not fan out to terminal reconnect", emptyList<String>(), events)
+    }
+
+    @Test
+    fun `different foreground network change after post resume suppression still dispatches`() {
+        var now = 20_000L
+        val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
+        val lateBackgroundChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "late-background-default-network-capabilities",
+        )
+        val foregroundChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("cell"),
+            current = TerminalNetworkSnapshot.Validated("ethernet"),
+            previousValidated = TerminalNetworkSnapshot.Validated("cell"),
+            reason = "foreground-ethernet-handoff",
+            sequence = 2L,
+        )
+
+        gate.onBackground()
+        gate.onForegroundResumeStarted()
+        assertTrue(
+            gate.onForegroundResumeFinished(
+                resumedWithinGrace = true,
+                hasLiveTerminalRuntime = true,
+            ) is TerminalNetworkDecision.Suppress,
+        )
+
+        now += POST_RESUME_NETWORK_SUPPRESSION_MILLIS / 2
+        assertTrue(gate.onNetworkChange(lateBackgroundChange) is TerminalNetworkDecision.Suppress)
+
+        val foregroundDecision = gate.onNetworkChange(foregroundChange) as TerminalNetworkDecision.Dispatch
+        assertEquals(
+            "only the first late callback is suppressed; later foreground handoffs must still reconnect",
+            foregroundChange,
+            foregroundDecision.change,
+        )
+        assertEquals("dispatch", foregroundDecision.gateDiagnostics.decision)
+        assertEquals("foreground_active", foregroundDecision.gateDiagnostics.reason)
+    }
+
+    @Test
+    fun `foreground network change after post resume suppression window still dispatches`() {
+        var now = 30_000L
+        val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
+        val foregroundChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "later-foreground-wifi-cellular-handoff",
+        )
+
+        gate.onBackground()
+        gate.onForegroundResumeStarted()
+        assertTrue(
+            gate.onForegroundResumeFinished(
+                resumedWithinGrace = true,
+                hasLiveTerminalRuntime = true,
+            ) is TerminalNetworkDecision.Suppress,
+        )
+
+        now += POST_RESUME_NETWORK_SUPPRESSION_MILLIS + 1
+        val foregroundDecision = gate.onNetworkChange(foregroundChange) as TerminalNetworkDecision.Dispatch
+        assertEquals(
+            "a real foreground handoff after the post-resume race window must still reconnect",
+            foregroundChange,
+            foregroundDecision.change,
+        )
+        assertEquals("dispatch", foregroundDecision.gateDiagnostics.decision)
+        assertEquals("foreground_active", foregroundDecision.gateDiagnostics.reason)
+    }
+
+    @Test
     fun `foreground active network change dispatches immediately after resume decision`() {
         val gate = TerminalNetworkLifecycleGate()
         val change = terminalNetworkChange(
@@ -729,12 +849,13 @@ class BackgroundGraceControllerTest {
         current: TerminalNetworkSnapshot.Validated,
         previousValidated: TerminalNetworkSnapshot.Validated?,
         reason: String,
+        sequence: Long = 1L,
     ): TerminalNetworkChange =
         TerminalNetworkChange(
             previous = previous,
             current = current,
             previousValidated = previousValidated,
             reason = reason,
-            sequence = 1L,
+            sequence = sequence,
         )
 }

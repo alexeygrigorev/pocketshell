@@ -244,7 +244,10 @@ class App : Application() {
                         dispatchTerminalNetworkChange(decision.change, decision.gateDiagnostics)
                     is TerminalNetworkDecision.Defer ->
                         logDeferredTerminalNetworkChange(decision.change, decision.gateDiagnostics)
-                    is TerminalNetworkDecision.Suppress -> Unit
+                    is TerminalNetworkDecision.Suppress ->
+                        decision.change?.let {
+                            logSuppressedTerminalNetworkChange(it, decision.gateDiagnostics)
+                        }
                 }
             }
         }
@@ -403,14 +406,18 @@ internal fun shouldDispatchPendingTerminalNetworkChange(
         !pendingChange.previousValidated.hasSameNetworkIdentityAs(pendingChange.current)
 }
 
-internal class TerminalNetworkLifecycleGate {
+internal class TerminalNetworkLifecycleGate(
+    private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
+) {
     private var processForeground: Boolean = false
     private var foregroundResumePending: Boolean = false
     private var pendingTerminalNetworkChange: TerminalNetworkChange? = null
+    private var suppressPostResumeNetworkChangeUntilMillis: Long? = null
 
     fun onBackground() {
         processForeground = false
         foregroundResumePending = false
+        suppressPostResumeNetworkChangeUntilMillis = null
     }
 
     fun onForegroundResumeStarted() {
@@ -425,12 +432,18 @@ internal class TerminalNetworkLifecycleGate {
         foregroundResumePending = false
         val pendingChange = pendingTerminalNetworkChange
         pendingTerminalNetworkChange = null
-        return if (shouldDispatchPendingTerminalNetworkChange(
-                resumedWithinGrace = resumedWithinGrace,
-                pendingChange = pendingChange,
-                hasLiveTerminalRuntime = hasLiveTerminalRuntime,
-            )
-        ) {
+        val dispatchPending = shouldDispatchPendingTerminalNetworkChange(
+            resumedWithinGrace = resumedWithinGrace,
+            pendingChange = pendingChange,
+            hasLiveTerminalRuntime = hasLiveTerminalRuntime,
+        )
+        suppressPostResumeNetworkChangeUntilMillis =
+            if (resumedWithinGrace && hasLiveTerminalRuntime && pendingChange == null) {
+                nowMillis() + POST_RESUME_NETWORK_SUPPRESSION_MILLIS
+            } else {
+                null
+            }
+        return if (dispatchPending) {
             TerminalNetworkDecision.Dispatch(
                 pendingChange!!.copy(deferredFromBackground = true),
                 gateDiagnostics = TerminalNetworkGateDiagnostics(
@@ -465,8 +478,26 @@ internal class TerminalNetworkLifecycleGate {
         }
     }
 
-    fun onNetworkChange(change: TerminalNetworkChange): TerminalNetworkDecision =
-        if (processForeground && !foregroundResumePending) {
+    fun onNetworkChange(change: TerminalNetworkChange): TerminalNetworkDecision {
+        val suppressionDeadline = suppressPostResumeNetworkChangeUntilMillis
+        if (suppressionDeadline != null) {
+            suppressPostResumeNetworkChangeUntilMillis = null
+            if (nowMillis() <= suppressionDeadline) {
+                return TerminalNetworkDecision.Suppress(
+                    change,
+                    gateDiagnostics = TerminalNetworkGateDiagnostics(
+                        decision = "suppress",
+                        reason = "post_resume_within_grace_live_runtime",
+                        processForeground = processForeground,
+                        foregroundResumePending = foregroundResumePending,
+                        resumedWithinGrace = true,
+                        hasLiveTerminalRuntime = true,
+                    ),
+                )
+            }
+        }
+
+        return if (processForeground && !foregroundResumePending) {
             TerminalNetworkDecision.Dispatch(
                 change,
                 gateDiagnostics = TerminalNetworkGateDiagnostics(
@@ -492,6 +523,7 @@ internal class TerminalNetworkLifecycleGate {
                 ),
             )
         }
+    }
 }
 
 internal data class TerminalNetworkGateDiagnostics(
@@ -540,6 +572,13 @@ internal sealed interface TerminalNetworkDecision {
 private const val APP_LIFECYCLE_TAG: String = "PsAppTmuxLifecycle"
 
 private const val TERMINAL_NETWORK_TAG: String = "PsAppTerminalNet"
+
+/**
+ * Short one-shot window for Android default-network callbacks that were
+ * queued by the just-ended background interval but reach the app after the
+ * foreground grace decision has completed.
+ */
+internal const val POST_RESUME_NETWORK_SUPPRESSION_MILLIS: Long = 1_000L
 
 /**
  * Issue #450: logcat tag for the bounded background grace-window state

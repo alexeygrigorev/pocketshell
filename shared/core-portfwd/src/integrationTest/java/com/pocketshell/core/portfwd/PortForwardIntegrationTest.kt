@@ -283,32 +283,16 @@ class PortForwardIntegrationTest {
 
                 forwarder.togglePort(22)
 
-                // After the toggle the tunnel should be FORWARDING.
-                waitUntil(5_000) {
-                    forwarder.flowOfTunnels().value().any {
-                        it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING
-                    }
-                }
-
-                val tunnel = forwarder.flowOfTunnels().value()
-                    .single { it.remotePort == 22 }
+                val tunnel = waitForForwardingTunnelWithBanner(
+                    timeoutMs = 5_000,
+                    remotePort = 22,
+                    tunnels = { forwarder.flowOfTunnels().value() },
+                )
                 assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
                 assertTrue(
                     "manually-toggled port should be allocated from localPortRange, got ${tunnel.localPort}",
                     tunnel.localPort in config.localPortRange,
                 )
-
-                // Make sure we can actually talk through that allocated port.
-                Socket().use { client ->
-                    client.connect(InetSocketAddress("127.0.0.1", tunnel.localPort), 5_000)
-                    client.soTimeout = 5_000
-                    val reader = BufferedReader(InputStreamReader(client.getInputStream()))
-                    val banner = reader.readLine() ?: ""
-                    assertTrue(
-                        "expected SSH banner from auto-forwarded tunnel, got `$banner`",
-                        banner.startsWith("SSH-2.0-"),
-                    )
-                }
                 loop.cancel()
             } finally {
                 forwarder.stop()
@@ -357,14 +341,11 @@ class PortForwardIntegrationTest {
                     AutoForwarderSupervisor.ConnectionState.Connected
             }
             supervisor.togglePort(22)
-            waitUntil(ciScaled(10_000)) {
-                supervisor.flowOfTunnels().value().any {
-                    it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING
-                }
-            }
-            val firstLocalPort = supervisor.flowOfTunnels().value()
-                .single { it.remotePort == 22 }.localPort
-            assertBannerReadable(firstLocalPort)
+            waitForForwardingTunnelWithBanner(
+                timeoutMs = ciScaled(10_000),
+                remotePort = 22,
+                tunnels = { supervisor.flowOfTunnels().value() },
+            )
 
             // Simulate a transport drop by closing the live session out
             // from under the supervisor. The session-health poll notices
@@ -374,21 +355,18 @@ class PortForwardIntegrationTest {
 
             // The supervisor must re-establish SSH and re-open :22 from its
             // desired-state set — without the user touching anything.
-            waitUntil(ciScaled(20_000)) {
-                val newSessionMounted =
-                    sessionAttempts.get() >= 2 && liveSession.get() !== firstSession
-                val reconnected = supervisor.flowOfConnectionState().value ==
-                    AutoForwarderSupervisor.ConnectionState.Connected
-                val forwardingAgain = supervisor.flowOfTunnels().value().any {
-                    it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING
-                }
-                newSessionMounted && reconnected && forwardingAgain
-            }
-
-            val restoredLocalPort = supervisor.flowOfTunnels().value()
-                .single { it.remotePort == 22 }.localPort
-            // Traffic must flow again through the restored forward.
-            assertBannerReadable(restoredLocalPort)
+            waitForForwardingTunnelWithBanner(
+                timeoutMs = ciScaled(20_000),
+                remotePort = 22,
+                tunnels = { supervisor.flowOfTunnels().value() },
+                readyToProbe = {
+                    val newSessionMounted =
+                        sessionAttempts.get() >= 2 && liveSession.get() !== firstSession
+                    val reconnected = supervisor.flowOfConnectionState().value ==
+                        AutoForwarderSupervisor.ConnectionState.Connected
+                    newSessionMounted && reconnected
+                },
+            )
             // No duplicate :22 rows after the reconnect cycle.
             assertEquals(
                 "exactly one :22 tunnel after auto-restore",
@@ -403,34 +381,48 @@ class PortForwardIntegrationTest {
         }
     }
 
-    private fun assertBannerReadable(localPort: Int) {
+    private fun waitForForwardingTunnelWithBanner(
+        timeoutMs: Long,
+        remotePort: Int,
+        tunnels: () -> List<TunnelInfo>,
+        readyToProbe: () -> Boolean = { true },
+    ): TunnelInfo {
         // The forward's local accept thread can lag a few hundred ms
-        // behind the FORWARDING status flip, so retry the read for a
-        // bounded window rather than racing a single attempt. On the
-        // shared GitHub Actions runner the freshly-reconnected forward's
-        // accept thread can lag well past the local 10 s budget (the
-        // line-409 CI flake in #545: the real-SSH reconnect + local
-        // accept settle competes with a sibling Docker container for the
-        // same 2-core host), so the window scales on CI.
-        val deadline = System.currentTimeMillis() + ciScaled(10_000)
+        // behind the FORWARDING status flip. Treat the tunnel as restored
+        // only after the same snapshot also yields the remote SSH banner,
+        // so this test cannot pass on a premature status row.
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var lastSnapshot = emptyList<TunnelInfo>()
         var lastBanner = ""
         while (System.currentTimeMillis() < deadline) {
-            val banner = runCatching {
-                Socket().use { client ->
-                    client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
-                    client.soTimeout = 5_000
-                    BufferedReader(InputStreamReader(client.getInputStream())).readLine() ?: ""
+            lastSnapshot = tunnels()
+            val tunnel = lastSnapshot
+                .singleOrNull {
+                    it.remotePort == remotePort &&
+                        it.status == TunnelInfo.Status.FORWARDING
                 }
-            }.getOrDefault("")
-            if (banner.startsWith("SSH-2.0-")) return
-            lastBanner = banner
+            if (tunnel != null && readyToProbe()) {
+                val banner = readForwardedBannerOrEmpty(tunnel.localPort)
+                if (banner.startsWith("SSH-2.0-")) return tunnel
+                lastBanner = banner
+            }
             Thread.sleep(200)
         }
-        assertTrue(
-            "expected SSH banner through forwarded tunnel on $localPort, got `$lastBanner`",
-            false,
+        error(
+            "timed out after ${timeoutMs}ms waiting for remote port $remotePort " +
+                "to be FORWARDING and banner-readable; lastSnapshot=$lastSnapshot, " +
+                "lastBanner=`$lastBanner`",
         )
     }
+
+    private fun readForwardedBannerOrEmpty(localPort: Int): String =
+        runCatching {
+            Socket().use { client ->
+                client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
+                client.soTimeout = 5_000
+                BufferedReader(InputStreamReader(client.getInputStream())).readLine() ?: ""
+            }
+        }.getOrDefault("")
 
     /**
      * Snapshot the current value of a [kotlinx.coroutines.flow.Flow] backed by a

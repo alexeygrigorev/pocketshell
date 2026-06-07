@@ -538,7 +538,7 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
-    fun `post resume network callback after within grace live runtime does not fan out`() = runTest {
+    fun `late post resume network callback over one second after within grace live runtime does not fan out`() = runTest {
         val events = mutableListOf<String>()
         val activeTmuxClients = ActiveTmuxClients()
         activeTmuxClients.registerLifecycleHooks(
@@ -567,7 +567,7 @@ class BackgroundGraceControllerTest {
         assertEquals(null, foregroundDecision.change)
         assertEquals("no_pending_change", foregroundDecision.gateDiagnostics.reason)
 
-        now += POST_RESUME_NETWORK_SUPPRESSION_MILLIS / 2
+        now += 1_500L
         val lateDecision = gate.onNetworkChange(change)
         if (lateDecision is TerminalNetworkDecision.Dispatch) {
             activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(lateDecision.change) }
@@ -587,7 +587,7 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
-    fun `different foreground network change after post resume suppression still dispatches`() {
+    fun `second foreground handoff dispatches after one post resume suppression`() {
         var now = 20_000L
         val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
         val lateBackgroundChange = terminalNetworkChange(
@@ -613,7 +613,7 @@ class BackgroundGraceControllerTest {
             ) is TerminalNetworkDecision.Suppress,
         )
 
-        now += POST_RESUME_NETWORK_SUPPRESSION_MILLIS / 2
+        now += 1_500L
         assertTrue(gate.onNetworkChange(lateBackgroundChange) is TerminalNetworkDecision.Suppress)
 
         val foregroundDecision = gate.onNetworkChange(foregroundChange) as TerminalNetworkDecision.Dispatch
@@ -627,7 +627,7 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
-    fun `foreground network change after post resume suppression window still dispatches`() {
+    fun `foreground handoff after post resume attribution bound dispatches`() {
         var now = 30_000L
         val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
         val foregroundChange = terminalNetworkChange(
@@ -646,10 +646,39 @@ class BackgroundGraceControllerTest {
             ) is TerminalNetworkDecision.Suppress,
         )
 
-        now += POST_RESUME_NETWORK_SUPPRESSION_MILLIS + 1
+        now += POST_RESUME_NETWORK_ATTRIBUTION_MILLIS + 1
         val foregroundDecision = gate.onNetworkChange(foregroundChange) as TerminalNetworkDecision.Dispatch
         assertEquals(
-            "a real foreground handoff after the post-resume race window must still reconnect",
+            "a real foreground handoff after the bounded attribution window must still reconnect",
+            foregroundChange,
+            foregroundDecision.change,
+        )
+        assertEquals("dispatch", foregroundDecision.gateDiagnostics.decision)
+        assertEquals("foreground_active", foregroundDecision.gateDiagnostics.reason)
+    }
+
+    @Test
+    fun `post resume network callback dispatches when runtime did not survive`() {
+        val gate = TerminalNetworkLifecycleGate()
+        val foregroundChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "post-resume-no-live-runtime-handoff",
+        )
+
+        gate.onBackground()
+        gate.onForegroundResumeStarted()
+        assertTrue(
+            gate.onForegroundResumeFinished(
+                resumedWithinGrace = true,
+                hasLiveTerminalRuntime = false,
+            ) is TerminalNetworkDecision.Suppress,
+        )
+
+        val foregroundDecision = gate.onNetworkChange(foregroundChange) as TerminalNetworkDecision.Dispatch
+        assertEquals(
+            "when the runtime did not survive, a real handoff must still reconnect",
             foregroundChange,
             foregroundDecision.change,
         )

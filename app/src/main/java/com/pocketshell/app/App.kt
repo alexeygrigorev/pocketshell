@@ -412,6 +412,9 @@ internal class TerminalNetworkLifecycleGate(
     private var processForeground: Boolean = false
     private var foregroundResumePending: Boolean = false
     private var pendingTerminalNetworkChange: TerminalNetworkChange? = null
+    // Android can deliver the background interval's default-network callback
+    // after ON_START. Suppress only one callback within this bounded
+    // attribution window; later active foreground handoffs still dispatch.
     private var suppressPostResumeNetworkChangeUntilMillis: Long? = null
 
     fun onBackground() {
@@ -439,7 +442,7 @@ internal class TerminalNetworkLifecycleGate(
         )
         suppressPostResumeNetworkChangeUntilMillis =
             if (resumedWithinGrace && hasLiveTerminalRuntime && pendingChange == null) {
-                nowMillis() + POST_RESUME_NETWORK_SUPPRESSION_MILLIS
+                nowMillis() + POST_RESUME_NETWORK_ATTRIBUTION_MILLIS
             } else {
                 null
             }
@@ -574,11 +577,12 @@ private const val APP_LIFECYCLE_TAG: String = "PsAppTmuxLifecycle"
 private const val TERMINAL_NETWORK_TAG: String = "PsAppTerminalNet"
 
 /**
- * Short one-shot window for Android default-network callbacks that were
- * queued by the just-ended background interval but reach the app after the
- * foreground grace decision has completed.
+ * Bounded attribution window for Android default-network callbacks that were
+ * plausibly queued by the just-ended background interval but reach the app
+ * after the foreground grace decision has completed. Kept longer than the
+ * observed >1s callback lag, but finite so later foreground handoffs dispatch.
  */
-internal const val POST_RESUME_NETWORK_SUPPRESSION_MILLIS: Long = 1_000L
+internal const val POST_RESUME_NETWORK_ATTRIBUTION_MILLIS: Long = 5_000L
 
 /**
  * Issue #450: logcat tag for the bounded background grace-window state

@@ -162,13 +162,37 @@ class App : Application() {
             // down, so reattach is a no-op and the user sees no
             // reconnect.
             sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_START)
+            val pendingNetworkChange = pendingTerminalNetworkChange
+            val shouldDispatchPendingNetworkChange = shouldDispatchPendingTerminalNetworkChange(
+                resumedWithinGrace = resumedWithinGrace,
+                pendingChange = pendingNetworkChange,
+                hasLiveTerminalClient = activeTmuxClients.hasLiveTerminalClient(),
+            )
             if (!resumedWithinGrace) {
                 dispatchTmuxForeground()
-                drainPendingTerminalNetworkChange()
+                if (shouldDispatchPendingNetworkChange) {
+                    drainPendingTerminalNetworkChange()
+                } else {
+                    pendingTerminalNetworkChange = null
+                }
                 terminalNetworkObserver.refresh("process-foreground")
-            } else if (pendingTerminalNetworkChange?.isRealValidatedIdentityChange == true) {
+            } else if (shouldDispatchPendingNetworkChange) {
                 drainPendingTerminalNetworkChange()
             } else {
+                if (pendingNetworkChange != null && pendingNetworkChange.isRealValidatedIdentityChange) {
+                    Log.i(
+                        TERMINAL_NETWORK_TAG,
+                        "terminal-network-change-suppressed-within-grace " +
+                            "sequence=${pendingNetworkChange.sequence} " +
+                            "reason=${pendingNetworkChange.reason}",
+                    )
+                    DiagnosticEvents.record(
+                        "network",
+                        "change_suppressed_within_grace",
+                        "sequence" to pendingNetworkChange.sequence,
+                        "reason" to pendingNetworkChange.reason,
+                    )
+                }
                 pendingTerminalNetworkChange = null
             }
         },
@@ -280,6 +304,9 @@ class App : Application() {
     private val TerminalNetworkChange.isRealValidatedIdentityChange: Boolean
         get() = previousValidated != null && previousValidated != current
 
+    private fun ActiveTmuxClients.hasLiveTerminalClient(): Boolean =
+        clients.value.values.any { entry -> !entry.client.disconnected.value }
+
     private fun dispatchTmuxBackground() {
         val hooks = activeTmuxClients.lifecycleHooksSnapshot()
         if (hooks.isEmpty()) return
@@ -311,6 +338,17 @@ class App : Application() {
             }
         }
     }
+}
+
+internal fun shouldDispatchPendingTerminalNetworkChange(
+    resumedWithinGrace: Boolean,
+    pendingChange: TerminalNetworkChange?,
+    hasLiveTerminalClient: Boolean,
+): Boolean {
+    if (pendingChange == null) return false
+    if (!resumedWithinGrace) return true
+    return !hasLiveTerminalClient && pendingChange.previousValidated != null &&
+        pendingChange.previousValidated != pendingChange.current
 }
 
 /**

@@ -227,15 +227,16 @@ class BackgroundGraceControllerTest {
             },
             onForeground = { resumedWithinGrace ->
                 events += "ssh:start"
-                if (!resumedWithinGrace) {
-                    events += "tmux:foreground"
-                    if (pendingNetworkChange != null) {
-                        events += "network:dispatch"
-                        pendingNetworkChange = null
-                    }
-                } else if (pendingNetworkChange?.isRealValidatedIdentityChange == true) {
+                if (shouldDispatchPendingTerminalNetworkChange(
+                        resumedWithinGrace = resumedWithinGrace,
+                        pendingChange = pendingNetworkChange,
+                        hasLiveTerminalClient = true,
+                    )
+                ) {
                     events += "network:dispatch"
                     pendingNetworkChange = null
+                } else if (!resumedWithinGrace) {
+                    events += "tmux:foreground"
                 } else {
                     pendingNetworkChange = null
                 }
@@ -258,7 +259,7 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
-    fun `real app fanout dispatches deferred real network handoff on within-grace resume`() = runTest {
+    fun `real app fanout suppresses deferred real network handoff on within-grace resume with live client`() = runTest {
         val events = mutableListOf<String>()
         val activeTmuxClients = ActiveTmuxClients()
         activeTmuxClients.registerLifecycleHooks(
@@ -286,11 +287,24 @@ class BackgroundGraceControllerTest {
                 events += "ssh:start"
                 if (!resumedWithinGrace) {
                     activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
-                    pendingNetworkChange?.let { change ->
+                    if (shouldDispatchPendingTerminalNetworkChange(
+                            resumedWithinGrace = resumedWithinGrace,
+                            pendingChange = pendingNetworkChange,
+                            hasLiveTerminalClient = false,
+                        )
+                    ) {
+                        val change = pendingNetworkChange!!
+                        pendingNetworkChange = null
                         activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(change) }
+                    } else {
                         pendingNetworkChange = null
                     }
-                } else if (pendingNetworkChange?.isRealValidatedIdentityChange == true) {
+                } else if (shouldDispatchPendingTerminalNetworkChange(
+                        resumedWithinGrace = resumedWithinGrace,
+                        pendingChange = pendingNetworkChange,
+                        hasLiveTerminalClient = true,
+                    )
+                ) {
                     val change = pendingNetworkChange!!
                     pendingNetworkChange = null
                     activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(change) }
@@ -308,11 +322,104 @@ class BackgroundGraceControllerTest {
         runCurrent()
 
         assertEquals(
-            "a real validated handoff during grace must still reach tmux without detach",
-            listOf("ssh:start", "network:wifi-cellular-handoff"),
+            "a real validated handoff during grace must not force a visible reconnect while the client is live",
+            listOf("ssh:start"),
             events,
         )
         assertEquals("pending network change should be consumed", null, pendingNetworkChange)
+    }
+
+    @Test
+    fun `real app fanout dispatches deferred real network handoff after grace teardown`() = runTest {
+        val events = mutableListOf<String>()
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = { events += "tmux:background" },
+                onForeground = { events += "tmux:foreground" },
+                onNetworkChanged = { change -> events += "network:${change.reason}" },
+            ),
+        )
+        var pendingNetworkChange: TerminalNetworkChange? = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "wifi-cellular-handoff",
+        )
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onBackground() }
+                events += "ssh:stop"
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "ssh:start"
+                if (!resumedWithinGrace) {
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                }
+                if (shouldDispatchPendingTerminalNetworkChange(
+                        resumedWithinGrace = resumedWithinGrace,
+                        pendingChange = pendingNetworkChange,
+                        hasLiveTerminalClient = false,
+                    )
+                ) {
+                    val change = pendingNetworkChange!!
+                    pendingNetworkChange = null
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(change) }
+                } else {
+                    pendingNetworkChange = null
+                }
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis + 1)
+        runCurrent()
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            "after grace teardown, foreground must still run the normal reattach and network reconnect path",
+            listOf(
+                "tmux:background",
+                "ssh:stop",
+                "ssh:start",
+                "tmux:foreground",
+                "network:wifi-cellular-handoff",
+            ),
+            events,
+        )
+        assertEquals("pending network change should be consumed", null, pendingNetworkChange)
+    }
+
+    @Test
+    fun `real app fanout still dispatches network changes while app is foreground active`() = runTest {
+        val events = mutableListOf<String>()
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = {},
+                onForeground = {},
+                onNetworkChanged = { change -> events += "network:${change.reason}" },
+            ),
+        )
+
+        val change = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "foreground-wifi-cellular-handoff",
+        )
+        activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(change) }
+
+        assertEquals(
+            listOf("network:foreground-wifi-cellular-handoff"),
+            events,
+        )
     }
 
     @Test
@@ -379,7 +486,4 @@ class BackgroundGraceControllerTest {
             reason = reason,
             sequence = 1L,
         )
-
-    private val TerminalNetworkChange.isRealValidatedIdentityChange: Boolean
-        get() = previousValidated != null && previousValidated != current
 }

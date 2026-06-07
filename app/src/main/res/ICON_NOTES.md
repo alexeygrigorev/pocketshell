@@ -3,8 +3,8 @@
 ## Scope
 
 - Adaptive icon vectors: `drawable/ic_launcher_background.xml` (flat
-  `#0D1117` fill) and `drawable/ic_launcher_foreground.xml` (cyan
-  `#22D3EE` `>_` prompt glyph).
+  `#0B0F14` fill) and `drawable/ic_launcher_foreground.xml` (D/1
+  pocket-terminal mark with a cyan frame and prompt/cursor glyph).
 - Adaptive icon entries: `mipmap-anydpi-v26/ic_launcher.xml` and
   `mipmap-anydpi-v26/ic_launcher_round.xml`.
 - Manifest `<application>` references `@mipmap/ic_launcher` and
@@ -30,13 +30,21 @@ The two vector drawables (`ic_launcher_background.xml` and
 else (the adaptive-icon XML, eventual raster fallbacks if needed)
 derives from them. Edit those when iterating on the mark.
 
+Issue #612's generated boards are design references only; the PNGs are
+not launcher assets:
+
+- Icon contact sheet:
+  https://github.com/alexeygrigorev/pocketshell/releases/download/feedback-assets/pocketshell-icon-contact-sheet-20260607.png
+- Brand board:
+  https://github.com/alexeygrigorev/pocketshell/releases/download/feedback-assets/pocketshell-brand-board-20260607.png
+
 ## Design intent
 
-- Background: deep navy (`#0D1117`) per `docs/design-language.md`.
-- Foreground: shell-prompt mark (`>` chevron + `_` cursor block) in
-  the accent cyan (`#22D3EE`). The glyph reads instantly as
-  "terminal / shell", aligns with the `--term-prompt` accent used in
-  the mockups, and is geometric/bold enough to survive scaling down
-  to mdpi (48px) without losing legibility.
+- Background: near-black navy (`#0B0F14`) from the selected Brand
+  Board Direction 1 / "Pocket Terminal" palette.
+- Foreground: direction D plus Direction 1, redrawn as a compact
+  pocket-terminal mark. The cyan (`#22D3EE`) frame/title bar/cursor
+  carries the brand color; the white prompt chevron preserves contrast
+  inside the small Android icon mask.
 - Artwork is constrained to the inner 66dp × 66dp adaptive-icon
   safe zone so OEM masks (circle, squircle, teardrop) never clip it.

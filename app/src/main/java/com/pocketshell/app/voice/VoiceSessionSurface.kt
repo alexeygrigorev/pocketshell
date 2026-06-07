@@ -15,8 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -524,7 +522,7 @@ private fun ComposerLauncherButton(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = Icons.Outlined.OpenInFull,
+            imageVector = ComposerLauncherIcon,
             contentDescription = null,
             tint = glyphColor,
             modifier = Modifier.size(24.dp),
@@ -646,6 +644,84 @@ internal const val SESSION_COMPOSER_LAUNCHER_TAG: String = "session:composer-lau
 internal const val SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION: String = "Open prompt composer"
 
 internal const val SESSION_MIC_FAB_TAG: String = SESSION_COMPOSER_LAUNCHER_TAG
+
+/**
+ * Issue #612: D/1-derived composer launcher mark. It keeps the selected
+ * pocket-terminal silhouette from the launcher icon, then adds a compact
+ * prompt/open-corner cue so the bottom FAB still reads as "open composer"
+ * rather than dictation. Microphone glyphs stay reserved for real recording
+ * controls.
+ */
+internal val ComposerLauncherIcon: ImageVector = ImageVector.Builder(
+    name = "ComposerLauncher",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).addComposerLauncherPath(
+    fill = SolidColor(Color.White),
+).build()
+
+private fun ImageVector.Builder.addComposerLauncherPath(fill: SolidColor): ImageVector.Builder {
+    val builder = PathBuilder()
+
+    // Pocket-terminal frame, built from filled bars for stable 24dp rendering.
+    builder.moveTo(5f, 4f)
+    builder.lineToRelative(14f, 0f)
+    builder.lineToRelative(0f, 2f)
+    builder.lineToRelative(-14f, 0f)
+    builder.close()
+
+    builder.moveTo(4f, 5f)
+    builder.lineToRelative(2f, 0f)
+    builder.lineToRelative(0f, 14f)
+    builder.lineToRelative(-2f, 0f)
+    builder.close()
+
+    builder.moveTo(18f, 5f)
+    builder.lineToRelative(2f, 0f)
+    builder.lineToRelative(0f, 14f)
+    builder.lineToRelative(-2f, 0f)
+    builder.close()
+
+    builder.moveTo(5f, 18f)
+    builder.lineToRelative(14f, 0f)
+    builder.lineToRelative(0f, 2f)
+    builder.lineToRelative(-14f, 0f)
+    builder.close()
+
+    // Prompt chevron.
+    builder.moveTo(7f, 9f)
+    builder.lineToRelative(1.6f, -1.4f)
+    builder.lineToRelative(4.4f, 4.4f)
+    builder.lineToRelative(-1.6f, 1.4f)
+    builder.close()
+
+    builder.moveTo(8.6f, 16.4f)
+    builder.lineToRelative(-1.6f, -1.4f)
+    builder.lineToRelative(4.4f, -4.4f)
+    builder.lineToRelative(1.6f, 1.4f)
+    builder.close()
+
+    // Cursor block.
+    builder.moveTo(13.5f, 15f)
+    builder.lineToRelative(3.5f, 0f)
+    builder.lineToRelative(0f, 1.8f)
+    builder.lineToRelative(-3.5f, 0f)
+    builder.close()
+
+    // Open-corner cue: enough to echo OpenInFull without becoming generic.
+    builder.moveTo(14.5f, 7.5f)
+    builder.lineToRelative(3f, 0f)
+    builder.lineToRelative(0f, 3f)
+    builder.lineToRelative(-1.4f, 0f)
+    builder.lineToRelative(0f, -1.6f)
+    builder.lineToRelative(-1.6f, 0f)
+    builder.close()
+
+    addPath(pathData = builder.nodes, fill = fill)
+    return this
+}
 
 /**
  * Issue #221 (round 2): stable test tag on the `+ snippet` chip inside

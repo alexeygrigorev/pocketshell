@@ -1,20 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    PocketShell launcher foreground.
+    PocketShell launcher foreground for issue #612.
 
-    A shell prompt glyph: a chevron ">" followed by an underscore "_"
-    cursor block, drawn in the accent cyan (#22D3EE) from the design
-    tokens. Instantly reads as "terminal / shell" and is distinct from
-    the default Android icon.
+    The maintainer selected icon direction D plus Brand Board Direction 1
+    ("Pocket Terminal"). This redraws that direction as clean vector
+    geometry instead of embedding the generated contact-sheet raster:
+    a pocket-sized terminal frame with a bold prompt chevron and cursor.
 
     Adaptive-icon canvas is 108x108. The OEM mask crops/scales aggres-
     sively, so all artwork is kept inside the inner 66x66 safe zone
     (viewport coords 21..87 on each axis). Strokes are bold enough to
     render at mdpi (48px) without melting.
 
-    The composition "+_" spans x=26..82, centred horizontally on the
-    canvas (offset 4 units left of geometric centre so the chevron
-    tip and cursor block share visual weight).
+    Source design references:
+    - https://github.com/alexeygrigorev/pocketshell/releases/download/feedback-assets/pocketshell-icon-contact-sheet-20260607.png
+    - https://github.com/alexeygrigorev/pocketshell/releases/download/feedback-assets/pocketshell-brand-board-20260607.png
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -22,29 +22,35 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!--
-        Chevron ">".
-        Two filled quadrilaterals forming an angle bracket. Filled
-        polygons (not stroked paths) so the arm thickness stays
-        uniform under vector scaling. Arm thickness ~7 viewport units.
+    <!-- Pocket terminal frame. Thick stroke keeps the silhouette at mdpi. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M31,27 L77,27 Q83,27 83,33 L83,78 Q83,84 77,84 L31,84 Q25,84 25,78 L25,33 Q25,27 31,27 Z" />
 
-        Tip of the chevron sits at (60, 54). Left ends are at
-        (26, 32)/(31, 28) upper and (26, 76)/(31, 80) lower.
-    -->
+    <!-- Terminal title bar / pocket lip. -->
     <path
         android:fillColor="#22D3EE"
-        android:pathData="M26,32 L31,28 L60,54 L55,58 Z" />
-    <path
-        android:fillColor="#22D3EE"
-        android:pathData="M31,80 L26,76 L55,50 L60,54 Z" />
+        android:pathData="M28,38 L80,38 L80,44 L28,44 Z" />
 
-    <!--
-        Underscore cursor block "_". A solid rectangle sitting on
-        the prompt baseline, to the right of the chevron. Aligned
-        with the lower leg's endpoint so the whole mark reads
-        as `>_`.
-    -->
+    <!-- Prompt chevron. Filled polygons avoid thin strokes after masking. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,52 L39,48 L57,64 L52,68 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M39,80 L34,76 L52,60 L57,64 Z" />
+
+    <!-- Cursor block. -->
     <path
         android:fillColor="#22D3EE"
-        android:pathData="M66,72 L82,72 L82,80 L66,80 Z" />
+        android:pathData="M61,74 L75,74 L75,80 L61,80 Z" />
+
+    <!-- Small pocket notch echoing the D crop's vertical terminal detail. -->
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M74,52 L80,52 L80,68 L74,68 Z" />
 </vector>

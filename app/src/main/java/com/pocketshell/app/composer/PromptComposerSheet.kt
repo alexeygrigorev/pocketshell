@@ -1220,23 +1220,58 @@ private fun Modifier.micSwipeUpLockGesture(
     return pointerInput(enabled, lockThresholdPx, onPressStart) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
-            onPressStart()
+            val tracker = MicSwipeUpLockGestureTracker(lockThresholdPx)
+            if (tracker.onPressStart() == MicSwipeUpLockGestureEvent.StartRecording) {
+                onPressStart()
+            }
             down.consume()
-            var locked = false
             while (true) {
                 val event = awaitPointerEvent()
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 val drag = change.position - down.position
-                if (!locked && micSwipeCrossedLockThreshold(drag.x, drag.y, lockThresholdPx)) {
-                    locked = true
+                if (tracker.onDrag(drag.x, drag.y) == MicSwipeUpLockGestureEvent.LockRecording) {
                     change.consume()
                 }
                 if (change.changedToUpIgnoreConsumed()) {
+                    tracker.onRelease()
                     break
                 }
             }
         }
     }
+}
+
+internal class MicSwipeUpLockGestureTracker(
+    private val lockThresholdPx: Float,
+) {
+    var started: Boolean = false
+        private set
+
+    var locked: Boolean = false
+        private set
+
+    fun onPressStart(): MicSwipeUpLockGestureEvent {
+        if (started) return MicSwipeUpLockGestureEvent.None
+        started = true
+        return MicSwipeUpLockGestureEvent.StartRecording
+    }
+
+    fun onDrag(dragX: Float, dragY: Float): MicSwipeUpLockGestureEvent {
+        if (!started || locked) return MicSwipeUpLockGestureEvent.None
+        if (!micSwipeCrossedLockThreshold(dragX, dragY, lockThresholdPx)) {
+            return MicSwipeUpLockGestureEvent.None
+        }
+        locked = true
+        return MicSwipeUpLockGestureEvent.LockRecording
+    }
+
+    fun onRelease(): MicSwipeUpLockGestureEvent = MicSwipeUpLockGestureEvent.None
+}
+
+internal enum class MicSwipeUpLockGestureEvent {
+    None,
+    StartRecording,
+    LockRecording,
 }
 
 internal fun micSwipeCrossedLockThreshold(

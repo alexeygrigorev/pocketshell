@@ -327,6 +327,8 @@ internal class RealTmuxClient(
     // (consumer). ConcurrentLinkedDeque is the simplest fit — peek + poll
     // + offer are all O(1) and lock-free.
     private val pendingQueue = ConcurrentLinkedDeque<PendingCommand>()
+    private val responseCorrelationLock = Any()
+    private var staleResponseBlocksToIgnore: Int = 0
 
     // Serialises concurrent sendCommand calls. tmux can only handle one
     // at a time; we queue on the Kotlin side instead of letting them
@@ -418,7 +420,9 @@ internal class RealTmuxClient(
             val sh = shell ?: throw TmuxClientException("client has no active shell")
             val deferred = CompletableDeferred<CommandResponse>()
             val pendingCmd = PendingCommand(deferred = deferred)
-            pendingQueue.offer(pendingCmd)
+            synchronized(responseCorrelationLock) {
+                pendingQueue.offer(pendingCmd)
+            }
 
             val writeResult = CompletableDeferred<Unit>()
             val writeJob = clientScope.launch {
@@ -438,7 +442,9 @@ internal class RealTmuxClient(
                     deferred.await()
                 }
             } catch (t: Throwable) {
-                pendingQueue.remove(pendingCmd)
+                synchronized(responseCorrelationLock) {
+                    pendingQueue.remove(pendingCmd)
+                }
                 writeJob.cancel()
                 if (!writeCompleted) {
                     val kind = commandKind(cmd)
@@ -457,10 +463,10 @@ internal class RealTmuxClient(
             val exception = TmuxClientException(
                 "tmux command `$kind` timed out after ${commandTimeoutMs}ms",
             )
-            if (timeoutMode == CommandTimeoutMode.BestEffortDrain && writeCompleted) {
+            if (timeoutMode != CommandTimeoutMode.FatalClose && writeCompleted) {
                 Log.w(
                     ISSUE_244_DIAG_TAG,
-                    "tmux-command-best-effort-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
+                    "tmux-command-${timeoutMode.logName}-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
                         "lateDrainMs=$BEST_EFFORT_LATE_RESPONSE_DRAIN_MS",
                 )
                 val lateResponse = withTimeoutOrNull(BEST_EFFORT_LATE_RESPONSE_DRAIN_MS) {
@@ -469,17 +475,32 @@ internal class RealTmuxClient(
                 if (lateResponse != null) {
                     Log.i(
                         ISSUE_244_DIAG_TAG,
-                        "tmux-command-best-effort-late-drained kind=$kind " +
+                        "tmux-command-${timeoutMode.logName}-late-drained kind=$kind " +
                             "number=${lateResponse.number}",
                     )
                     throw exception
                 }
                 Log.w(
                     ISSUE_244_DIAG_TAG,
-                    "tmux-command-best-effort-quarantine-expired kind=$kind",
+                    "tmux-command-${timeoutMode.logName}-quarantine-expired kind=$kind",
                 )
-                pendingQueue.remove(pendingCmd)
-                close()
+                val waitingForBegin = synchronized(responseCorrelationLock) {
+                    val waiting = pendingCmd.commandNumber < 0L
+                    if (timeoutMode == CommandTimeoutMode.FailOpenDrain && waiting) {
+                        staleResponseBlocksToIgnore += 1
+                    }
+                    pendingQueue.remove(pendingCmd)
+                    waiting
+                }
+                if (timeoutMode == CommandTimeoutMode.FailOpenDrain && waitingForBegin) {
+                    Log.w(
+                        ISSUE_244_DIAG_TAG,
+                        "tmux-command-fail-open-stale-response-queued kind=$kind",
+                    )
+                }
+                if (timeoutMode == CommandTimeoutMode.BestEffortDrain) {
+                    close()
+                }
                 throw exception
             }
             writeJob.cancel()
@@ -488,7 +509,9 @@ internal class RealTmuxClient(
                 ISSUE_244_DIAG_TAG,
                 "tmux-command-timeout kind=$kind timeoutMs=$commandTimeoutMs",
             )
-            pendingQueue.remove(pendingCmd)
+            synchronized(responseCorrelationLock) {
+                pendingQueue.remove(pendingCmd)
+            }
             close()
             throw exception
         }
@@ -518,7 +541,10 @@ internal class RealTmuxClient(
                 isError = true,
             )
         }
-        return sendCommand("refresh-client -C ${cols}x${rows}")
+        return sendCommandInternal(
+            "refresh-client -C ${cols}x${rows}",
+            timeoutMode = CommandTimeoutMode.FailOpenDrain,
+        )
     }
 
     override suspend fun detachCleanly(timeoutMs: Long) {
@@ -589,8 +615,11 @@ internal class RealTmuxClient(
         shell = null
         // Fail any outstanding sendCommand waiters so callers don't block
         // forever after a teardown.
-        while (true) {
-            val cmd = pendingQueue.poll() ?: break
+        val pending = synchronized(responseCorrelationLock) {
+            staleResponseBlocksToIgnore = 0
+            drainPendingCommands()
+        }
+        pending.forEach { cmd ->
             cmd.deferred.completeExceptionally(
                 TmuxClientException("client closed while waiting for response"),
             )
@@ -672,6 +701,7 @@ internal class RealTmuxClient(
         // the next pending entry from the queue on `%begin` and complete
         // it on `%end` / `%error`.
         var inflight: PendingCommand? = null
+        var ignoredResponseNumber: Long = -1L
         val stream = ControlEventStream(
             onResponsePayload = { _, line ->
                 inflight?.output?.add(line)
@@ -682,10 +712,18 @@ internal class RealTmuxClient(
             stream.events(lines).collect { event ->
                 when (event) {
                     is ControlEvent.Begin -> {
-                        // The next pending command — if any — is for this
-                        // `%begin`. We capture the tmux-assigned number
-                        // for the eventual CommandResponse.number field.
-                        val match = pendingQueue.poll()
+                        val match = synchronized(responseCorrelationLock) {
+                            if (staleResponseBlocksToIgnore > 0) {
+                                staleResponseBlocksToIgnore -= 1
+                                ignoredResponseNumber = event.number
+                                null
+                            } else {
+                                // The next pending command — if any — is for this
+                                // `%begin`. We capture the tmux-assigned number
+                                // for the eventual CommandResponse.number field.
+                                pendingQueue.poll()
+                            }
+                        }
                         if (match != null) {
                             match.commandNumber = event.number
                             inflight = match
@@ -693,7 +731,9 @@ internal class RealTmuxClient(
                     }
                     is ControlEvent.End -> {
                         val match = inflight
-                        if (match != null && match.commandNumber == event.number) {
+                        if (ignoredResponseNumber == event.number) {
+                            ignoredResponseNumber = -1L
+                        } else if (match != null && match.commandNumber == event.number) {
                             match.deferred.complete(
                                 CommandResponse(
                                     number = match.commandNumber,
@@ -702,11 +742,15 @@ internal class RealTmuxClient(
                                 ),
                             )
                         }
-                        inflight = null
+                        if (match?.commandNumber == event.number) {
+                            inflight = null
+                        }
                     }
                     is ControlEvent.Error -> {
                         val match = inflight
-                        if (match != null && match.commandNumber == event.number) {
+                        if (ignoredResponseNumber == event.number) {
+                            ignoredResponseNumber = -1L
+                        } else if (match != null && match.commandNumber == event.number) {
                             match.deferred.complete(
                                 CommandResponse(
                                     number = match.commandNumber,
@@ -715,7 +759,9 @@ internal class RealTmuxClient(
                                 ),
                             )
                         }
-                        inflight = null
+                        if (match?.commandNumber == event.number) {
+                            inflight = null
+                        }
                     }
                     else -> Unit
                 }
@@ -781,13 +827,24 @@ internal class RealTmuxClient(
             )
             // Any commands that were queued but never saw a `%begin` also
             // need to fail so their callers unblock.
-            while (true) {
-                val cmd = pendingQueue.poll() ?: break
+            val pending = synchronized(responseCorrelationLock) {
+                staleResponseBlocksToIgnore = 0
+                drainPendingCommands()
+            }
+            pending.forEach { cmd ->
                 cmd.deferred.completeExceptionally(
                     TmuxClientException("control channel closed before response"),
                 )
             }
         }
+    }
+
+    private fun drainPendingCommands(): List<PendingCommand> {
+        val pending = mutableListOf<PendingCommand>()
+        while (true) {
+            pending += pendingQueue.poll() ?: break
+        }
+        return pending
     }
 
     private fun emitOutput(event: ControlEvent.Output) {
@@ -890,6 +947,15 @@ internal class RealTmuxClient(
     private enum class CommandTimeoutMode {
         FatalClose,
         BestEffortDrain,
+        FailOpenDrain,
+        ;
+
+        val logName: String
+            get() = when (this) {
+                FatalClose -> "fatal"
+                BestEffortDrain -> "best-effort"
+                FailOpenDrain -> "fail-open"
+            }
     }
 
     private class PaneOutputPipe private constructor(

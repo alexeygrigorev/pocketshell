@@ -358,6 +358,62 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `refreshClientSize timeout fails open without disconnecting client`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val outcome = withTimeout(3_000) {
+                runCatching { client.refreshClientSize(cols = 62, rows = 52) }
+            }
+
+            assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify refresh-client without logging full arguments",
+                ex.message?.contains("tmux command `refresh-client` timed out") == true,
+            )
+            assertEquals("refresh-client -C 62x52\n", shell.stdinAsString())
+            assertFalse("refresh-client timeout must not close the shell", shell.closed)
+            assertFalse(
+                "refresh-client timeout must not trip disconnected latch",
+                client.disconnected.value,
+            )
+
+            shell.resetStdin()
+            val next = scope.async {
+                client.sendCommand("list-panes -F ok")
+            }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+            shell.feed(
+                "%begin 1 10 0\n" +
+                    "%end 1 10 0\n",
+            )
+            shell.feed(
+                "%begin 1 11 0\n" +
+                    "list-panes-ok\n" +
+                    "%end 1 11 0\n",
+            )
+            val nextResponse = withTimeout(3_000) { next.await() }
+            assertEquals(11L, nextResponse.number)
+            assertEquals(listOf("list-panes-ok"), nextResponse.output)
+            assertFalse("follow-up command must not disconnect client", client.disconnected.value)
+            assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendCommand serialises concurrent calls FIFO`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

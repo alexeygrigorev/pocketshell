@@ -2754,6 +2754,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     startedAtMs = startedAtMs,
                     trigger = TmuxConnectTrigger.AutoReconnect,
                 )
+                rebindVisiblePaneProducersToClient(replacement)
                 reseedAllVisiblePanes(
                     RuntimeRefreshGuard(
                         generation = connectGeneration,
@@ -2879,6 +2880,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     startedAtMs = startedAtMs,
                     trigger = TmuxConnectTrigger.AutoReconnect,
                 )
+                rebindVisiblePaneProducersToClient(newClient)
                 reseedAllVisiblePanes(
                     RuntimeRefreshGuard(
                         generation = connectGeneration,
@@ -3849,6 +3851,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-terminal-producer-attach-failed pane=$paneId",
                 cause,
+            )
+        }
+    }
+
+    private fun rebindVisiblePaneProducersToClient(client: TmuxClient) {
+        for (pane in paneRows.values) {
+            val paneId = pane.paneId
+            paneProducerJobs.remove(paneId)?.cancel()
+            paneOutputActivityJobs.remove(paneId)?.cancel()
+            panePortDetectorJobs.remove(paneId)?.cancel()
+            paneInputJobs.remove(paneId)?.cancel()
+            paneInputQueues.remove(paneId)?.close()
+            attachTerminalProducerForPane(
+                paneId = paneId,
+                state = pane.terminalState,
+                client = client,
             )
         }
     }

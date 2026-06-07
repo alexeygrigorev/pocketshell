@@ -31,6 +31,8 @@ import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
@@ -55,7 +57,6 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -68,29 +69,27 @@ import java.io.File
  *
  * The old (#145-era) contract this test used to assert — a mid-session
  * drop surfaces a `Failed` error band and waits for a *manual* Reconnect
- * tap — was superseded when auto-reconnect landed. A dropped session now
- * auto-retries with backoff (`DEFAULT_AUTO_RECONNECT_DELAYS_MS`), so the
- * user-visible journey is: transport drop -> "Reconnecting (attempt
- * N/max)" progress row -> the session auto-recovers (reattaches to the
- * tmux session) with **no manual tap**. A non-retryable failure (bad
- * auth, unknown host, missing key) short-circuits the backoff loop and
- * falls back to the manual Reconnect affordance instead.
+ * tap — was superseded when auto-reconnect landed. The current contract has
+ * two recovery shapes: passive EOF can ride through silently by refreshing
+ * the transport and reattaching the tmux pipe with **no manual tap**, while
+ * sustained retryable failures can still surface the bounded
+ * "Reconnecting" progress row. A non-retryable failure (bad auth, unknown
+ * host, missing key) short-circuits the backoff loop and falls back to the
+ * manual Reconnect affordance instead.
  *
  * This test exercises both halves:
  *
- *  - [transportDropAutoRecoversWithReconnectingProgressAndNoManualTap]
+ *  - [transportDropSilentlyRidesThroughAndRecoversWithoutManualTap]
  *    drives the real app journey against the deterministic `flaky-agent`
  *    Docker fixture (host port 2226, `FLAKY_DISCONNECT_AFTER_SEC=12`).
  *    The fixture forcibly kills the SSH child after ~12s, so the app
- *    observes a wire-level transport drop. On current main, brief passive
- *    drops can ride through silently, so the transient
- *    [TMUX_CONNECTING_PROGRESS_TAG] row is accepted when it is visible but
- *    not required as the durable signal. We assert the session auto-recovers
- *    to a live terminal **without** ever showing the manual
- *    [TMUX_SESSION_ERROR_TAG] band. The after-drop blip lands — proving the
- *    reattach actually re-bound the tmux pipe. The connect-attempt counter
- *    must advance by >= 2 (initial connect + at least one auto-reconnect
- *    attempt).
+ *    observes a wire-level transport drop. Current #548 passive EOF policy
+ *    may silently refresh the transport with `trigger=auto-reconnect`
+ *    without showing [TMUX_CONNECTING_PROGRESS_TAG] and without incrementing
+ *    [TMUX_CONNECT_ATTEMPTS] for the hidden reattach. The durable app-level
+ *    contract is terminal liveness after the fixture's first forced EOF:
+ *    a ticker already running in the same tmux session continues rendering
+ *    in the app with no manual [TMUX_SESSION_ERROR_TAG] / Reconnect band.
  *
  *  - [nonRetryableDropShortCircuitsToManualReconnectAffordance] drives a
  *    [TmuxSessionViewModel] directly (mirrors `TmuxAttachTimeoutDockerTest`):
@@ -111,8 +110,7 @@ import java.io.File
  * ```bash
  * docker compose -f tests/docker/docker-compose.yml up -d --build flaky-agent
  * ./gradlew :app:connectedDebugAndroidTest \
- *   -Pandroid.testInstrumentationRunnerArguments.pocketshellFlakyReconnectProof=true \
- *   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SshReconnectE2eTest#transportDropAutoRecoversWithReconnectingProgressAndNoManualTap
+ *   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SshReconnectE2eTest#transportDropSilentlyRidesThroughAndRecoversWithoutManualTap
  * ```
  */
 @RunWith(AndroidJUnit4::class)
@@ -133,8 +131,7 @@ class SshReconnectE2eTest {
     }
 
     @Test
-    fun transportDropAutoRecoversWithReconnectingProgressAndNoManualTap() = runBlocking {
-        assumeFlakyReconnectProofEnabled()
+    fun transportDropSilentlyRidesThroughAndRecoversWithoutManualTap() = runBlocking {
         val key = readFixtureKey()
         // Wait for the flaky-agent fixture port (2226) to accept SSH.
         // The fixture kills each accepted SSH session after ~12s, but
@@ -152,8 +149,9 @@ class SshReconnectE2eTest {
         val hostRowTag = seedFlakyHost(key, hostName)
 
         // Snapshot the connect-attempt counter BEFORE we drive the app.
-        // After auto-reconnect recovers it must have advanced by at least
-        // 2 (the initial connect + at least one auto-reconnect attempt).
+        // The initial attach must increment it. Current passive EOF
+        // ride-through may perform the hidden transport refresh without
+        // incrementing this legacy logical-connect counter.
         val attemptsBefore = TMUX_CONNECT_ATTEMPTS.get()
 
         preGrantRuntimePermissions()
@@ -162,6 +160,7 @@ class SshReconnectE2eTest {
 
         val attachStart = SystemClock.elapsedRealtime()
         waitForPickerSessionRowReady(sessionName)
+        val sessionTapStart = SystemClock.elapsedRealtime()
         compose.onNodeWithText(sessionName).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -176,31 +175,32 @@ class SshReconnectE2eTest {
         waitForVisibleTerminalText(label = "before-blip output") { "BEFORE-$marker" in it }
         recordTiming("flaky_before_blip_ms", SystemClock.elapsedRealtime() - beforeBlipStart)
 
-        // Wait for the deterministic transport drop to trigger auto-reconnect.
-        // The fixture kills the SSH session ~12s after acceptance; the
-        // [TmuxClient.readerLoop] observes EOF, latches `disconnected`, and
-        // the view model's `disconnected` observer calls
-        // `scheduleAutoReconnect`, which flips status to
-        // [ConnectionStatus.Reconnecting] (-> [TMUX_CONNECTING_PROGRESS_TAG])
-        // and then runs a fresh connect attempt (advancing
-        // [TMUX_CONNECT_ATTEMPTS]).
-        //
-        // The authoritative "auto-reconnect fired" signal is the connect-
-        // attempt counter advancing past the initial connect. The brief
-        // passive ride-through path can recover before Compose catches a
-        // visible row, so we accept either the row or the durable counter.
-        val dropWaitStart = SystemClock.elapsedRealtime()
-        var sawReconnectingRow = false
-        compose.waitUntil(timeoutMillis = RECONNECTING_PROGRESS_TIMEOUT_MS) {
-            val rowVisible = compose
-                .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            if (rowVisible) sawReconnectingRow = true
-            val reconnectFired = (TMUX_CONNECT_ATTEMPTS.get() - attemptsBefore) >= 2
-            rowVisible || reconnectFired
+        val tickerPrefix = "RIDE-$marker-"
+        startTickerViaFixtureTmuxExec(
+            key = key,
+            sessionName = sessionName,
+            prefix = tickerPrefix,
+            count = FLAKY_TICKER_COUNT,
+        )
+        waitForVisibleTerminalText(label = "ticker primed") {
+            containsTickerAtLeast(it, tickerPrefix, minTick = 0)
         }
-        recordTiming("flaky_reconnect_observed_ms", SystemClock.elapsedRealtime() - dropWaitStart)
+
+        // Wait past the flaky-agent's first deterministic EOF. The current
+        // passive-disconnect path is intentionally hidden: it can refresh the
+        // transport and reattach with `trigger=auto-reconnect` while leaving
+        // the visible reconnect row absent and the old connect-attempt
+        // counter unchanged beyond the initial attach. Give that hidden
+        // ride-through a small settle window, then prove the terminal is
+        // live by observing later ticker output below.
+        val dropWaitStart = SystemClock.elapsedRealtime()
+        waitPastFirstFlakyDisconnectWindow(sessionTapStart)
+        waitForTerminalViewAttached()
+        recordTiming("flaky_first_drop_wait_ms", SystemClock.elapsedRealtime() - dropWaitStart)
+        val sawReconnectingRow = compose
+            .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
         if (sawReconnectingRow) {
             assertTrue(
                 "the auto-reconnect progress row must show 'Reconnecting' copy when visible",
@@ -211,54 +211,37 @@ class SshReconnectE2eTest {
             )
         }
 
-        // Auto-recovery: WITHOUT any manual tap, the progress row clears, the
-        // manual Failed/Reconnect band never shows, and the terminal is
-        // re-attached. We never touch [TMUX_SESSION_RECONNECT_TAG].
-        val recoverStart = SystemClock.elapsedRealtime()
-        compose.waitUntil(timeoutMillis = AUTO_RECOVERY_TIMEOUT_MS) {
-            val progressGone = compose
-                .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isEmpty()
-            val screenUp = compose
-                .onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            progressGone && screenUp
-        }
-        // The whole point of auto-reconnect: the manual Failed/Reconnect band
-        // must NOT be showing — the user does not tap anything for a
-        // transient transport drop.
+        // The whole point of passive ride-through: the manual
+        // Failed/Reconnect band must NOT be showing after the forced EOF —
+        // the user does not tap anything for a transient transport drop.
         assertTrue(
-            "manual Failed error band must NOT appear during an auto-reconnect — the drop is " +
+            "manual Failed error band must NOT appear during passive ride-through — the drop is " +
                 "transient and recovers without a tap",
             compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isEmpty(),
         )
-        waitForTerminalViewAttached()
-        recordTiming("flaky_auto_recovery_ms", SystemClock.elapsedRealtime() - recoverStart)
 
-        // After-drop blip on the recovered session. Asserting the command
-        // output renders proves the auto-reconnect actually re-attached the
-        // tmux session and re-bound the terminal pipe — no manual tap was
-        // needed at any point.
+        // After-drop liveness on the recovered session. The ticker was
+        // started before the drop and keeps writing to the tmux pane without
+        // another SSH exec during the hidden reattach window. Seeing a later
+        // tick proves passive ride-through re-bound the live tmux output
+        // pipe — no manual tap was needed at any point.
         val afterBlipStart = SystemClock.elapsedRealtime()
-        sendCommandThroughTerminalInput("printf 'AFTER-$marker\\n'", label = "after-blip")
-        waitForVisibleTerminalText(label = "after-blip output") { "AFTER-$marker" in it }
+        waitForVisibleTerminalText(label = "after-blip output") {
+            containsTickerAtLeast(it, tickerPrefix, minTick = FLAKY_POST_DROP_MIN_TICK)
+        }
         recordTiming("flaky_after_blip_ms", SystemClock.elapsedRealtime() - afterBlipStart)
 
-        // The connect-attempt counter must have advanced by at least 2:
-        // the initial connect plus at least one auto-reconnect attempt.
-        // Anything less than 2 means auto-reconnect never ran (i.e. the
-        // user would have been stuck on a manual band — the regression
-        // #444 guards against).
+        // Initial attach must still be counted. Passive EOF ride-through is
+        // intentionally allowed to stay silent and avoid an additional
+        // logical-connect increment.
         val attemptsAfter = TMUX_CONNECT_ATTEMPTS.get()
         val totalAttempts = attemptsAfter - attemptsBefore
         assertTrue(
-            "expected at least 2 connect attempts (initial + >=1 auto-reconnect), got $totalAttempts " +
+            "expected at least the initial connect attempt, got $totalAttempts " +
                 "(attemptsBefore=$attemptsBefore attemptsAfter=$attemptsAfter)",
-            totalAttempts >= 2,
+            totalAttempts >= 1,
         )
 
         val artifactsDir = ensureArtifactDir()
@@ -374,18 +357,6 @@ class SshReconnectE2eTest {
                 delay(25)
             }
         }
-    }
-
-    private fun assumeFlakyReconnectProofEnabled() {
-        val enabled = InstrumentationRegistry.getArguments()
-            .getString(FLAKY_RECONNECT_PROOF_ARG)
-            ?.toBooleanStrictOrNull() == true
-        Assume.assumeTrue(
-            "The flaky-agent transport proof is opt-in while the current #548 passive EOF " +
-                "ride-through behavior is being retargeted. Enable with " +
-                "-Pandroid.testInstrumentationRunnerArguments.$FLAKY_RECONNECT_PROOF_ARG=true.",
-            enabled,
-        )
     }
 
     private fun readFixtureKey(): String =
@@ -577,7 +548,54 @@ class SshReconnectE2eTest {
         }
     }
 
-    private fun sendCommandThroughTerminalInput(command: String, label: String) {
+    private fun waitPastFirstFlakyDisconnectWindow(sessionTapStart: Long) {
+        val targetElapsed = sessionTapStart + FLAKY_DISCONNECT_AFTER_MS + FLAKY_RIDE_THROUGH_SETTLE_MS
+        val remaining = targetElapsed - SystemClock.elapsedRealtime()
+        if (remaining > 0L) {
+            SystemClock.sleep(remaining)
+        }
+    }
+
+    private suspend fun startTickerViaFixtureTmuxExec(
+        key: String,
+        sessionName: String,
+        prefix: String,
+        count: Int,
+    ) {
+        val command = "i=0; while [ \$i -lt $count ]; do " +
+            "printf '${prefix}%02d\\n' \"\$i\"; " +
+            "i=\$((i + 1)); sleep 1; done"
+        val script = "tmux send-keys -t ${shellQuote(sessionName)} ${shellQuote(command)} Enter"
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = FLAKY_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(script) }
+        }
+        val exec = result.getOrNull()
+        assertTrue(
+            "expected tmux ticker send-keys exec to succeed; " +
+                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
+    }
+
+    private fun containsTickerAtLeast(transcript: String, prefix: String, minTick: Int): Boolean {
+        val pattern = Regex(Regex.escape(prefix) + "(\\d{2})")
+        return pattern.findAll(transcript).any { match ->
+            match.groupValues[1].toIntOrNull()?.let { it >= minTick } == true
+        }
+    }
+
+    private fun sendCommandThroughTerminalInput(
+        command: String,
+        label: String,
+        echoTimeoutMillis: Long = 5_000,
+    ) {
         command.chunked(4).forEach { chunk ->
             val committed = terminalInputConnection().commitText(chunk, 1)
             assertTrue(
@@ -586,7 +604,10 @@ class SshReconnectE2eTest {
             )
             SystemClock.sleep(35)
         }
-        waitForVisibleTerminalText("$label command echo", timeoutMillis = 5_000) { transcript ->
+        waitForVisibleTerminalText(
+            "$label command echo",
+            timeoutMillis = echoTimeoutMillis,
+        ) { transcript ->
             TerminalTextMatcher.containsWrapTolerant(
                 transcript,
                 command,
@@ -676,7 +697,7 @@ class SshReconnectE2eTest {
                 when {
                     ch == '' -> append("<ESC>")
                     ch == '\r' -> append("<CR>")
-                    ch == ' ' -> append("<NUL>")
+                    ch == '\u0000' -> append("<NUL>")
                     ch < ' ' && ch != '\n' && ch != '\t' -> append("<0x${ch.code.toString(16)}>")
                     else -> append(ch)
                 }
@@ -703,7 +724,7 @@ class SshReconnectE2eTest {
         File(dir, "summary.txt").writeText(
             buildString {
                 appendLine("scenario=ssh-mid-session-transport-drop-auto-reconnect")
-                appendLine("contract=auto-reconnect (88b309b + #440), retargeted by #444")
+                appendLine("contract=passive EOF silent ride-through (#548/#444)")
                 appendLine("fixture=tests/docker/flaky-agent (host port $FLAKY_PORT)")
                 appendLine("session=$sessionName")
                 appendLine("marker=$marker")
@@ -717,6 +738,9 @@ class SshReconnectE2eTest {
         )
         File(dir, "timings.txt").writeText(timings.joinToString(separator = "\n", postfix = "\n"))
     }
+
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\"'\"'") + "'"
 
     private data class TerminalGridSize(val columns: Int, val rows: Int)
 
@@ -772,28 +796,18 @@ class SshReconnectE2eTest {
         const val FLAKY_PORT: Int = 2226
 
         /**
-         * Ceiling for the auto-reconnect "Reconnecting" progress row to
-         * surface after the fixture's ~12s deterministic drop. The CI
-         * emulator can lag the `disconnected` observer by several seconds
-         * under sibling-test load.
+         * Mirrors `tests/docker/docker-compose.yml`'s
+         * `FLAKY_DISCONNECT_AFTER_SEC=12`. The settle window keeps the
+         * after-drop blip on the first hidden reattach and well before the
+         * fixture's second forced EOF.
          */
-        val RECONNECTING_PROGRESS_TIMEOUT_MS: Long =
-            if (TerminalTestTimeouts.isRunningOnCi()) 45_000L else 30_000L
-
-        /**
-         * Ceiling for the auto-reconnect loop to recover the session
-         * (progress row clears, terminal re-attached) WITHOUT a manual tap.
-         * The default backoff schedule is `[0, 1s, 2s, 5s]`, and each
-         * attempt re-runs the full SSH handshake + tmux re-attach to the
-         * Docker fixture, so CI needs generous head-room.
-         */
-        val AUTO_RECOVERY_TIMEOUT_MS: Long =
-            if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 30_000L
+        const val FLAKY_DISCONNECT_AFTER_MS: Long = 12_000L
+        const val FLAKY_RIDE_THROUGH_SETTLE_MS: Long = 2_000L
+        const val FLAKY_TICKER_COUNT: Int = 40
+        const val FLAKY_POST_DROP_MIN_TICK: Int = 16
 
         /** Ceiling for the non-retryable abort to land on Failed. */
         val NON_RETRYABLE_STATUS_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 20_000L
-
-        const val FLAKY_RECONNECT_PROOF_ARG: String = "pocketshellFlakyReconnectProof"
     }
 }

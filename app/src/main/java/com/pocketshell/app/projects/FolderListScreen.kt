@@ -1392,7 +1392,11 @@ private fun FolderTreeRootGroup(
             onRootActions = { onRootActions(root) },
         )
         if (root.folders.isEmpty()) {
-            EmptyRootHint(candidateCount = root.addSheetProjects.size, onCreate = { onCreateInRoot(root) })
+            EmptyRootHint(
+                rootPath = root.path,
+                candidateCount = root.addSheetProjects.size,
+                onCreate = { onCreateInRoot(root) },
+            )
         } else {
             Column(
                 modifier = Modifier.padding(start = treeProjectIndent),
@@ -1519,14 +1523,12 @@ internal fun rootCountSubtitle(root: FolderTreeRoot): String {
 }
 
 @Composable
-private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
+private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = treeProjectIndent)
-            .background(PocketShellColors.Surface.copy(alpha = 0.36f), RoundedCornerShape(6.dp))
-            .border(1.dp, PocketShellColors.BorderSoft.copy(alpha = 0.72f), RoundedCornerShape(6.dp))
-            .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
+            .heightIn(min = 36.dp)
+            .padding(start = treeProjectIndent, end = 2.dp)
             .testTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1546,12 +1548,11 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
             modifier = Modifier.weight(1f),
         )
         Spacer(modifier = Modifier.width(8.dp))
-        CompactTreeIconButton(
-            label = "+",
+        CompactTreeActionButton(
+            label = "+ Add",
             contentDescription = "Add project",
             onClick = onCreate,
-            accent = true,
-            size = 32.dp,
+            modifier = Modifier.testTag(folderTreeRootEmptyHintAddTestTag(rootPath)),
         )
     }
 }
@@ -2143,6 +2144,33 @@ private fun CompactTreeIconButton(
 }
 
 @Composable
+private fun CompactTreeActionButton(
+    label: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .defaultMinSize(minWidth = 52.dp, minHeight = 36.dp)
+            .background(PocketShellColors.AccentSoft, RoundedCornerShape(18.dp))
+            .semantics { this.contentDescription = contentDescription }
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.Accent,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
 private fun DisclosureIndicator(
     expanded: Boolean,
     modifier: Modifier = Modifier,
@@ -2605,6 +2633,8 @@ fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:
 fun folderTreeRootCountTag(path: String): String = "folder-list:tree-root:$path:count"
 fun folderTreeRootCreateTestTag(path: String): String = "folder-list:tree-root:$path:create"
 fun folderTreeRootActionsTestTag(path: String): String = "folder-list:tree-root:$path:actions"
+fun folderTreeRootEmptyHintAddTestTag(path: String): String =
+    "folder-list:tree-root:$path:empty-hint:add"
 
 private fun windowStableKey(windowIndex: Int?, windowName: String?): String =
     windowIndex?.let { "w$it" } ?: windowName?.ifBlank { null } ?: "unknown"

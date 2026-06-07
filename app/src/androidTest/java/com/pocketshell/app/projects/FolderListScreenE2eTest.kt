@@ -299,6 +299,10 @@ class FolderListScreenE2eTest {
             .performScrollToNode(hasTestTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG))
         compose.onNodeWithTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG).assertIsDisplayed()
         compose.onNodeWithText("No project folders found").assertIsDisplayed()
+        compose.onNodeWithTag(folderTreeRootEmptyHintAddTestTag("~/archive"))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+        compose.onNodeWithText("+ Add").assertIsDisplayed()
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
         // #602: the host-detail Port forwarding entry point is intentionally
@@ -997,6 +1001,61 @@ class FolderListScreenE2eTest {
         compose.waitUntil(timeoutMillis = 5_000) { openedPortForwarding }
     }
 
+    @Test
+    fun longRootHeaderLeavesRoomForTrailingActions() {
+        runBlocking {
+            val longRootPath = "~/very-long-root-name-that-must-not-collide-with-actions"
+            db.projectRootDao().insert(
+                ProjectRootEntity(
+                    hostId = hostId,
+                    label = "very-long-root-name-that-must-not-collide-with-actions",
+                    path = longRootPath,
+                ),
+            )
+            val fakeGateway = FakeFolderListGateway(
+                rows = emptyList(),
+                projectFoldersByRoot = mapOf(longRootPath to listOf("/home/u/very-long-root-name/project-alpha")),
+                resolvedWatchedRootPaths = mapOf(longRootPath to "/home/u/very-long-root-name"),
+            )
+            val viewModel = constructFolderListViewModel(fakeGateway)
+
+            compose.setContent {
+                PocketShellTheme {
+                    FolderListScreen(
+                        hostId = hostId,
+                        hostName = "issue603-host",
+                        hostname = "h.example",
+                        port = 22,
+                        username = "u",
+                        keyPath = "/tmp/issue603",
+                        passphrase = null,
+                        onBack = {},
+                        onOpenSession = { _, _ -> },
+                        onSessionCreated = { _, _ -> },
+                        onBrowseRepos = { _ -> },
+                        onEditEnv = { _, _, _ -> },
+                        modifier = Modifier.fillMaxSize(),
+                        viewModel = viewModel,
+                    )
+                }
+            }
+
+            compose.waitUntil(timeoutMillis = 10_000) {
+                fakeGateway.callCount.get() >= 1 &&
+                    compose.onAllNodesWithTag(folderTreeRootActionsTestTag(longRootPath))
+                        .fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+                .performScrollToNode(hasTestTag(folderTreeRootActionsTestTag(longRootPath)))
+            assertRootHeaderLeavesRoomForActions(longRootPath)
+            assertAccessibleTouchTarget(folderTreeRootActionsTestTag(longRootPath))
+            assertAccessibleTouchTarget(folderTreeRootCreateTestTag(longRootPath))
+            compose.onNodeWithTag(folderTreeRootEmptyHintAddTestTag(longRootPath))
+                .assertIsDisplayed()
+                .assertHasClickAction()
+        }
+    }
+
     private fun assertProjectNameKeepsReadableWidth(
         folderPath: String,
         expectedName: String,
@@ -1057,6 +1116,39 @@ class FolderListScreenE2eTest {
         // substitution in the rendered text), as a belt-and-braces semantic
         // check that pairs with the geometric one above.
         labelNode.assertTextEquals(expectedName)
+    }
+
+    private fun assertRootHeaderLeavesRoomForActions(rootPath: String) {
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val labelBounds = compose.onNodeWithTag(
+            folderTreeRootLabelTag(rootPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val countBounds = compose.onNodeWithTag(
+            folderTreeRootCountTag(rootPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val actionsBounds = compose.onNodeWithTag(
+            folderTreeRootActionsTestTag(rootPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val minGapPx = 4f * density
+
+        assertTrue(
+            "long root title must end before trailing actions: " +
+                "label.right=${labelBounds.right}px actions.left=${actionsBounds.left}px",
+            labelBounds.right <= actionsBounds.left - minGapPx,
+        )
+        assertTrue(
+            "long root count must end before trailing actions: " +
+                "count.right=${countBounds.right}px actions.left=${actionsBounds.left}px",
+            countBounds.right <= actionsBounds.left - minGapPx,
+        )
+        assertTrue(
+            "long root title should keep a readable column before ellipsizing: width=${labelBounds.width}px",
+            labelBounds.width >= 160f * density,
+        )
     }
 
     private fun measureTextWidthPx(text: String, fontSizeSp: Float, density: Float): Float {

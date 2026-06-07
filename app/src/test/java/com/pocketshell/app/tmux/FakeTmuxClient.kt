@@ -199,6 +199,13 @@ internal class FakeTmuxClient : TmuxClient {
                 isError = false,
             )
         }
+        if (cmd == "display-message -p '#{session_name}'") {
+            return CommandResponse(
+                number = 0L,
+                output = listOf("work"),
+                isError = false,
+            )
+        }
         return responses.removeFirstOrNull() ?: CommandResponse(
             number = 0L,
             output = emptyList(),

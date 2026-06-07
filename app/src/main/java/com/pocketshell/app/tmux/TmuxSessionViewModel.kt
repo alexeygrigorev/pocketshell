@@ -578,21 +578,47 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }
 
-        if (tryActivateCachedRuntime(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)) {
-            DiagnosticEvents.record(
-                "connection",
-                "connect_success",
-                "attempt" to attempt,
-                "hostId" to hostId,
-                "host" to host,
-                "port" to port,
-                "user" to user,
-                "session" to target.sessionName,
-                "trigger" to effectiveTrigger.logValue,
-                "source" to "runtime_cache",
-                "generation" to generation,
-                "clientHash" to clientRef?.let { System.identityHashCode(it) },
-            )
+        val cachedActivation = takeCachedRuntimeForActivation(
+            target = target,
+            attempt = attempt,
+            trigger = effectiveTrigger,
+            visibleSwitchStartedAtMs = fastSwitchStartedAtMs,
+        )
+        if (cachedActivation != null) {
+            connectJob = viewModelScope.launch {
+                if (
+                    tryActivateCachedRuntime(
+                        target = target,
+                        attempt = attempt,
+                        trigger = effectiveTrigger,
+                        visibleSwitchStartedAtMs = fastSwitchStartedAtMs,
+                        cached = cachedActivation,
+                        generation = generation,
+                    )
+                ) {
+                    DiagnosticEvents.record(
+                        "connection",
+                        "connect_success",
+                        "attempt" to attempt,
+                        "hostId" to hostId,
+                        "host" to host,
+                        "port" to port,
+                        "user" to user,
+                        "session" to target.sessionName,
+                        "trigger" to effectiveTrigger.logValue,
+                        "source" to "runtime_cache",
+                        "generation" to generation,
+                        "clientHash" to clientRef?.let { System.identityHashCode(it) },
+                    )
+                    return@launch
+                }
+                cancelTmuxSessionPrewarm()
+                closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
+                connectingTarget = target
+                refreshReconnectAvailability()
+                _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+                runConnect(target, attempt, effectiveTrigger)
+            }
             return
         }
         cancelTmuxSessionPrewarm()
@@ -1650,12 +1676,12 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
-    private fun tryActivateCachedRuntime(
+    private fun takeCachedRuntimeForActivation(
         target: ConnectionTarget,
         attempt: Int,
         trigger: TmuxConnectTrigger,
         visibleSwitchStartedAtMs: Long,
-    ): Boolean {
+    ): CachedTmuxRuntime? {
         val activation = runtimeCache.activate(target.toRuntimeKey())
         closeCachedRuntimesAsync(activation.evicted)
         val cached = activation.runtime ?: run {
@@ -1669,9 +1695,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = "source=runtime_cache",
             )
-            return false
+            return null
         }
-        if (cached.client.disconnected.value || cached.session?.isConnected == false) {
+        if (cached.client.disconnected.value || cached.session?.isConnected != true) {
             val startedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L }
                 ?: SystemClock.elapsedRealtime()
             recordWarmSwitchMilestone(
@@ -1685,13 +1711,41 @@ public class TmuxSessionViewModel @Inject constructor(
             viewModelScope.launch {
                 cached.closeCachedRuntime()
             }
+            return null
+        }
+        return cached
+    }
+
+    private suspend fun tryActivateCachedRuntime(
+        target: ConnectionTarget,
+        attempt: Int,
+        trigger: TmuxConnectTrigger,
+        visibleSwitchStartedAtMs: Long,
+        cached: CachedTmuxRuntime,
+        generation: Long,
+    ): Boolean {
+        if (!cachedRuntimeControlChannelHealthy(cached)) {
+            val startedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L }
+                ?: SystemClock.elapsedRealtime()
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                name = "warm_switch_runtime_cache_miss",
+                trigger = trigger,
+                detail = "source=runtime_cache reason=health_probe_failed",
+            )
+            runCatching { cached.client.close() }
+            viewModelScope.launch {
+                cached.closeCachedRuntime()
+                cached.lease?.key?.let { key ->
+                    runCatching { sshLeaseManager.disconnect(key) }
+                }
+            }
             return false
         }
         val startedAtMs = SystemClock.elapsedRealtime()
         val milestoneStartedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L } ?: startedAtMs
-        val generation = latestConnectIntent?.takeIf {
-            sameSessionIdentity(it.target, target)
-        }?.generation ?: connectGeneration
         closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
         restoreCachedRuntime(
             target = target,
@@ -1767,6 +1821,17 @@ public class TmuxSessionViewModel @Inject constructor(
             trigger = trigger,
         )
         return true
+    }
+
+    private suspend fun cachedRuntimeControlChannelHealthy(runtime: CachedTmuxRuntime): Boolean {
+        if (runtime.client.disconnected.value) return false
+        if (runtime.session?.isConnected != true) return false
+        val response = runCatching {
+            withTimeoutOrNull(CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS) {
+                runtime.client.sendBestEffortCommand("display-message -p '#{session_name}'")
+            }
+        }.getOrNull() ?: return false
+        return !response.isError
     }
 
     private fun deactivateCurrentRuntimeToCache(): List<CachedTmuxRuntime> {
@@ -1979,7 +2044,8 @@ public class TmuxSessionViewModel @Inject constructor(
         preferReuseLog: Boolean = false,
     ): SshLease? {
         val leaseTarget = target.toSshLeaseTarget()
-        val evictedIdleLease = if (trigger == TmuxConnectTrigger.NetworkReconnect) {
+        val forceFreshLease = shouldForceFreshLease(trigger)
+        val evictedIdleLease = if (forceFreshLease) {
             withContext(NonCancellable) {
                 runCatching { sshLeaseManager.evictIdle(leaseTarget.leaseKey) }
                     .getOrDefault(false)
@@ -1999,11 +2065,11 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return null
         }
-        if (trigger == TmuxConnectTrigger.NetworkReconnect) {
+        if (forceFreshLease) {
             val sessionHash = System.identityHashCode(lease.session)
             DiagnosticEvents.record(
                 "connection",
-                "network_reconnect_ssh_lease",
+                "tmux_force_fresh_ssh_lease",
                 "attempt" to attempt,
                 "hostId" to target.hostId,
                 "host" to target.host,
@@ -2017,7 +2083,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
-                "tmux-network-reconnect-ssh-lease evictedLease=$evictedIdleLease " +
+                "tmux-force-fresh-ssh-lease trigger=${trigger.logValue} evictedLease=$evictedIdleLease " +
                     "freshTransport=${lease.isNewConnection} sshSessionHash=$sessionHash " +
                     "${targetLogFields(target)} attempt=$attempt",
             )
@@ -2063,6 +2129,11 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         return lease
     }
+
+    private fun shouldForceFreshLease(trigger: TmuxConnectTrigger): Boolean =
+        trigger == TmuxConnectTrigger.Reconnect ||
+            trigger == TmuxConnectTrigger.LifecycleReattach ||
+            trigger == TmuxConnectTrigger.NetworkReconnect
 
     private fun ConnectionTarget.toSshLeaseTarget(): SshLeaseTarget =
         SshLeaseTarget(
@@ -2475,14 +2546,14 @@ public class TmuxSessionViewModel @Inject constructor(
         // NEXT acquire opens a fresh transport that can open the channel, and
         // force-preserve the reconnect target so the Reconnect affordance has
         // something to retry even when this was the very first connect.
-        val openFailed = isChannelOpenFailure(cause)
-        if (openFailed) {
+        val staleChannelSymptom = isStaleChannelSymptom(cause)
+        if (staleChannelSymptom) {
             withContext(NonCancellable) {
                 runCatching { sshLeaseManager.disconnect(target.toSshLeaseTarget().leaseKey) }
             }
             Log.w(
                 ISSUE_145_RECONNECT_TAG,
-                "tmux-connect-open-failed evicted poisoned lease so Reconnect opens fresh; " +
+                "tmux-connect-stale-channel-symptom evicted poisoned lease so Reconnect opens fresh; " +
                     "${targetLogFields(target)} attempt=$attempt",
             )
         }
@@ -2530,9 +2601,30 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         activeAttachMilestone = null
         activeTarget = null
-        connectingTarget = if (preserveReconnectTarget || openFailed) target else null
+        connectingTarget = if (preserveReconnectTarget || staleChannelSymptom) target else null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Failed(message)
+    }
+
+    private fun isStaleChannelSymptom(cause: Throwable?): Boolean =
+        isChannelOpenFailure(cause) || isTmuxCommandTimeout(cause)
+
+    private fun isTmuxCommandTimeout(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (
+                message != null &&
+                message.contains("tmux", ignoreCase = true) &&
+                message.contains("command", ignoreCase = true) &&
+                message.contains("timed out", ignoreCase = true)
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
     }
 
     /**
@@ -7807,6 +7899,7 @@ internal const val ATTACH_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val SEND_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val SEND_SESSION_WAIT_POLL_MS: Long = 100L
+internal const val CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
 internal const val TMUX_SESSION_PREWARM_MAX_TARGETS: Int = 2
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"

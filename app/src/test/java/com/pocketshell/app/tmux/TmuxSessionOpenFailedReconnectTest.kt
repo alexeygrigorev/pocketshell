@@ -149,6 +149,71 @@ class TmuxSessionOpenFailedReconnectTest {
         assertEquals(listOf("%1"), vm.panes.value.map { it.paneId })
     }
 
+    @Test
+    fun reconnectRecoversFromCommandTimeoutByEvictingPoisonedTransport() = runTest {
+        val poisonedSession = AlwaysConnectedSession(id = "poisoned")
+        val healthySession = AlwaysConnectedSession(id = "healthy")
+        val connector = TwoSessionConnector(poisonedSession, healthySession)
+        val registry = ActiveTmuxClients()
+        val vm = TestNewVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+        )
+
+        vm.setAutoReconnectDelaysForTest(emptyList())
+        vm.setAttachPanesReadyTimeoutForTest(500L)
+
+        val recoveredClient = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            if (session === poisonedSession) {
+                FakeTmuxClient().apply {
+                    closeAndThrowOnCommandPrefix = "list-panes"
+                    closeAndThrowException = TmuxClientException("tmux command timed out")
+                }
+            } else {
+                assertEquals("work", sessionName)
+                recoveredClient
+            }
+        }
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+
+        val failed = vm.connectionStatus.value
+        assertTrue(
+            "first connect should surface the command timeout, got $failed",
+            failed is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            "the failure message should reflect the timeout cause, was " +
+                (failed as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            failed.message.contains("command timed out"),
+        )
+        assertTrue("Reconnect must remain available after a tmux command timeout", vm.canReconnect.value)
+        assertTrue("poisoned lease should be closed when the timeout is classified stale", poisonedSession.closed)
+
+        assertTrue(vm.reconnect())
+        advanceUntilIdle()
+
+        assertEquals(
+            "Reconnect must open a fresh transport after a stale command timeout",
+            2,
+            connector.connectCount,
+        )
+        val recovered = vm.connectionStatus.value
+        assertTrue("Reconnect must recover to Connected, got $recovered", recovered is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(listOf("%1"), vm.panes.value.map { it.paneId })
+    }
+
     private fun FakeTmuxClient.withSinglePaneRow(
         sessionName: String,
         paneId: String,

@@ -1980,6 +1980,62 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun lifecycleReattachEvictsConnectedIdleLeaseBeforeReattaching() = runTest {
+        val registry = ActiveTmuxClients()
+        val staleSession = FakeSshSession()
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(staleSession, freshSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        manager.acquire(testLeaseTarget()).getOrThrow().release()
+        runCurrent()
+
+        val lifecycleClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = manager,
+        )
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            sessionsSeenByFactory += session
+            lifecycleClient
+        }
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+
+        vm.onAppBackgroundedAndAwait()
+        vm.onAppForegrounded()
+        advanceUntilIdle()
+
+        assertTrue(
+            "stale connected idle lease must be closed before lifecycle reattach acquire",
+            staleSession.closed,
+        )
+        assertEquals(
+            "lifecycle reattach must open a fresh SSH transport instead of reusing the warm stale one",
+            2,
+            connector.connectCount,
+        )
+        assertEquals(listOf(freshSession), sessionsSeenByFactory)
+        assertSame(lifecycleClient, registry.clients.value[1L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+    }
+
+    @Test
     fun postGraceLifecycleReattachCoalescesDeferredNetworkReplay() = runTest {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
@@ -6635,11 +6691,10 @@ class TmuxSessionViewModelTest {
         assertSame(clientA, registry.clients.value[1L]?.client)
         assertFalse("cached activation must not create a new tmux client", clientA.connectCalled)
         assertTrue(
-            "cached activation must avoid tmux list/capture commands, got ${clientA.sentCommands}",
+            "cached activation must avoid synchronous tmux list/capture commands, got ${clientA.sentCommands}",
             clientA.sentCommands.none {
                 it.startsWith("list-panes") ||
-                    it.startsWith("capture-pane") ||
-                    it.startsWith("display-message")
+                    it.startsWith("capture-pane")
             },
         )
         assertTrue(
@@ -6665,6 +6720,84 @@ class TmuxSessionViewModelTest {
         )
         assertEquals(listOf("%0", "%1"), vm.panes.value.map { it.paneId })
         TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
+    fun cachedRuntimeWithStaleConnectedSessionFallsBackToFreshAttach() = runTest {
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val staleSession = FakeSshSession()
+        val staleClient = FakeTmuxClient().apply {
+            failBestEffortOnCommandPrefix = "display-message"
+            bestEffortException = TmuxClientException("tmux command timed out")
+        }
+        val currentClient = FakeTmuxClient()
+        val freshClient = FakeTmuxClient().withSinglePane("work", "%9")
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = staleClient,
+            session = staleSession,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "cached-work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = currentClient,
+            session = staleSession,
+        )
+        runCurrent()
+        assertTrue(runtimeCache.contains(tmuxRuntimeKeyForTest("work")))
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            freshClient
+        }
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+
+        assertTrue("stale cached runtime must be closed after failed health probe", staleClient.closed)
+        assertSame("fresh attach should replace the stale cached runtime", freshClient, registry.clients.value[1L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(listOf("%9"), vm.panes.value.map { it.paneId })
+        assertFalse("failed cached runtime should be removed from cache", runtimeCache.contains(tmuxRuntimeKeyForTest("work")))
     }
 
     @Test

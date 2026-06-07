@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -64,10 +65,16 @@ class ConversationTimestampScreenshotTest {
 
         compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG).assertIsDisplayed()
 
-        // The structural block (scheduled_task_fire) renders as a muted
-        // system-note row, no longer dropped/raw.
+        // The structural block renders as a normalized Claude timeline row,
+        // not as a raw subtype label.
         compose.onAllNodesWithText("scheduled_task_fire", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.onAllNodesWithText("CLAUDE", substring = true, useUnmergedTree = true)
             .assertCountAtLeast(1)
+        compose.onAllNodesWithText("Claude resuming /loop wakeup", substring = true, useUnmergedTree = true)
+            .assertCountAtLeast(1)
+        compose.onAllNodesWithText("Turn took", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
         // Prose turns are present.
         compose.onAllNodesWithText(
             "Did the migration finish?",
@@ -109,6 +116,13 @@ class ConversationTimestampScreenshotTest {
                 atMillis = yesterdayMillis + 60_000L,
                 tag = "scheduled_task_fire",
                 content = "Claude resuming /loop wakeup (deploy watch)",
+            ),
+            ConversationEvent.SystemNote(
+                id = "sys-duration",
+                agent = AgentKind.ClaudeCode,
+                atMillis = yesterdayMillis + 70_000L,
+                tag = "turn_duration",
+                content = "Turn took 9s across 1303 messages",
             ),
             ConversationEvent.Message(
                 id = "u-today",

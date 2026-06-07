@@ -1,13 +1,22 @@
 package com.pocketshell.uikit.render
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.pocketshell.uikit.components.Badge
@@ -20,6 +29,7 @@ import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellType
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -122,6 +132,102 @@ class DesignRenders {
                 subtitle = "ci@edge.acme.io",
                 status = HostStatus.ConnectionError,
                 onClick = {},
+            )
+        }
+    }
+
+    /**
+     * Issue #561: fast PNG target for the dense Conversation timeline before
+     * spending emulator time. This fixture mirrors the production row grammar:
+     * actor/tool badge, one-line truncated preview, and right-aligned timestamp.
+     */
+    @Test
+    fun conversationTimeline() = render("conversation-timeline") {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            ConversationTimelineRenderRow(
+                badge = "USER",
+                badgeColor = PocketShellColors.Accent,
+                preview = "check the deploy log and tell me what failed in the last run",
+                timestamp = "09:05",
+            )
+            ConversationTimelineRenderRow(
+                badge = "ASSISTANT",
+                badgeColor = PocketShellColors.Purple,
+                preview = "I'll check the deploy logs and compare the failing revision with the last green run.",
+                timestamp = "09:07",
+            )
+            ConversationTimelineRenderRow(
+                badge = "TOOL",
+                badgeColor = PocketShellColors.TextSecondary,
+                preview = "Bash  kubectl logs -n prod deploy/api --tail=120",
+                timestamp = "09:07",
+                highlighted = true,
+            )
+            ConversationTimelineRenderRow(
+                badge = "CLAUDE",
+                badgeColor = PocketShellColors.TextSecondary,
+                preview = "Claude resuming /loop wakeup (deploy watch)",
+                timestamp = "09:08",
+            )
+            ConversationTimelineRenderRow(
+                badge = "ASSISTANT",
+                badgeColor = PocketShellColors.Purple,
+                preview = "The deploy failed because the database migration timed out at step 4.",
+                timestamp = "09:09",
+            )
+        }
+    }
+
+    @Composable
+    private fun ConversationTimelineRenderRow(
+        badge: String,
+        badgeColor: Color,
+        preview: String,
+        timestamp: String,
+        highlighted: Boolean = false,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+        ) {
+            Text(
+                text = badge,
+                color = badgeColor,
+                style = PocketShellType.labelMono,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .width(82.dp)
+                    .background(
+                        color = badgeColor.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(3.dp),
+                    )
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = preview,
+                color = if (highlighted) PocketShellColors.Text else PocketShellColors.TextSecondary,
+                style = if (highlighted) PocketShellType.bodyMono else PocketShellType.bodyDense,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = timestamp,
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+                textAlign = TextAlign.End,
+                modifier = Modifier.width(84.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }

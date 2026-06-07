@@ -322,15 +322,21 @@ public class ClaudeCodeParser : ConversationParser {
          * Sourced from the issue body (#176) plus observed maintainer
          * payloads: `system-reminder`, `command-name`, `command-args`,
          * `command-message`, `command-stdout`, and
-         * `local-command-stdout`.
+         * `local-command-stdout`. Issue #561 adds the orchestration-harness
+         * tags observed in the "current raw" screenshot, so those blocks get
+         * lifted into compact structural rows instead of dumping as message
+         * text.
          */
         public val SYSTEM_NOTE_TAGS: List<String> = listOf(
             "system-reminder",
+            "task-notification",
             "command-name",
             "command-args",
             "command-message",
             "command-stdout",
             "local-command-stdout",
+            "tool-use-id",
+            "output-file",
         )
     }
 }

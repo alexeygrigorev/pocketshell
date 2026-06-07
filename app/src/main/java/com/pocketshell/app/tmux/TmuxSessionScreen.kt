@@ -89,12 +89,18 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
+import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
+import com.pocketshell.app.conversation.timelineActorLabel
+import com.pocketshell.app.conversation.timelinePreview
+import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.session.AgentConversationSyncStatus
@@ -143,6 +149,7 @@ import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -3166,7 +3173,8 @@ internal fun TmuxConversationPane(
     // draft/unsent-prompt state, and the `onSendToAgent` callback are gone.
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     val visibleEvents = remember(events, showSystemNotes) {
-        if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
+        val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
+        if (showSystemNotes) timelineEvents else timelineEvents.filterNot { it is ConversationEvent.SystemNote }
     }
     val filteredConversation = remember(visibleEvents, effectiveQuery) {
         filterConversationRows(
@@ -3175,6 +3183,7 @@ internal fun TmuxConversationPane(
         )
     }
     val filteredEvents = filteredConversation.events
+    val expandedMessages = remember { mutableStateOf(setOf<String>()) }
     // Tool-call expansion state per event-id. Persisted at the pane
     // level (not inside the row composable) so a row scrolling out and
     // back in remembers the user's decision until the session detaches.
@@ -3248,8 +3257,8 @@ internal fun TmuxConversationPane(
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag(TMUX_CONVERSATION_LIST_TAG),
-                contentPadding = PaddingValues(vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 if (filteredEvents.isEmpty()) {
                     item {
@@ -3268,6 +3277,10 @@ internal fun TmuxConversationPane(
                         toolResultsByCallId = toolResultsByCallId,
                         isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
                             event.id in filteredConversation.searchExpandedToolCallIds,
+                        isMessageExpanded = expandedMessages.value.contains(event.id),
+                        onToggleMessageExpand = { id ->
+                            expandedMessages.value = expandedMessages.value.toggle(id)
+                        },
                         onToggleExpand = { id ->
                             expandedToolCalls.value = expandedToolCalls.value.toggle(id)
                         },
@@ -3487,6 +3500,8 @@ private fun ConversationEventRow(
     eventsById: Map<String, ConversationEvent>,
     toolResultsByCallId: Map<String, ConversationEvent.ToolResult>,
     isExplicitlyExpanded: Boolean,
+    isMessageExpanded: Boolean,
+    onToggleMessageExpand: (String) -> Unit,
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
@@ -3494,7 +3509,13 @@ private fun ConversationEventRow(
     onLinkTap: ((com.pocketshell.core.terminal.selection.ConversationLink) -> Unit)? = null,
 ) {
     when (event) {
-        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend, onLinkTap)
+        is ConversationEvent.Message -> ConversationMessageRow(
+            event = event,
+            isExpanded = isMessageExpanded,
+            onToggleExpand = { onToggleMessageExpand(event.id) },
+            onRetryFailedSend = onRetryFailedSend,
+            onLinkTap = onLinkTap,
+        )
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
             result = toolResultsByCallId[event.id],
@@ -3520,6 +3541,8 @@ private fun ConversationEventRow(
 @Composable
 private fun ConversationMessageRow(
     event: ConversationEvent.Message,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
     onRetryFailedSend: (String) -> Unit = {},
     onLinkTap: ((com.pocketshell.core.terminal.selection.ConversationLink) -> Unit)? = null,
 ) {
@@ -3527,6 +3550,8 @@ private fun ConversationMessageRow(
         event = event,
         onRetrySend = onRetryFailedSend,
         onLinkTap = onLinkTap,
+        isExpanded = isExpanded,
+        onToggleExpanded = onToggleExpand,
     )
 }
 
@@ -3662,40 +3687,73 @@ private fun ConversationToolCallRow(
             .padding(vertical = 2.dp)
             .testTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + toolCall.id),
     ) {
+        val timestamp = remember(toolCall.atMillis) { toolCall.timelineTimestamp() }
         Row(
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = if (expanded) "v" else "›",
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = toolCall.name,
+            TimelineBadgeText(
+                label = "TOOL",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
             )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = summary,
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-            )
-            if (statusGlyph.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp)
+                    .background(
+                        color = PocketShellColors.Surface,
+                        shape = RoundedCornerShape(4.dp),
+                    )
+                    .padding(horizontal = 7.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (expanded) "v" else "›",
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(text = statusGlyph, color = statusColor, fontSize = 12.sp)
+                Text(
+                    text = toolCall.name,
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = summary,
+                    color = PocketShellColors.Text,
+                    style = PocketShellType.bodyMono,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (statusGlyph.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(text = statusGlyph, color = statusColor, style = PocketShellType.labelMono)
+                }
+            }
+            if (timestamp != null) {
+                Text(
+                    text = timestamp,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .width(84.dp)
+                        .padding(start = 6.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
         if (expanded) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 ToolCallSection(
@@ -3736,7 +3794,8 @@ private fun ConversationSystemNoteRow(
     isExpanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val preview = remember(note.content) { note.content.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() }
+    val actorLabel = remember(note.tag) { note.timelineActorLabel() }
+    val preview = remember(note.tag, note.content) { note.timelinePreview() }
     val chevron = if (isExpanded) "v" else "›"
     Column(
         modifier = Modifier
@@ -3745,27 +3804,49 @@ private fun ConversationSystemNoteRow(
             .padding(vertical = 2.dp)
             .testTag(TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = note.tag,
+        val timestamp = remember(note.atMillis) { note.timelineTimestamp() }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TimelineBadgeText(
+                label = actorLabel,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = preview,
-                color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = chevron,
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
-            )
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = preview,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = chevron,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                )
+            }
+            if (timestamp != null) {
+                Text(
+                    text = timestamp,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .width(84.dp)
+                        .padding(start = 6.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         if (isExpanded && note.content.isNotEmpty()) {
             // Raw monospace body so the XML-like structure stays readable.
@@ -3775,7 +3856,7 @@ private fun ConversationSystemNoteRow(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
             ) {
                 ToolCallSection(
                     label = "content",
@@ -3794,13 +3875,38 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
             .fillMaxWidth()
             .padding(vertical = 2.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = if (result.isError) "tool result (error)" else "tool result",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
+        val timestamp = remember(result.atMillis) { result.timelineTimestamp() }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TimelineBadgeText(
+                label = "TOOL",
+                color = if (result.isError) PocketShellColors.Red else PocketShellColors.TextSecondary,
             )
+            Text(
+                text = if (result.isError) "result error" else "result",
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (timestamp != null) {
+                Text(
+                    text = timestamp,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .width(84.dp)
+                        .padding(start = 6.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         if (result.output.isNotEmpty()) {
             ToolCallSection(
@@ -3810,6 +3916,29 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
             )
         }
     }
+}
+
+@Composable
+private fun TimelineBadgeText(
+    label: String,
+    color: Color,
+) {
+    Text(
+        text = label,
+        color = color,
+        style = PocketShellType.labelMono,
+        fontWeight = FontWeight.SemiBold,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .width(82.dp)
+            .background(
+                color = color.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(3.dp),
+            )
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 /**

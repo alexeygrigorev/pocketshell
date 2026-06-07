@@ -74,6 +74,23 @@ class ClaudeCodeParserTest {
     }
 
     @Test
+    fun parsesHarnessXmlBlocksAsSystemNotesInsteadOfRawMessageText() {
+        val events = parser.parseLine(
+            """{"type":"user","uuid":"u-harness-1","message":{"role":"user","content":"<task-notification>Claude resuming /loop wakeup</task-notification><tool-use-id>toolu_123</tool-use-id><output-file>/tmp/out.log</output-file>show status"}}""",
+        )
+
+        assertEquals(4, events.size)
+        val notes = events.take(3).map { it as ConversationEvent.SystemNote }
+        assertEquals(listOf("task-notification", "tool-use-id", "output-file"), notes.map { it.tag })
+        assertEquals("Claude resuming /loop wakeup", notes[0].content)
+        assertEquals("toolu_123", notes[1].content)
+        assertEquals("/tmp/out.log", notes[2].content)
+        val message = events[3] as ConversationEvent.Message
+        assertEquals("show status", message.text)
+        assertTrue("raw harness XML must not remain in a Message: $message", "<task-notification>" !in message.text)
+    }
+
+    @Test
     fun splitsProseAndSystemNoteIntoSeparateEvents() {
         val events = parser.parseLine(
             """{"type":"assistant","uuid":"a-mix-1","message":{"role":"assistant","content":"Sure, I'll check the logs.\n<system-reminder>The date has changed.</system-reminder>\nLet me start now."}}""",

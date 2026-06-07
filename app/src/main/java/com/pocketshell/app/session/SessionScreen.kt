@@ -46,10 +46,13 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -58,6 +61,10 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
+import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
+import com.pocketshell.app.conversation.timelineActorLabel
+import com.pocketshell.app.conversation.timelinePreview
+import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.UnsentPromptBanner
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
@@ -83,6 +90,7 @@ import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 internal const val SESSION_SCREEN_TAG = "session:screen"
 internal const val SESSION_CONVERSATION_PANE_TAG = "session:conversation"
@@ -583,13 +591,31 @@ internal fun ConversationPane(
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
     val visibleEvents = remember(events, showSystemNotes) {
-        if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
+        val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
+        if (showSystemNotes) timelineEvents else timelineEvents.filterNot { it is ConversationEvent.SystemNote }
     }
     val filteredEvents = remember(visibleEvents, effectiveQuery) {
         val q = effectiveQuery.trim()
-        if (q.isBlank()) visibleEvents else visibleEvents.filter { it.searchText().contains(q, ignoreCase = true) }
+        val eventsById = visibleEvents.associateBy { it.id }
+        val rows = if (q.isBlank()) {
+            visibleEvents
+        } else {
+            visibleEvents.filter { event ->
+                event.searchText().contains(q, ignoreCase = true) ||
+                    (
+                        event is ConversationEvent.ToolCall &&
+                            visibleEvents.any {
+                                it is ConversationEvent.ToolResult &&
+                                    it.toolCallId == event.id &&
+                                    it.output.contains(q, ignoreCase = true)
+                            }
+                        )
+            }
+        }
+        rows.filterNot { it is ConversationEvent.ToolResult && it.hasVisibleParentToolCall(eventsById) }
     }
     val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
+    val expandedMessages = remember { mutableStateOf(setOf<String>()) }
     // Issue #176: SystemNote expand state — sticky for the pane lifetime.
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
     val runningToolIds = remember(events) { runningToolCallIds(events) }
@@ -635,8 +661,8 @@ internal fun ConversationPane(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 if (filteredEvents.isEmpty()) {
                     item {
@@ -653,6 +679,11 @@ internal fun ConversationPane(
                         runningToolIds = runningToolIds,
                         eventsById = eventsById,
                         isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
+                        isMessageExpanded = expandedMessages.value.contains(event.id),
+                        onToggleMessageExpand = { id ->
+                            val current = expandedMessages.value
+                            expandedMessages.value = if (current.contains(id)) current - id else current + id
+                        },
                         onToggleExpand = { id ->
                             val current = expandedToolCalls.value
                             expandedToolCalls.value = if (current.contains(id)) current - id else current + id
@@ -828,6 +859,8 @@ private fun ConversationEventRow(
     runningToolIds: Set<String>,
     eventsById: Map<String, ConversationEvent>,
     isExplicitlyExpanded: Boolean,
+    isMessageExpanded: Boolean,
+    onToggleMessageExpand: (String) -> Unit,
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
@@ -835,7 +868,13 @@ private fun ConversationEventRow(
     onLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
     when (event) {
-        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend, onLinkTap)
+        is ConversationEvent.Message -> ConversationMessageRow(
+            event = event,
+            isExpanded = isMessageExpanded,
+            onToggleExpand = { onToggleMessageExpand(event.id) },
+            onRetryFailedSend = onRetryFailedSend,
+            onLinkTap = onLinkTap,
+        )
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
             result = eventsById.findToolResultFor(event.id),
@@ -855,6 +894,8 @@ private fun ConversationEventRow(
 @Composable
 private fun ConversationMessageRow(
     event: ConversationEvent.Message,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
     onRetryFailedSend: (String) -> Unit = {},
     onLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
@@ -862,6 +903,8 @@ private fun ConversationMessageRow(
         event = event,
         onRetrySend = onRetryFailedSend,
         onLinkTap = onLinkTap,
+        isExpanded = isExpanded,
+        onToggleExpanded = onToggleExpand,
     )
 }
 
@@ -893,31 +936,73 @@ private fun ConversationToolCallRow(
             .padding(vertical = 2.dp)
             .testTag(SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX + toolCall.id),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = toolCall.name,
+        val timestamp = remember(toolCall.atMillis) { toolCall.timelineTimestamp() }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TimelineBadgeText(
+                label = "TOOL",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
             )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = summary,
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-            )
-            if (statusGlyph.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp)
+                    .background(
+                        color = PocketShellColors.Surface,
+                        shape = RoundedCornerShape(4.dp),
+                    )
+                    .padding(horizontal = 7.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (expanded) "v" else "›",
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(text = statusGlyph, color = statusColor, fontSize = 12.sp)
+                Text(
+                    text = toolCall.name,
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = summary,
+                    color = PocketShellColors.Text,
+                    style = PocketShellType.bodyMono,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (statusGlyph.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(text = statusGlyph, color = statusColor, style = PocketShellType.labelMono)
+                }
+            }
+            if (timestamp != null) {
+                Text(
+                    text = timestamp,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .width(84.dp)
+                        .padding(start = 6.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
         if (expanded) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 ToolCallSection(
@@ -951,7 +1036,8 @@ private fun ConversationSystemNoteRow(
     isExpanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val preview = remember(note.content) { note.content.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() }
+    val actorLabel = remember(note.tag) { note.timelineActorLabel() }
+    val preview = remember(note.tag, note.content) { note.timelinePreview() }
     val chevron = if (isExpanded) "v" else "›"
     Column(
         modifier = Modifier
@@ -960,33 +1046,55 @@ private fun ConversationSystemNoteRow(
             .padding(vertical = 2.dp)
             .testTag(SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = note.tag,
+        val timestamp = remember(note.atMillis) { note.timelineTimestamp() }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TimelineBadgeText(
+                label = actorLabel,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = preview,
-                color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = chevron,
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
-            )
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = preview,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = chevron,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                )
+            }
+            if (timestamp != null) {
+                Text(
+                    text = timestamp,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .width(84.dp)
+                        .padding(start = 6.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         if (isExpanded && note.content.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
             ) {
                 ToolCallSection(
                     label = "content",
@@ -1005,12 +1113,39 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
             .fillMaxWidth()
             .padding(vertical = 2.dp),
     ) {
-        Text(
-            text = if (result.isError) "tool result (error)" else "tool result",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-        )
+        val timestamp = remember(result.atMillis) { result.timelineTimestamp() }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TimelineBadgeText(
+                label = "TOOL",
+                color = if (result.isError) PocketShellColors.Red else PocketShellColors.TextSecondary,
+            )
+            Text(
+                text = if (result.isError) "result error" else "result",
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (timestamp != null) {
+                Text(
+                    text = timestamp,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .width(84.dp)
+                        .padding(start = 6.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         if (result.output.isNotEmpty()) {
             ToolCallSection(
                 label = "output",
@@ -1019,6 +1154,29 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
             )
         }
     }
+}
+
+@Composable
+private fun TimelineBadgeText(
+    label: String,
+    color: Color,
+) {
+    Text(
+        text = label,
+        color = color,
+        style = PocketShellType.labelMono,
+        fontWeight = FontWeight.SemiBold,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .width(82.dp)
+            .background(
+                color = color.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(3.dp),
+            )
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 @Composable
@@ -1039,6 +1197,10 @@ private fun Map<String, ConversationEvent>.findToolResultFor(
 ): ConversationEvent.ToolResult? =
     values.firstOrNull { it is ConversationEvent.ToolResult && it.toolCallId == toolCallId }
         as? ConversationEvent.ToolResult
+
+private fun ConversationEvent.ToolResult.hasVisibleParentToolCall(
+    eventsById: Map<String, ConversationEvent>,
+): Boolean = toolCallId?.let { eventsById[it] is ConversationEvent.ToolCall } == true
 
 internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
     val resolved = events

@@ -21,6 +21,8 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -70,9 +72,9 @@ class TmuxConversationTurnDensityScreenshotTest {
         compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG)
             .assertIsDisplayed()
         compose.onAllNodesWithText("US" + "ER", substring = true, useUnmergedTree = true)
-            .assertCountEquals(0)
+            .assertCountEquals(2)
         compose.onAllNodesWithText("ASS" + "ISTANT", substring = true, useUnmergedTree = true)
-            .assertCountEquals(0)
+            .assertCountEquals(2)
         compose.onAllNodesWithText(
             "Check why the staging deploy failed",
             substring = true,
@@ -150,6 +152,45 @@ class TmuxConversationTurnDensityScreenshotTest {
         compose.waitForIdle()
         compose.onNodeWithTag("conversation-density-before").assertIsDisplayed()
         captureFullDevice(File(artifactDir(), "issue-493-before-loose-spacing.png"))
+    }
+
+    @Test
+    fun longMessageRowsCollapseToOneLineAndExpandOnTap() {
+        compose.setContent {
+            PocketShellTheme {
+                TmuxConversationPane(
+                    events = listOf(
+                        ConversationEvent.Message(
+                            id = "dense-expand",
+                            agent = AgentKind.ClaudeCode,
+                            role = ConversationRole.Assistant,
+                            text = "first line visible 561\nhidden detail line 561",
+                        ),
+                    ),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background),
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        compose.onAllNodesWithText(
+            "hidden detail line 561",
+            substring = true,
+            useUnmergedTree = true,
+        ).assertCountEquals(0)
+
+        compose.onNodeWithText("first line visible 561", substring = true)
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitForIdle()
+
+        compose.onAllNodesWithText(
+            "hidden detail line 561",
+            substring = true,
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
     }
 
     private fun densityComparisonEvents(): List<ConversationEvent.Message> = listOf(

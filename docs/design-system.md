@@ -1,497 +1,596 @@
 # PocketShell Design System
 
-Locked design targets for PocketShell. Every future UX issue (#152–#157, #160,
-…) should reference this document by section number, and every new UI surface
-should reach for the tokens defined here rather than invent values.
+This is the authoritative design-system audit and foundation for issue #461.
+It is a docs/spec slice: runtime Kotlin and Compose code must not change as part
+of #461 implementation work.
 
-**This document is the authoritative design-system spec** (#461/#472). When a
-token value here and a `.dp`/`.sp`/colour literal in code disagree, this spec
-plus the codified token objects in `shared/ui-kit/.../theme/` win — fix the
-literal, don't fork the spec.
+PocketShell is a Material 3 Compose app with a dark, compact dev-tool dialect.
+The foundation combines Material 3 structure with terminal/productivity cues
+from Warp, VS Code, Termius, and Linear: dark-first surfaces, dense rows,
+monospace where content is command- or path-shaped, restrained motion, and
+visible but quiet status.
 
-This document is the **spec**. The **code** lives in `shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/`:
+## Source Map
 
-- [`Color.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Color.kt) — colour tokens (§1)
-- [`Type.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Type.kt) — typography (§2)
-- [`Shape.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Shape.kt) — corner radii (§4)
-- [`Motion.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Motion.kt) — motion durations + easing (§5)
-- [`Theme.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Theme.kt) — Material 3 wrapper
+Use these files as citations when migrating screens:
 
-Visual reference: the static HTML at `docs/mockups/` (Pixel 7 viewport). When
-the markdown and the mockup CSS disagree, the markdown wins — the mockups are
-an artist's impression of the design, not the implementation truth.
+| Area | Current source |
+|------|----------------|
+| Theme entry point | [`MainActivity.kt`](../app/src/main/java/com/pocketshell/app/MainActivity.kt), [`Theme.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Theme.kt) |
+| Navigation inventory | [`AppDestination.kt`](../app/src/main/java/com/pocketshell/app/nav/AppDestination.kt), [`MainActivity.kt`](../app/src/main/java/com/pocketshell/app/MainActivity.kt) |
+| Colour tokens | [`Color.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Color.kt) |
+| Type tokens | [`Type.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Type.kt) |
+| Spacing and density tokens | [`Spacing.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Spacing.kt) |
+| Shape tokens | [`Shape.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Shape.kt) |
+| Shared components | [`shared/ui-kit/components`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/components) |
+| Fast render harness | [`DesignRenders.kt`](../shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt), [`scripts/render.sh`](../scripts/render.sh) |
+| Emulator visual audit | [`docs/testing.md`](testing.md), [`WalkthroughVisualScreenshotTest.kt`](../app/src/androidTest/java/com/pocketshell/app/proof/WalkthroughVisualScreenshotTest.kt) |
+| Visual brief | [`design-language.md`](design-language.md), [`ux-rules.md`](ux-rules.md), [`decisions.md`](decisions.md) |
 
-Original spike proposal (with rationale for each value):
-[#162 — Design system proposal comment](https://github.com/alexeygrigorev/pocketshell/issues/162#issuecomment-spike-proposal).
+When this document and the code disagree, treat the disagreement as drift. Fix
+the implementation in a migration issue, or update this document only after a
+maintainer decision.
 
-Companion docs:
+## Current Audit
 
-- [`design-language.md`](design-language.md) — short visual brief, the
-  Termius-inspired starting point. This document supersedes it for token
-  values; design-language.md remains the lightweight "feel" summary.
-- [`decisions.md`](decisions.md) — locked product decisions (no background
-  work, dark-first, etc.) referenced throughout.
+### Tokens
 
----
+| Token area | Current state | Drift / risk | Decision |
+|------------|---------------|--------------|----------|
+| Colour | `PocketShellColors` defines dark surface, text, accent, semantic, border, and terminal tokens in [`Color.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Color.kt). `PocketShellSemanticColors` adds status/agent/accent roles via `LocalPocketShellSemantic`. | Many screens still import raw `PocketShellColors` directly. That is acceptable during migration, but new code should prefer `MaterialTheme.colorScheme` for M3 roles and semantic locals for status/agent roles. Terminal selection still has hard-coded token-equivalent colours in [`SmartSelectionAffordanceOverlay.kt`](../shared/core-terminal/src/main/java/com/pocketshell/core/terminal/selection/SmartSelectionAffordanceOverlay.kt). | Keep the existing dark palette. Add no new colours unless a maintainer approves a new role. |
+| M3 scheme | [`Theme.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Theme.kt) maps background, surface, surfaceVariant, primary, outline, inverse, and error slots. PocketShell is always dark. | `surfaceContainer*`, `secondaryContainer`, and related selected/container slots remain M3 defaults because filling them is a visible change for menus, switches, cards, chips, and segmented controls. | Migrate M3 container slots in a visual-audited slice, not silently in a token-only slice. |
+| Type | [`Type.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Type.kt) overrides `headlineSmall` 20sp, `titleMedium` 16sp, `bodyMedium` 14sp, `labelSmall` 11sp. `PocketShellType` adds `bodyDense` 13sp, `bodyMono` 13sp, and `labelMono` 11sp. | Screen code still has raw `10.sp`, `12.sp`, `13.sp`, `15.sp`, and custom line heights, especially conversation, markdown, keybar, terminal chrome, and legacy local rows. | Use M3 slots for normal chrome, `PocketShellType.bodyDense` for compact rows, `bodyMono` for paths/commands/IDs, and `labelMono` for compact code labels. |
+| Spacing | [`Spacing.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Spacing.kt) currently codifies `xs` 4dp, `sm` 8dp, `md` 12dp, `lg` 16dp, plus density tokens. | Older docs referenced `xl`/`xxl`; those tokens do not exist on current `origin/main`. Raw `.dp` literals are widespread in screens and components, including off-grid values like 2, 5, 6, 10, 14, 20, 28, 30, and 38 where component geometry needs explicit tokens. | Keep the base spacing scale small. Add component-specific geometry tokens only when a pattern repeats across surfaces. |
+| Density | `PocketShellDensity` defines `rowMinHeight` 44dp, `rowPadV` 8dp, `rowPadH` 12dp, `chipPadV` 6dp, `chipPadH` 10dp, `sectionGap` 8dp, `treeIndent` 16dp, `tapTargetMin` 48dp. | Some compact rows draw below the visual density target, and some touch areas depend on surrounding layout rather than explicit `sizeIn`. | Visual density can be compact; touch targets stay at least 48dp. |
+| Shape | [`Shape.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Shape.kt) maps 8dp, 14dp, 20dp, and 28dp radii into M3 shape slots. | Screens still create local `RoundedCornerShape` values for micro badges, key slots, cards, and sheets. Some are legitimate component geometry; repeated values should move into shared components. | 8dp chip/key, 14dp card, 20dp sheet, 28dp FAB/mic. Avoid new radii. |
+| Elevation | No standalone elevation token. Components mostly use borders; [`MicButton.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/components/MicButton.kt) is the visible exception. | Local surfaces sometimes simulate card hierarchy by adding nested panels. | Hairline borders separate surfaces. FAB/mic is the only normal chrome with shadow. |
+| Motion | No `Motion.kt` exists on current `origin/main`. Motion is local and ad hoc, for example `MicButton` uses a recording pulse. | Older docs called `MotionDurations` codified; that is stale. `animate*` / `tween` values cannot be audited centrally today. | Define motion values in this spec now; add code tokens only in a later runtime slice. |
 
-## 1. Colour palette
+### Shared UI Kit
 
-Dark mode is primary. Light mode (future) inverts the surface ramp while
-keeping accent + semantic colours on-brand. Hex values are locked.
+The current reusable catalog lives under
+[`shared/ui-kit/components`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/components):
 
-### Surfaces
+| Component | Current role | Drift / next use |
+|-----------|--------------|------------------|
+| `ScreenHeader` | Page title, optional subtitle, compact trailing slot. | Use for every non-terminal full-screen header. Do not invent bespoke top bars. |
+| `SectionHeader` | Title-case section label with optional count. | Use above row groups, not as large page headings. |
+| `ListRow` | Dense row with leading, title, subtitle, trailing, and click slot. | Canonical row for settings, files, repos, keys, folders, share targets, crash reports, costs, and jobs. |
+| `HostCard` | Host dashboard card with avatar, subtitle, status, setup, usage, and trailing slot. | Host list should remain the only consumer unless another surface is truly host-card-shaped. |
+| `SessionRow` | Session list row with tags. | Folder/session surfaces increasingly use custom rows; migrate repeated session patterns back into one row API or retire this component. |
+| `Badge` / `Pill` | Compact labels for agent, shell, active, warning, neutral, and usage states. | Badge roles should replace one-off chips and hand-styled labels. |
+| `StatusDot` | Connection/status dot using `ConnectionStatus`. | Prefer this over local dot composables. Extend role mapping if needed. |
+| `Kebab` | Shared overflow trigger and menu item model. | Replace raw `DropdownMenu` blocks when menus have common section/destructive/status rows. A kebab opens actions; it must not directly perform or confirm an action. |
+| `SegmentedToggle` / `Tabs` | Compact mode/tab controls. | Use for mode switches and Terminal/Conversation tabs; avoid radio groups for view density. |
+| `Breadcrumb` | Host/session/window/pane path chrome. | Terminal chrome should converge here or document why it needs a local variant. |
+| `KeyBar` / `CommandChip` | Terminal input controls. | Shared surface for #454 and #459; no new command-chip styling. |
+| `MicButton` / `MicIcon` | Composer dictation FAB and icon. | Shared surface for #453; no second mic glyph or text-only dictate chip. |
+| `ProgressBar` | Usage/progress fill. | Use for usage, bootstrap, sync, and long-running operations. |
 
-| Token | Hex | Usage | Notes |
-|-------|-----|-------|-------|
-| `Background` | `#0D1117` | Page background, toolbar, app chrome | Deep navy; never pure black |
-| `Surface` | `#161B22` | Cards, sheets, elevated containers | One step lighter than background |
-| `SurfaceElev` | `#1C2129` | Nested containers, modifier strip, key bar | Highest surface in the stack |
+### Implementation Drift Themes
 
-### Text
+The audit found these repeated drift patterns:
 
-| Token | Hex | Usage | Notes |
-|-------|-----|-------|-------|
-| `Text` | `#E6EDF3` | Primary content, headings, primary actions | High contrast on all surfaces |
-| `TextSecondary` | `#8B949E` | Secondary labels, breadcrumbs, hints | Intermediate contrast |
-| `TextMuted` | `#6E7681` | Captions, timestamps, section labels | Lowest contrast for de-emphasis |
+- Raw `PocketShellColors` are still the common path in screens. Keep existing
+  code until each surface migrates, but new components should expose semantic
+  roles instead of colour parameters.
+- Raw `.dp` and `.sp` literals are widespread. Not every literal is wrong, but
+  repeated row, chip, card, sheet, and timeline values should move into shared
+  components or named geometry constants.
+- Some screens have local versions of shared ideas: status dots in
+  `PortForwardPanelScreen` and `FolderListScreen`, section headers in tmux menus,
+  rows in file/share/repo/settings surfaces, and tab/segmented controls around
+  terminal chrome.
+- Motion is not centralized. Until a runtime token is added, new motion must
+  cite this spec and stay local to state comprehension.
+- Dialog and sheet styling is repeated across host import, snippets, tmux
+  lifecycle, env copy, bootstrap, and composer flows. Standardize the outer
+  container and action row before polishing individual content.
 
-### Accent + UI
+## Foundation
 
-| Token | Hex | Usage | Notes |
-|-------|-----|-------|-------|
-| `Accent` | `#22D3EE` | Primary action, active states, dictate FAB, connection status | Termius-inspired cyan; brand colour |
-| `AccentSoft` | `#22D3EE` @ 12 % opacity (`0x1F22D3EE`) | Soft backgrounds for accent contexts (badge, hint chip) | Matches `.accent-soft` from mockup CSS |
-| `AccentDim` | `#0891B2` | Borders, dividers on accent surfaces | Darker cyan for hierarchy |
-| `OnAccent` | `#04101A` | Foreground on top of `Accent` (FAB icon, primary-button label) | Sourced from `.btn.primary` |
+### Colour Roles
 
-### Semantic / status
+Dark mode is the product mode. Do not add light-mode conditionals in #461
+follow-up work.
 
-Used as dots, badges, progress states — **never** for UI chrome.
+| Role | Token | Hex | Usage |
+|------|-------|-----|-------|
+| App background | `Background` | `#0D1117` | Root surface, page chrome |
+| Surface | `Surface` | `#161B22` | Cards, dialogs, sheet content, row groups |
+| Elevated surface | `SurfaceElev` | `#1C2129` | Nested controls, active chips, key slots |
+| Terminal background | `TermBg` | `#010409` | Terminal viewport only |
+| Text primary | `Text` | `#E6EDF3` | Headings, row titles, primary labels |
+| Text secondary | `TextSecondary` | `#8B949E` | Subtitles, inactive chrome |
+| Text muted | `TextMuted` | `#6E7681` | Captions, timestamps, low-emphasis counts |
+| Accent | `Accent` | `#22D3EE` | Primary actions, active state, links, mic |
+| Accent soft | `AccentSoft` | `0x1F22D3EE` | Active chip fill, hint/banner fill |
+| Accent border | `AccentDim` | `#0891B2` | Accent borders, active separators |
+| On accent | `OnAccent` | `#04101A` | Text/icons on accent fill |
+| Status active | `statusActive` | `Green` | Connected, attached, healthy |
+| Status connecting | `statusConnecting` | `Amber` | Connecting, pending, attention |
+| Status error | `statusError` | `Red` | Failed, blocked, destructive confirmation |
+| Agent | `agentAccent` | `Purple` | Agent badges and assistant role marks |
 
-| Token | Hex | Usage |
-|-------|-----|-------|
-| `Green` | `#22C55E` | Connected status, success, positive progress |
-| `Amber` | `#F59E0B` | Connecting, idle, caution states |
-| `Red` | `#EF4444` | Error status, failures, blocked |
-| `Purple` | `#A78BFA` | Agent assistance, secondary accent contexts |
+Rule: semantic colour is for status, role, and action. It is not page chrome.
 
-### Borders
+### Type Scale
 
-| Token | Hex | Usage |
-|-------|-----|-------|
-| `Border` | `#2D333B` | Standard outline, dividers, key bar separators |
-| `BorderSoft` | `#21262D` | Hairline, app-bar divider, soft separators |
+| Role | Token | Size | Weight | Usage |
+|------|-------|------|--------|-------|
+| Screen heading | `MaterialTheme.typography.headlineSmall` | 20sp | Bold | `ScreenHeader` title |
+| Title | `titleMedium` | 16sp | SemiBold | Dialog/sheet titles, card titles |
+| Body | `bodyMedium` | 14sp | Normal | Normal content text |
+| Dense body | `PocketShellType.bodyDense` | 13sp | Normal | Dense rows, conversation summaries, settings rows |
+| Mono body | `PocketShellType.bodyMono` | 13sp | Normal mono | Paths, commands, host subtitles, IDs |
+| Caption | `labelSmall` | 11sp | Medium | Section labels, timestamps |
+| Mono caption | `PocketShellType.labelMono` | 11sp | Normal mono | Tool badges, counters, IDs |
 
-### Terminal-specific
+Do not use display typography in PocketShell chrome. The viewport is for work,
+not marketing.
 
-The terminal background is *blacker* than the app background on purpose
-(see §7 Δ4) so the terminal layer reads as a distinct surface, not part of
-the chrome.
+### Spacing And Density
 
-| Token | Hex | Usage |
-|-------|-----|-------|
-| `TermBg` | `#010409` | Terminal viewport background |
-| `TermText` | `#E6EDF3` | Terminal foreground (matches `Text`) |
-| `TermPrompt` | `#22D3EE` | Prompt colour in xterm (matches `Accent`) |
-| `TermComment` | `#6E7681` | Comments / dim text in terminal (matches `TextMuted`) |
+Base spacing tokens are `xs` 4dp, `sm` 8dp, `md` 12dp, and `lg` 16dp.
+Screen-level padding should normally be 16dp; row groups can use 12dp internal
+padding when density matters.
 
-### Light-mode portability
-
-Future light-mode work inverts the surface ramp:
-
-| Slot | Dark | Light (target) |
-|------|------|----------------|
-| `Background` | `#0D1117` | `#F8FAFC` |
-| `Surface` | `#161B22` | `#FFFFFF` |
-| `SurfaceElev` | `#1C2129` | `#EEF1F5` |
-
-Accent + semantic tokens stay the same in both modes. See `Theme.kt`'s
-`PocketShellLightColorScheme` for the in-code mapping.
-
----
-
-## 2. Typography
-
-Two faces: **UI sans** (Android system default — Roboto on most devices, with
-Inter as a follow-up target) and **terminal monospace** (system monospace
-today; JetBrains Mono once bundled).
-
-| Slot | Size | Weight | Usage | Notes |
-|------|------|--------|-------|-------|
-| `headlineSmall` | 20 sp | Bold (700) | App-bar title, screen headings | Restrained hierarchy |
-| `titleMedium` | 16 sp | SemiBold (600) | Sheet headers, card titles, section headers | Clear visual separation |
-| `bodyMedium` | 14 sp | Normal (400) | Session names, message body, row-primary text | Default reading size |
-| `labelSmall` | 11 sp | Medium (500) | Captions, section labels, timestamps, breadcrumb | Used for de-emphasis |
-| *Monospace* | 12 sp | Normal (400) | Terminal viewport, inline code, command chips | Fixed-width; user-scalable |
-
-**Dense + mono rungs (Codified, #472 — `PocketShellType` in `Type.kt`).** Three
-extra rungs for compact dev-tool rows and terminal-adjacent UI (§7 Δ7/Δ8). They
-are **standalone `TextStyle` constants**, deliberately *not* Material `Typography`
-slots — overriding a previously-default M3 slot would silently restyle every
-component reading `MaterialTheme.typography.*` for it. Call sites opt in
-explicitly (`PocketShellType.bodyMono`):
-
-| Rung | Size / Weight | Family | Line-height | Usage |
-|------|---------------|--------|-------------|-------|
-| `PocketShellType.bodyDense` | 13 sp / Normal | sans | ~1.35× (18 sp) | dense list/tree rows, conversation lines, settings rows — promotes the de-facto 13sp literal |
-| `PocketShellType.bodyMono` | 13 sp / Normal | mono | ~1.4× (18 sp) | host subtitles, paths, command chips, tmux names, tool-call previews |
-| `PocketShellType.labelMono` | 11 sp / Normal | mono | ~1.3× (14 sp) | inline counts/IDs in a mono context |
-
-Mono rungs use the system monospace family (`JetBrainsMonoFamily`); bundling
-JetBrains Mono is deferred (#461 decision #5).
-
-Line-height: Material 3 defaults for chrome; terminal uses 1.65× multiplier
-for readability.
-
-Only the four UI slots above are overridden in `PocketShellTypography`;
-everything else inherits Material 3's defaults so unanticipated components
-fail loud (with default sizing) rather than silently mis-render. The dense/mono
-rungs live outside `PocketShellTypography` for the same fail-loud reason.
-
----
-
-## 3. Spacing scale
-
-**4 dp grid (Codified, #472 — `PocketShellSpacing` in `Spacing.kt`).** All
-padding, margin, and gap values land on this 4 dp grid (shared by Linear and
-Material 3). The defaults favour the tighter rungs for dev-tool density (§7 Δ6).
+Density defaults:
 
 | Token | Value | Usage |
 |-------|-------|-------|
-| `xs` | 4 dp | Micro-gaps (icon-to-label, breadcrumb separators) |
-| `sm` | 8 dp | Standard gap (chip-to-chip, row-to-row padding), key bar gap |
-| `md` | 12 dp | Card internal padding, row vertical padding (the compact default), section divider height |
-| `lg` | 16 dp | Large padding (app bar, sheet header, host-card internal), modal dialog padding |
-| `xl` | 20 dp | Extra-large spacing (section label top margin, breadcrumb padding) |
-| `xxl` | 24 dp | Screen-level padding, largest list-item spacing |
+| `rowMinHeight` | 44dp | Visual minimum for list/tree rows |
+| `rowPadV` | 8dp | Dense row vertical padding |
+| `rowPadH` | 12dp | Dense row horizontal padding |
+| `chipPadV` | 6dp | Dense chip vertical padding |
+| `chipPadH` | 10dp | Dense chip horizontal padding |
+| `sectionGap` | 8dp | Gap between row groups |
+| `treeIndent` | 16dp | Folder tree nesting |
+| `tapTargetMin` | 48dp | Accessibility floor for touch targets |
 
-If a padding/gap/margin value off this grid appears anywhere outside
-terminal-viewport rendering, it's a bug or a scope creep.
+Touch target rule: compact paint is allowed; compact hit areas are not.
 
-### 3.1 Density (Codified, #472 — `PocketShellDensity` in `Spacing.kt`)
+### Radius, Elevation, And Borders
 
-The compact knob (§7 Δ6). **Visual density is kept separate from the touch
-floor:** `rowPadV`/`chipPadV` shrink the *paint* so more rows fit per screen,
-while `tapTargetMin` (48 dp) is the a11y hit-area floor every interactive element
-must still honour (`Modifier.sizeIn` / `minimumInteractiveComponentSize`).
-Shrinking the paint never shrinks the hit area below 48 dp.
+| Pattern | Radius | Separation |
+|---------|--------|------------|
+| List rows and cards | 14dp | 1dp `BorderSoft` or no border inside a grouped surface |
+| Chips, badges, key slots | 8dp | 1dp `BorderSoft`; active uses `AccentDim` |
+| Bottom sheets | 20dp top corners | `Surface` container, no decorative shadow |
+| FAB/mic | 28dp | Accent fill plus the only normal chrome shadow |
+| Micro role badges | 3-6dp | Local only until promoted into `Badge` |
 
-| Token | Value | Usage |
-|-------|-------|-------|
-| `rowMinHeight` | 44 dp | List / tree row minimum height (down from M3's 56–72) |
-| `rowPadV` | 8 dp | Row vertical padding (visual density, not the touch floor) |
-| `rowPadH` | 12 dp | Row horizontal padding |
-| `chipPadV` | 6 dp | Chip vertical padding |
-| `chipPadH` | 10 dp | Chip horizontal padding |
-| `sectionGap` | 8 dp | Gap between sections / stacked groups |
-| `treeIndent` | 16 dp | Indent per workspace-tree nesting level |
-| `tapTargetMin` | 48 dp | a11y touch-target floor |
+Do not nest cards inside cards. Use full-width sections, rows, and simple
+surface bands.
 
----
+### Motion
 
-## 4. Shape language
+Motion is a spec decision today, not a codified Kotlin token. Use these values
+until a future runtime slice adds `Motion.kt`:
 
-Corner radii, sourced from `docs/mockups/styles.css`'s `:root`:
+| Motion | Duration | Easing | Use |
+|--------|----------|--------|-----|
+| Fast | 150ms | ease-out | Chip dismiss, menu fade, small highlight |
+| Normal | 200ms | ease-out | Sheet open/close, tab change |
+| Slow | 400ms | ease-out | Progress fill, recording level easing |
+| Pulse | 1.5s loop | steps/two-state | Connecting status only |
+| Cursor blink | 1.05s loop | steps/two-state | Terminal/caret only |
 
-| Component | Radius | Token | Usage |
-|-----------|--------|-------|-------|
-| Cards / elevated containers | 14 dp | `PocketShellShapes.medium` | `HostCard`, `SessionRow`, usage card, chip-row background |
-| Chips / pills / key bar | 8 dp | `PocketShellShapes.small` / `extraSmall` | `CommandChip`, tag, key bar key |
-| Bottom sheet | 20 dp (top only) | `PocketShellShapes.large` | Composer sheet, modal sheets |
-| FAB / mic button | 28 dp | `PocketShellShapes.extraLarge`, `FabShape` | Dictate FAB (56 dp pill), mic button in composer |
-| Icon buttons | 20 dp radius | (call-site `RoundedCornerShape(20.dp)`) | Back button in breadcrumb, close on sheets (36–40 dp square) |
+No decorative motion. No idle animation that implies background work or drains
+battery. Animation must communicate state.
 
-**Borders vs shadows.** Surface separation uses 1 dp hairline borders
-(`BorderSoft` or `Border`), **not** drop-shadows. The FAB is the only
-chrome element with a shadow (`0 12 px 32 px Accent @ 40 %`) because it is
-the primary action. See §7 Δ3.
+## Component Catalog
 
----
+### App Shell
 
-## 5. Motion
+Use `PocketShellTheme` at the root. Full-screen pages use a `Surface` on
+`Background`, then `ScreenHeader`, then dense content. Terminal pages are the
+exception: terminal viewport is full-height and owns keyboard behavior.
 
-Standard durations and easing curves, codified in
-[`Motion.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Motion.kt).
-Durations are exposed as `kotlin.time.Duration`; call sites convert at the
-Compose boundary (`MotionDurations.normal.inWholeMilliseconds.toInt()`).
+Do:
 
-| Motion type | Duration | Easing | Token | Usage |
-|-------------|----------|--------|-------|-------|
-| Fast (entry/exit) | 150 ms | `easeOut` | `MotionDurations.fast` + `MotionEasing.standard` | Chip dismiss, tab highlight pulse, hint chip fade |
-| Normal (standard) | 200 ms | `easeOut` | `MotionDurations.normal` + `MotionEasing.standard` | Sheet open/close, tab change, item fade |
-| Slow (emphasis) | 400 ms | `easeOut` | `MotionDurations.slow` + `MotionEasing.standard` | Progress bar fill, waveform stabilisation |
-| Idle pulse | 1.5 s loop | `steps(2)` | `MotionDurations.idlePulse` + `MotionEasing.stepsTwo` | Status dot in `Connecting` state, composer idle waveform |
-| Cursor blink | 1.05 s loop | `steps(2)` | `MotionDurations.blink` + `MotionEasing.stepsTwo` | Terminal cursor, text-input caret |
+- Use `ScreenHeader` for title/subtitle/trailing actions.
+- Keep headers compact and adjacent to content.
+- Use icon buttons or `Kebab` for secondary actions.
 
-**Locked principle (from §10).** No purely decorative motion. No background
-work; no idle animations that would drain battery or require keeping the app
-alive. Every animation must serve a comprehension goal — status pulse
-communicates "connecting", progress bar communicates "working".
+Don't:
 
-**Where motion is used:**
+- Add large hero sections, marketing copy, or nested panel chrome.
+- Add a custom top bar when `ScreenHeader` fits.
 
-- Status dots: pulse only while `connecting`; solid when `connected`,
-  `idle`, `error`.
-- Composer waveform: subtle pulse (4 dp → 6 dp) when idle; freeze at last
-  values when transcribing.
-- Tab highlight: fade-in + 2 s pulse when conversation tab first appears.
-- Hint chip: auto-dismiss after 8 s on first detection; if re-entered,
-  persist dismissal.
-- Sheet transitions: 200 ms ease-out on open, instant snap on close.
-- Session swipe: 1:1 with finger; snap on release; haptic tick at boundary.
+### Rows
 
-Reach for `MotionDurations` / `MotionEasing`, not ad-hoc `tween(180, …)`
-literals, so future audits can grep `Motion` references and reason about
-every animation in the app.
+`ListRow` is the default row primitive. It has leading, title, optional subtitle,
+trailing, and click slots. Use `bodyDense` title and mono subtitle when the
+subtitle is a path, host, command, or ID.
 
----
+Long-name invariant: row titles are flexible and ellipsized; trailing controls
+are fixed-size and non-shrinking. A long session, host, file, folder, repo, key,
+or job name must never compress away the kebab, action button, badge, or status
+target. Every interactive trailing control keeps at least a 48dp touch target.
 
-## 6. Terminal-specific components
+Standard row variants:
 
-### 6.1 Breadcrumb (`host › session › window › pane`)
+| Variant | Pattern |
+|---------|---------|
+| Navigation row | title, text subtitle, trailing chevron |
+| File/path row | title, mono path subtitle, file/folder leading icon |
+| Status row | leading `StatusDot`, title, mono/detail subtitle, trailing badge |
+| Destructive row | normal row text, destructive action only in menu/dialog confirm |
+| Loading row | title stays stable, trailing progress/spinner |
 
+Do not make one-off row padding or font sizes unless the row is a terminal
+viewport renderer.
+
+### Sections
+
+Use `SectionHeader` for row groups. Count is inline (`Title - N` or equivalent
+component text), not a separate chip unless it is actionable.
+
+Empty sections render a compact neutral row or empty-state block. Do not render
+large empty cards with explanatory copy.
+
+### Badges, Pills, And Status Dots
+
+Use `Badge` for role and state labels, `Pill` for short status/cost/quota labels,
+and `StatusDot` for live connection state. Dots carry status at a glance; nearby
+text supplies context for accessibility.
+
+Do:
+
+- Use green only for active/healthy.
+- Use amber for connecting, idle attention, or caution.
+- Use red only for error or destructive confirmation.
+- Use purple only for agent/assistant role.
+
+Don't:
+
+- Use semantic colours for generic chrome.
+- Spell status in all caps in every row.
+
+### Cards And Grouped Surfaces
+
+Cards are repeated items such as `HostCard`, usage provider cards, and summary
+cards. A card uses `Surface`, 14dp radius, and a quiet border. Prefer rows inside
+a full-width section when content is navigational or list-like.
+
+Do not put cards inside cards. If content needs hierarchy, use spacing, section
+headers, leading icons, and muted text.
+
+### Sheets And Dialogs
+
+Sheets handle browse/select/create flows. Dialogs handle confirmation, short
+text entry, passphrase/API-key entry, and blocking errors.
+
+Standard sheet pattern:
+
+- `ModalBottomSheet`, `Surface` container, 20dp top corners.
+- Title row, optional search/filter, dense `LazyColumn`, fixed action row only
+  when needed.
+- Rows use `ListRow`, `Badge`, `StatusDot`, and `Kebab` where possible.
+
+Standard dialog pattern:
+
+- `AlertDialog` on `Surface`.
+- `titleMedium` title, `bodyMedium` or `bodyDense` body.
+- Primary action uses `Accent`; destructive confirmation uses red text only on
+  the confirm action.
+- Cancel action is muted.
+
+### Overflow Menus
+
+Use `Kebab` where the menu is row/screen overflow. Raw `DropdownMenu` is allowed
+only where the menu needs custom anchoring or section layout, and then should
+copy the shared density and text treatment.
+
+Overflow invariant: tapping a kebab opens an action menu or sheet. It never
+directly triggers a destructive confirmation. Destructive actions are explicit
+menu items such as "Stop session" or "Delete key"; selecting that item then
+opens the confirmation dialog.
+
+Menus should group actions by scope:
+
+- "In this session"
+- "On this host"
+- "Diagnostics"
+- "Danger"
+
+Destructive actions stay in overflow plus confirmation, not on primary rows.
+
+### Composer Controls
+
+The composer system includes `UnifiedComposer`, `PromptComposerSheet`,
+`MicButton`, attachment chips, snippet entry, send controls, and pending
+transcription states.
+
+Do:
+
+- Use the shared `MicButton` and `MicIcon` for all dictation entry points.
+- Use paperclip/attachment affordances for attachments, not text-heavy buttons.
+- Keep recording/transcribing state visible but compact.
+- Route conversation sends through the prompt composer, not terminal keybar.
+
+Don't:
+
+- Add a second "dictate" chip beside the mic FAB.
+- Invent a new recording glyph or state colour.
+
+### Terminal Chrome And Keybar
+
+Terminal screens use `TermBg`, `KeyBar`, `CommandChip`, compact tabs, breadcrumb
+or equivalent terminal location chrome, and right-reachable bottom controls.
+
+Do:
+
+- Show `KeyBar` only for terminal input, not Conversation.
+- Keep Terminal/Conversation as compact tabs.
+- Put terminal content in the blacker terminal viewport.
+- Keep controls reachable near the bottom/right thumb area.
+
+Don't:
+
+- Let command chips push primary composer/snippet controls off screen.
+- Add text-heavy chrome above the terminal viewport.
+
+### List And Tree Hierarchy
+
+Folder and session hierarchy uses indentation, section headers, `StatusDot`,
+`Badge`, and dense `ListRow` grammar. Actions collapse into overflow.
+
+Do:
+
+- Use `treeIndent` per level.
+- Keep folder/session rows compact.
+- Show agent/shell with `Badge`.
+- Keep `+` create action visible where it is the primary next action.
+
+Don't:
+
+- Use ASCII tree glyphs in row titles.
+- Put per-folder "E / ..." action clutter in the main scan path.
+
+### Empty, Loading, And Error States
+
+States should occupy the same structural area as the eventual content.
+
+| State | Pattern |
+|-------|---------|
+| Loading | Screen header remains, content area shows a compact spinner row or progress row |
+| Empty | One neutral message row plus one primary action if useful |
+| Error | Red status/badge, concise message, retry action |
+| Permission/setup needed | Amber attention badge/row plus direct action |
+
+Do not use full-page explanation cards unless the screen has no other content.
+
+## Screen And Sheet Inventory
+
+### Primary Navigation Screens
+
+This inventory is from [`AppDestination.kt`](../app/src/main/java/com/pocketshell/app/nav/AppDestination.kt)
+and the `when` dispatch in [`MainActivity.kt`](../app/src/main/java/com/pocketshell/app/MainActivity.kt).
+
+| Screen | Current components / patterns | Drift | Standardize on |
+|--------|-------------------------------|-------|----------------|
+| Host list [`HostListScreen.kt`](../app/src/main/java/com/pocketshell/app/hosts/HostListScreen.kt) | `ScreenHeader`, `SectionHeader`, `HostCard`, `Kebab`, host import/share/passphrase dialogs, usage badges. | Strongest shared-component adoption, but host trailing/usage/overflow still owns local glue and dialogs repeat styling. | Keep `HostCard`; move per-host usage/status/overflow grammar into reusable row/card slots. |
+| Add/Edit host [`AddEditHostScreen.kt`](../app/src/main/java/com/pocketshell/app/hosts/AddEditHostScreen.kt) | `ScreenHeader`, local tabs, text fields, key dropdown, discard dialog. | Form field, dropdown, and tab styling are local. Embedded key management is not expressed as shared rows. | Shared form section, field error pattern, `SegmentedToggle` or tabs, shared dialog actions. |
+| QR scanner [`QrScannerScreen.kt`](../app/src/main/java/com/pocketshell/app/hosts/QrScannerScreen.kt) | `ScreenHeader`, camera preview, info cards, file-pick fallback. | Info cards use local surface grammar. | Standard empty/help card and action row. |
+| Settings [`SettingsScreen.kt`](../app/src/main/java/com/pocketshell/app/settings/SettingsScreen.kt) | `ScreenHeader`, `SectionHeader`, `ListRow`, switches/sliders/dialogs, API-key dialogs. | Good row adoption, but controls and repeated API-key dialogs are local. | Settings section + settings row component; shared secret-entry dialog. |
+| Usage [`UsageScreen.kt`](../app/src/main/java/com/pocketshell/app/usage/UsageScreen.kt) | `Breadcrumb`, `Pill`, `ProgressBar`, provider cards, blocked badges. | Uses custom card grammar rather than shared card/list-row pattern. | Usage provider card tokenized with shared badge/progress roles. |
+| AI Costs [`CostsScreen.kt`](../app/src/main/java/com/pocketshell/app/costs/CostsScreen.kt) | `ScreenHeader`, `ListRow`, local section cards, reset dialog. | Local cards duplicate Settings/Usage section surfaces. | Shared metric card and destructive confirmation dialog. |
+| Crash reports [`CrashReportsScreen.kt`](../app/src/main/java/com/pocketshell/app/crash/CrashReportsScreen.kt) | `ScreenHeader`, `ListRow`, mono body for report snippets. | Mostly aligned; long report text needs shared mono detail treatment. | Keep `ListRow`; standardize detail panes/empty states. |
+| Port-forward chooser [`ForwardingChooserScreen.kt`](../app/src/main/java/com/pocketshell/app/systemsurfaces/ForwardingChooserScreen.kt) | `ScreenHeader`, `ListRow`, warning dialog. | Mostly aligned; chooser/error state should share setup-needed pattern. | Shared chooser row and permission/setup error state. |
+| Port-forward panel [`PortForwardPanelScreen.kt`](../app/src/main/java/com/pocketshell/app/portfwd/PortForwardPanelScreen.kt) | Local status dot, tables, toggles, dense rows, semantic colours. | Does not use shared `StatusDot` or row/card catalog consistently. | `StatusDot`, metric/list rows, progress/error roles, shared table-density rules. |
+| Folder list [`FolderListScreen.kt`](../app/src/main/java/com/pocketshell/app/projects/FolderListScreen.kt) | `ScreenHeader`, `SectionHeader`, `ListRow`, `Badge`, `StatusDot`, `Kebab`, `MicButton`, local tree rows, session type picker. | Large local tree grammar; some local status dots/actions; hierarchy can drift easily. | Shared tree row/session row, shared folder action overflow, `Badge` for agent/shell, `treeIndent`. |
+| Watched folders [`WatchedFoldersScreen.kt`](../app/src/main/java/com/pocketshell/app/projects/WatchedFoldersScreen.kt) | `ScreenHeader`, `ListRow`, `Kebab`, `SegmentedToggle`, dialogs. | Section cards and edit dialogs are local. | Shared settings/list management rows, shared add/edit folder dialog. |
+| Repo browser [`RepoBrowserScreen.kt`](../app/src/main/java/com/pocketshell/app/projects/RepoBrowserScreen.kt) | `ScreenHeader`, `ListRow`, repo cards, clone/open pills. | Repo card duplicates dense row plus badge/action pattern. | `ListRow` with trailing action badge/button and shared loading/error rows. |
+| Env files [`EnvScreen.kt`](../app/src/main/java/com/pocketshell/app/env/EnvScreen.kt) | `ScreenHeader`, `ListRow`, `Kebab`, reveal/copy dialogs, copy-from sheet. | Sheet and secret rows are local; reveal/hide action styling should match settings secrets. | Shared secret row, shared copy-source sheet, shared destructive/reset dialog. |
+| File viewer [`FileViewerScreen.kt`](../app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt) | `ScreenHeader`, text/image/binary viewer states, share/copy actions. | File chrome is local; action placement can diverge from file explorer. | Shared file header/action row, mono text body, empty/error file state. |
+| File explorer [`FileExplorerScreen.kt`](../app/src/main/java/com/pocketshell/app/fileexplorer/FileExplorerScreen.kt) | `ListRow`, alert dialog, folder/file listing. | Header mirrors file viewer but does not use `ScreenHeader`; file rows need one shared file grammar. | Shared file browser scaffold, `ListRow` file/folder row, path breadcrumb. |
+| Recurring jobs [`RecurringJobsScreen.kt`](../app/src/main/java/com/pocketshell/app/jobs/RecurringJobsScreen.kt) | `Breadcrumb`, `ListRow`, `StatusDot`, `Kebab`, add/edit dialog. | Dialog form and breadcrumb/header pattern differ from other non-terminal screens. | Shared job row, shared form dialog, header decision: `ScreenHeader` or terminal breadcrumb. |
+| Raw SSH session [`SessionScreen.kt`](../app/src/main/java/com/pocketshell/app/session/SessionScreen.kt) | `Breadcrumb`, `Tabs`, `KeyBar`, `DropdownMenu`, `ModalBottomSheet`, conversation feed, terminal viewport. | Legacy route has local terminal/conversation chrome and bottom controls. | Terminal shell pattern: tabs, breadcrumb, keybar, composer, overflow menu. |
+| Tmux session [`TmuxSessionScreen.kt`](../app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt) | Terminal viewport, compact tabs, `KeyBar`, usage badge, `StatusDot`, drawer, menus, lifecycle dialogs, conversation feed. | Largest drift surface: many local rows, menus, status sections, tabs, conversation turns, and lifecycle dialogs. | Extract terminal chrome, session drawer rows, lifecycle dialog, conversation row/tool-call row, and overflow menu patterns. |
+
+### Hosted Sheets, Dialogs, And Secondary Surfaces
+
+| Surface | Current patterns | Drift | Standardize on |
+|---------|------------------|-------|----------------|
+| Prompt composer [`PromptComposerSheet.kt`](../app/src/main/java/com/pocketshell/app/composer/PromptComposerSheet.kt) and [`UnifiedComposer.kt`](../app/src/main/java/com/pocketshell/app/composer/UnifiedComposer.kt) | `ModalBottomSheet`, `MicButton`, recording/transcribing states, attachment chips, API-key dialog. | Many local controls and state rows; motion is local. | Composer component family: mic, paperclip, state row, attachment chip, send actions. |
+| Snippets screen [`SnippetsScreen.kt`](../app/src/main/java/com/pocketshell/app/snippets/SnippetsScreen.kt) | `ScreenHeader`, local library tabs, `ListRow`, `Kebab`, add/edit/rename/delete dialogs. | Tabs and dialogs are local. | Shared tabs/segmented control and edit dialog grammar. |
+| Snippet picker [`SnippetPickerSheet.kt`](../app/src/main/java/com/pocketshell/app/snippets/SnippetPickerSheet.kt) | `ModalBottomSheet`, search, rows, explicit send chips, delete dialog. | Sheet row/action density should match composer and command sheets. | Shared picker sheet with search, dense rows, trailing action chips. |
+| Agent command sheet [`AgentCommandSheet.kt`](../app/src/main/java/com/pocketshell/app/agentcommands/AgentCommandSheet.kt) | `ModalBottomSheet`, command rows, parameter rows, mono previews. | Similar to snippet picker but separate styling. | Shared command picker sheet and command row. |
+| Bootstrap sheet [`HostBootstrapSheet.kt`](../app/src/main/java/com/pocketshell/app/bootstrap/HostBootstrapSheet.kt) | `ModalBottomSheet`, progress/setup states, secondary buttons, confirm dialog. | Setup state cards should align with empty/error/setup-needed patterns. | Shared setup sheet, progress row, action footer. |
+| Folder context actions [`FolderContextActionSheet.kt`](../app/src/main/java/com/pocketshell/app/projects/FolderContextActionSheet.kt) | `ModalBottomSheet`, actions, confirm dialog. | Should be the canonical row action sheet for folders. | Shared action sheet rows with destructive confirm. |
+| Root project add [`RootProjectAddSheet.kt`](../app/src/main/java/com/pocketshell/app/projects/RootProjectAddSheet.kt) | `ModalBottomSheet`, autocomplete list. | Autocomplete/search rows should match session start directory picker. | Shared path picker sheet. |
+| Session type picker [`SessionTypePickerSheet.kt`](../app/src/main/java/com/pocketshell/app/projects/SessionTypePickerSheet.kt) | `ModalBottomSheet`, shell/agent choices. | Choice rows are local. | Shared session-create picker with agent/shell badges. |
+| Share host picker [`ShareActivity.kt`](../app/src/main/java/com/pocketshell/app/share/ShareActivity.kt), [`HostPickerScreen.kt`](../app/src/main/java/com/pocketshell/app/share/HostPickerScreen.kt) | Share-specific host/target lists, `ListRow`, dialogs. | Header and picker flow are separate from app host chooser. | Shared chooser row and target picker sheet. |
+| SSH keys [`SshKeysScreen.kt`](../app/src/main/java/com/pocketshell/app/hosts/SshKeysScreen.kt) | `ListRow`, `Kebab`, key rows, unlock dialog. | Not a nav destination but important form-management surface; needs `ScreenHeader` when standalone. | Shared key row, secret/unlock dialog. |
+| Voice session surface [`VoiceSessionSurface.kt`](../app/src/main/java/com/pocketshell/app/voice/VoiceSessionSurface.kt) | Dictation UI shared by raw SSH and tmux routes. | Must not drift from composer and mic tokens. | `MicButton`, shared recording states, shared transcript controls. |
+| Terminal lab [`TerminalLabActivity.kt`](../app/src/main/java/com/pocketshell/app/terminal/TerminalLabActivity.kt) | Dev/test terminal activity. | Not production nav, but can mislead future agents. | Keep as lab-only; do not source product components from it without review. |
+| Proof of life [`ProofOfLifeScreen.kt`](../app/src/main/java/com/pocketshell/app/proof/ProofOfLifeScreen.kt) | Legacy proof screen. | Not launcher UX. | Do not use as design precedent. |
+
+## Migration Slices
+
+### Slice 0: Spec And Audit
+
+This document is Slice 0. It locks the foundation, current drift, component
+catalog, screen inventory, screenshot plan, and open maintainer decisions. It
+does not touch runtime UI.
+
+### Slice 1: Token Hygiene
+
+- Fix stale docs/code references such as the missing `Motion.kt` claim.
+- Add runtime motion tokens only after maintainer approval.
+- Decide whether to add spacing tokens beyond `lg` or keep repeated values in
+  component geometry.
+- Fill M3 `surfaceContainer*` and selected-container slots only with emulator
+  visual evidence because it changes menus, switches, cards, and selected
+  controls.
+
+### Slice 2: Shared Component Consolidation
+
+- Promote repeated local status dots to shared `StatusDot`.
+- Extend `ListRow` or add focused variants for file rows, setting rows, secret
+  rows, repo rows, and job rows.
+- Standardize `AlertDialog` and `ModalBottomSheet` wrappers.
+- Add a shared empty/loading/error state component.
+- Add a shared overflow menu section model if `Kebab` cannot cover sectioned
+  menus.
+
+### Slice 3: In-Flight UI Issues
+
+| Issue | Token/component consumption |
+|-------|-----------------------------|
+| #453 Prompt composer recording UI | `MicButton`, `MicIcon`, composer state row, `Accent`/`OnAccent`, `bodyDense`, `labelMono`, attachment chip grammar, approved motion pulse only while recording/transcribing. |
+| #454 Session bottom controls | `CommandChip`, `KeyBar`, `PocketShellDensity`, `PocketShellType.bodyMono`, 48dp touch floor, sticky primary cluster, no duplicate dictate chip. |
+| #455 Folder/session tree | `ScreenHeader`, `SectionHeader`, `ListRow`, `Badge`, `StatusDot`, `treeIndent`, `bodyDense`, `bodyMono`, action overflow, compact row density. |
+| #459 Conversation tab | `Tabs`, `UnifiedComposer`, `PocketShellType.bodyDense`, `labelMono`, tool-call row pattern, conversation timeline render target, no terminal keybar in Conversation. |
+
+### Slice 4: Screen Families
+
+Migrate by family, not by random file:
+
+1. Host/settings/list-management family: Host list, Settings, SSH keys, Watched
+   folders, Crash reports, AI costs.
+2. Workspace family: Folder list, Repo browser, Env files.
+3. Terminal family: Session, Tmux session, Recurring jobs, Usage in-session
+   chip, port forwarding.
+4. File/share family: File explorer, File viewer, Share host picker.
+5. Modal family: Composer, snippets, agent commands, bootstrap, folder context,
+   session type picker, root project add.
+
+Each migration PR should include before/after screenshots or render artifacts
+for the touched family.
+
+## Screenshot And Render Plan
+
+### Fast Render Harness
+
+Use this first for shared tokens and components:
+
+```bash
+scripts/render.sh
+scripts/render.sh hostListScreen
+scripts/render.sh conversationTimeline
 ```
-[← back] [host › session › window › pane] [⋯ more]
+
+Current #461 run result:
+
+- Command: `scripts/render.sh`
+- Result: success in 28 seconds.
+- Generated artifacts:
+  - `shared/ui-kit/build/renders/screen-header.png`
+  - `shared/ui-kit/build/renders/list-row.png`
+  - `shared/ui-kit/build/renders/host-list-screen.png`
+  - `shared/ui-kit/build/renders/conversation-timeline.png`
+
+Add render cases before migrating a shared component if no representative case
+exists.
+
+### Emulator Visual Audit
+
+Use this for full journey screenshots:
+
+```bash
+scripts/phone-walkthrough.sh visual-audit
 ```
 
-- Back button: 36 dp tap target, circular (18 dp radius), `TextSecondary` foreground.
-- Crumbs: 14 sp body text. Separators (`›`) in `TextMuted`. Current segment (pane) in `Text`, weight 500. Inactive segments in `TextSecondary`.
-- **Pane-label rule:** if a pane has no custom title, display `Pane N` (1-based index) instead of the raw `%N` ID.
-- Live-dot: 7 dp green circle with glow (`0 0 6 px green @ 0.7 opacity`) when connected.
-- Overflow: one-line; ellipsis on active segment if needed.
+Expected normalized output is documented in [`docs/testing.md`](testing.md):
 
-### 6.2 Status chips (connection state badges)
+- `build/phone-walkthrough/<run-id>/screenshots/visual-audit/01-host-list.png`
+- `02-host-setup-folder-list.png`
+- `03-terminal-session-input-controls.png`
+- `04-snippets.png`
+- `05b-composer-idle-draft.png`
+- `06-composer-recording.png`
+- `07-composer-transcribing.png`
 
-Single composable; never freestyle. Call sites pass an enum, the component
-renders the dot. No inline labels (status conveyed by colour + animation);
-context (tooltip on long-press, sibling text) supplies semantic meaning.
+This command uses emulator and Docker-backed instrumentation, so it is not the
+cheap inner loop. Run it for migration PRs that affect app screens or sheets.
 
-Used in: host card (right side, near kebab), session-drawer header, settings
-usage dashboard.
+### Focused Screenshot Tests
 
-| State | Visual | Duration |
-|-------|--------|----------|
-| `Connected` | 8 dp solid green circle, glow | Solid |
-| `Idle` | 8 dp solid amber circle, no glow | Solid |
-| `Connecting` | 8 dp amber circle, pulse (0.3 → 1.0 opacity, 1.5 s) | Until connected |
-| `Error` | 8 dp solid red circle, no glow | Solid |
-| `Unknown` | 8 dp solid `TextMuted` circle, no glow | Solid |
+Run targeted connected tests when a slice touches a covered surface:
 
-### 6.3 Agent hint banner
+```bash
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.tmux.TmuxConsolidatedChromeScreenshotTest
 
-Replaces the current top-center overlay chip.
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.composer.PromptComposerVisualScreenshotTest
 
-- **Position:** anchored to the bottom of the terminal viewport (above the key bar / chip row).
-- **Appearance:** `AccentSoft` background, 10–12 px padding, 10 dp radius, 1 dp `AccentDim` border. Text: "Claude detected. Visit Conversation tab" or "New agent output available".
-- **Lifetime:** auto-dismiss after 8 s. On first visit to Conversation tab, remove the banner from state. Don't re-show unless a new agent is detected.
-- **Animation:** fade-in (`MotionDurations.fast`), auto-dismiss fade-out (`MotionDurations.fast`).
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.projects.FolderContextActionSheetScreenshotTest
 
-### 6.4 Tool-call row (Conversation pane, #160)
-
-Subtle, non-intrusive.
-
-```
-[▶] Tool: bash (run) | $ command-here... [dim: 11sp mono]
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.costs.CostsScreenScreenshotTest
 ```
 
-- Leading chevron (`TextMuted`): tap to expand / collapse.
-- Tool name (`Accent`, bold): "Bash", "Python", etc.
-- Trailing preview: first ~40 chars of the tool call, monospace 11 sp `TextSecondary`, ellipsis.
-- Row background: `Surface` + 1 dp `BorderSoft` border, 10 dp radius, 10–12 px padding, 12 px margin top/bottom.
-- Expanded state: full command, output (if available); chevron rotation indicates state.
+Many screenshot tests write under
+`/sdcard/Android/media/com.pocketshell.app/additional_test_output/<test-name>/`.
+Pull or copy those artifacts into the issue report. Full-device screenshots are
+advisory for terminal content; terminal viewport captures and text assertions
+remain authoritative.
 
-### 6.5 Workspace tree row (host detail)
+## Do / Don't Rules
 
-Compact active-only hierarchy for the host-detail workspace view.
+Do:
 
-- Target structure follows `mockups/tree/index.html`'s terminal-style
-  outline: app bar title is the host, actions are compact icon controls,
-  then the tree starts immediately with workspace roots. Avoid an extra
-  "Workspace" label or repeated root path text inside each root row.
-- Configured roots render first, in configured order. Sessions outside those
-  roots render after them under one neutral group in tree mode. Flat mode
-  is a simple project list and must not add an "outside roots" callout.
-- The screen should stay in a clear loading state until both local configured
-  roots and the first remote session/project snapshot are ready. Do not render
-  a roots-only placeholder tree and then move rows after the SSH probe returns.
-- Project rows are collapsed by default. Expanding reveals active sessions
-  only; inactive scanned folders belong in add/browse flows, not the primary
-  tree.
-- Hierarchy comes from indentation, subtle connector lines, and spacing. Do
-  not put branch glyphs, bullets, or ASCII tree art in row titles.
-- Root rows are compact `Surface` bands with subtle counts such as
-  "3 active · 5 sessions"; no pin chip is needed because every root in this
-  section is configured. Project rows use a lighter `Surface` treatment,
-  6-8 dp radius, and 7-9 dp vertical padding. Session children use
-  `SurfaceElev`, 8 dp radius, and a 1 dp connector line at the left.
-- Active/idle state is a 7-8 dp status dot: green for active/attached or
-  agent-backed sessions, amber for idle detached shells. Do not add prose
-  status labels unless accessibility text is needed.
-- Counts are subtle neutral pills (`SurfaceElev` + `BorderSoft`, 10-11 sp)
-  such as "2 sessions" or "2 sessions, 1 agent". They stay single-line at
-  phone width; truncate the project label before wrapping a count pill.
-- Session children prefer human-readable titles. The raw tmux session name is
-  secondary fallback text when no richer title source exists.
+- Start with an existing shared component.
+- Cite this document when adding a new UI pattern.
+- Use `ScreenHeader`, `SectionHeader`, `ListRow`, `Badge`, `StatusDot`,
+  `Kebab`, `Tabs`, `SegmentedToggle`, `KeyBar`, `CommandChip`, and `MicButton`
+  before inventing local chrome.
+- Keep rows dense but touch targets at least 48dp.
+- Use mono for command/path/ID content, not for every label.
+- Put destructive actions in overflow plus confirmation.
+- Include render or screenshot evidence for visual migrations.
 
-Implementation audit note for issue #396: visible churn was caused by
-`FolderListViewModel.bind()` emitting `Ready` from the watched-root DAO before
-the first remote probe had resolved sessions, scanned projects, and root
-expansion. A first probe could also start with `lastWatchedFolders` still empty,
-rendering sessions outside configured roots before a later DAO/probe cycle moved
-them under roots. Keep root/project `LazyColumn` items keyed by stable paths so
-legitimate refreshes update rows in place.
+Don't:
 
----
+- Add new colours, radii, shadows, motion values, or font sizes without a named
+  role.
+- Add a bespoke top bar, status dot, badge, command chip, mic, or row because a
+  screen is "special".
+- Use cards as page sections or nest cards inside cards.
+- Use semantic colours as decoration.
+- Add decorative animation or background-work-looking motion.
+- Use legacy `ProofOfLifeScreen` or `TerminalLabActivity` as design precedent.
 
-## 7. Material 3 deltas (the 8 justified divergences)
+## Migration Checklist
 
-Default position: PocketShell is a **Material 3 dialect**. Divergence is
-always explicit and always justified.
+For every UI migration issue:
 
-| # | Divergence | Rationale | Impact |
-|---|------------|-----------|--------|
-| **Δ1** | **Corner radius 14 dp on cards** instead of M3's 12 dp | Aligns with the mockup CSS (`--r-card: 14px`) and the live codebase. The 2 dp bump is imperceptible to users but consistent with intent. | `HostCard`, `SessionRow`, usage cards. No behaviour change. |
-| **Δ2** | **Accent cyan `#22D3EE`** instead of M3's default teal | PocketShell's Termius-inspired design calls for a bright cyan. M3 teal is cooler; cyan is warmer and more terminal-native. | `primary` slot in the Material scheme, FAB, action highlights. M3's teal would make the dictate button and status dots feel corporate instead of "terminal-adjacent". |
-| **Δ3** | **No drop-shadows except FAB; hairline borders for surface separation** | Mobile battery + visual restraint ("very busy, very crowded" → favour subtraction). M3 defaults to elevation shadows on cards; we use hairline 1 dp `BorderSoft` borders instead. | Cards, sheets, key bar. Cleaner, faster rendering, less visual clutter. The FAB shadow (`0 12 px 32 px Accent @ 40 %`) is allowed because the FAB is the primary action. |
-| **Δ4** | **Terminal viewport background (`#010409`) is blacker than app background (`#0D1117`)** | Preserves the xterm-style dark terminal on a slightly-lighter UI background. Keeps the terminal layer visually separable from the surrounding chrome. M3 would collapse these to a single tone. | `TermBg` token + custom styles on `TerminalSurface`. Users immediately see "terminal content vs UI chrome" without cognitive load. |
-| **Δ5** | **Typography scale 11 – 20 sp only** (no `displayLarge` / `headlineMedium`) | Mobile-first design. Large display sizes waste viewport. Restrained 4-tier scale matches the "reduce clutter" directive. | All text sizes defined in `PocketShellTypography`. This is a scope reduction, not a content change. |
-| **Δ6** | **Compact density** (`PocketShellDensity`): list rows ~44 dp, 8 dp row / 6 dp chip vertical padding, tight section gaps | Dev-tool density — the most-requested change (#454/#455/#459 all ask for compact). Roughly M3 density −2…−3. | Rows/chips/trees. Visual density stays separate from the 48 dp touch floor (§3.1). |
-| **Δ7** | **Mono as a real type role** (`PocketShellType.bodyMono`/`labelMono`) instead of a stray `FontFamily` | Terminal-adjacent UI (paths, host subtitles, command chips, tmux names, tool-call previews) should read consistently as code, like VS Code/Warp treat mono as a first-class UI role. | Standalone `TextStyle` constants; system monospace until JetBrains Mono is bundled (deferred). |
-| **Δ8** | **13 sp `bodyDense` rung** between `labelSmall`(11) and `bodyMedium`(14) | 13 sp is already the 2nd most-used size in the app (×87) — a de-facto token. Promote it instead of fighting it. | Dense list/tree rows, conversation lines, settings rows. Standalone `TextStyle`, not an M3 slot. |
+- [ ] Identify the screen family and source files.
+- [ ] List current shared components already in use.
+- [ ] Replace repeated local row/status/badge/menu/sheet/dialog patterns with
+      shared components or document why not.
+- [ ] Use only approved colour, type, spacing, density, radius, and motion roles.
+- [ ] Preserve 48dp hit targets.
+- [ ] Add a long-label row case proving the primary title ellipsizes and the
+      trailing kebab/action/badge remains visible and tappable.
+- [ ] Verify every kebab opens an action menu/sheet first; destructive menu
+      items then open confirmation.
+- [ ] Add or update a fast render case when touching `shared/ui-kit`.
+- [ ] Run `scripts/render.sh` for shared components.
+- [ ] Run targeted connected screenshot tests for screen/sheet changes.
+- [ ] Attach artifact paths and note whether screenshots are full-device or
+      authoritative viewport captures.
+- [ ] Leave unrelated runtime churn out of the migration.
 
-All eight deltas are justified by either (a) PocketShell's mobile-terminal
-context, (b) existing implementation in the CSS mockups and codebase, or
-(c) explicit design principles in [`decisions.md`](decisions.md).
+## Open Maintainer Decisions
 
----
-
-## 8. Worked example: host card (re-spec of #155)
-
-**Current issues.** Usage badge competes with the status chip; kebab is quiet
-to the point of invisibility.
-
-**Re-spec using design system tokens:**
-
-```
-┌─────────────────────────────────────────────────┐  ← Surface (radius medium = 14 dp)
-│ Avatar │  Walkthrough      [● connected] [⋮]   │    ← md (12 dp) internal padding
-│ (40dp) │  testuser@10.0.2:2222                  │
-│ 'D'    │  (12 sp mono, TextMuted)               │
-└─────────────────────────────────────────────────┘
-```
-
-- **Container:** `Surface`, `PocketShellShapes.medium` (14 dp), 1 dp `BorderSoft`. No drop-shadow (Δ3).
-- **Avatar (left):** 40 dp circle on `SurfaceElev`, single letter `D` in 12 sp `TextSecondary`.
-- **Hostname row:** 14 sp `bodyMedium`, `Text`. Status dot (§6.2 `Connected`) on the right.
-- **Subtitle:** 12 sp monospace `TextMuted`, nowrap, ellipsis.
-- **Kebab:** 40 dp tap target, circular (20 dp radius), `TextSecondary` icon. Always visible affordance.
-- **Spacing between cards:** 12 dp (`md`) external gap.
-- **Usage badge is demoted** to a kebab tooltip / overflow item, not a row sibling.
-
-Net effect: cleaner hierarchy, status at a glance, secondary actions out of
-the breadth scan.
-
----
-
-## 9. Worked example: bottom toolbar (re-spec of #152)
-
-**Status.** The dictate chip removal and right-edge chip reorder
-landed via #221 (follow-up to the #208 right-thumb ergonomics audit).
-The mic FAB is now the single dictate affordance, and primary chips
-(`keyboard`, `+ snippet`) live in a **sticky right cluster** that sits
-outside the scrolling secondary-chip strip so they are always visible
-next to the FAB without horizontal-scrolling — regardless of how many
-static command chips lead the row.
-
-**Re-spec using design system tokens:**
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ [git status] [tmux ls] [k logs] ⟷  [⌨ keyboard] [+ snippet] [🎤 FAB] │
-│ ←─── scrollable secondary strip ───→ ←──── sticky right cluster ────→
-└──────────────────────────────────────────────────────────┘
-```
-
-- **Bottom strip composition:** a single `Row` with three child slots,
-  left → right: (1) scrollable secondary strip with `weight(1f)`, (2)
-  sticky `PrimaryChipCluster` (non-scrolling), (3) mic FAB (fixed 80 dp
-  slot).
-- **Scrollable secondary strip** (slot 1):
-  - Background: `Background` (no elevation).
-  - Chips: 8 dp radius (`PocketShellShapes.extraSmall`), `Surface` background, 1 dp `BorderSoft`, `md` (12 dp) internal padding, `sm` (8 dp) gap between.
-  - Font: 12 sp monospace, `TextSecondary`.
-  - Tap area: ≥ 48 dp.
-  - **Order (left → right):** low-frequency static command chips
-    (`git status`, `tmux ls`, `k logs`, `clear`) → `dirs` (project
-    navigation, raw-SSH only).
-  - Overflow: horizontally scrollable (`Modifier.horizontalScroll`),
-    so adding more static chips never displaces the sticky cluster.
-- **Sticky primary cluster** (slot 2):
-  - Same chip styling as the scrollable strip; non-scrolling.
-  - **Order (left → right):** `keyboard` → `+ snippet`. `+ snippet`
-    sits closest to the mic FAB so the most-tapped composer entry
-    points line up inside the right-thumb arc.
-  - The cluster pins to the right end of the chip area regardless of
-    static-chip count, fixing the round-1 #221 regression where the
-    primary chips were pushed off-screen by leading static chips.
-  - **The "dictate" chip is removed entirely** (shipped in #221). The
-    mic FAB is the single dictate affordance.
-- **Key bar** (visible only when the keyboard is open):
-  - Background: `Surface`.
-  - Keys: 38 dp tall, 8 dp radius, `SurfaceElev` background, 1 dp `Border`.
-  - Label: 12 sp monospace `TextSecondary`.
-  - Active key: `AccentSoft` background, `Accent` label, border → `AccentDim`.
-  - Gap: 5 dp between keys (sub-grid micro-spacing).
-- **Mic FAB:**
-  - 56 dp pill (`PocketShellShapes.extraLarge` / `FabShape`).
-  - `Accent` background, `OnAccent` foreground.
-  - Shadow: `0 12 px 32 px Accent @ 40 % opacity` (the **only** allowed chrome shadow — Δ3).
-  - Fixed bottom-right, 20 dp inset. Floats above the keyboard.
-- **Modifier strip** (Ctrl / Alt / Shift, if shown):
-  - Single 40 dp icon row (do not occupy a full row).
-  - `Surface` background, 1 dp `BorderSoft`.
-  - Modifier icons: 32 dp circles on `SurfaceElev`, `TextSecondary` icon.
-  - Active modifier: `AccentSoft` background, `Accent` icon.
-
-Net effect: one dictate affordance, quieter bottom row, more terminal
-viewport.
-
----
-
-## 10. Anti-design (what we explicitly don't do)
-
-- No purely decorative emoji or icons in chrome.
-- No background work / no idle animations that drain battery (see locked
-  "no-background-work" principle in
-  [`decisions.md`](decisions.md)). Animations only run while their host
-  screen is in the foreground.
-- No motion for motion's sake — every animation must serve a
-  comprehension goal.
-- No iOS-style frosted blur effects on surfaces.
-- No bright illustrations or mascots.
-- No drop-shadows except on the FAB (§7 Δ3).
-- No design tokens that diverge from Material 3 unless justified (§7).
-
----
-
-## 11. Status of codification
-
-| Surface | State | Notes |
-|---------|-------|-------|
-| `Color.kt` | Codified | Surfaces, text, accent, semantic, borders, terminal. |
-| ColorScheme slots | Partial (#472 Slice 0) | Slice 0 fills only the provably-inert `inverseSurface`/`inverseOnSurface`/`inversePrimary` trio (no `Snackbar`/`NavigationBar` is instantiated, so nothing reads them today) → zero rendered-pixel change. **Deferred to Slice 1:** `surfaceContainer*` (read by all `DropdownMenu` call sites via `MenuTokens.ContainerColor`, the unchecked `Switch` track, and the M3 `Card` default) and `secondaryContainer`/`onSecondaryContainer` (M3 selected-chip/segmented-button/drawer state). Completing those onto the dev-tool palette is an *intended* visual change (menus shift `#211F26`→`#1C2129`, switch track + cards likewise), so it lands in Slice 1 with an emulator visual audit + maintainer sign-off — not silently inside the zero-change Slice 0. |
-| Semantic roles | Codified (#472) | `PocketShellSemanticColors` + `LocalPocketShellSemantic` carry the non-M3 roles (status `active/idle/connecting/error/attention`, `agentAccent`, `accentSoft/accent/accentDim`), sourced from the same palette constants screens use today. |
-| `Type.kt` | Codified | 4 UI slots + monospace alias. **+ `PocketShellType` dense/mono rungs (#472):** `bodyDense`(13) / `bodyMono`(13, mono) / `labelMono`(11, mono), standalone `TextStyle`s (not M3 slots). |
-| `Shape.kt` | Codified | 14 / 8 / 20 / 28 dp + `FabShape`. |
-| `Motion.kt` | Codified | `MotionDurations` (`fast`, `normal`, `slow`, `idlePulse`, `blink`) + `MotionEasing` (`standard`, `linear`, `stepsTwo`). |
-| Spacing | **Codified (#472).** | `PocketShellSpacing` (`xs`/`sm`/`md`/`lg`/`xl`/`xxl`) on the 4 dp grid (§3). |
-| Density | **Codified (#472).** | `PocketShellDensity` (`rowMinHeight`/`rowPadV`/`rowPadH`/`chipPadV`/`chipPadH`/`sectionGap`/`treeIndent`/`tapTargetMin`) — the compact knob (§3.1, §7 Δ6). |
-
-`UnifiedComposer` (the shared compose/send surface, #196) is re-sourced off these
-tokens as of #472 (Slice 0) — zero visual change, proven by a before/after
-emulator screenshot diff of the composer body (0 differing pixels).
-
-Migrating existing screens onto the codified tokens is **per-surface
-follow-up work**, tracked as small issues against the consumer screens
-(#152–#157, #160, …). This document is the lock; the per-screen migration
-is separate.
+1. Should `Motion.kt` be added to `shared/ui-kit/theme`, and should it expose
+   Compose `FiniteAnimationSpec` helpers or plain duration/easing constants?
+2. Should the spacing scale remain `xs` through `lg`, or should repeated 20dp,
+   24dp, 28dp, 38dp, and 40dp values become named component geometry tokens?
+3. When should M3 `surfaceContainer*`, selected-container, switch-track, and menu
+   colours move from defaults to the PocketShell palette?
+4. Should `SessionRow` be revived as the single session row across folder,
+   drawer, and flat session lists, or replaced by a more general tree/session
+   row component?
+5. Should `Kebab` grow section headers, destructive roles, and disabled/status
+   rows, or should complex terminal menus keep local `DropdownMenu` blocks?
+6. Should secret entry and reveal flows share one dialog across Settings, Env,
+   Host key unlock, and Composer API key setup?
+7. Should future light mode stay out of scope permanently, or remain a deferred
+   portability target after the dark dev-tool system is stable?

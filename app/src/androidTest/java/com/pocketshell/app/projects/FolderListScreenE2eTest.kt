@@ -562,6 +562,11 @@ class FolderListScreenE2eTest {
                 "claude.bottom=${claudeConnectorBounds.bottom}px shell.top=${shellConnectorBounds.top}px",
             kotlin.math.abs(claudeConnectorBounds.bottom - shellConnectorBounds.top) <= 1.0f,
         )
+        assertHostDetailTreeGutterIsCompact(
+            rootPath = "~/git",
+            folderPath = "/home/u/git/pocketshell",
+            sessionName = "claude-main",
+        )
         // The session row keeps its 48 dp touch floor even at compact density.
         assertAccessibleTouchTarget(
             folderDetailRowTestTag("/home/u/git/pocketshell", "claude-main"),
@@ -1014,6 +1019,58 @@ class FolderListScreenE2eTest {
             textSize = fontSizeSp * density
         }
         return paint.measureText(text)
+    }
+
+    private fun assertHostDetailTreeGutterIsCompact(
+        rootPath: String,
+        folderPath: String,
+        sessionName: String,
+    ) {
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val rootLabelBounds = compose.onNodeWithTag(
+            folderTreeRootLabelTag(rootPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val projectBounds = compose.onNodeWithTag(
+            folderHeaderClickTestTag(folderPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val connectorBounds = compose.onNodeWithTag(
+            folderSessionConnectorTestTag(folderPath, sessionName),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val sessionBounds = compose.onNodeWithTag(
+            folderDetailRowTestTag(folderPath, sessionName),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+
+        val projectIndentDp = (projectBounds.left - rootLabelBounds.left) / density
+        assertTrue(
+            "host-detail project row should start within an 8dp compact gutter (#565): " +
+                "rootLabel.left=${rootLabelBounds.left}px project.left=${projectBounds.left}px",
+            projectIndentDp <= 8.5f,
+        )
+
+        val connectorIndentDp = (connectorBounds.left - projectBounds.left) / density
+        assertTrue(
+            "session connector should stay close to the project row, not waste left gutter (#565): " +
+                "project.left=${projectBounds.left}px connector.left=${connectorBounds.left}px",
+            connectorIndentDp <= 8.5f,
+        )
+
+        val connectorWidthDp = connectorBounds.width / density
+        assertTrue(
+            "session connector cell should be 16dp or tighter (#565): width=${connectorBounds.width}px",
+            connectorWidthDp <= 16.5f,
+        )
+
+        val sessionIndentDp = (sessionBounds.left - projectBounds.left) / density
+        assertTrue(
+            "session row content should sit within a 24dp child gutter from the project row (#565): " +
+                "project.left=${projectBounds.left}px session.left=${sessionBounds.left}px",
+            sessionIndentDp <= 24.5f,
+        )
     }
 
     // #455: the compact tree icon buttons (overflow kebab + accent `+`)

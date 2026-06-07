@@ -1313,7 +1313,7 @@ private fun FolderTreeRootGroup(
             EmptyRootHint(candidateCount = root.addSheetProjects.size, onCreate = { onCreateInRoot(root) })
         } else {
             Column(
-                modifier = Modifier.padding(start = PocketShellDensity.treeIndent),
+                modifier = Modifier.padding(start = treeProjectIndent),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 root.folders.forEach { folder ->
@@ -1440,7 +1440,7 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 22.dp)
+            .padding(start = treeProjectIndent)
             .background(PocketShellColors.Surface.copy(alpha = 0.48f), RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
@@ -1746,18 +1746,27 @@ private fun AgentTypeBadge(
 }
 
 /**
- * Indent applied to the session-children column under an expanded project so the
- * `├─/└─` spine sits under the project's chevron/dot lead (#503). The connector
- * cell ([treeConnectorCellWidth]) lives inside this column and the spine's
- * vertical x ([treeSpineX]) is the visual left edge of the child sub-tree.
+ * Compact host-detail tree gutter. The shared density token keeps the default
+ * 16 dp workspace nesting step for generic tree rows, but this screen follows
+ * the tighter terminal-style host-detail mockup (#565): project rows advance by
+ * only one 8 dp rung and session connectors use a narrow 16 dp cell.
  */
-private val treeChildIndent = 12.dp
+private val treeProjectIndent = PocketShellSpacing.sm
+
+/**
+ * Indent applied to the session-children column under an expanded project so the
+ * `├─/└─` spine sits just under the project's compact chevron/dot lead (#503,
+ * #565). The connector cell ([treeConnectorCellWidth]) lives inside this column
+ * and the spine's vertical x ([treeSpineX]) is the visual left edge of the child
+ * sub-tree.
+ */
+private val treeChildIndent = PocketShellSpacing.sm
 
 /** Width of the per-row connector cell that carries the spine + horizontal stub. */
-private val treeConnectorCellWidth = 22.dp
+private val treeConnectorCellWidth = PocketShellSpacing.lg
 
 /** Horizontal position of the vertical spine inside the connector cell. */
-private val treeSpineX = 6.dp
+private val treeSpineX = PocketShellSpacing.xs
 
 /**
  * One session row hung off the project's tree spine (#503).

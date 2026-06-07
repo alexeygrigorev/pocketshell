@@ -26,7 +26,8 @@ import javax.inject.Singleton
  *  - A long-lived consumer (today, the per-host
  *    [com.pocketshell.app.tmux.TmuxSessionViewModel] when #48 lifecycle
  *    UI lands; pre-#48, manually wired by tests) calls [register] when
- *    it brings a [TmuxClient] up, and [unregister] when it tears it
+ *    it brings a [TmuxClient] up, keeps the returned [Registration],
+ *    and passes that handle to [unregister] when it tears the client
  *    down.
  *  - This class does NOT own client lifetimes — closing the registry
  *    entry does not close the underlying [TmuxClient]. The owner of the
@@ -92,7 +93,9 @@ class ActiveTmuxClients @Inject constructor() {
      * lifecycle observer can iterate while a tmux teardown is
      * concurrently unregistering a hook from another thread.
      */
-    private val lifecycleHooks: MutableMap<Long, LifecycleHooks> = ConcurrentHashMap()
+    private val clientOwners: MutableMap<Long, OwnerToken> = mutableMapOf()
+
+    private val lifecycleHooks: ConcurrentHashMap<Long, LifecycleHookEntry> = ConcurrentHashMap()
 
     /**
      * Add (or replace) the entry for [hostId]. The caller still owns
@@ -115,7 +118,8 @@ class ActiveTmuxClients @Inject constructor() {
         keyPath: String,
         client: TmuxClient,
         startDirectoryExists: (suspend (String) -> Boolean)? = null,
-    ) {
+    ): Registration {
+        val owner = OwnerToken()
         synchronized(this) {
             val next = _clients.value.toMutableMap()
             next[hostId] = Entry(
@@ -128,15 +132,16 @@ class ActiveTmuxClients @Inject constructor() {
                 client = client,
                 startDirectoryExists = startDirectoryExists,
             )
+            clientOwners[hostId] = owner
             _clients.value = next
         }
+        return Registration(hostId = hostId, owner = owner)
     }
 
     /**
-     * Remove the entry for [hostId] if present. No-op if the host was
-     * never registered, or if it was overwritten by a later
-     * [register] call for a different host id (the map is keyed on
-     * host id so we use that as the unique handle).
+     * Remove the entry owned by [registration]. No-op if the host was
+     * never registered, or if this handle was overwritten by a later
+     * same-host [register] call.
      *
      * Issue #235: this method DOES NOT clear lifecycle hooks. The
      * client entry is created/destroyed on every attach/detach cycle
@@ -147,12 +152,31 @@ class ActiveTmuxClients @Inject constructor() {
      * `ON_START`. Hooks are removed via [unregisterLifecycleHooks]
      * (called from `TmuxSessionViewModel.onCleared` only).
      */
-    fun unregister(hostId: Long) {
+    fun unregister(registration: Registration) {
+        synchronized(this) {
+            val current = _clients.value
+            val hostId = registration.hostId
+            if (hostId !in current) return
+            if (clientOwners[hostId] !== registration.owner) return
+            val next = current.toMutableMap()
+            next.remove(hostId)
+            clientOwners.remove(hostId)
+            _clients.value = next
+        }
+    }
+
+    /**
+     * Test/fixture cleanup escape hatch. Production owners should call
+     * [unregister] with the [Registration] returned from [register] so
+     * stale teardown cannot evict a newer same-host client.
+     */
+    fun forceUnregister(hostId: Long) {
         synchronized(this) {
             val current = _clients.value
             if (hostId !in current) return
             val next = current.toMutableMap()
             next.remove(hostId)
+            clientOwners.remove(hostId)
             _clients.value = next
         }
     }
@@ -179,18 +203,23 @@ class ActiveTmuxClients @Inject constructor() {
     fun registerLifecycleHooks(
         hostId: Long,
         hooks: LifecycleHooks,
-    ) {
-        lifecycleHooks[hostId] = hooks
+    ): LifecycleRegistration {
+        val owner = OwnerToken()
+        lifecycleHooks[hostId] = LifecycleHookEntry(hooks = hooks, owner = owner)
+        return LifecycleRegistration(hostId = hostId, owner = owner)
     }
 
     /**
-     * Issue #235: explicitly remove the lifecycle hooks installed for
-     * [hostId] by an earlier [registerLifecycleHooks] call. Called
-     * from `TmuxSessionViewModel.onCleared` so a destroyed VM does
-     * not leak a callback into the singleton fanout.
+     * Issue #235: explicitly remove the lifecycle hooks owned by
+     * [registration]. Called from `TmuxSessionViewModel.onCleared` so
+     * a destroyed VM does not leak a callback into the singleton
+     * fanout. A stale handle is a no-op after a later same-host
+     * [registerLifecycleHooks] call replaces the hooks.
      */
-    fun unregisterLifecycleHooks(hostId: Long) {
-        lifecycleHooks.remove(hostId)
+    fun unregisterLifecycleHooks(registration: LifecycleRegistration) {
+        val current = lifecycleHooks[registration.hostId] ?: return
+        if (current.owner !== registration.owner) return
+        lifecycleHooks.remove(registration.hostId, current)
     }
 
     /**
@@ -200,7 +229,29 @@ class ActiveTmuxClients @Inject constructor() {
      * model's `viewModelScope`, which may itself unregister mid-walk).
      */
     fun lifecycleHooksSnapshot(): List<LifecycleHooks> =
-        lifecycleHooks.values.toList()
+        lifecycleHooks.values.map { it.hooks }
+
+    /**
+     * Opaque proof that the caller still owns the current client entry
+     * for [hostId]. Registrants keep this handle and pass it back to
+     * [unregister]; a stale handle becomes a no-op after a later
+     * same-host [register] replaces the entry.
+     */
+    class Registration internal constructor(
+        internal val hostId: Long,
+        internal val owner: OwnerToken,
+    )
+
+    /**
+     * Opaque proof that the caller still owns the current lifecycle
+     * hooks for [hostId]. Mirrors [Registration] for hook teardown.
+     */
+    class LifecycleRegistration internal constructor(
+        internal val hostId: Long,
+        internal val owner: OwnerToken,
+    )
+
+    internal class OwnerToken
 
     /**
      * One entry in the registry — a live tmux control channel against a
@@ -233,5 +284,10 @@ class ActiveTmuxClients @Inject constructor() {
         val onBackground: suspend () -> Unit,
         val onForeground: suspend () -> Unit,
         val onNetworkChanged: suspend (TerminalNetworkChange) -> Unit = {},
+    )
+
+    private data class LifecycleHookEntry(
+        val hooks: LifecycleHooks,
+        val owner: OwnerToken,
     )
 }

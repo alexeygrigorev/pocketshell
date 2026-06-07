@@ -323,6 +323,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var sessionRef: SshSession? = null
     private var leaseRef: SshLease? = null
     private var clientRef: TmuxClient? = null
+    private var clientRegistration: ActiveTmuxClients.Registration? = null
     private var registeredHostId: Long? = null
     // Issue #235: hostId under which we registered application-scoped
     // lifecycle hooks in [activeTmuxClients]. This is tracked
@@ -333,6 +334,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // can find a callback that calls back into THIS VM. Cleared
     // exclusively from [onCleared], which is the only place where the
     // VM truly goes away and the hook must be removed too.
+    private var lifecycleHookRegistration: ActiveTmuxClients.LifecycleRegistration? = null
     private var lifecycleHookHostId: Long? = null
     private var activeTarget: ConnectionTarget? = null
     private var connectingTarget: ConnectionTarget? = null
@@ -1472,7 +1474,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * observer wired in [com.pocketshell.app.App.onCreate].
      */
     private fun installLifecycleHooks(hostId: Long) {
-        activeTmuxClients.registerLifecycleHooks(
+        lifecycleHookRegistration = activeTmuxClients.registerLifecycleHooks(
             hostId = hostId,
             hooks = ActiveTmuxClients.LifecycleHooks(
                 onBackground = { onAppBackgrounded() },
@@ -1481,6 +1483,18 @@ public class TmuxSessionViewModel @Inject constructor(
             ),
         )
         lifecycleHookHostId = hostId
+    }
+
+    private fun unregisterCurrentClient() {
+        clientRegistration?.let { activeTmuxClients.unregister(it) }
+        clientRegistration = null
+        registeredHostId = null
+    }
+
+    private fun unregisterLifecycleHooks() {
+        lifecycleHookRegistration?.let { activeTmuxClients.unregisterLifecycleHooks(it) }
+        lifecycleHookRegistration = null
+        lifecycleHookHostId = null
     }
 
     /**
@@ -1516,8 +1530,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "tmux-network-proactive-reconnect reason=$reason " +
                 targetLogFields(target),
         )
-        registeredHostId?.let { activeTmuxClients.unregister(it) }
-        registeredHostId = null
+        unregisterCurrentClient()
         scheduleAutoReconnect(
             target = target,
             reason = reconnectReason,
@@ -1695,8 +1708,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // dismissed/forwarded.
         _detectedPort.value = null
         _panes.value = emptyList()
-        registeredHostId?.let { activeTmuxClients.unregister(it) }
-        registeredHostId = null
+        unregisterCurrentClient()
         activeTarget = null
         activeAttachMilestone = null
         return evicted
@@ -1781,7 +1793,7 @@ public class TmuxSessionViewModel @Inject constructor(
         rebindRestoredRuntimePaneJobsIfNeeded(runtime.client, runtime.panes)
         _panes.value = runtime.panes
         restartAgentConversationsForRestoredRuntime(runtime)
-        activeTmuxClients.register(
+        clientRegistration = activeTmuxClients.register(
             hostId = target.hostId,
             hostName = target.hostName,
             hostname = target.host,
@@ -1981,7 +1993,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 event = "tmux-control-command-started",
                 trigger = trigger,
             )
-            activeTmuxClients.register(
+            clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
                 hostname = target.host,
@@ -2155,7 +2167,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 event = "tmux-control-command-started",
                 trigger = trigger,
             )
-            activeTmuxClients.register(
+            clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
                 hostname = target.host,
@@ -2778,7 +2790,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 runCatching { replacement.close() }
                 return false
             }
-            activeTmuxClients.register(
+            clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
                 hostname = target.host,
@@ -2926,7 +2938,7 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             val lease = acquiredLease ?: return false
             val newClient = replacement ?: return false
-            activeTmuxClients.register(
+            clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
                 hostname = target.host,
@@ -3041,8 +3053,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "user" to (current?.user ?: target?.user.orEmpty()),
             "session" to (target?.sessionName ?: "unknown"),
         )
-        registeredHostId?.let { activeTmuxClients.unregister(it) }
-        registeredHostId = null
+        unregisterCurrentClient()
         if (target != null) {
             activeTarget = target
             connectingTarget = null
@@ -3238,7 +3249,7 @@ public class TmuxSessionViewModel @Inject constructor(
             sessionRef = session
         }
         attachClient(client)
-        activeTmuxClients.register(
+        clientRegistration = activeTmuxClients.register(
             hostId = hostId,
             hostName = hostName,
             hostname = host,
@@ -3345,7 +3356,7 @@ public class TmuxSessionViewModel @Inject constructor(
             name = "warm_switch_tmux_shell_attached",
             trigger = TmuxConnectTrigger.FastSwitch,
         )
-        activeTmuxClients.register(
+        clientRegistration = activeTmuxClients.register(
             hostId = hostId,
             hostName = hostName,
             hostname = host,
@@ -6498,8 +6509,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // auto-detach on background would unregister the hook before
         // the foreground hook fires the reattach); the VM going away
         // is the only signal we use to drop them.
-        lifecycleHookHostId?.let { activeTmuxClients.unregisterLifecycleHooks(it) }
-        lifecycleHookHostId = null
+        unregisterLifecycleHooks()
         // bridgeScope is parented to viewModelScope, so its SupervisorJob
         // tears down automatically when viewModelScope cancels post-super
         // call. Explicit cancellation here is redundant — leaving it to
@@ -6638,8 +6648,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // detach.
         runCatching { clientRef?.detachCleanly() }
         clientRef = null
-        registeredHostId?.let { activeTmuxClients.unregister(it) }
-        registeredHostId = null
+        unregisterCurrentClient()
         closingHostId?.let { hostId ->
             runtimeCache.removeHost(hostId).forEach { cached ->
                 cached.closeCachedRuntime()
@@ -6758,8 +6767,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
             }
         }
-        registeredHostId?.let { activeTmuxClients.unregister(it) }
-        registeredHostId = null
+        unregisterCurrentClient()
         // Intentionally NOT touching [sessionRef] — that is the
         // contract of this method. The caller will pass the same
         // session to the next tmux client.
@@ -6873,8 +6881,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // failed or was a no-op (clientRef was null).
         runCatching { clientRef?.close() }
         clientRef = null
-        registeredHostId?.let { activeTmuxClients.unregister(it) }
-        registeredHostId = null
+        unregisterCurrentClient()
         closingHostId?.let { hostId ->
             closeCachedRuntimesBlocking(runtimeCache.removeHost(hostId))
         }

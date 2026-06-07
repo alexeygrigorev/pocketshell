@@ -8214,8 +8214,8 @@ class TmuxSessionViewModelTest {
         assertEquals(1, registry.lifecycleHooksSnapshot().size)
 
         // `detachAndExit` drives `closeCurrentConnectionAndJoin`, which
-        // ends in `activeTmuxClients.unregister(hostId)`. The hooks
-        // must survive — they are tied to the VM, not the client.
+        // clears the active client registration. The hooks must
+        // survive — they are tied to the VM, not the client.
         vm.detachAndExit()
         advanceUntilIdle()
 
@@ -8259,6 +8259,56 @@ class TmuxSessionViewModelTest {
         assertTrue(
             "lifecycle hook must be removed when VM is cleared",
             registry.lifecycleHooksSnapshot().isEmpty(),
+        )
+    }
+
+    /**
+     * Issue #548: a stale VM can finish teardown after a newer VM has
+     * already attached to the same host. The stale teardown must not
+     * evict the newer client entry or lifecycle hook.
+     */
+    @Test
+    fun staleViewModelClearDoesNotUnregisterNewerSameHostClientOrHooks() = runTest {
+        val registry = ActiveTmuxClients()
+        val oldVm = newVm(registry)
+        val newVm = newVm(registry)
+        val oldClient = FakeTmuxClient()
+        val newClient = FakeTmuxClient()
+        oldVm.replaceClientForTest(
+            hostId = 13L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+        newVm.replaceClientForTest(
+            hostId = 13L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = newClient,
+        )
+        assertSame(newClient, registry.clients.value[13L]?.client)
+        assertEquals(1, registry.lifecycleHooksSnapshot().size)
+
+        oldVm.clearForTest()
+        advanceUntilIdle()
+
+        assertSame(
+            "stale VM teardown must not remove newer client entry",
+            newClient,
+            registry.clients.value[13L]?.client,
+        )
+        assertEquals(
+            "stale VM teardown must not remove newer lifecycle hook",
+            1,
+            registry.lifecycleHooksSnapshot().size,
         )
     }
 

@@ -81,7 +81,7 @@ class SessionsDashboardViewModelTest {
         keyPath: String,
         client: FakeTmuxClient,
         startDirectoryExists: (suspend (String) -> Boolean)? = null,
-    ) {
+    ): ActiveTmuxClients.Registration =
         registry.register(
             hostId = host.id,
             hostName = host.name,
@@ -92,7 +92,6 @@ class SessionsDashboardViewModelTest {
             client = client,
             startDirectoryExists = startDirectoryExists,
         )
-    }
 
     @Test
     fun sessionsStartEmpty() = runTest {
@@ -316,12 +315,12 @@ class SessionsDashboardViewModelTest {
                 )
             }
         }
-        register(registry, host(1L, "h"), "/k", client)
+        val registration = register(registry, host(1L, "h"), "/k", client)
         runCurrent()
         assertEquals(1, vm.sessions.value.size)
         val callsWhileRegistered = client.sentCommands.size
 
-        registry.unregister(1L)
+        registry.unregister(registration)
         runCurrent()
         // Snapshot empty → aggregate is empty.
         assertTrue(vm.sessions.value.isEmpty())

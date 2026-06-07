@@ -89,7 +89,7 @@ class ShareTargetE2eTest {
                 EntryPointAccessors
                     .fromApplication(ctx, ShareTestAccessEntryPoint::class.java)
                     .activeTmuxClients()
-                    .unregister(hostId)
+                    .forceUnregister(hostId)
             }
         }
         registeredHostId = null

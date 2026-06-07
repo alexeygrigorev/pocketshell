@@ -1409,7 +1409,7 @@ private fun FolderTreeRootHeader(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             // Group title — the mockup renders this larger than a project row
-            // (the screen-level "git" heading above its org tree).
+            // (the screen-level "git" heading above its project tree).
             Text(
                 text = folderDisplayLabel(root.label, root.path),
                 color = PocketShellColors.Text,
@@ -1457,18 +1457,18 @@ private fun RootCountText(root: FolderTreeRoot) {
 
 /**
  * Group-header subtitle shown under the root title — issue #478. Mirrors the
- * maintainer's target mockup: `N orgs · M sessions` (e.g. "10 orgs ·
- * 14 sessions"). An "org" here is one project folder under the root (active or
+ * project-list grouping summary: `N projects · M sessions` (e.g. "10 projects ·
+ * 14 sessions"). A project here is one project folder under the root (active or
  * inactive/scanned); "sessions" is the live tmux session count across those
- * projects. Degrades to just the org count when there are no live sessions.
+ * projects. Degrades to just the project count when there are no live sessions.
  */
 internal fun rootCountSubtitle(root: FolderTreeRoot): String {
-    val orgCount = root.activeProjectCount + root.inactiveProjectCount
-    val orgs = orgCount.countLabel("org")
+    val projectCount = root.activeProjectCount + root.inactiveProjectCount
+    val projects = projectCount.countLabel("project")
     return if (root.sessionCount > 0) {
-        "$orgs · ${root.sessionCount.countLabel("session")}"
+        "$projects · ${root.sessionCount.countLabel("session")}"
     } else {
-        orgs
+        projects
     }
 }
 

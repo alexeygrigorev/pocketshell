@@ -358,7 +358,7 @@ class FolderListScreenE2eTest {
             .fetchSemanticsNodes().also {
                 require(it.isEmpty()) { "grid view stub should be removed (#504)" }
             }
-        // #504 evidence: the group header (title + `N orgs · M sessions`
+        // #504 evidence: the group header (title + `N projects · M sessions`
         // counts + kebab + `+`) renders with NO list/grid toggle between the
         // counts and the kebab. Full-device capture via uiAutomation is the
         // reliable artifact path on this AVD (captureToImage is best-effort

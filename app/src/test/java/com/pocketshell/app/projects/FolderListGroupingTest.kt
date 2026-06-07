@@ -881,9 +881,9 @@ class FolderListGroupingTest {
     }
 
     @Test
-    fun rootCountSubtitleRendersOrgsAndSessions() {
-        // #478: group header subtitle reads `N orgs · M sessions`, mirroring
-        // the maintainer's target mockup ("10 orgs · 14 sessions").
+    fun rootCountSubtitleRendersProjectsAndSessions() {
+        // #478: group header subtitle reads `N projects · M sessions`, mirroring
+        // the maintainer's target mockup ("10 projects · 14 sessions").
         val root = FolderTreeRoot(
             path = "~/git",
             label = "git",
@@ -905,13 +905,13 @@ class FolderListGroupingTest {
                 RootProjectCandidate("/home/u/git/scanned", "scanned", RootProjectSource.Scanned),
             ),
         )
-        // 2 active projects + 1 inactive/scanned = 3 orgs; 3 live sessions.
-        assertEquals("3 orgs · 3 sessions", rootCountSubtitle(root))
+        // 2 active projects + 1 inactive/scanned = 3 projects; 3 live sessions.
+        assertEquals("3 projects · 3 sessions", rootCountSubtitle(root))
     }
 
     @Test
     fun rootCountSubtitleSingularAndSessionless() {
-        val oneOrgNoSessions = FolderTreeRoot(
+        val oneProjectNoSessions = FolderTreeRoot(
             path = "~/git",
             label = "git",
             folders = emptyList(),
@@ -920,9 +920,9 @@ class FolderListGroupingTest {
                 RootProjectCandidate("/home/u/git/scanned", "scanned", RootProjectSource.Scanned),
             ),
         )
-        assertEquals("1 org", rootCountSubtitle(oneOrgNoSessions))
+        assertEquals("1 project", rootCountSubtitle(oneProjectNoSessions))
 
-        val oneOrgOneSession = FolderTreeRoot(
+        val oneProjectOneSession = FolderTreeRoot(
             path = "~/git",
             label = "git",
             folders = listOf(
@@ -930,7 +930,7 @@ class FolderListGroupingTest {
             ),
             isWatched = true,
         )
-        assertEquals("1 org · 1 session", rootCountSubtitle(oneOrgOneSession))
+        assertEquals("1 project · 1 session", rootCountSubtitle(oneProjectOneSession))
     }
 
     @Test

@@ -307,6 +307,62 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `setWindowSizeLatest timeout fails open without disconnecting client`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val outcome = withTimeout(3_000) {
+                runCatching { client.setWindowSizeLatest("work") }
+            }
+
+            assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify set-window-option without logging full arguments",
+                ex.message?.contains("tmux command `set-window-option` timed out") == true,
+            )
+            assertEquals("set-window-option -t 'work' window-size latest\n", shell.stdinAsString())
+            assertFalse("setWindowSizeLatest timeout must not close the shell", shell.closed)
+            assertFalse(
+                "setWindowSizeLatest timeout must not trip disconnected latch",
+                client.disconnected.value,
+            )
+
+            shell.resetStdin()
+            val next = scope.async {
+                client.sendCommand("list-panes -F ok")
+            }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+            shell.feed(
+                "%begin 1 10 0\n" +
+                    "%end 1 10 0\n",
+            )
+            shell.feed(
+                "%begin 1 11 0\n" +
+                    "list-panes-ok\n" +
+                    "%end 1 11 0\n",
+            )
+            val nextResponse = withTimeout(3_000) { next.await() }
+            assertEquals(11L, nextResponse.number)
+            assertEquals(listOf("list-panes-ok"), nextResponse.output)
+            assertFalse("follow-up command must not disconnect client", client.disconnected.value)
+            assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `refreshClientSize sends control client size command`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
@@ -783,6 +839,59 @@ class TmuxClientTest {
             command = "display-message -p -t %0 '#{cursor_x},#{cursor_y}'",
             expectedKind = "display-message",
         )
+    }
+
+    @Test
+    fun `best-effort command timeout without late response does not disconnect or mis-correlate next command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        val command = "capture-pane -p -e -S -200 -t %0"
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val outcome = withTimeout(3_000) {
+                runCatching { client.sendBestEffortCommand(command) }
+            }
+
+            assertTrue("expected best-effort timeout, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify command kind",
+                ex.message?.contains("tmux command `capture-pane` timed out") == true,
+            )
+            assertEquals("$command\n", shell.stdinAsString())
+            assertFalse("best-effort timeout without late response must not close shell", shell.closed)
+            assertFalse(
+                "best-effort timeout without late response must not trip disconnected latch",
+                client.disconnected.value,
+            )
+
+            shell.resetStdin()
+            val next = scope.async {
+                client.sendCommand("list-panes -F ok")
+            }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+            shell.feed(
+                "%begin 1 10 0\n" +
+                    "next-ok\n" +
+                    "%end 1 10 0\n",
+            )
+            val nextResponse = withTimeout(3_000) { next.await() }
+            assertEquals(10L, nextResponse.number)
+            assertEquals(listOf("next-ok"), nextResponse.output)
+            assertFalse("follow-up command must not disconnect client", client.disconnected.value)
+            assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
     }
 
     @Test

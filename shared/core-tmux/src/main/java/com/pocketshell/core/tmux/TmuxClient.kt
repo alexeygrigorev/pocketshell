@@ -498,9 +498,6 @@ internal class RealTmuxClient(
                         "tmux-command-fail-open-stale-response-queued kind=$kind",
                     )
                 }
-                if (timeoutMode == CommandTimeoutMode.BestEffortDrain) {
-                    close()
-                }
                 throw exception
             }
             writeJob.cancel()
@@ -529,8 +526,9 @@ internal class RealTmuxClient(
     }
 
     override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
-        sendCommand(
+        sendCommandInternal(
             "set-window-option -t '${escapeSingleQuoted(sessionId)}' window-size latest",
+            timeoutMode = CommandTimeoutMode.FailOpenDrain,
         )
 
     override suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse {

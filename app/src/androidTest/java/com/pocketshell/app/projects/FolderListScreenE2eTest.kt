@@ -215,6 +215,7 @@ class FolderListScreenE2eTest {
         val dictationViewModel = noopAssistantDictationViewModel()
         var openedSettings = false
         var openedWorkspaceSettings = false
+        var openedUsage = false
         var openedPortForwarding = false
         var editedEnvPath: String? = null
 
@@ -236,6 +237,7 @@ class FolderListScreenE2eTest {
                     onOpenSettings = { openedSettings = true },
                     onOpenWorkspaceSettings = { openedWorkspaceSettings = true },
                     onEditEnv = { path, _, _ -> editedEnvPath = path },
+                    onOpenUsage = { openedUsage = true },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
                     assistantDictationViewModel = dictationViewModel,
@@ -344,9 +346,17 @@ class FolderListScreenE2eTest {
         // settings entries.
         compose.onNodeWithTag(FOLDER_LIST_BROWSE_REPOS_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_USAGE_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG).assertExists()
         android.os.SystemClock.sleep(200)
         WalkthroughScreenshotArtifacts.capture("issue522-header-kebab-open")
+        compose.onNodeWithTag(FOLDER_LIST_USAGE_TAG)
+            .assertExists()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedUsage }
+        assertEquals(false, openedSettings)
+        assertEquals(false, openedWorkspaceSettings)
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG)
             .assertExists()
             .performClick()

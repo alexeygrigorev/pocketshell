@@ -35,6 +35,12 @@ class UsageFormatTest {
         )
     }
 
+    @Test
+    fun formatPercentUsed_makesUsageExplicit() {
+        assertEquals("65% used", formatPercentUsed(65.0))
+        assertEquals("65.5% used", formatPercentUsed(65.5))
+    }
+
     // --- Issue #501: relative "time until reset" across all buckets ---
 
     @Test

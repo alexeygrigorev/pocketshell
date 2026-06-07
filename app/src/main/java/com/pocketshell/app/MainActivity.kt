@@ -819,7 +819,7 @@ private fun AppNavigator(
 
         // Issue #114 Fix A: Usage / quota panel. The view model loads
         // every bootstrapped host on construction and pull-to-refresh
-        // (the breadcrumb "more" action on UsageScreen) re-runs
+        // (the Usage overflow refresh action) re-runs
         // `fetchUsage` for each host. A fresh ViewModel is materialised
         // every visit so missing-tool / failed-fetch state can't leak
         // across navigations.
@@ -830,6 +830,7 @@ private fun AppNavigator(
                 state = usageState,
                 onBack = ::back,
                 onRefresh = usageViewModel::refresh,
+                onOpenSettings = { navigate(AppDestination.Settings) },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -1058,6 +1059,7 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenUsage = { navigate(AppDestination.Usage) },
             // Issue #264: route to the per-folder env-file manager. The
             // discovered folder set is forwarded so the env screen's
             // copy picker stays inside the known folders (D24).

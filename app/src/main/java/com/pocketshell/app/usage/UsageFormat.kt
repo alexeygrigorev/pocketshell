@@ -23,6 +23,8 @@ internal fun statusLabel(record: UsageProviderRecord): String = when {
 internal fun formatPercent(value: Double): String =
     if (value % 1.0 == 0.0) "${value.toInt()}%" else String.format(Locale.US, "%.1f%%", value)
 
+internal fun formatPercentUsed(value: Double): String = "${formatPercent(value)} used"
+
 internal fun formatWindowFoot(
     window: UsageWindow,
     now: Instant,

@@ -34,10 +34,10 @@ import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
-import com.pocketshell.uikit.components.Breadcrumb
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.ProgressBar
-import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -50,6 +50,7 @@ fun UsageScreen(
     state: UsageScreenState,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
+    onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
     now: Instant = Instant.now(),
 ) {
@@ -58,11 +59,10 @@ fun UsageScreen(
             .background(PocketShellColors.Background)
             .verticalScroll(rememberScrollState()),
     ) {
-        Breadcrumb(
-            crumbs = listOf(Crumb(label = "Usage", isCurrent = true, onClick = {})),
+        UsageHeader(
             onBack = onBack,
-            onMore = onRefresh,
-            liveDot = false,
+            onRefresh = onRefresh,
+            onOpenSettings = onOpenSettings,
         )
 
         UsageMeta(state = state)
@@ -78,6 +78,59 @@ fun UsageScreen(
         }
 
         Spacer(modifier = Modifier.height(30.dp))
+    }
+}
+
+@Composable
+private fun UsageHeader(
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Background)
+            .height(56.dp)
+            .padding(start = 4.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clickable(role = Role.Button, onClick = onBack),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "‹",
+                color = PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.headlineSmall,
+            )
+        }
+        Text(
+            text = "Usage",
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 6.dp),
+        )
+        Kebab(
+            triggerTestTag = USAGE_OVERFLOW_TAG,
+            items = listOf(
+                KebabItem(
+                    label = "Refresh usage",
+                    onClick = onRefresh,
+                    testTag = USAGE_REFRESH_ACTION_TAG,
+                ),
+                KebabItem(
+                    label = "Usage settings",
+                    onClick = onOpenSettings,
+                    testTag = USAGE_SETTINGS_ACTION_TAG,
+                ),
+            ),
+        )
     }
 }
 
@@ -137,7 +190,7 @@ fun UsageDashboardStrip(
                     )
                 }
                 Text(
-                    text = formatPercent(row.percent),
+                    text = formatPercentUsed(row.percent),
                     color = thresholdTextColor(row.thresholdState),
                     style = PocketShellType.labelMono,
                 )
@@ -257,7 +310,7 @@ private fun UsageProviderStateRow(
         }
         if (percent != null) {
             Text(
-                text = formatPercent(percent),
+                text = formatPercentUsed(percent),
                 color = thresholdTextColor(state),
                 style = PocketShellType.bodyMono,
                 fontWeight = FontWeight.Medium,
@@ -294,7 +347,7 @@ fun UsageWarningBanner(
         append(" usage")
         if (percent != null) {
             append(": ")
-            append(formatPercent(percent))
+            append(formatPercentUsed(percent))
         }
         append(" — ")
         append(thresholdBannerSuffix(state))
@@ -436,7 +489,7 @@ private fun UsageWindowRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = formatPercent(window.percent),
+                text = formatPercentUsed(window.percent),
                 color = PocketShellColors.Text,
                 style = PocketShellType.labelMono,
                 fontWeight = FontWeight.Medium,
@@ -468,7 +521,8 @@ private fun UsageResetFoot(
     val zone = ZoneId.systemDefault()
     val primary = formatWindowFoot(window, now, blockReason, zone)
     val absolute = formatResetAbsolute(window.resetAt, zone)
-    if (primary.isBlank() && absolute == null) return
+    val unavailable = resetUnavailableText(window)
+    if (primary.isBlank() && absolute == null && unavailable == null) return
     Column(modifier = Modifier.padding(top = 6.dp)) {
         if (primary.isNotBlank()) {
             Text(
@@ -485,7 +539,20 @@ private fun UsageResetFoot(
                 modifier = Modifier.padding(top = 1.dp),
             )
         }
+        if (unavailable != null) {
+            Text(
+                text = unavailable,
+                color = PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
     }
+}
+
+private fun resetUnavailableText(window: UsageWindow): String? {
+    if (window.resetAt != null) return null
+    return "Reset time unavailable from provider data."
 }
 
 @Composable
@@ -647,3 +714,7 @@ public fun usageBannerTagFor(provider: String): String =
 
 public fun usageBannerDismissTagFor(provider: String): String =
     "usage:warning-banner-dismiss:" + provider.lowercase()
+
+public const val USAGE_OVERFLOW_TAG: String = "usage:overflow"
+public const val USAGE_REFRESH_ACTION_TAG: String = "usage:overflow:refresh"
+public const val USAGE_SETTINGS_ACTION_TAG: String = "usage:overflow:settings"

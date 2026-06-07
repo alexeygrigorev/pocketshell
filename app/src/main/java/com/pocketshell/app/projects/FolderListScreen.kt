@@ -166,6 +166,7 @@ fun FolderListScreen(
      * from the same data the user saw here (D24).
      */
     onEditEnv: (path: String, label: String, allFolders: List<Pair<String, String>>) -> Unit,
+    onOpenUsage: () -> Unit = {},
     onAssistantNavigate: (AppDestination) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
@@ -297,6 +298,7 @@ fun FolderListScreen(
                 onRefreshSessions = viewModel::refreshSessions,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
+                onOpenUsage = onOpenUsage,
                 onOpenAssistant = { showAssistant = true },
             )
             when (val s = state) {
@@ -653,6 +655,7 @@ private fun FolderListAppBar(
     onRefreshSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
+    onOpenUsage: () -> Unit,
     onOpenAssistant: () -> Unit,
 ) {
     // #479 Slice A: the reference screen's hand-rolled bar is reconciled onto the
@@ -701,6 +704,7 @@ private fun FolderListAppBar(
                 onOpenAssistant = onOpenAssistant,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
+                onOpenUsage = onOpenUsage,
             )
         },
     )
@@ -722,6 +726,7 @@ private fun FolderListOverflowMenu(
     onOpenAssistant: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
+    onOpenUsage: () -> Unit,
 ) {
     Kebab(
         triggerTestTag = FOLDER_LIST_OVERFLOW_TAG,
@@ -743,6 +748,12 @@ private fun FolderListOverflowMenu(
                 onClick = onRefreshSessions,
                 contentDescription = "Refresh sessions",
                 testTag = FOLDER_LIST_REFRESH_SESSIONS_TAG,
+            ),
+            KebabItem(
+                label = "Usage",
+                onClick = onOpenUsage,
+                contentDescription = "Usage",
+                testTag = FOLDER_LIST_USAGE_TAG,
             ),
             KebabItem(
                 label = "Settings",
@@ -2540,6 +2551,7 @@ private const val FLAT_IDLE_SECTION_KEY: String = "flat-section-idle"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 const val FOLDER_LIST_REFRESH_SESSIONS_TAG: String = "folder-list:refresh-sessions"
+const val FOLDER_LIST_USAGE_TAG: String = "folder-list:usage"
 const val FOLDER_LIST_SETTINGS_TAG: String = "folder-list:settings"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
 const val FOLDER_LIST_WORKSPACE_SETTINGS_TAG: String = "folder-list:workspace-settings"

@@ -14,6 +14,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -81,6 +82,12 @@ class UsageResetTimeScreenshotTest {
         compose.onAllNodesWithText("resets in 5 days").assertCountEquals(1)
         // Codex weekly has no reset_at → placeholder.
         compose.onAllNodesWithText("resets —").assertCountEquals(1)
+        compose.onAllNodesWithText("Reset time unavailable from provider data.").assertCountEquals(1)
+        compose.onAllNodesWithText("61% used").assertCountEquals(1)
+        compose.onAllNodesWithText("18% used").assertCountEquals(1)
+        compose.onNodeWithTag(USAGE_OVERFLOW_TAG).performClick()
+        compose.onNodeWithTag(USAGE_REFRESH_ACTION_TAG).assertExists()
+        compose.onNodeWithTag(USAGE_SETTINGS_ACTION_TAG).assertExists()
         SystemClock.sleep(200)
 
         captureFullDevice(File(ensureArtifactDir(), "usage-reset-times-detail.png"))
@@ -107,6 +114,8 @@ class UsageResetTimeScreenshotTest {
         compose.waitForIdle()
         compose.onAllNodesWithText("Claude Code").assertCountEquals(1)
         compose.onAllNodesWithText("Codex").assertCountEquals(1)
+        compose.onAllNodesWithText("61% used").assertCountEquals(1)
+        compose.onAllNodesWithText("18% used").assertCountEquals(1)
         SystemClock.sleep(200)
 
         captureFullDevice(File(ensureArtifactDir(), "usage-reset-times-strip.png"))

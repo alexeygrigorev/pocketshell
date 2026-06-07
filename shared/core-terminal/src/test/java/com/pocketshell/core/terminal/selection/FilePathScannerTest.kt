@@ -51,6 +51,15 @@ class FilePathScannerTest {
     }
 
     @Test
+    fun detectsReportedIssue609AttachmentPathAsHomeRelativeFile() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-course-management-platform/" +
+                "20260607-115723-01-Screenshot_20260607-115718.png"
+
+        assertEquals(listOf(attachment), paths("Attached files:\n- $attachment"))
+    }
+
+    @Test
     fun detectsLineBrokenPocketShellAttachmentPathAsOneTarget() {
         val attachment =
             "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
@@ -63,6 +72,30 @@ class FilePathScannerTest {
         val detected = detectFilePathsInLine(broken)
 
         assertEquals(listOf(attachment), detected.map { it.path })
+    }
+
+    @Test
+    fun terminalReportedIssue609AttachmentRowsReassembleBeforePathDetection() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-course-management-platform/" +
+                "20260607-115723-01-Screenshot_20260607-115718.png"
+        val rows = markAttachmentContinuationWraps(
+            listOf(
+                VisualRow(
+                    row = 7,
+                    text = "- ~/.pocketshell/attachments/host-1-git-course-management-",
+                    wrapsToNext = false,
+                ),
+                VisualRow(
+                    row = 8,
+                    text = "platform/20260607-115723-01-Screenshot_20260607-115718.png",
+                    wrapsToNext = false,
+                ),
+            ),
+        )
+        val logical = reassemble(rows).single()
+
+        assertEquals(listOf(attachment), paths(logical.text))
     }
 
     @Test
@@ -89,6 +122,14 @@ class FilePathScannerTest {
                     "20260606-153324-01-Screenshot_20260606-153310.png",
             ),
             paths(logical.text),
+        )
+    }
+
+    @Test
+    fun doesNotOpenAttachmentContinuationFragmentAsProjectRelativePath() {
+        assertTrue(
+            paths("platform/20260607-115723-01-Screenshot_20260607-115718.png")
+                .isEmpty(),
         )
     }
 

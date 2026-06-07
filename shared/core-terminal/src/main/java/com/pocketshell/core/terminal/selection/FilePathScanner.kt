@@ -199,6 +199,7 @@ public fun detectFilePathsInLine(
         // After trimming, the token must still end in a known extension —
         // protects against e.g. a trailing `).` having masked the real end.
         if (!endsWithKnownExtension(raw)) continue
+        if (looksLikeAttachmentContinuationFragment(raw)) continue
         out += DetectedFilePath(
             path = raw,
             start = start,
@@ -379,6 +380,12 @@ private val ATTACHMENT_CONTINUATION_FILE_PATTERN: java.util.regex.Pattern =
         java.util.regex.Pattern.CASE_INSENSITIVE,
     )
 
+private val ATTACHMENT_TIMESTAMPED_BASENAME_PATTERN: java.util.regex.Pattern =
+    java.util.regex.Pattern.compile(
+        "^\\d{8}-\\d{6}-\\d{2}-.+\\.(?:$EXTENSION_ALTERNATION)$",
+        java.util.regex.Pattern.CASE_INSENSITIVE,
+    )
+
 internal fun markAttachmentContinuationWraps(rows: List<VisualRow>): List<VisualRow> {
     if (rows.size < 2) return rows
     var changed = false
@@ -409,6 +416,19 @@ private fun looksLikeUnfinishedAttachmentPath(text: String): Boolean {
 private fun looksLikeAttachmentContinuation(text: String): Boolean {
     val trimmed = text.trimStart()
     return ATTACHMENT_CONTINUATION_FILE_PATTERN.matcher(trimmed).find()
+}
+
+private fun looksLikeAttachmentContinuationFragment(path: String): Boolean {
+    if (path.startsWith("/") ||
+        path.startsWith("~/") ||
+        path.startsWith("./") ||
+        path.startsWith("../")
+    ) {
+        return false
+    }
+    if (!path.contains('/')) return false
+    val leaf = path.substringAfterLast('/')
+    return ATTACHMENT_TIMESTAMPED_BASENAME_PATTERN.matcher(leaf).matches()
 }
 
 private fun endsWithKnownExtension(token: String): Boolean {

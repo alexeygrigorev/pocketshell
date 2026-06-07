@@ -32,6 +32,21 @@ class RemotePathResolverTest {
     }
 
     @Test
+    fun `reported attachment path is not rebased onto project cwd`() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-course-management-platform/" +
+                "20260607-115723-01-Screenshot_20260607-115718.png"
+
+        assertEquals(
+            attachment,
+            RemotePathResolver.resolve(
+                attachment,
+                "/home/alexey/git/course-management-platform/platform",
+            ),
+        )
+    }
+
+    @Test
     fun `relative path joins onto cwd`() {
         assertEquals(
             "/home/me/proj/out/report.png",

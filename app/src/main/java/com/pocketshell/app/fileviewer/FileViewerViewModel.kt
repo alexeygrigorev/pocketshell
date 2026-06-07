@@ -179,7 +179,7 @@ class FileViewerViewModel @Inject constructor(
         } catch (e: SshFileNotFoundException) {
             FileViewerUiState.CannotPreview(
                 displayPath = resolved,
-                message = "No such file on the server: $resolved",
+                message = fileNotFoundMessage(resolved),
             )
         } catch (e: SshFileTooLargeException) {
             FileViewerUiState.CannotPreview(
@@ -337,5 +337,8 @@ class FileViewerViewModel @Inject constructor(
                 .ifEmpty { "file" }
             return "${hash}_$base"
         }
+
+        internal fun fileNotFoundMessage(resolvedPath: String): String =
+            "No such file on the server: $resolvedPath"
     }
 }

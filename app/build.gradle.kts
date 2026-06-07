@@ -84,6 +84,9 @@ android {
         getByName("androidTest") {
             assets.srcDir(rootProject.file("tests/docker"))
         }
+        getByName("test") {
+            java.srcDir("src/integrationTest/java")
+        }
     }
 
     packaging {
@@ -96,13 +99,6 @@ android {
     }
 
     testOptions {
-        // ProofPipelineTest runs Testcontainers against the Docker daemon,
-        // same as `core-ssh`'s integration test. Mirror that module's
-        // configuration: do not pre-bake Android resources into the JVM
-        // test classpath, and pin the docker-java client API version so
-        // current Docker engines (>= 25) accept the negotiation. See
-        // `shared/core-ssh/build.gradle.kts` for the full rationale.
-        //
         // `returnDefaultValues = true` mirrors `:shared:core-terminal` —
         // it lets calls to Android framework stubs (Handler, Looper, Log)
         // return Java defaults instead of throwing `RuntimeException: Stub!`.
@@ -126,6 +122,13 @@ android {
                 // assistant classes, but the standard unit-test suite must
                 // never execute them. Use :app:realLlmTest explicitly.
                 test.exclude("**/*RealLlmTest.class")
+
+                // Docker-backed proof tests are compiled with the same
+                // source set but run under :app:integrationTest, matching
+                // the shared modules' Testcontainers split. Keeping them
+                // out of ./gradlew test stabilizes the JVM unit workflow
+                // without dropping coverage.
+                test.exclude("**/*IntegrationTest.class")
             }
         }
     }
@@ -272,5 +275,27 @@ project.afterEvaluate {
             events("passed", "skipped", "failed")
             showStandardStreams = true
         }
+    }
+
+    tasks.register<Test>("integrationTest") {
+        group = "verification"
+        description = "Runs app Testcontainers-backed integration tests (requires Docker)."
+
+        val unitTest = tasks.named<Test>("testReleaseUnitTest").get()
+        testClassesDirs = unitTest.testClassesDirs
+        classpath = unitTest.classpath
+
+        useJUnit()
+        include("**/*IntegrationTest.class")
+
+        testLogging {
+            events("passed", "skipped", "failed")
+            showStandardStreams = true
+        }
+
+        val apiVersion = providers.gradleProperty("api.version")
+            .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
+            .get()
+        systemProperty("api.version", apiVersion)
     }
 }

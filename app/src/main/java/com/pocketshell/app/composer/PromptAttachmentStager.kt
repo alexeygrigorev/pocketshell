@@ -16,6 +16,7 @@ internal class PromptAttachmentStager(
     private val resolver: ContentResolver,
     private val cacheDir: File,
     private val now: () -> Long = { System.currentTimeMillis() },
+    private val attachmentPruner: RemoteAttachmentPruner = RemoteAttachmentPruner(now = now),
 ) {
     suspend fun stage(
         session: SshSession,
@@ -44,6 +45,7 @@ internal class PromptAttachmentStager(
                 uploadUri(session, uri, item.size, remotePath, remoteName)
                 "$displayDir/$remoteName"
             }
+            attachmentPruner.prune(session, remoteDir)
             Result.success(paths)
         } catch (cancelled: CancellationException) {
             throw cancelled

@@ -194,6 +194,44 @@ class PromptComposerSendNoKeyboardTest {
         assertEquals("restart the worker pool", lastSent)
     }
 
+    @Test
+    fun agentPaneSendUsesLiveEditorText() {
+        // Issue #569: the agent-pane composer must use the same live editor
+        // text model as the prompt sheet. Send receives the currently visible
+        // field text directly, so the submit path does not have to re-read a
+        // parent String draft that may be behind an IME composing region.
+        var text by mutableStateOf("")
+        var sent: String? = null
+
+        compose.setContent {
+            PocketShellTheme {
+                AgentComposerSurface(
+                    value = text,
+                    onValueChange = { text = it },
+                    onSend = { liveText -> sent = liveText },
+                    inputFieldTag = "issue569:agent-input",
+                    sendButtonTag = "issue569:agent-send",
+                )
+            }
+        }
+
+        val longDictation = buildString {
+            append("Summarize the attached screenshot and explain why the deployment stalled. ")
+            repeat(20) { append("Keep the answer concrete and mention the failing stage. ") }
+        }
+        compose.onNodeWithTag("issue569:agent-input")
+            .performTextInput(longDictation)
+        compose.waitForIdle()
+
+        compose.onNodeWithTag("issue569:agent-send")
+            .assertIsDisplayed()
+            .assertIsEnabled()
+            .performClick()
+        compose.waitForIdle()
+
+        assertEquals(longDictation, sent)
+    }
+
     /**
      * Issue #570 / #544: staged attachment chips are a valid prompt even
      * without typed text. The ViewModel already composes attachment-only

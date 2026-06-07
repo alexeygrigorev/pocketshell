@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
@@ -484,7 +485,7 @@ internal object ComposerAboveAnchorPopupPositionProvider : PopupPositionProvider
  *
  * @param value current draft text.
  * @param onValueChange draft edits.
- * @param onSend tapped Send with a non-blank draft. Callers trim + clear.
+ * @param onSend tapped Send with the live editor text. Callers trim + clear.
  * @param sendEnabled gate on top of the non-blank check (e.g. session
  *   liveness for #249) — when false the button is disabled and a tap
  *   cannot deliver-then-clear the draft.
@@ -497,14 +498,27 @@ internal object ComposerAboveAnchorPopupPositionProvider : PopupPositionProvider
 internal fun AgentComposerSurface(
     value: String,
     onValueChange: (String) -> Unit,
-    onSend: () -> Unit,
+    onSend: (String) -> Unit,
     inputFieldTag: String,
     sendButtonTag: String,
     modifier: Modifier = Modifier,
     sendEnabled: Boolean = true,
     placeholder: String = "Message agent",
 ) {
-    val canSend = sendEnabled && value.isNotBlank()
+    // Issue #569 / #491: keep the agent-pane composer on the same
+    // TextFieldValue-backed editor model as the terminal prompt sheet. The
+    // String BasicTextField overload can leave dictation / IME composing text
+    // visible in the field while the parent String state is stale, making Send
+    // look like it inserted text but never submitted. The send tap below reads
+    // this local editor value directly and passes it to the caller.
+    var fieldValue by remember { mutableStateOf(TextFieldValue(value)) }
+    if (value != fieldValue.text) {
+        fieldValue = TextFieldValue(
+            text = value,
+            selection = TextRange(value.length),
+        )
+    }
+    val canSend = sendEnabled && fieldValue.text.isNotBlank()
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -513,8 +527,13 @@ internal fun AgentComposerSurface(
         horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
         ComposerDraftField(
-            value = value,
-            onValueChange = onValueChange,
+            value = fieldValue,
+            onValueChange = { newValue ->
+                fieldValue = newValue
+                if (newValue.text != value) {
+                    onValueChange(newValue.text)
+                }
+            },
             placeholder = placeholder,
             fieldTag = inputFieldTag,
             // Single-row agent draft: keep the field on the 48dp touch floor.
@@ -525,7 +544,7 @@ internal fun AgentComposerSurface(
         ComposerSendEnterButton(
             label = "Send",
             tooltipLabel = AGENT_SEND_TOOLTIP_LABEL,
-            onClick = onSend,
+            onClick = { onSend(fieldValue.text) },
             enabled = canSend,
             modifier = Modifier.testTag(sendButtonTag),
         )

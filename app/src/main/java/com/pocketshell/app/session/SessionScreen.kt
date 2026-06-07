@@ -715,8 +715,8 @@ internal fun ConversationPane(
         com.pocketshell.app.composer.AgentComposerSurface(
             value = composerText,
             onValueChange = { composerText = it },
-            onSend = {
-                val trimmed = composerText.trim()
+            onSend = { liveText ->
+                val trimmed = liveText.trim()
                 if (trimmed.isNotEmpty() && !sendInFlight) {
                     coroutineScope.launch {
                         sendInFlight = true
@@ -725,6 +725,7 @@ internal fun ConversationPane(
                                 composerText = ""
                                 hasUnsentPrompt = false
                             } else {
+                                composerText = liveText
                                 hasUnsentPrompt = true
                             }
                         } finally {

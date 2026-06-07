@@ -3797,6 +3797,52 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun sendToAgentPaneLongDictationWithAttachmentBlockSubmitsFinalEnter() = runTest {
+        // Issue #569: a long dictated prompt plus staged attachment paths
+        // must not stop at "text inserted into the agent TUI". The composed
+        // prompt is pasted through bounded chunks and then submitted with the
+        // separate Enter key.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val payload = buildString {
+            append("Please inspect the attached screenshot and explain why the agent did not submit. ")
+            repeat(80) {
+                append("This sentence represents a long dictation segment that should stay one prompt. ")
+            }
+            append("\n\nAttached files:\n")
+            append("- ~/.pocketshell/attachments/host-1/issue-569-135736.png")
+        }
+        val result = vm.sendToAgentPaneResult("%0", payload)
+        runCurrent()
+
+        assertTrue("expected long dictation plus attachment send to succeed", result.isSuccess)
+        val sendKeys = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertTrue(
+            "combined dictation/attachment prompt must use bounded hex paste chunks, got $sendKeys",
+            sendKeys.count { it.startsWith("send-keys -H -t %0 ") } > 3,
+        )
+        assertTrue(
+            "combined prompt must not use one unbounded literal send-keys command: $sendKeys",
+            sendKeys.none { it.startsWith("send-keys -l") },
+        )
+        assertEquals(
+            "combined prompt must be submitted after paste chunks",
+            "send-keys -t %0 Enter",
+            sendKeys.last(),
+        )
+        val maxExpectedCommandLength =
+            "send-keys -H -t %0 ".length + (TMUX_PASTE_BODY_CHUNK_BYTES * 3 - 1)
+        val longest = sendKeys.maxOf { it.length }
+        assertTrue(
+            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength commands=$sendKeys",
+            longest <= maxExpectedCommandLength,
+        )
+    }
+
+    @Test
     fun sendToAgentPaneResultFailureDuringLargePasteKeepsConversationAndReconnectAvailable() = runTest {
         val vm = newVm()
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))

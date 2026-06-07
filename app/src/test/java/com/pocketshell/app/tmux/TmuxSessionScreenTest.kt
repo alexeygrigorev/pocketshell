@@ -315,20 +315,20 @@ class TmuxSessionScreenTest {
     }
 
     @Test
-    fun panOffsetSubtractsNavBarFromImeOverlap() {
-        // IME inset is measured from the screen edge and subsumes the nav
-        // bar; the terminal column already pads the nav bar, so the pan is
-        // only the extra slice the keyboard covers above it.
+    fun panOffsetUsesFullImeInset() {
+        // Some Android/keyboard combinations report IME and nav-bar insets
+        // separately. Panning by the full IME inset keeps the hotkey bar
+        // clear of the keyboard instead of leaving only a thin strip visible.
         assertEquals(
-            900 - 48,
+            900,
             imeKeyboardPanOffsetPx(imeBottomPx = 900, navBarBottomPx = 48),
         )
     }
 
     @Test
-    fun panOffsetClampsWhenImeSmallerThanNavBar() {
-        // Defensive: a transient frame where the reported IME inset is below
-        // the nav bar height must not yield a negative (downward) pan.
-        assertEquals(0, imeKeyboardPanOffsetPx(imeBottomPx = 30, navBarBottomPx = 48))
+    fun panOffsetDoesNotSubtractLargeNavInset() {
+        // Defensive: a small non-zero IME inset still represents keyboard
+        // obstruction. It must not be erased by a larger nav-bar inset.
+        assertEquals(30, imeKeyboardPanOffsetPx(imeBottomPx = 30, navBarBottomPx = 48))
     }
 }

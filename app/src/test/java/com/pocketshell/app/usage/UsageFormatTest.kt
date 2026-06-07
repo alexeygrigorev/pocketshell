@@ -208,4 +208,32 @@ class UsageFormatTest {
         assertEquals("EXCEEDED", thresholdBadgeLabel(record.thresholdState()))
         assertEquals("Exceeded — provider blocked", thresholdRowDescription(record.thresholdState()))
     }
+
+    @Test
+    fun dashboardRows_keepsBlockedCodexWithoutWindows() {
+        val record = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Blocked,
+            rawStatus = "quota_exhausted",
+            blockReason = "Codex quota exhausted",
+            windows = emptyList(),
+        )
+        val state = UsageScreenState(
+            hosts = listOf(
+                UsageHostSnapshot(
+                    hostId = 1L,
+                    hostName = "agents",
+                    records = listOf(record),
+                    lastSyncedAt = Instant.parse("2026-06-07T12:00:00Z"),
+                ),
+            ),
+        )
+
+        val row = state.dashboardRows().single()
+
+        assertEquals("Codex", row.provider)
+        assertEquals(UsageStatus.Blocked, row.status)
+        assertEquals(100.0, row.percent, 0.001)
+        assertEquals(UsageThresholdState.Exceeded, row.thresholdState)
+    }
 }

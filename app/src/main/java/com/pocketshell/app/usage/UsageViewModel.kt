@@ -15,12 +15,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.time.Instant
@@ -198,6 +199,8 @@ open class UsageViewModel internal constructor(
     val state: StateFlow<UsageScreenState> = _state.asStateFlow()
 
     private var inFlight: Job? = null
+    private var activeLoad: Job? = null
+    private var refreshSerial: Long = 0L
 
     init {
         refresh()
@@ -212,16 +215,42 @@ open class UsageViewModel internal constructor(
      * in-session chips stay in sync with what's on the usage panel.
      */
     fun refresh() {
+        refreshSerial += 1L
+        val serial = refreshSerial
         inFlight?.cancel()
+        activeLoad?.cancel()
         inFlight = viewModelScope.launch {
             _state.value = _state.value.copy(isRefreshing = true)
-            val result = withContext(refreshDispatcher) {
+            val load = viewModelScope.async(refreshDispatcher) {
+                loadUsageState()
+            }
+            activeLoad = load
+            val result = try {
                 withTimeoutOrNull(refreshTimeoutMillis) {
-                    loadUsageState()
+                    load.await()
                 }
+            } catch (e: CancellationException) {
+                load.cancel()
+                if (!isActive) throw e
+                null
+            } catch (_: Throwable) {
+                null
+            }
+            if (activeLoad === load && load.isCompleted) {
+                activeLoad = null
             }
             if (result == null) {
-                _state.value = _state.value.copy(isRefreshing = false)
+                // Best-effort cancellation. SSH reads can block a thread and
+                // ignore coroutine cancellation, so the UI must stop waiting
+                // here and discard any late result from this load.
+                load.cancel()
+                if (activeLoad === load) activeLoad = null
+                if (serial == refreshSerial) {
+                    _state.value = _state.value.copy(isRefreshing = false)
+                }
+                return@launch
+            }
+            if (serial != refreshSerial) {
                 return@launch
             }
             _state.value = result.state

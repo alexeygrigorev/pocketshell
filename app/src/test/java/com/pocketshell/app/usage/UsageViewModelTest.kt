@@ -3,7 +3,6 @@ package com.pocketshell.app.usage
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
@@ -14,13 +13,15 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageThresholdState
-import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -35,6 +36,9 @@ import org.robolectric.annotation.Config
 import java.io.InputStream
 import java.nio.file.Files
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Robolectric tests for [UsageViewModel].
@@ -293,6 +297,47 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun refreshTimeoutClearsRefreshingWhenFetcherBlocksThread() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(
+                name = "blocked",
+                hostname = "blocked.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val viewModel = UsageViewModel(
+                hostDao = db.hostDao(),
+                fetcher = BlockingThreadFetcher(started, release, finished),
+                usageScheduler = null,
+                refreshDispatcher = dispatcher,
+                refreshTimeoutMillis = 1_000L,
+            )
+
+            assertTrue("blocking fetcher should start", started.await(1, TimeUnit.SECONDS))
+            advanceTimeBy(1_001L)
+            advanceUntilIdle()
+
+            assertFalse(
+                "non-cooperative SSH-style fetch must not leave the Usage panel refreshing",
+                viewModel.state.value.isRefreshing,
+            )
+        } finally {
+            release.countDown()
+            assertTrue("blocking fetcher should drain after test release", finished.await(1, TimeUnit.SECONDS))
+            dispatcher.close()
+        }
+    }
+
+    @Test
     fun sshHostUsageFetcher_forwardsHostUsageCommandOverrideToRemoteSource() = runTest {
         val keyFile = Files.createTempFile("pocketshell-usage-fetcher", ".key").toFile()
         keyFile.deleteOnExit()
@@ -431,6 +476,22 @@ class UsageViewModelTest {
         override suspend fun fetch(host: HostEntity): HostUsageFetch {
             called = true
             awaitCancellation()
+        }
+    }
+
+    private class BlockingThreadFetcher(
+        private val started: CountDownLatch,
+        private val release: CountDownLatch,
+        private val finished: CountDownLatch,
+    ) : HostUsageFetcher {
+        override suspend fun fetch(host: HostEntity): HostUsageFetch {
+            started.countDown()
+            try {
+                release.await()
+                return HostUsageFetch.Skipped
+            } finally {
+                finished.countDown()
+            }
         }
     }
 

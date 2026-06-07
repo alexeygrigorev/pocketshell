@@ -399,10 +399,14 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
             if (index != record.windows.lastIndex) Spacer(modifier = Modifier.height(14.dp))
         }
 
-        record.lastError?.let { error ->
-            Spacer(modifier = Modifier.height(10.dp))
+        val messages = listOfNotNull(
+            record.blockReason.takeIf { record.windows.isEmpty() },
+            record.lastError,
+        ).distinct()
+        messages.forEachIndexed { index, message ->
+            Spacer(modifier = Modifier.height(if (index == 0) 10.dp else 6.dp))
             Text(
-                text = error,
+                text = message,
                 color = PocketShellColors.TextMuted,
                 style = PocketShellType.labelMono,
             )

@@ -39,14 +39,17 @@ public fun UsageScreenState.dashboardRows(
     allRecords
         .sortedWith(compareBy<UsageProviderRecord> { it.provider })
         .mapNotNull { record ->
-            val window = record.mostConstrainedWindow ?: return@mapNotNull null
+            val window = record.mostConstrainedWindow
+            val thresholdState = record.thresholdState(warnPercent = warnPercent)
+            val percent = window?.percent
+                ?: if (thresholdState == UsageThresholdState.Exceeded) 100.0 else return@mapNotNull null
             UsageDashboardRow(
                 provider = record.displayName,
                 status = record.status,
-                percent = window.percent,
+                percent = percent,
                 blocked = record.isBlocked,
                 nearLimit = record.isNearLimit,
-                thresholdState = record.thresholdState(warnPercent = warnPercent),
+                thresholdState = thresholdState,
                 soonestReset = soonestReset(record),
             )
         }

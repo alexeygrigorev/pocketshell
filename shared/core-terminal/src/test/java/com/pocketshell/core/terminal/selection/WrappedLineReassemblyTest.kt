@@ -186,6 +186,37 @@ class WrappedLineReassemblyTest {
     }
 
     @Test
+    fun `wrapped generated image absolute path emits full smart selection target per visual row`() {
+        val path =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255de6bac8819197d2528102528ee2.png"
+        val firstSplit = path.indexOf("019e9d03")
+        val secondSplit = path.indexOf("ig_")
+        val rows = listOf(
+            VisualRow(33, "image ${path.take(firstSplit)}", wrapsToNext = false),
+            VisualRow(34, path.substring(firstSplit, secondSplit), wrapsToNext = false),
+            VisualRow(35, path.substring(secondSplit), wrapsToNext = false),
+        )
+
+        val regions = terminalMatchRegionsForRows(rows, columns = 120, matcher = DefaultTerminalMatcher())
+        val pathRegions = regions.filter { it.match is TerminalMatch.Path }
+
+        assertEquals(3, pathRegions.size)
+        assertEquals(listOf(33, 34, 35), pathRegions.map { it.row })
+        assertTrue(
+            "every visual fragment should carry the complete path: $pathRegions",
+            pathRegions.all { it.match.value == path },
+        )
+        assertEquals(6, pathRegions[0].startCol)
+        assertEquals(rows[0].text.length, pathRegions[0].endColExclusive)
+        assertEquals(0, pathRegions[1].startCol)
+        assertEquals(rows[1].text.length, pathRegions[1].endColExclusive)
+        assertEquals(0, pathRegions[2].startCol)
+        assertEquals(rows[2].text.length, pathRegions[2].endColExclusive)
+    }
+
+    @Test
     fun `wrapped generated image file uri emits decoded file target per visual row`() {
         val decoded =
             "/home/alexey/.codex/generated_images/" +

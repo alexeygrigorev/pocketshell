@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import android.os.SystemClock
 import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.Job
@@ -102,6 +103,19 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         removed
     }
 
+    internal fun removeLease(leaseKey: SshLeaseKey): List<CachedTmuxRuntime> = synchronized(this) {
+        val removed = mutableListOf<CachedTmuxRuntime>()
+        val iterator = runtimes.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.value.runtime.matchesLeaseKey(leaseKey)) {
+                iterator.remove()
+                removed += entry.value.runtime
+            }
+        }
+        removed
+    }
+
     internal fun clear(): List<CachedTmuxRuntime> = synchronized(this) {
         val removed = runtimes.values.map { it.runtime }
         runtimes.clear()
@@ -156,6 +170,16 @@ internal data class TmuxRuntimeKey(
     val keyPath: String,
     val sessionName: String,
 )
+
+private fun TmuxRuntimeKey.matchesLeaseKey(leaseKey: SshLeaseKey): Boolean =
+    hostname == leaseKey.host &&
+        port == leaseKey.port &&
+        username == leaseKey.user &&
+        "$hostId:$keyPath" == leaseKey.credentialId &&
+        leaseKey.knownHostsId == "accept-all"
+
+private fun CachedTmuxRuntime.matchesLeaseKey(leaseKey: SshLeaseKey): Boolean =
+    lease?.key == leaseKey || key.matchesLeaseKey(leaseKey)
 
 internal data class CachedTmuxRuntime(
     val key: TmuxRuntimeKey,

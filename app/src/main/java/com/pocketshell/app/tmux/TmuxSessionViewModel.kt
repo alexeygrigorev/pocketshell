@@ -580,12 +580,16 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }
 
-        val cachedActivation = takeCachedRuntimeForActivation(
-            target = target,
-            attempt = attempt,
-            trigger = effectiveTrigger,
-            visibleSwitchStartedAtMs = fastSwitchStartedAtMs,
-        )
+        val cachedActivation = if (shouldForceFreshLease(effectiveTrigger)) {
+            null
+        } else {
+            takeCachedRuntimeForActivation(
+                target = target,
+                attempt = attempt,
+                trigger = effectiveTrigger,
+                visibleSwitchStartedAtMs = fastSwitchStartedAtMs,
+            )
+        }
         if (cachedActivation != null) {
             connectJob = viewModelScope.launch {
                 if (
@@ -2049,6 +2053,9 @@ public class TmuxSessionViewModel @Inject constructor(
         val forceFreshLease = shouldForceFreshLease(trigger)
         val evictedIdleLease = if (forceFreshLease) {
             withContext(NonCancellable) {
+                runtimeCache.removeLease(leaseTarget.leaseKey).forEach { cached ->
+                    runCatching { cached.closeCachedRuntime() }
+                }
                 runCatching { sshLeaseManager.evictIdle(leaseTarget.leaseKey) }
                     .getOrDefault(false)
             }
@@ -3764,6 +3771,7 @@ public class TmuxSessionViewModel @Inject constructor(
         user: String,
         keyPath: String,
         sessionName: String,
+        trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
     ): SshLease? {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -3779,7 +3787,7 @@ public class TmuxSessionViewModel @Inject constructor(
         return acquireLeaseForTmux(
             target = target,
             attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet(),
-            trigger = TmuxConnectTrigger.UserTap,
+            trigger = trigger,
             startedAtMs = SystemClock.elapsedRealtime(),
         )
     }

@@ -7991,6 +7991,97 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun forceFreshAcquireClosesSameLeaseCachedRuntimeBeforeOpeningTransport() = runTest {
+        val staleSession = FakeSshSession()
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(staleSession, freshSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 0L,
+        )
+        val cachedLease = manager.acquire(testLeaseTarget()).getOrThrow()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val cachedClient = FakeTmuxClient()
+        assertTrue(
+            runtimeCache.put(
+                cachedRuntimeForTest(
+                    sessionName = "other",
+                    client = cachedClient,
+                    session = staleSession,
+                    lease = cachedLease,
+                ),
+            ).isEmpty(),
+        )
+        val vm = newVm(runtimeCache = runtimeCache, sshLeaseManager = manager)
+
+        val lease = vm.acquireLeaseForTmuxForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            trigger = TmuxConnectTrigger.NetworkReconnect,
+        )
+
+        assertNotNull(lease)
+        assertSame("force-fresh acquire must open a new transport", freshSession, lease?.session)
+        assertTrue("force-fresh lease should be marked as a new connection", lease?.isNewConnection == true)
+        assertEquals("stale cached lease must not be reused", 2, connector.connectCount)
+        assertFalse("same-lease cached runtime must be removed", runtimeCache.contains(tmuxRuntimeKeyForTest("other")))
+        assertTrue("same-lease cached tmux client must close", cachedClient.closed)
+        assertTrue("same-lease cached SSH session must close", staleSession.closed)
+        lease?.release()
+    }
+
+    @Test
+    fun normalAcquirePreservesSameLeaseCachedRuntimeReuse() = runTest {
+        val warmSession = FakeSshSession()
+        val connector = QueueLeaseConnector(warmSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 0L,
+        )
+        val cachedLease = manager.acquire(testLeaseTarget()).getOrThrow()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val cachedClient = FakeTmuxClient()
+        assertTrue(
+            runtimeCache.put(
+                cachedRuntimeForTest(
+                    sessionName = "other",
+                    client = cachedClient,
+                    session = warmSession,
+                    lease = cachedLease,
+                ),
+            ).isEmpty(),
+        )
+        val vm = newVm(runtimeCache = runtimeCache, sshLeaseManager = manager)
+
+        val lease = vm.acquireLeaseForTmuxForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+        )
+
+        assertNotNull(lease)
+        assertSame("normal acquire should reuse the warm lease", warmSession, lease?.session)
+        assertFalse("normal acquire should not open a new transport", lease?.isNewConnection == true)
+        assertEquals("normal acquire must not reconnect", 1, connector.connectCount)
+        assertTrue("normal acquire must preserve cached runtime", runtimeCache.contains(tmuxRuntimeKeyForTest("other")))
+        assertFalse("normal acquire must keep cached tmux client warm", cachedClient.closed)
+        assertFalse("normal acquire must keep cached SSH session warm", warmSession.closed)
+        lease?.release()
+        runtimeCache.remove(tmuxRuntimeKeyForTest("other"))?.closeCachedRuntime()
+    }
+
+    @Test
     fun fastSwitchDeadSessionFallbackReleasesAcquiredLeaseBeforeRetry() = runTest {
         val deadLeaseSession = FakeSshSession(isConnectedValue = false)
         val fallbackSession = FakeSshSession()

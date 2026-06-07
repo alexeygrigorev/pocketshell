@@ -35,7 +35,7 @@ data class PortForwardPanelState(
     val error: String? = null,
     // Issue #492: "Show all ports" — when false (default), the discovery
     // table only shows ports in InterestingPortFilter.DEFAULT_RANGE
-    // (1000-10000). When true, every discovered port is shown.
+    // (10000+). When true, every discovered port is shown.
     val showAllPorts: Boolean = false,
     // Issue #492: number of discovered ports hidden by the default filter,
     // i.e. how many extra rows "Show all ports" would reveal. Drives the
@@ -580,9 +580,9 @@ private fun List<RemotePort>.toAvailableTunnels(
     showAll: Boolean = false,
 ): List<TunnelInfo> =
     // Issue #456/#492: de-dupe per port and, by default, keep only the useful
-    // dev-port range (`1000-10000`) so the panel table is readable instead of
-    // an ~80-row dump. When [showAll] is true the out-of-range system/ephemeral
-    // ports are included too. The filter already orders in-range-first and
+    // high-port range (`10000+`) so the panel table is readable instead of
+    // an ~80-row dump. When [showAll] is true the low noisy ports are included
+    // too. The filter already orders in-range-first and
     // de-duplicates, so we keep its order rather than re-sorting by port number.
     InterestingPortFilter.filter(this, showAll).map { remotePort ->
         TunnelInfo(

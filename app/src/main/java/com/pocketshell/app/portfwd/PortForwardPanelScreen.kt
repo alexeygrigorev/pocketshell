@@ -126,9 +126,9 @@ fun PortForwardPanelScreen(
                 onEnabledChange = viewModel::setAutoForwardEnabled,
             )
 
-            // Issue #492: the discovery table hides system (<1000) and
-            // high/ephemeral (>10000) ports by default. The checkbox reveals
-            // them. Only relevant for the discovery view; auto-forward rows
+            // Issue #602: the discovery table hides low noisy ports below
+            // 10000 by default. The checkbox reveals them. Only relevant for
+            // the discovery view; auto-forward rows
             // are the user's explicit tunnels, not a filtered scan.
             if (!state.autoForwardEnabled) {
                 ShowAllPortsRow(
@@ -278,9 +278,9 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
 
 /**
  * Issue #492: "Show all ports" checkbox. Unchecked = the default filtered
- * table (only ports in 1000-10000). Checked = every discovered port including
- * the hidden out-of-range ones. The label surfaces the hidden-row count so the
- * user knows the table is filtered.
+ * table (only ports 10000+). Checked = every discovered port including
+ * the hidden low ports. The label surfaces the hidden-row count so the user
+ * knows the table is filtered.
  */
 @Composable
 private fun ShowAllPortsRow(

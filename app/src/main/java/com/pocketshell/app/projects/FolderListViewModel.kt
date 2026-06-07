@@ -137,6 +137,8 @@ data class HostPortForwardingSummary(
     val discoveredPorts: List<HostDiscoveredPort> = emptyList(),
     val active: Boolean = false,
     val activeTunnelCount: Int = 0,
+    val entryAvailable: Boolean = false,
+    val discoveryLoading: Boolean = false,
 ) {
     val discoveredCount: Int
         get() = discoveredPorts.count { it.discovered }
@@ -164,7 +166,9 @@ data class FolderSessionWindowEntry(
 )
 
 sealed interface FolderListUiState {
-    data object Loading : FolderListUiState
+    data class Loading(
+        val portForwarding: HostPortForwardingSummary = HostPortForwardingSummary(),
+    ) : FolderListUiState
 
     data class Ready(
         val folders: List<FolderRow>,
@@ -320,7 +324,7 @@ class FolderListViewModel internal constructor(
     )
 
     private val _state: MutableStateFlow<FolderListUiState> =
-        MutableStateFlow(FolderListUiState.Loading)
+        MutableStateFlow(FolderListUiState.Loading())
     val state: StateFlow<FolderListUiState> = _state.asStateFlow()
 
     private val _actionStatus: MutableStateFlow<FolderActionStatus> =
@@ -536,7 +540,7 @@ class FolderListViewModel internal constructor(
         // applies fresh and a prior host's collapse choices don't leak across.
         expandedProjectPaths = emptySet()
         userCollapsedProjectPaths = emptySet()
-        _state.value = FolderListUiState.Loading
+        _state.value = loadingState()
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {
@@ -917,7 +921,7 @@ class FolderListViewModel internal constructor(
         val params = bound ?: return
         if (!rootSnapshotLoaded) {
             if (_state.value !is FolderListUiState.Ready) {
-                _state.value = FolderListUiState.Loading
+                _state.value = loadingState()
             }
             return
         }
@@ -928,7 +932,7 @@ class FolderListViewModel internal constructor(
             // snapshot visible (so classifier-chip updates are a single
             // Compose recomposition, not a loading flash).
             if (_state.value !is FolderListUiState.Ready) {
-                _state.value = FolderListUiState.Loading
+                _state.value = loadingState()
             }
             while (isActive) {
                 // Issue #430: gate every probe on the whole-process
@@ -1081,6 +1085,19 @@ class FolderListViewModel internal constructor(
         )
     }
 
+    private fun loadingState(): FolderListUiState.Loading {
+        val hostId = bound?.hostId
+        val snapshot = hostId?.let { forwardingSnapshots[it] }
+        return FolderListUiState.Loading(
+            portForwarding = HostPortForwardingSummary(
+                active = snapshot?.active == true,
+                activeTunnelCount = snapshot?.tunnelCount ?: 0,
+                entryAvailable = hostId != null,
+                discoveryLoading = true,
+            ),
+        )
+    }
+
     private fun forwardingSummary(): HostPortForwardingSummary {
         val hostId = bound?.hostId ?: return HostPortForwardingSummary(discoveredPorts = lastDiscoveredPorts)
         val snapshot = forwardingSnapshots[hostId]
@@ -1091,6 +1108,8 @@ class FolderListViewModel internal constructor(
             ),
             active = snapshot?.active == true,
             activeTunnelCount = snapshot?.tunnelCount ?: 0,
+            entryAvailable = true,
+            discoveryLoading = !hasSessionProbeSnapshot,
         )
     }
 

@@ -295,7 +295,18 @@ fun FolderListScreen(
                 onOpenAssistant = { showAssistant = true },
             )
             when (val s = state) {
-                FolderListUiState.Loading -> LoadingPanel()
+                is FolderListUiState.Loading -> Column(modifier = Modifier.fillMaxSize()) {
+                    LoadingPanel(modifier = Modifier.weight(1f))
+                    if (s.portForwarding.shouldShowSummary) {
+                        PortForwardingSummaryCard(
+                            summary = s.portForwarding,
+                            onOpen = onOpenPortForwarding,
+                            modifier = Modifier
+                                .padding(horizontal = 20.dp)
+                                .padding(bottom = 12.dp),
+                        )
+                    }
+                }
                 is FolderListUiState.Failed -> ErrorPanel(message = s.message, onRetry = viewModel::refresh)
                 is FolderListUiState.ConnectError -> ErrorPanel(
                     message = s.message.ifBlank { "Couldn't reach $hostName." },
@@ -865,10 +876,9 @@ private fun HostDetailAssistantPanel(
 }
 
 @Composable
-private fun LoadingPanel() {
+private fun LoadingPanel(modifier: Modifier = Modifier.fillMaxSize()) {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
+        modifier = modifier
             .padding(horizontal = 20.dp)
             .testTag(FOLDER_LIST_LOADING_TAG),
         verticalArrangement = Arrangement.Center,
@@ -1099,29 +1109,32 @@ private fun FolderListContent(
 }
 
 private val HostPortForwardingSummary.shouldShowSummary: Boolean
-    get() = active || activeTunnelCount > 0 || discoveredPorts.isNotEmpty()
+    get() = entryAvailable || active || activeTunnelCount > 0 || discoveredPorts.isNotEmpty()
 
 @Composable
 private fun PortForwardingSummaryCard(
     summary: HostPortForwardingSummary,
     onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     // Issue #456: the card is a summary + entry only — never a dump of raw
     // discovered-port rows. `discoveredCount` already reflects the
     // interesting-port filter (system/noise ports dropped, de-duped upstream),
     // so "N ports" is the user-facing count of forwardable ports.
     val statusText = when {
+        summary.discoveryLoading -> "Scanning"
         summary.active -> "${summary.activeTunnelCount} active"
         summary.discoveredCount > 0 -> "${summary.discoveredCount} ports"
         else -> "Off"
     }
     val detailText = when {
+        summary.discoveryLoading -> "Checking remote ports."
         summary.active -> "Foreground forwarding service is running."
         summary.discoveredCount > 0 -> "Tap to view discovered ports and forward."
         else -> "Auto-forward is off by default."
     }
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
             .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))

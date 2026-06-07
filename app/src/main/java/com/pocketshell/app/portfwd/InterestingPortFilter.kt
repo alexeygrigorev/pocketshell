@@ -6,19 +6,16 @@ import com.pocketshell.core.portfwd.RemotePort
  * Decides which discovered remote ports are worth surfacing to the user and in
  * what order.
  *
- * Issue #456 established the original "interesting range" intuition. Issue #492
- * tightens it for the port-forward table: by default the table shows only the
- * **useful dev-port range** `[1000, 10000]` (typical app/dev servers — 3000,
- * 5000, 8000, 8080, …). Ports below `1000` (system) and above `10000`
- * (high/ephemeral, e.g. the `49xxx` dynamic range) are hidden by default and
- * revealed only when the user ticks the panel's "Show all ports" checkbox.
+ * Issue #456 established the original "interesting range" intuition. Issue #602
+ * tightens it for the port-forward table: by default the table hides noisy low
+ * ports below `10000` (system services, Docker/test SSH ports, common local
+ * daemons) and shows `10000+` ports, including higher app/dev servers such as
+ * `11434`.
  *
  * Two filtering modes:
  *
  * - **Default ([filter] / `showAll = false`):** keep only ports in the
- *   inclusive [DEFAULT_RANGE] `1000-10000`. Everything outside it — system
- *   ports `< 1000` and high/ephemeral ports `> 10000` — is hidden. This is the
- *   readable, low-noise view.
+ *   inclusive [DEFAULT_RANGE] `10000-65535`. Everything below it is hidden.
  * - **Show-all ([filter] with `showAll = true`):** keep every discovered port,
  *   including the out-of-range ones. The in-range ports still sort first so the
  *   useful rows stay at the top.
@@ -30,11 +27,10 @@ import com.pocketshell.core.portfwd.RemotePort
 object InterestingPortFilter {
 
     /**
-     * Inclusive useful dev-server range shown by default (#492). Ports inside
-     * this band are the ones the user almost always wants to forward; ports
-     * outside it are hidden unless "Show all ports" is enabled.
+     * Inclusive high-port range shown by default (#602). Ports below this band
+     * are hidden unless "Show all ports" is enabled.
      */
-    val DEFAULT_RANGE: IntRange = 1_000..10_000
+    val DEFAULT_RANGE: IntRange = 10_000..65_535
 
     /** True when [port] is inside the default-shown [DEFAULT_RANGE]. */
     fun isInRange(port: Int): Boolean = port in DEFAULT_RANGE
@@ -45,8 +41,8 @@ object InterestingPortFilter {
      * 1. De-duplicates by port, keeping the entry with a non-blank process
      *    name when available.
      * 2. When [showAll] is false (default), drops every port outside
-     *    [DEFAULT_RANGE] — the `< 1000` system ports and `> 10000`
-     *    high/ephemeral ports. When [showAll] is true, keeps them all.
+     *    [DEFAULT_RANGE] — the low-port noise. When [showAll] is true, keeps
+     *    them all.
      * 3. Sorts in-range ports ahead of out-of-range ones; within each group,
      *    ascending by port number.
      */

@@ -151,7 +151,7 @@ class PortForwardPanelViewModelTest {
     fun loadWithDiscoveryShowsAvailablePortsWithoutStartingForwarding() = runTest {
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
         val session = FakeSshSession(
-            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+            ssOutput = "127.0.0.1:11434 users:((\"ollama\",pid=42,fd=3))\n",
         )
         val viewModel = newViewModel(FakeConnector(Result.success(session)))
 
@@ -163,9 +163,9 @@ class PortForwardPanelViewModelTest {
         assertEquals(PortForwardConnectionState.Connected, state.connectionState)
         assertEquals(1, state.tunnels.size)
         val tunnel = state.tunnels.single()
-        assertEquals(3000, tunnel.remotePort)
-        assertEquals(3000, tunnel.localPort)
-        assertEquals("node", tunnel.process)
+        assertEquals(11434, tunnel.remotePort)
+        assertEquals(11434, tunnel.localPort)
+        assertEquals("ollama", tunnel.process)
         assertEquals(com.pocketshell.core.portfwd.TunnelInfo.Status.AVAILABLE, tunnel.status)
         assertEquals(emptyList<FakePortForward>(), session.openedForwards)
         assertTrue("passive discovery SSH session should close after scan", session.closed)
@@ -174,17 +174,18 @@ class PortForwardPanelViewModelTest {
     @Test
     fun discoveryCollapsesDuplicateListenersToOneRowPerRemotePort() = runTest {
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
-        // Issue #456: the same dev-server port shows up once per bound address
-        // family (`0.0.0.0:3000` and `[::]:3000`). Discovery must collapse
-        // them to a single row, and the sshd control port (22) must be
-        // dropped as noise rather than surfaced.
+        // Issue #456/#602: the same high app port shows up once per bound
+        // address family (`0.0.0.0:11434` and `[::]:11434`). Discovery must
+        // collapse them to a single row, and low ports must be dropped as
+        // noise rather than surfaced.
         val session = FakeSshSession(
             ssOutput = """
                 0.0.0.0:22 users:(("sshd",pid=1,fd=3))
                 :::22 users:(("sshd",pid=1,fd=4))
                 0.0.0.0:3000 users:(("node",pid=42,fd=3))
-                :::3000 users:(("node",pid=42,fd=4))
-                127.0.0.1:8080 users:(("python",pid=99,fd=3))
+                0.0.0.0:11434 users:(("ollama",pid=42,fd=3))
+                :::11434 users:(("ollama",pid=42,fd=4))
+                127.0.0.1:49152 users:(("app",pid=99,fd=3))
             """.trimIndent(),
         )
         val viewModel = newViewModel(FakeConnector(Result.success(session)))
@@ -195,18 +196,18 @@ class PortForwardPanelViewModelTest {
         val state = viewModel.state.value
         assertFalse("discovery must leave auto-forward off", state.autoForwardEnabled)
         assertEquals(PortForwardConnectionState.Connected, state.connectionState)
-        assertEquals(listOf(3000, 8080), state.tunnels.map { it.remotePort })
+        assertEquals(listOf(11434, 49152), state.tunnels.map { it.remotePort })
         assertEquals(2, state.tunnels.size)
-        assertEquals("node", state.tunnels.first { it.remotePort == 3000 }.process)
+        assertEquals("ollama", state.tunnels.first { it.remotePort == 11434 }.process)
         assertEquals(emptyList<FakePortForward>(), session.openedForwards)
         assertTrue("passive discovery SSH session should close after scan", session.closed)
     }
 
     @Test
     fun discoveryHidesOutOfRangePortsByDefaultAndShowAllRevealsThem() = runTest {
-        // #492: <1000 (22/443) and >10000 (49152/11434) ports are hidden by
-        // default; only the in-range 3000/8080 appear. Toggling "Show all
-        // ports" reveals every discovered port without a new SSH scan.
+        // #602: low ports below 10000 are hidden by default; 10000+ ports are
+        // visible. Toggling "Show all ports" reveals every discovered port
+        // without a new SSH scan.
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
         val session = FakeSshSession(
             ssOutput = """
@@ -227,9 +228,9 @@ class PortForwardPanelViewModelTest {
         viewModel.load(hostId, "/tmp/key", discoverPorts = true)
         runCurrent()
 
-        // Default: only the in-range ports, and the hidden count is surfaced.
+        // Default: only high in-range ports, and the hidden count is surfaced.
         assertFalse(viewModel.state.value.showAllPorts)
-        assertEquals(listOf(3000, 8080), viewModel.state.value.tunnels.map { it.remotePort })
+        assertEquals(listOf(11434, 49152), viewModel.state.value.tunnels.map { it.remotePort })
         assertEquals(4, viewModel.state.value.hiddenPortCount)
 
         // Show all: every discovered port, in-range first, no extra connect.
@@ -237,7 +238,7 @@ class PortForwardPanelViewModelTest {
         runCurrent()
         assertTrue(viewModel.state.value.showAllPorts)
         assertEquals(
-            listOf(3000, 8080, 22, 443, 11434, 49152),
+            listOf(11434, 49152, 22, 443, 3000, 8080),
             viewModel.state.value.tunnels.map { it.remotePort },
         )
         assertEquals(1, connector.hosts.size)
@@ -246,7 +247,7 @@ class PortForwardPanelViewModelTest {
         viewModel.setShowAllPorts(false)
         runCurrent()
         assertFalse(viewModel.state.value.showAllPorts)
-        assertEquals(listOf(3000, 8080), viewModel.state.value.tunnels.map { it.remotePort })
+        assertEquals(listOf(11434, 49152), viewModel.state.value.tunnels.map { it.remotePort })
 
         viewModel.setAutoForwardEnabled(false)
         viewModel.leavePanel()
@@ -284,9 +285,9 @@ class PortForwardPanelViewModelTest {
 
         second.load(hostId, "/tmp/key", discoverPorts = true)
         runCurrent()
-        // Discovery honours the persisted show-all flag: out-of-range 49152 stays.
+        // Discovery honours the persisted show-all flag: low 3000 stays visible.
         assertTrue(second.state.value.showAllPorts)
-        assertEquals(listOf(3000, 49152), second.state.value.tunnels.map { it.remotePort })
+        assertEquals(listOf(49152, 3000), second.state.value.tunnels.map { it.remotePort })
 
         second.leavePanel()
         runCurrent()
@@ -296,10 +297,10 @@ class PortForwardPanelViewModelTest {
     fun startPortFromDiscoveredStateEnablesForwardingExplicitly() = runTest {
         val hostId = insertHost(maxAutoPort = 2000, skipPortsBelow = 1000)
         val discoverySession = FakeSshSession(
-            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+            ssOutput = "127.0.0.1:11434 users:((\"ollama\",pid=42,fd=3))\n",
         )
         val forwardingSession = FakeSshSession(
-            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+            ssOutput = "127.0.0.1:11434 users:((\"ollama\",pid=42,fd=3))\n",
         )
         val connector = QueueConnector(
             listOf(Result.success(discoverySession), Result.success(forwardingSession)),
@@ -308,12 +309,12 @@ class PortForwardPanelViewModelTest {
 
         viewModel.load(hostId, "/tmp/key", discoverPorts = true)
         runCurrent()
-        viewModel.startPort(3000)
+        viewModel.startPort(11434)
         runCurrent()
 
         assertFalse(discoverySession.openedForwards.any())
         assertTrue(viewModel.state.value.autoForwardEnabled)
-        assertEquals(listOf(3000), forwardingSession.openedForwards.map { it.remotePort })
+        assertEquals(listOf(11434), forwardingSession.openedForwards.map { it.remotePort })
         assertEquals(com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING, viewModel.state.value.tunnels.single().status)
 
         viewModel.setAutoForwardEnabled(false)
@@ -328,7 +329,7 @@ class PortForwardPanelViewModelTest {
         // and without a separate discovery scan (one SSH session).
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
         val session = FakeSshSession(
-            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+            ssOutput = "127.0.0.1:11434 users:((\"ollama\",pid=42,fd=3))\n",
         )
         val connector = QueueConnector(listOf(Result.success(session)))
         val viewModel = newViewModel(connector)
@@ -396,7 +397,7 @@ class PortForwardPanelViewModelTest {
         // does not open any forward until the user acts.
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
         val session = FakeSshSession(
-            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+            ssOutput = "127.0.0.1:11434 users:((\"ollama\",pid=42,fd=3))\n",
         )
         val viewModel = newViewModel(FakeConnector(Result.success(session)))
 
@@ -406,6 +407,7 @@ class PortForwardPanelViewModelTest {
         val state = viewModel.state.value
         assertFalse(state.autoForwardEnabled)
         assertEquals(PortForwardConnectionState.Connected, state.connectionState)
+        assertEquals(1, state.tunnels.size)
         assertEquals(
             com.pocketshell.core.portfwd.TunnelInfo.Status.AVAILABLE,
             state.tunnels.single().status,

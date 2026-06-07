@@ -87,7 +87,7 @@ class RepoBrowserSessionPickerTest {
         val name = derivedSessionName(
             choice = shellChoice,
             homeDirectory = conventionalRemoteHome("alexey"),
-            existingNames = knownSessionNames(FolderListUiState.Loading),
+            existingNames = knownSessionNames(FolderListUiState.Loading()),
         )
         assertEquals("git-pocketshell", name)
     }
@@ -131,7 +131,7 @@ class RepoBrowserSessionPickerTest {
         val name = derivedSessionName(
             choice = agentChoice,
             homeDirectory = conventionalRemoteHome("alexey"),
-            existingNames = knownSessionNames(FolderListUiState.Loading),
+            existingNames = knownSessionNames(FolderListUiState.Loading()),
         )
         assertEquals("codex-git-pocketshell", name)
     }

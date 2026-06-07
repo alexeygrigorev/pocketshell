@@ -56,6 +56,32 @@ class AutoForwarderTest {
     }
 
     @Test
+    fun `in-window mirror port increments when requested local port is occupied`() = runTest {
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+
+        val occupied = setOf(3000)
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            localPortAvailability = LocalPortAvailability { port -> port !in occupied },
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        val snapshot = forwarder.flowOfTunnels().first()
+        val tunnel = snapshot.single()
+        assertEquals(3000, tunnel.remotePort)
+        assertEquals(3001, tunnel.localPort)
+        assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
+        assertEquals(3001, session.openForwards.values.single().localPort)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
     fun `port below skipPortsBelow is not forwarded but is reported AVAILABLE`() = runTest {
         val session = FakeSession()
         session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
@@ -396,6 +422,7 @@ class AutoForwarderTest {
             session,
             smallConfig(),
             initialRemappings = mapOf(3000 to 9000),
+            localPortAvailability = LocalPortAvailability { true },
         )
         val job = forwarder.start(this)
         runCurrent()
@@ -429,6 +456,7 @@ class AutoForwarderTest {
             session,
             smallConfig(),
             initialRemappings = mapOf(22 to 2222),
+            localPortAvailability = LocalPortAvailability { true },
         )
         val job = forwarder.start(this)
         runCurrent()

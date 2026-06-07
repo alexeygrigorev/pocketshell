@@ -33,15 +33,14 @@ import org.junit.runner.RunWith
 /**
  * Issue #492 screenshot test — renders the port-forward discovery table with a
  * deterministic fake host whose `ss -tlnp` output mixes:
- *  - in-range dev ports (2222 / 3000 / 8080) shown by default, and
- *  - out-of-range ports: `<1000` system (22 / 443) and `>10000`
- *    high/ephemeral (11434 / 49152) hidden by default.
+ *  - low noisy ports (22 / 443 / 2222 / 3000 / 8080) hidden by default, and
+ *  - high ports (11434 / 49152) shown by default.
  *
  * Two artifacts prove the acceptance criteria:
- *  - `show-all-ports-default.png` — the default filtered table (only the
- *    in-range ports, "Show all ports (4 hidden)" unchecked).
+ *  - `show-all-ports-default.png` — the default filtered table (only 10000+
+ *    ports, "Show all ports" unchecked with the hidden low-port count).
  *  - `show-all-ports-checked.png` — after clicking the checkbox, the full
- *    table including the previously hidden out-of-range ports.
+ *    table including the previously hidden low ports.
  */
 @RunWith(AndroidJUnit4::class)
 class ShowAllPortsScreenshotTest {
@@ -162,8 +161,8 @@ class ShowAllPortsScreenshotTest {
     }
 
     private companion object {
-        // 22/443 are <1000 system; 11434/49152 are >10000 ephemeral —
-        // all hidden by default. 2222/3000/8080 are the in-range dev ports.
+        // Low noisy ports below 10000 are hidden by default. The 10000+ ports
+        // stay visible unless the user enables the full table.
         val NOISY_SS_OUTPUT: String = """
             0.0.0.0:22 users:(("sshd",pid=1,fd=3))
             0.0.0.0:443 users:(("nginx",pid=2,fd=3))

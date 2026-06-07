@@ -11,6 +11,25 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+
+public fun interface LocalPortAvailability {
+    public fun isAvailable(port: Int): Boolean
+}
+
+public object DefaultLocalPortAvailability : LocalPortAvailability {
+    override fun isAvailable(port: Int): Boolean {
+        if (port !in 1..65_535) return false
+        return runCatching {
+            ServerSocket().use { socket ->
+                socket.reuseAddress = false
+                socket.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port))
+            }
+        }.isSuccess
+    }
+}
 
 /**
  * Periodically scans a remote SSH host for listening TCP ports and opens
@@ -86,6 +105,7 @@ public class AutoForwarder(
     // advance with `advanceTimeBy`, so we'd otherwise have no test seam
     // for the TTL eviction logic.
     private val clock: () -> Long = { System.currentTimeMillis() },
+    private val localPortAvailability: LocalPortAvailability = DefaultLocalPortAvailability,
 ) {
 
     // We use a StateFlow so the UI can render the current set of tunnels
@@ -342,26 +362,39 @@ public class AutoForwarder(
         // honour it whether or not N falls inside the auto-forward
         // window. Without this branch, a user who remapped port 22 to
         // local 2222 would never see the override take effect.
-        portRemappings[remotePort]?.let { return it }
+        portRemappings[remotePort]?.let { return allocateLocalPortStartingAtLocked(it) }
         // When the remote port is inside the auto-forward window we mirror
-        // it locally — much friendlier UX (`localhost:3000` ↔ `remote:3000`)
-        // than allocating a random port. Otherwise we hand out the next
-        // free one in `localPortRange`.
+        // it locally when possible — much friendlier UX
+        // (`localhost:3000` ↔ `remote:3000`) than allocating a random port.
+        // If that phone-side port is already occupied, walk upward to the next
+        // available local port and surface that actual value in TunnelInfo.
+        // Otherwise we hand out the next free one in `localPortRange`.
         if (remotePort in config.skipPortsBelow..config.maxAutoPort) {
-            return remotePort
+            return allocateLocalPortStartingAtLocked(remotePort)
         }
         return allocateLocalPortLocked()
     }
 
+    private fun allocateLocalPortStartingAtLocked(requestedPort: Int): Int {
+        if (requestedPort !in 1..65_535) {
+            throw RuntimeException("invalid local port $requestedPort")
+        }
+        var candidate = requestedPort
+        while (candidate <= 65_535) {
+            if (isLocalPortUsableLocked(candidate)) return candidate
+            candidate++
+        }
+        throw RuntimeException("no free local ports at or above $requestedPort")
+    }
+
     private fun allocateLocalPortLocked(): Int {
-        val used = localPortMap.values.toSet()
         // Wrap nextLocalPort back to the start of the range if it has
         // walked off the end.
         if (nextLocalPort !in config.localPortRange) {
             nextLocalPort = config.localPortRange.first
         }
         var candidate = nextLocalPort
-        while (candidate in used) {
+        while (!isLocalPortUsableLocked(candidate)) {
             candidate++
             if (candidate !in config.localPortRange) {
                 candidate = config.localPortRange.first
@@ -380,6 +413,9 @@ public class AutoForwarder(
         nextLocalPort = candidate + 1
         return candidate
     }
+
+    private fun isLocalPortUsableLocked(port: Int): Boolean =
+        port !in localPortMap.values && localPortAvailability.isAvailable(port)
 
     private fun updateStateLocked() {
         val intervalSec = config.scanIntervalSec.coerceAtLeast(1).toLong()

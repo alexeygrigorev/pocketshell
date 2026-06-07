@@ -51,4 +51,20 @@ class FolderListPortForwardingSummaryTest {
             rows.drop(1).map { it.status },
         )
     }
+
+    @Test
+    fun `entry can be available while discovery is still loading or empty`() {
+        val loading = HostPortForwardingSummary(
+            entryAvailable = true,
+            discoveryLoading = true,
+        )
+        assertEquals(true, loading.entryAvailable)
+        assertEquals(true, loading.discoveryLoading)
+        assertEquals(0, loading.discoveredCount)
+
+        val empty = loading.copy(discoveryLoading = false)
+        assertEquals(true, empty.entryAvailable)
+        assertEquals(false, empty.discoveryLoading)
+        assertEquals(0, empty.discoveredCount)
+    }
 }

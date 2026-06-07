@@ -3229,6 +3229,11 @@ internal fun TmuxConversationPane(
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
     val runningToolIds = remember(events) { runningToolCallIds(events) }
     val rowMap = remember(events) { events.associateBy { it.id } }
+    // Issue #573: scrolling upward through a large Codex transcript can
+    // compose many older ToolCall rows in quick succession. Looking up each
+    // ToolCall's result with a full event-list scan turns that scroll into
+    // repeated O(n) work on the UI thread. Index once per event snapshot.
+    val toolResultsByCallId = remember(events) { events.toolResultsByCallId() }
 
     // Issue #401: terminal-style tail-follow. The pane opens at the newest
     // row and follows appended events until the user intentionally scrolls
@@ -3304,6 +3309,7 @@ internal fun TmuxConversationPane(
                         event = event,
                         runningToolIds = runningToolIds,
                         eventsById = rowMap,
+                        toolResultsByCallId = toolResultsByCallId,
                         isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
                             event.id in filteredConversation.searchExpandedToolCallIds,
                         onToggleExpand = { id ->
@@ -3523,6 +3529,7 @@ private fun ConversationEventRow(
     event: ConversationEvent,
     runningToolIds: Set<String>,
     eventsById: Map<String, ConversationEvent>,
+    toolResultsByCallId: Map<String, ConversationEvent.ToolResult>,
     isExplicitlyExpanded: Boolean,
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
@@ -3534,7 +3541,7 @@ private fun ConversationEventRow(
         is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend, onLinkTap)
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
-            result = eventsById.findToolResultFor(event.id),
+            result = toolResultsByCallId[event.id],
             isRunning = event.id in runningToolIds,
             isExplicitlyExpanded = isExplicitlyExpanded,
             onToggle = { onToggleExpand(event.id) },
@@ -3567,11 +3574,13 @@ private fun ConversationMessageRow(
     )
 }
 
-private fun Map<String, ConversationEvent>.findToolResultFor(
-    toolCallId: String,
-): ConversationEvent.ToolResult? =
-    values.firstOrNull { it is ConversationEvent.ToolResult && it.toolCallId == toolCallId }
-        as? ConversationEvent.ToolResult
+private fun List<ConversationEvent>.toolResultsByCallId(): Map<String, ConversationEvent.ToolResult> =
+    buildMap {
+        for (result in this@toolResultsByCallId.filterIsInstance<ConversationEvent.ToolResult>()) {
+            val toolCallId = result.toolCallId ?: continue
+            putIfAbsent(toolCallId, result)
+        }
+    }
 
 /**
  * Identify every tool call that has no matching tool result yet so the

@@ -103,6 +103,41 @@ class TmuxConversationPaneNavigationUiTest {
     }
 
     @Test
+    fun largeCodexTranscriptScrollsUpWithoutFreezing() {
+        val events = sampleCodexTranscript(turns = 900)
+        compose.setContent {
+            PocketShellTheme {
+                TmuxConversationPane(
+                    events = events,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("codex-visible-message-899")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_LIST_TAG)
+            .performScrollToIndex(0)
+        compose.waitForIdle()
+        compose.onNodeWithText("codex-visible-message-0").assertIsDisplayed()
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_LIST_TAG)
+            .performScrollToIndex(901)
+        compose.waitForIdle()
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "codex-tool-450")
+            .assertIsDisplayed()
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_LIST_TAG)
+            .performScrollToIndex(1798)
+        compose.waitForIdle()
+        compose.onNodeWithText("codex-visible-message-899").assertIsDisplayed()
+    }
+
+    @Test
     fun conversationOpensAtLatestMessage() {
         val events = sampleMessageEvents(count = 80)
         compose.setContent {
@@ -276,6 +311,47 @@ class TmuxConversationPaneNavigationUiTest {
                 role = if (i % 2 == 0) ConversationRole.User else ConversationRole.Assistant,
                 text = "event-$i body text",
             )
+        }
+    }
+
+    private fun sampleCodexTranscript(turns: Int): List<ConversationEvent> {
+        val ts = 1_700_000_000_000L
+        return buildList {
+            repeat(turns) { i ->
+                add(
+                    ConversationEvent.Message(
+                        id = "codex-message-$i",
+                        agent = AgentKind.Codex,
+                        atMillis = ts + i,
+                        role = if (i % 2 == 0) ConversationRole.User else ConversationRole.Assistant,
+                        text = "codex-visible-message-$i",
+                    ),
+                )
+                add(
+                    ConversationEvent.ToolCall(
+                        id = "codex-tool-$i",
+                        agent = AgentKind.Codex,
+                        atMillis = ts + i,
+                        name = "exec_command",
+                        input = """{"cmd":"./gradlew test --tests CodexScroll$i"}""",
+                    ),
+                )
+                add(
+                    ConversationEvent.ToolResult(
+                        id = "codex-result-$i",
+                        agent = AgentKind.Codex,
+                        atMillis = ts + i,
+                        toolCallId = "codex-tool-$i",
+                        output = buildString {
+                            repeat(80) { line ->
+                                append("tool-output-$i-$line ")
+                                append("0123456789abcdef0123456789abcdef0123456789abcdef")
+                                append('\n')
+                            }
+                        },
+                    ),
+                )
+            }
         }
     }
 }

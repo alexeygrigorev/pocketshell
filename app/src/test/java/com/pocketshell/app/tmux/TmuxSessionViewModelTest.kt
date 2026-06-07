@@ -1922,6 +1922,64 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun networkReconnectEvictsConnectedIdleLeaseBeforeReattaching() = runTest {
+        val registry = ActiveTmuxClients()
+        val staleSession = FakeSshSession()
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(staleSession, freshSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        manager.acquire(testLeaseTarget()).getOrThrow().release()
+        runCurrent()
+
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = manager,
+        )
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            sessionsSeenByFactory += session
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "wifi-cellular-handoff"),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "stale connected idle lease must be closed before network reconnect acquire",
+            staleSession.closed,
+        )
+        assertEquals(
+            "network reconnect must open a fresh SSH transport instead of reusing the warm stale one",
+            2,
+            connector.connectCount,
+        )
+        assertEquals(listOf(freshSession), sessionsSeenByFactory)
+        assertSame(reconnectClient, registry.clients.value[1L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
+    }
+
+    @Test
     fun postGraceLifecycleReattachCoalescesDeferredNetworkReplay() = runTest {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()

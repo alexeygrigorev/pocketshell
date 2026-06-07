@@ -1979,6 +1979,14 @@ public class TmuxSessionViewModel @Inject constructor(
         preferReuseLog: Boolean = false,
     ): SshLease? {
         val leaseTarget = target.toSshLeaseTarget()
+        val evictedIdleLease = if (trigger == TmuxConnectTrigger.NetworkReconnect) {
+            withContext(NonCancellable) {
+                runCatching { sshLeaseManager.evictIdle(leaseTarget.leaseKey) }
+                    .getOrDefault(false)
+            }
+        } else {
+            false
+        }
         val leaseResult = sshLeaseManager.acquire(leaseTarget)
         val lease = leaseResult.getOrElse { e ->
             failConnectAttempt(
@@ -1990,6 +1998,29 @@ public class TmuxSessionViewModel @Inject constructor(
                 preserveReconnectTarget = false,
             )
             return null
+        }
+        if (trigger == TmuxConnectTrigger.NetworkReconnect) {
+            val sessionHash = System.identityHashCode(lease.session)
+            DiagnosticEvents.record(
+                "connection",
+                "network_reconnect_ssh_lease",
+                "attempt" to attempt,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "trigger" to trigger.logValue,
+                "evictedLease" to evictedIdleLease,
+                "freshTransport" to lease.isNewConnection,
+                "sshSessionHash" to sessionHash,
+            )
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-network-reconnect-ssh-lease evictedLease=$evictedIdleLease " +
+                    "freshTransport=${lease.isNewConnection} sshSessionHash=$sessionHash " +
+                    "${targetLogFields(target)} attempt=$attempt",
+            )
         }
         if (preferReuseLog || !lease.isNewConnection) {
             StartupTiming.mark(

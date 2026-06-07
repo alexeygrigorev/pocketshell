@@ -237,6 +237,53 @@ class SshLeaseManagerTest {
     }
 
     @Test
+    fun `evict idle closes connected retained lease so next acquire opens fresh session`() = runTest {
+        val stale = FakeSshSession()
+        val fresh = FakeSshSession()
+        val connector = QueueLeaseConnector(stale, fresh)
+        val manager = leaseManager(
+            connector = connector,
+            idleTtlMillis = 60_000,
+        )
+
+        manager.acquire(TARGET).getOrThrow().release()
+
+        assertFalse(stale.closed)
+        assertTrue(manager.evictIdle(TARGET.leaseKey))
+
+        val replacement = manager.acquire(TARGET).getOrThrow()
+
+        assertTrue(stale.closed)
+        assertEquals(1, stale.closeCount)
+        assertEquals(2, connector.connectCount)
+        assertSame(fresh, replacement.session)
+
+        replacement.release()
+    }
+
+    @Test
+    fun `evict idle ignores active lease`() = runTest {
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val manager = leaseManager(
+            connector = connector,
+            idleTtlMillis = 60_000,
+        )
+
+        val active = manager.acquire(TARGET).getOrThrow()
+
+        assertFalse(manager.evictIdle(TARGET.leaseKey))
+        assertFalse(session.closed)
+
+        val shared = manager.acquire(TARGET).getOrThrow()
+        assertEquals(1, connector.connectCount)
+        assertSame(session, shared.session)
+
+        active.release()
+        shared.release()
+    }
+
+    @Test
     fun `state events include idle expiry and lifecycle close reasons`() = runTest {
         val first = FakeSshSession()
         val second = FakeSshSession()

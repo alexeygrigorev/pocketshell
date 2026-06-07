@@ -147,6 +147,32 @@ public class SshLeaseManager(
     }
 
     /**
+     * Evict a retained zero-reference lease without disturbing active holders.
+     *
+     * Network handoffs can leave a transport reporting [SshSession.isConnected]
+     * even though new channels should be opened on a fresh TCP path. Callers
+     * that need a fresh acquire can use this after their current lease has been
+     * released; active leases are deliberately left in place.
+     *
+     * @return true when an idle lease existed and was closed.
+     */
+    public suspend fun evictIdle(key: SshLeaseKey): Boolean {
+        val entry = mutex.withLock {
+            val entry = entries[key] ?: return@withLock null
+            if (entry.refCount != 0) return@withLock null
+            entries.remove(key)
+            emitStateLocked(
+                key = key,
+                state = SshLeaseConnectionState.Closed,
+                closeReason = SshLeaseCloseReason.ForceRefresh,
+            )
+            entry
+        } ?: return false
+        entry.close()
+        return true
+    }
+
+    /**
      * Apply the app process background policy for warm SSH transports.
      *
      * Active leases are left alone because the owning foreground flow must
@@ -319,6 +345,7 @@ public enum class SshLeaseCloseReason {
     ExplicitDisconnect,
     ManagerClosed,
     Disconnected,
+    ForceRefresh,
 }
 
 public data class SshLeaseKey(

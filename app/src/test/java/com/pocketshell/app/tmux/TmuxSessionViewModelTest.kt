@@ -526,6 +526,89 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun bestEffortCaptureFailureDuringAttachKeepsConnectionConnectedAndClientOpen() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.failBestEffortOnCommandPrefix = "capture-pane"
+        client.bestEffortException = TmuxClientException("tmux command `capture-pane` timed out")
+
+        vm.attachClientWithReadinessForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "best-effort capture timeout must not surface as Failed/Reconnecting; " +
+                "status=${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse("best-effort capture timeout must not close tmux client", client.closed)
+        assertTrue(
+            "expected capture-pane seed attempt, got ${client.sentCommands}",
+            client.sentCommands.contains("capture-pane -p -e -S -200 -t %0"),
+        )
+    }
+
+    @Test
+    fun bestEffortCursorFailureDuringAttachKeepsConnectionConnectedAndClientOpen() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("visible"),
+                isError = false,
+            ),
+        )
+        client.failBestEffortOnCommandPrefix = "display-message"
+        client.bestEffortException = TmuxClientException("tmux command `display-message` timed out")
+
+        vm.attachClientWithReadinessForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "best-effort cursor timeout must not surface as Failed/Reconnecting; " +
+                "status=${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse("best-effort cursor timeout must not close tmux client", client.closed)
+        assertTrue(
+            "expected cursor query after capture-pane, got ${client.sentCommands}",
+            client.sentCommands.contains("display-message -p -t %0 '#{cursor_x},#{cursor_y}'"),
+        )
+    }
+
+    @Test
     fun attachReadinessRecordsTmuxLatencyMetrics() = runTest {
         TmuxSessionLatencyTelemetry.resetForTest()
         val vm = newVm()

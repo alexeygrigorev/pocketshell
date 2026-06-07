@@ -695,6 +695,22 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `best-effort capture timeout drains late response without disconnecting`() = runBlocking {
+        assertBestEffortTimeoutDrainsLateResponse(
+            command = "capture-pane -p -e -S -200 -t %0",
+            expectedKind = "capture-pane",
+        )
+    }
+
+    @Test
+    fun `best-effort cursor timeout drains late response without disconnecting`() = runBlocking {
+        assertBestEffortTimeoutDrainsLateResponse(
+            command = "display-message -p -t %0 '#{cursor_x},#{cursor_y}'",
+            expectedKind = "display-message",
+        )
+    }
+
+    @Test
     fun `sendCommand write failure closes client and fails visibly`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
@@ -1016,6 +1032,83 @@ class TmuxClientTest {
         append("%end 1 ")
         append(commandNumber)
         append(" 0\n")
+    }
+
+    private suspend fun assertBestEffortTimeoutDrainsLateResponse(
+        command: String,
+        expectedKind: String,
+    ) {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val outputEvents = scope.async {
+                client.outputFor("%0").take(2).toList()
+            }
+            delay(100)
+
+            val outcome = scope.async {
+                runCatching { client.sendBestEffortCommand(command) }
+            }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "$command\n") { yield(); delay(10) }
+            }
+
+            shell.feed(
+                "%output %0 storm-before\n" +
+                    "%output %0 storm-still-running\n",
+            )
+            val outputs = withTimeout(2_000) { outputEvents.await() }
+            assertEquals(2, outputs.size)
+
+            delay(150)
+            shell.feed(
+                "%begin 1 10 0\n" +
+                    "late-response\n" +
+                    "%end 1 10 0\n",
+            )
+
+            val timedOut = withTimeout(3_000) { outcome.await() }
+            assertTrue("expected best-effort timeout, got ${timedOut.getOrNull()}", timedOut.isFailure)
+            val ex = timedOut.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify command kind",
+                ex.message?.contains("tmux command `$expectedKind` timed out") == true,
+            )
+            assertFalse("best-effort timeout with drained response must not close shell", shell.closed)
+            assertFalse(
+                "best-effort timeout with drained response must not trip disconnected latch",
+                client.disconnected.value,
+            )
+
+            val next = scope.async {
+                client.sendCommand("list-panes -F ok")
+            }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().endsWith("list-panes -F ok\n")) {
+                    yield(); delay(10)
+                }
+            }
+            shell.feed(
+                "%begin 1 11 0\n" +
+                    "next-ok\n" +
+                    "%end 1 11 0\n",
+            )
+            val nextResponse = withTimeout(3_000) { next.await() }
+            assertEquals(11L, nextResponse.number)
+            assertEquals(listOf("next-ok"), nextResponse.output)
+            assertFalse("follow-up command must not disconnect client", client.disconnected.value)
+            assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
     }
 
     // --- fakes --------------------------------------------------------------

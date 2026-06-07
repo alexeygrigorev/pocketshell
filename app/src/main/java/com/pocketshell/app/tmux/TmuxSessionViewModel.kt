@@ -4241,7 +4241,7 @@ public class TmuxSessionViewModel @Inject constructor(
     ): Boolean {
         val captureStartedAtMs = SystemClock.elapsedRealtime()
         val response = runCatching {
-            client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+            client.sendBestEffortCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
         }.getOrNull()
         TmuxSessionLatencyTelemetry.record(
             name = "capture_pane",
@@ -4263,7 +4263,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // degrades to a seed with no explicit cursor restore.
         val cursorStartedAtMs = SystemClock.elapsedRealtime()
         val cursor = runCatching {
-            client.sendCommand(
+            client.sendBestEffortCommand(
                 "display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'",
             )
         }.getOrNull()

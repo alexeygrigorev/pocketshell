@@ -24,7 +24,8 @@ import kotlinx.coroutines.flow.filterIsInstance
  *
  * - [events] is a hot [MutableSharedFlow] tests `emit` into to drive the
  *   view model's reconcile path
- * - [sendCommand] is captured into [sentCommands] and returns a canned
+ * - [sendCommand] / [sendBestEffortCommand] are captured into [sentCommands]
+ *   and return a canned
  *   [CommandResponse] from [responses] (or an empty success if none
  *   queued). Production code only invokes `sendCommand("list-panes ...")`
  *   from reconcilePanes and `sendCommand("send-keys ...")` from the input
@@ -114,6 +115,10 @@ internal class FakeTmuxClient : TmuxClient {
 
     var closeAndThrowException: Throwable = TmuxClientException("tmux command timed out")
 
+    var failBestEffortOnCommandPrefix: String? = null
+
+    var bestEffortException: Throwable = TmuxClientException("tmux best-effort command timed out")
+
     var suspendForeverOnCommandPrefix: String? = null
 
     var sendCommandDelayMs: Long = 0L
@@ -143,7 +148,13 @@ internal class FakeTmuxClient : TmuxClient {
         connectThrows?.let { throw it }
     }
 
-    override suspend fun sendCommand(cmd: String): CommandResponse {
+    override suspend fun sendCommand(cmd: String): CommandResponse =
+        handleCommand(cmd, bestEffort = false)
+
+    override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
+        handleCommand(cmd, bestEffort = true)
+
+    private suspend fun handleCommand(cmd: String, bestEffort: Boolean): CommandResponse {
         sentCommands += cmd
         sendCommandGatePrefix?.let { prefix ->
             if (cmd.startsWith(prefix)) {
@@ -162,6 +173,13 @@ internal class FakeTmuxClient : TmuxClient {
             if (cmd.startsWith(prefix)) {
                 close()
                 throw closeAndThrowException
+            }
+        }
+        if (bestEffort) {
+            failBestEffortOnCommandPrefix?.let { prefix ->
+                if (cmd.startsWith(prefix)) {
+                    throw bestEffortException
+                }
             }
         }
         if (cmd.startsWith("capture-pane")) {

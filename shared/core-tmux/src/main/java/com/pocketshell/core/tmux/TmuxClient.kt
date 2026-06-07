@@ -106,6 +106,19 @@ public interface TmuxClient : AutoCloseable {
     public suspend fun sendCommand(cmd: String): CommandResponse
 
     /**
+     * Send a non-structural, rendering-only tmux command and wait for its
+     * response without treating a delayed response as an immediate transport
+     * disconnect.
+     *
+     * This path is for commands such as `capture-pane` and cursor queries that
+     * can safely fail open locally during output storms. Implementations must
+     * still protect control-mode FIFO correlation before allowing another
+     * command onto the wire.
+     */
+    public suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
+        sendCommand(cmd)
+
+    /**
      * Subscribe to `%output` events for a single pane.
      *
      * Multiple callers may subscribe to the same pane — the underlying
@@ -243,8 +256,11 @@ public data class TmuxOutputBacklogOverflow(
  *   created sessions. Existing sessions are still attached via `-A`.
  * @param commandTimeoutMs ceiling for a single control-mode command
  *   transaction, including stdin write/flush and response wait. A
- *   timeout closes the client so callers see a disconnect instead of
- *   waiting forever behind a stalled SSH/tmux channel.
+ *   structural command timeout closes the client so callers see a
+ *   disconnect instead of waiting forever behind a stalled SSH/tmux
+ *   channel. Best-effort commands get a short late-response drain window
+ *   first so rendering reseeds can fail locally without misreporting a
+ *   transport disconnect.
  */
 internal class RealTmuxClient(
     private val session: SshSession,
@@ -379,7 +395,16 @@ internal class RealTmuxClient(
         connected = true
     }
 
-    override suspend fun sendCommand(cmd: String): CommandResponse {
+    override suspend fun sendCommand(cmd: String): CommandResponse =
+        sendCommandInternal(cmd, timeoutMode = CommandTimeoutMode.FatalClose)
+
+    override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
+        sendCommandInternal(cmd, timeoutMode = CommandTimeoutMode.BestEffortDrain)
+
+    private suspend fun sendCommandInternal(
+        cmd: String,
+        timeoutMode: CommandTimeoutMode,
+    ): CommandResponse {
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
         // Single-flight: tmux only honours one outstanding command at a
@@ -427,11 +452,36 @@ internal class RealTmuxClient(
             }
             if (response != null) return@withLock response
 
-            writeJob.cancel()
             val kind = commandKind(cmd)
             val exception = TmuxClientException(
                 "tmux command `$kind` timed out after ${commandTimeoutMs}ms",
             )
+            if (timeoutMode == CommandTimeoutMode.BestEffortDrain && writeCompleted) {
+                Log.w(
+                    ISSUE_244_DIAG_TAG,
+                    "tmux-command-best-effort-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
+                        "lateDrainMs=$BEST_EFFORT_LATE_RESPONSE_DRAIN_MS",
+                )
+                val lateResponse = withTimeoutOrNull(BEST_EFFORT_LATE_RESPONSE_DRAIN_MS) {
+                    deferred.await()
+                }
+                if (lateResponse != null) {
+                    Log.i(
+                        ISSUE_244_DIAG_TAG,
+                        "tmux-command-best-effort-late-drained kind=$kind " +
+                            "number=${lateResponse.number}",
+                    )
+                    throw exception
+                }
+                Log.w(
+                    ISSUE_244_DIAG_TAG,
+                    "tmux-command-best-effort-quarantine-expired kind=$kind",
+                )
+                pendingQueue.remove(pendingCmd)
+                close()
+                throw exception
+            }
+            writeJob.cancel()
             deferred.completeExceptionally(exception)
             Log.w(
                 ISSUE_244_DIAG_TAG,
@@ -746,6 +796,7 @@ internal class RealTmuxClient(
     private companion object {
         private const val DEFAULT_SESSION_NAME = "pocketshell"
         private const val DEFAULT_COMMAND_TIMEOUT_MS = 10_000L
+        private const val BEST_EFFORT_LATE_RESPONSE_DRAIN_MS = 1_000L
 
         private fun escapeSingleQuoted(input: String): String =
             input.replace("'", "'\\''")
@@ -815,6 +866,11 @@ internal class RealTmuxClient(
                 bytes
             }
         }
+    }
+
+    private enum class CommandTimeoutMode {
+        FatalClose,
+        BestEffortDrain,
     }
 
     private class PaneOutputPipe private constructor(

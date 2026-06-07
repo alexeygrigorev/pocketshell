@@ -67,8 +67,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *  4. Inactive scanned folders stay out of the main tree and appear in
  *     the root add sheet, which exposes quick actions plus a
  *     start-session path for the selected project.
- *  5. The SessionTypePickerSheet opens on the FAB tap and the agent /
- *     shell segments + agent CLI radio buttons are present.
+ *  5. The SessionTypePickerSheet opens on the compact host-level new-session
+ *     row and the agent / shell segments + agent CLI radio buttons are present.
  *
  * The screen surface is captured to `additional_test_output/issue300-folder-tree/` as a
  * viewport bitmap (artifact-pattern matching `*-viewport.png`) so a
@@ -329,6 +329,8 @@ class FolderListScreenE2eTest {
             }
         compose.onNodeWithTag(FOLDER_LIST_PORT_FORWARDING_TAG).performClick()
         compose.waitUntil(timeoutMillis = 5_000) { openedPortForwarding }
+
+        assertHostDetailBottomRowsAreCompact()
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
         compose.onAllNodesWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG)
@@ -680,8 +682,11 @@ class FolderListScreenE2eTest {
             compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isEmpty()
         }
 
-        // --- Assertion 5: SessionTypePickerSheet opens on FAB tap and
+        // --- Assertion 5: SessionTypePickerSheet opens on the compact
+        //    host-level new-session row and
         //    shows the agent / shell segments + agent CLI radio rows.
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(FOLDER_LIST_NEW_SESSION_FAB_TAG))
         compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isNotEmpty()
@@ -1148,6 +1153,41 @@ class FolderListScreenE2eTest {
         assertTrue(
             "long root title should keep a readable column before ellipsizing: width=${labelBounds.width}px",
             labelBounds.width >= 160f * density,
+        )
+    }
+
+    private fun assertHostDetailBottomRowsAreCompact() {
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(FOLDER_LIST_NEW_SESSION_FAB_TAG))
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(FOLDER_LIST_PORT_FORWARDING_TAG))
+
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val newSessionBounds = compose.onNodeWithTag(
+            FOLDER_LIST_NEW_SESSION_FAB_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val forwardingBounds = compose.onNodeWithTag(
+            FOLDER_LIST_PORT_FORWARDING_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val maxCompactHeightPx = 56f * density
+
+        assertTrue(
+            "host-detail new-session affordance should render as a compact list row, " +
+                "not a large floating control: height=${newSessionBounds.height}px",
+            newSessionBounds.height <= maxCompactHeightPx,
+        )
+        assertTrue(
+            "host-detail port-forwarding entry should render as a compact list row, " +
+                "not a bulky card: height=${forwardingBounds.height}px",
+            forwardingBounds.height <= maxCompactHeightPx,
+        )
+        assertTrue(
+            "new-session row must stay above port-forwarding row without overlap: " +
+                "new.bottom=${newSessionBounds.bottom}px forwarding.top=${forwardingBounds.top}px",
+            newSessionBounds.bottom <= forwardingBounds.top,
         )
     }
 

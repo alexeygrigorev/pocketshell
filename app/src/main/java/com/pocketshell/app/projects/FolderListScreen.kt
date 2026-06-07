@@ -38,7 +38,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -254,6 +253,11 @@ fun FolderListScreen(
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
+    val onCreateTopLevelSession = {
+        // The host-level action uses the user's home directory by default; the
+        // picker still lets them edit before confirming.
+        pickerFolder = PickerTarget(path = "~", label = "home")
+    }
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri ->
@@ -298,14 +302,19 @@ fun FolderListScreen(
             when (val s = state) {
                 is FolderListUiState.Loading -> Column(modifier = Modifier.fillMaxSize()) {
                     LoadingPanel(modifier = Modifier.weight(1f))
-                    if (s.portForwarding.shouldShowSummary) {
-                        PortForwardingSummaryCard(
-                            summary = s.portForwarding,
-                            onOpen = onOpenPortForwarding,
-                            modifier = Modifier
-                                .padding(horizontal = 20.dp)
-                                .padding(bottom = 12.dp),
-                        )
+                    Column(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        NewSessionSummaryRow(onClick = onCreateTopLevelSession)
+                        if (s.portForwarding.shouldShowSummary) {
+                            PortForwardingSummaryRow(
+                                summary = s.portForwarding,
+                                onOpen = onOpenPortForwarding,
+                            )
+                        }
                     }
                 }
                 is FolderListUiState.Failed -> ErrorPanel(message = s.message, onRetry = viewModel::refresh)
@@ -328,6 +337,7 @@ fun FolderListScreen(
                     actionStatus = actionStatus,
                     onDismissActionStatus = viewModel::clearActionStatus,
                     onOpenPortForwarding = onOpenPortForwarding,
+                    onCreateTopLevelSession = onCreateTopLevelSession,
                     onSessionClick = { folderPath, sessionName, windowIndex ->
                         onOpenSessionWindow(
                             sessionName,
@@ -363,25 +373,6 @@ fun FolderListScreen(
                     onToggleProjectExpanded = { row -> viewModel.toggleProjectExpanded(row.path) },
                 )
             }
-        }
-
-        FloatingActionButton(
-            onClick = {
-                // FAB tap without a folder context lands the picker on
-                // the user's home directory by default; the user can
-                // edit before confirming.
-                pickerFolder = PickerTarget(path = "~", label = "home")
-            },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 20.dp, bottom = 20.dp)
-                .size(56.dp)
-                .testTag(FOLDER_LIST_NEW_SESSION_FAB_TAG),
-            shape = CircleShape,
-            containerColor = PocketShellColors.Accent,
-            contentColor = PocketShellColors.OnAccent,
-        ) {
-            Text(text = "+", fontSize = 28.sp, fontWeight = FontWeight.Medium)
         }
 
         if (showAssistant || assistantState !is AssistantUiState.Idle) {
@@ -936,6 +927,7 @@ private fun FolderListContent(
     actionStatus: FolderActionStatus,
     onDismissActionStatus: () -> Unit,
     onOpenPortForwarding: () -> Unit,
+    onCreateTopLevelSession: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
     onRenameSession: (sessionName: String) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
@@ -976,7 +968,7 @@ private fun FolderListContent(
             start = 12.dp,
             top = 12.dp,
             end = 12.dp,
-            bottom = FolderListFabContentClearance,
+            bottom = FolderListBottomContentPadding,
         ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -1100,9 +1092,12 @@ private fun FolderListContent(
                 )
             }
         }
+        item {
+            NewSessionSummaryRow(onClick = onCreateTopLevelSession)
+        }
         if (portForwarding.shouldShowSummary) {
             item {
-                PortForwardingSummaryCard(
+                PortForwardingSummaryRow(
                     summary = portForwarding,
                     onOpen = onOpenPortForwarding,
                 )
@@ -1122,12 +1117,44 @@ private val HostPortForwardingSummary.shouldShowSummary: Boolean
     get() = entryAvailable || active || activeTunnelCount > 0 || discoveredPorts.isNotEmpty()
 
 @Composable
-private fun PortForwardingSummaryCard(
+private fun NewSessionSummaryRow(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ListRow(
+        title = "New session",
+        subtitle = "Start in home or choose a folder.",
+        leading = {
+            Text(
+                text = "+",
+                color = PocketShellColors.Accent,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        },
+        trailing = {
+            Text(
+                text = "Create",
+                color = PocketShellColors.Accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+        },
+        onClick = onClick,
+        modifier = modifier
+            .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
+            .testTag(FOLDER_LIST_NEW_SESSION_FAB_TAG),
+    )
+}
+
+@Composable
+private fun PortForwardingSummaryRow(
     summary: HostPortForwardingSummary,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // Issue #456: the card is a summary + entry only — never a dump of raw
+    // Issue #456/#603: this is a compact summary + entry only — never a dump of raw
     // discovered-port rows. `discoveredCount` already reflects the
     // interesting-port filter (system/noise ports dropped, de-duped upstream),
     // so "N ports" is the user-facing count of forwardable ports.
@@ -1143,39 +1170,27 @@ private fun PortForwardingSummaryCard(
         summary.discoveredCount > 0 -> "Tap to view discovered ports and forward."
         else -> "Auto-forward is off by default."
     }
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button, onClick = onOpen)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-            .testTag(FOLDER_LIST_PORT_FORWARDING_TAG),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Port forwarding",
-                    color = PocketShellColors.Text,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = detailText,
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
-                )
-            }
+    ListRow(
+        title = "Port forwarding",
+        subtitle = detailText,
+        leading = {
+            StatusDot(active = summary.active)
+        },
+        trailing = {
             Text(
                 text = statusText,
                 color = if (summary.active) PocketShellColors.Green else PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(start = 12.dp),
+                maxLines = 1,
             )
-        }
-    }
+        },
+        onClick = onOpen,
+        modifier = modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
+            .testTag(FOLDER_LIST_PORT_FORWARDING_TAG),
+    )
 }
 
 @Composable
@@ -2495,7 +2510,7 @@ private fun StopSessionDialog(
     )
 }
 
-private val FolderListFabContentClearance = 112.dp
+private val FolderListBottomContentPadding = 12.dp
 
 // Test tags exposed for the unit / connected E2E suite.
 const val FOLDER_LIST_SCREEN_TAG: String = "folder-list:screen"

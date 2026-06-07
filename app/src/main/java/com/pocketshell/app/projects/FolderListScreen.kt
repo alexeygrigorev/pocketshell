@@ -1326,6 +1326,7 @@ private fun FlatSessionRow(
                 SessionActionsKebab(
                     sessionName = session.sessionName,
                     triggerTestTag = folderListFlatRowStopTestTag(session.sessionName),
+                    openItemTestTag = folderListFlatRowOpenMenuItemTestTag(session.sessionName),
                     renameItemTestTag = folderListFlatRowRenameMenuItemTestTag(session.sessionName),
                     stopItemTestTag = folderListFlatRowStopMenuItemTestTag(session.sessionName),
                     onOpen = onOpen,
@@ -1839,6 +1840,7 @@ private fun WorkspaceSessionRow(
         SessionActionsKebab(
             sessionName = session.sessionName,
             triggerTestTag = folderSessionStopTestTag(folderPath, session.sessionName),
+            openItemTestTag = folderSessionOpenMenuItemTestTag(folderPath, session.sessionName),
             renameItemTestTag = folderSessionRenameMenuItemTestTag(folderPath, session.sessionName),
             stopItemTestTag = folderSessionStopMenuItemTestTag(folderPath, session.sessionName),
             onOpen = onClick,
@@ -1852,23 +1854,32 @@ private fun WorkspaceSessionRow(
 private fun SessionActionsKebab(
     sessionName: String,
     triggerTestTag: String,
+    openItemTestTag: String,
     renameItemTestTag: String,
     stopItemTestTag: String,
     onOpen: () -> Unit,
     onRename: () -> Unit,
     onStop: () -> Unit,
 ) {
+    var expanded by remember { mutableStateOf(false) }
     Box(
-        modifier = Modifier.defaultMinSize(minWidth = PocketShellDensity.tapTargetMin),
+        modifier = Modifier
+            .size(PocketShellDensity.tapTargetMin)
+            .clickable(role = Role.Button, onClick = { expanded = true })
+            .semantics { contentDescription = "Session actions $sessionName" }
+            .testTag(triggerTestTag),
         contentAlignment = Alignment.CenterEnd,
     ) {
         Kebab(
             contentDescription = "Session actions $sessionName",
-            triggerTestTag = triggerTestTag,
+            triggerTestTag = "$triggerTestTag:visual",
+            expanded = expanded,
+            onExpandedChange = { expanded = it },
             items = listOf(
                 KebabItem(
-                    label = "Open session",
+                    label = "Open / Attach",
                     onClick = onOpen,
+                    testTag = openItemTestTag,
                 ),
                 KebabItem(
                     label = "Rename session",
@@ -2524,6 +2535,8 @@ fun folderListFlatRowBadgeTestTag(sessionName: String): String =
 /** Tags the per-session "Stop session" kebab on a flat host-detail row (#518). */
 fun folderListFlatRowStopTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop"
+fun folderListFlatRowOpenMenuItemTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:open:item"
 fun folderListFlatRowRenameMenuItemTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:rename:item"
 fun folderListFlatRowStopMenuItemTestTag(sessionName: String): String =
@@ -2548,6 +2561,8 @@ fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
 /** Tags the per-session "Stop session" kebab on a tree session child row (#518). */
 fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop"
+fun folderSessionOpenMenuItemTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:open:item"
 fun folderSessionRenameMenuItemTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:rename:item"
 fun folderSessionStopMenuItemTestTag(folderPath: String, sessionName: String): String =

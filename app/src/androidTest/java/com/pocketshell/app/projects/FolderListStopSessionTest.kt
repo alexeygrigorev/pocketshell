@@ -3,6 +3,8 @@ package com.pocketshell.app.projects
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -17,6 +19,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.tmux.SessionLifecycleSignals
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
@@ -272,7 +275,7 @@ class FolderListStopSessionTest {
         }
 
         compose.onNodeWithTag(folderSessionStopTestTag(projectPath, oldName)).performClick()
-        compose.onNodeWithText("Open session").assertExists()
+        compose.onNodeWithTag(folderSessionOpenMenuItemTestTag(projectPath, oldName)).assertExists()
         compose.onNodeWithTag(folderSessionRenameMenuItemTestTag(projectPath, oldName)).assertExists()
         compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, oldName)).assertExists()
         assertTrue(
@@ -297,6 +300,38 @@ class FolderListStopSessionTest {
         assertEquals(listOf(oldName to newName), gateway.renamedSessions.toList())
     }
 
+    @Test
+    fun longSessionNamesKeepTreeKebabVisibleAndOpenMenu() {
+        val longName = "agent-" + "very-long-session-name-".repeat(8) + "tail"
+
+        assertLongNameKebabVisibleAndMenuOpens(
+            longName = longName,
+            mode = HostDetailViewMode.Tree,
+            rowTag = folderDetailRowTestTag(projectPath, longName),
+            triggerTag = folderSessionStopTestTag(projectPath, longName),
+            openItemTag = folderSessionOpenMenuItemTestTag(projectPath, longName),
+            renameItemTag = folderSessionRenameMenuItemTestTag(projectPath, longName),
+            stopItemTag = folderSessionStopMenuItemTestTag(projectPath, longName),
+            expandTree = true,
+        )
+    }
+
+    @Test
+    fun longSessionNamesKeepFlatKebabVisibleAndOpenMenu() {
+        val longName = "agent-" + "very-long-session-name-".repeat(8) + "tail"
+
+        assertLongNameKebabVisibleAndMenuOpens(
+            longName = longName,
+            mode = HostDetailViewMode.Flat,
+            rowTag = folderListFlatRowTestTag(longName),
+            triggerTag = folderListFlatRowStopTestTag(longName),
+            openItemTag = folderListFlatRowOpenMenuItemTestTag(longName),
+            renameItemTag = folderListFlatRowRenameMenuItemTestTag(longName),
+            stopItemTag = folderListFlatRowStopMenuItemTestTag(longName),
+            expandTree = false,
+        )
+    }
+
     private fun constructFolderListViewModel(
         gateway: FolderListGateway,
         signals: SessionLifecycleSignals,
@@ -314,6 +349,116 @@ class FolderListStopSessionTest {
             )
         }
         return vm
+    }
+
+    private fun assertLongNameKebabVisibleAndMenuOpens(
+        longName: String,
+        mode: HostDetailViewMode,
+        rowTag: String,
+        triggerTag: String,
+        openItemTag: String,
+        renameItemTag: String,
+        stopItemTag: String,
+        expandTree: Boolean,
+    ) {
+        val gateway = MutableKillGateway(
+            initialRows = listOf(
+                FolderSessionRow(
+                    sessionName = longName,
+                    lastActivity = 1_700_004_000L,
+                    attached = true,
+                    cwd = projectPath,
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+            projectFoldersByRoot = mapOf("~/git" to listOf(projectPath)),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val viewModel = constructFolderListViewModel(gateway, SessionLifecycleSignals())
+        var openedSession: String? = null
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue597-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue518",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { name, _ -> openedSession = name },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                    hostDetailViewMode = mode,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            gateway.callCount.get() >= 1 &&
+                if (expandTree) {
+                    compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
+                        .fetchSemanticsNodes().isNotEmpty()
+                } else {
+                    compose.onAllNodesWithTag(rowTag).fetchSemanticsNodes().isNotEmpty()
+                }
+        }
+
+        if (expandTree) {
+            compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+                .performScrollToNode(hasTestTag(folderHeaderClickTestTag(projectPath)))
+            if (compose.onAllNodesWithTag(rowTag).fetchSemanticsNodes().isEmpty()) {
+                compose.onNodeWithTag(folderHeaderClickTestTag(projectPath)).performClick()
+            }
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(rowTag).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG).performScrollToNode(hasTestTag(rowTag))
+
+        assertActionTargetVisibleInsideRow(rowTag = rowTag, triggerTag = triggerTag)
+
+        compose.onNodeWithTag(triggerTag).performClick()
+        compose.onNodeWithTag(openItemTag).assertExists()
+        compose.onNodeWithTag(renameItemTag).assertExists()
+        compose.onNodeWithTag(stopItemTag).assertExists()
+        assertTrue(
+            "kebab tap must open the action menu, not the Stop confirmation",
+            compose.onAllNodesWithTag(STOP_SESSION_DIALOG_TAG).fetchSemanticsNodes().isEmpty(),
+        )
+
+        compose.onNodeWithTag(openItemTag).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedSession == longName }
+    }
+
+    private fun assertActionTargetVisibleInsideRow(rowTag: String, triggerTag: String) {
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val rowBounds = compose.onNodeWithTag(rowTag, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val triggerBounds = compose.onNodeWithTag(triggerTag, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val minPx = 48f * density
+        assertTrue(
+            "session action target must remain a visible, tappable control: " +
+                "${triggerBounds.width}x${triggerBounds.height}px",
+            triggerBounds.width >= minPx && triggerBounds.height >= minPx,
+        )
+        assertTrue(
+            "long session names must not push the action target outside the row: " +
+                "row=$rowBounds trigger=$triggerBounds",
+            triggerBounds.left >= rowBounds.left && triggerBounds.right <= rowBounds.right,
+        )
     }
 
     private fun outDir(): File {

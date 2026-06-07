@@ -494,6 +494,39 @@ class AutoForwarderTest {
     }
 
     @Test
+    fun `initialRemappings increment when requested local port is occupied`() = runTest {
+        // #602: remapped ports still use the conflict-aware allocator. If the
+        // requested local port is busy, the tunnel should open on the next
+        // available local port and surface that actual mapping.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+
+        val occupied = setOf(9000, 9001)
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            initialRemappings = mapOf(3000 to 9000),
+            localPortAvailability = LocalPortAvailability { port -> port !in occupied },
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        val t = forwarder.flowOfTunnels().first().single()
+        assertEquals(3000, t.remotePort)
+        assertEquals(9002, t.localPort)
+        assertEquals(TunnelInfo.Status.FORWARDING, t.status)
+        assertEquals(
+            "openLocalPortForward should have been called with the incremented local port",
+            9002,
+            session.openForwards.values.single().localPort,
+        )
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
     fun `initialRemappings override allocator for an out-of-window port`() = runTest {
         // sshd on port 22 is normally below skipPortsBelow, so the
         // allocator would hand it a port from localPortRange when

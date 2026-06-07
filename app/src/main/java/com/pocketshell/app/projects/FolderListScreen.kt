@@ -290,6 +290,7 @@ fun FolderListScreen(
                 headerGroups = headerGroups,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
+                onRefreshSessions = viewModel::refreshSessions,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
                 onOpenAssistant = { showAssistant = true },
@@ -658,6 +659,7 @@ private fun FolderListAppBar(
     headerGroups: FlatSessionGroups?,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
+    onRefreshSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
     onOpenAssistant: () -> Unit,
@@ -704,6 +706,7 @@ private fun FolderListAppBar(
         trailing = {
             FolderListOverflowMenu(
                 onBrowseRepos = onBrowseRepos,
+                onRefreshSessions = onRefreshSessions,
                 onOpenAssistant = onOpenAssistant,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
@@ -724,6 +727,7 @@ private fun FolderListAppBar(
 @Composable
 private fun FolderListOverflowMenu(
     onBrowseRepos: () -> Unit,
+    onRefreshSessions: () -> Unit,
     onOpenAssistant: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
@@ -742,6 +746,12 @@ private fun FolderListOverflowMenu(
                 onClick = onBrowseRepos,
                 contentDescription = "Browse repos",
                 testTag = FOLDER_LIST_BROWSE_REPOS_TAG,
+            ),
+            KebabItem(
+                label = "Refresh sessions",
+                onClick = onRefreshSessions,
+                contentDescription = "Refresh sessions",
+                testTag = FOLDER_LIST_REFRESH_SESSIONS_TAG,
             ),
             KebabItem(
                 label = "Settings",
@@ -2475,6 +2485,7 @@ private const val FLAT_ACTIVE_SECTION_KEY: String = "flat-section-active"
 private const val FLAT_IDLE_SECTION_KEY: String = "flat-section-idle"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
+const val FOLDER_LIST_REFRESH_SESSIONS_TAG: String = "folder-list:refresh-sessions"
 const val FOLDER_LIST_SETTINGS_TAG: String = "folder-list:settings"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
 const val FOLDER_LIST_WORKSPACE_SETTINGS_TAG: String = "folder-list:workspace-settings"

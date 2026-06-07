@@ -375,6 +375,7 @@ class FolderListViewModel internal constructor(
     private var userCollapsedProjectPaths: Set<String> = emptySet()
     private var lastDiscoveredPorts: List<HostDiscoveredPort> = emptyList()
     private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
+    private var refreshSessionsRequested: Boolean = false
 
     /**
      * Issue #430: whole-process foreground signal driven by
@@ -574,6 +575,20 @@ class FolderListViewModel internal constructor(
         // Cancel the in-flight poll cycle and restart so the new probe
         // runs immediately rather than waiting for the next tick.
         startPolling()
+    }
+
+    /**
+     * Manual host-detail overflow action for issue #607. Reuses the same
+     * session/folder discovery path as [refresh], but keeps the current Ready
+     * snapshot visible if the remote refresh fails and reports that failure in
+     * the existing lightweight action banner.
+     */
+    fun refreshSessions() {
+        if (_state.value is FolderListUiState.Ready) {
+            refreshSessionsRequested = true
+            _actionStatus.value = FolderActionStatus.Running("Refreshing sessions")
+        }
+        refresh()
     }
 
     /**
@@ -1011,20 +1026,38 @@ class FolderListViewModel internal constructor(
                     )
                 }
                 emitReady()
+                completeManualRefresh()
             }
             is FolderListResult.Failed -> {
+                if (preserveReadyOnManualRefresh("Couldn't refresh sessions: ${result.message}")) return
                 _state.value = FolderListUiState.Failed(result.message)
             }
             is FolderListResult.ConnectFailed -> {
+                val message = result.cause.message ?: "Connection failed"
+                if (preserveReadyOnManualRefresh("Couldn't refresh sessions: $message")) return
                 _state.value = FolderListUiState.ConnectError(
-                    message = result.cause.message ?: "Connection failed",
+                    message = message,
                     cause = result.cause,
                 )
             }
             FolderListResult.ToolUnavailable -> {
+                if (preserveReadyOnManualRefresh("Couldn't refresh sessions: tmux is not installed.")) return
                 _state.value = FolderListUiState.ToolUnavailable
             }
         }
+    }
+
+    private fun preserveReadyOnManualRefresh(message: String): Boolean {
+        if (!refreshSessionsRequested || _state.value !is FolderListUiState.Ready) return false
+        refreshSessionsRequested = false
+        _actionStatus.value = FolderActionStatus.Failed(message)
+        return true
+    }
+
+    private fun completeManualRefresh() {
+        if (!refreshSessionsRequested) return
+        refreshSessionsRequested = false
+        _actionStatus.value = FolderActionStatus.Succeeded("Sessions refreshed")
     }
 
     /**

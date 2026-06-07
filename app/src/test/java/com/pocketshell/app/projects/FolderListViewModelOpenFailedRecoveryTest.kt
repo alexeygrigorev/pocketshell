@@ -24,6 +24,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -135,6 +136,38 @@ class FolderListViewModelOpenFailedRecoveryTest {
                 setOf("alpha"),
                 readySessionNames(vm),
             )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun refreshSessionsFailurePreservesReadySnapshot() = runTest {
+        val gateway = ScriptedGateway(
+            results = listOf(
+                FolderListResult.Sessions(rows = listOf(sessionRow("alpha"), sessionRow("beta"))),
+                FolderListResult.ConnectFailed(RuntimeException("open failed")),
+            ),
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+            assertEquals(setOf("alpha", "beta"), readySessionNames(vm))
+
+            vm.refreshSessions()
+            runCurrent()
+
+            assertEquals(
+                "manual Refresh sessions must keep the last visible sessions when discovery fails",
+                setOf("alpha", "beta"),
+                readySessionNames(vm),
+            )
+            val actionStatus = vm.actionStatus.value
+            when (actionStatus) {
+                is FolderActionStatus.Failed -> assertTrue(actionStatus.message.contains("open failed"))
+                else -> fail("expected a lightweight refresh failure banner, got $actionStatus")
+            }
         } finally {
             vm.stopPolling()
         }

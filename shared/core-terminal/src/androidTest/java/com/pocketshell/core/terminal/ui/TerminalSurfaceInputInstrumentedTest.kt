@@ -83,6 +83,49 @@ class TerminalSurfaceInputInstrumentedTest {
     }
 
     @Test
+    fun rawMultiLineImeCommitRoutesAsOneBracketedPasteBlock() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val remoteStdin = RecordingOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = remoteStdin,
+        )
+        val client = PocketShellTerminalViewClient()
+        val paste = "first line\nsecond line\nthird line"
+        val expected = "\u001B[200~$paste\u001B[201~"
+
+        try {
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                view.requestFocus()
+
+                val inputConnection = requireNotNull(view.onCreateInputConnection(EditorInfo()))
+                inputConnection.commitText(paste, 1)
+            }
+
+            remoteStdin.awaitSnapshot(expected)
+            assertEquals(expected, remoteStdin.snapshot())
+            assertTrue("multi-line IME paste must preserve LF bytes", remoteStdin.snapshot().contains("\n"))
+            assertTrue("multi-line IME paste must not convert LF to CR submit bytes", !remoteStdin.snapshot().contains("\r"))
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
     fun smartTextImeStagesCommittedTextUntilEnterConfirms() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -161,6 +204,25 @@ class TerminalSurfaceInputInstrumentedTest {
 
             remoteStdin.awaitSnapshot("echo ok\r")
             assertEquals("echo ok\r", remoteStdin.snapshot())
+        }
+    }
+
+    @Test
+    fun smartTextMultiLineImeCommitBypassesStaleStagingAndRoutesAsBracketedPaste() = runBlocking {
+        withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
+            val paste = "alpha\nbeta\ngamma"
+            val expected = "\u001B[200~$paste\u001B[201~"
+
+            instrumentation.runOnMainSync {
+                inputConnection.commitText("discard me", 1)
+                assertEquals("", remoteStdin.snapshot())
+                inputConnection.commitText(paste, 1)
+            }
+
+            remoteStdin.awaitSnapshot(expected)
+            assertEquals(expected, remoteStdin.snapshot())
+            assertTrue("staged smart text must not prefix paste payload", !remoteStdin.snapshot().contains("discard me"))
+            assertTrue("multi-line smart IME paste must not send Enter bytes", !remoteStdin.snapshot().contains("\r"))
         }
     }
 

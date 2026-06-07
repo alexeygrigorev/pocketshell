@@ -37,6 +37,7 @@ import android.widget.Scroller;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 
+import com.pocketshell.core.terminal.input.BracketedPaste;
 import com.termux.terminal.KeyHandler;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
@@ -428,8 +429,9 @@ public final class TerminalView extends View {
                     super.finishComposingText();
 
                     if (!smartTextKeyboard) {
-                        sendTextToTerminal(getEditable());
-                        getEditable().clear();
+                        Editable content = getEditable();
+                        sendCommittedTextToTerminal(content);
+                        content.clear();
                     }
                 } catch (RuntimeException e) {
                     reportTerminalViewFailure("IME finishComposingText failed", e);
@@ -444,6 +446,7 @@ public final class TerminalView extends View {
                     if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
                         mClient.logInfo(LOG_TAG, "IME: commitText(\"" + text + "\", " + newCursorPosition + ")");
                     }
+                    boolean multiLinePasteCommit = isMultiLinePasteText(text);
                     Editable content = getEditable();
                     rememberSmartTextStaging(content, smartTextKeyboard);
                     if (smartTextKeyboard && content.length() > 0 && isMultiCharacterConfirmText(text)) {
@@ -460,7 +463,7 @@ public final class TerminalView extends View {
                     if (smartTextKeyboard && !containsConfirmKey(content)) {
                         return true;
                     }
-                    sendTextToTerminal(content);
+                    sendCommittedTextToTerminal(content, multiLinePasteCommit);
                     content.clear();
                 } catch (RuntimeException e) {
                     reportTerminalViewFailure("IME commitText failed", e);
@@ -621,6 +624,29 @@ public final class TerminalView extends View {
             default:
                 return false;
         }
+    }
+
+    private void sendCommittedTextToTerminal(CharSequence text) {
+        sendCommittedTextToTerminal(text, isMultiLinePasteText(text));
+    }
+
+    private void sendCommittedTextToTerminal(CharSequence text, boolean bracketAsPaste) {
+        if (bracketAsPaste) {
+            sendBracketedPasteToTerminal(text);
+        } else {
+            sendTextToTerminal(text);
+        }
+    }
+
+    private boolean isMultiLinePasteText(CharSequence text) {
+        return text != null && text.length() > 1 && BracketedPaste.containsLineBreak(text);
+    }
+
+    private void sendBracketedPasteToTerminal(CharSequence text) {
+        stopTextSelectionMode();
+        if (mTermSession == null) return;
+        byte[] framed = BracketedPaste.frame(text);
+        if (framed.length > 0) mTermSession.write(framed, 0, framed.length);
     }
 
     private void sendTextToTerminal(CharSequence text) {

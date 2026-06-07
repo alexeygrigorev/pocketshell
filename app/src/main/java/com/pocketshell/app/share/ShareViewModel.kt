@@ -8,8 +8,6 @@ import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.notifications.ShareUploadNotifications
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.sessions.ActiveTmuxClients
-import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
-import com.pocketshell.app.tmux.buildBracketedPasteHexChunks
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -19,6 +17,7 @@ import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.terminal.input.BracketedPaste
 import com.pocketshell.core.tmux.TmuxClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -693,8 +692,8 @@ internal class ShareViewModel @Inject constructor(
     private suspend fun sendTextToAttachedPane(client: TmuxClient, text: String) {
         val paneId = resolveActivePaneIdOrNull(client)
         val bytes = text.toByteArray(Charsets.UTF_8)
-        if (text.contains('\n') || bytes.size > TMUX_PASTE_BODY_CHUNK_BYTES) {
-            for (hex in buildBracketedPasteHexChunks(bytes)) {
+        if (BracketedPaste.containsLineBreak(bytes) || bytes.size > BracketedPaste.BODY_CHUNK_BYTES) {
+            for (hex in BracketedPaste.hexChunks(bytes)) {
                 val response = if (paneId != null) {
                     client.sendCommand("send-keys -H -t $paneId $hex")
                 } else {

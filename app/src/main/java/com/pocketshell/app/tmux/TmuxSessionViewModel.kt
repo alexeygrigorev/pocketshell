@@ -59,6 +59,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.terminal.input.BracketedPaste
 import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
@@ -4759,7 +4760,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         return runCatching {
             ensurePaneAcceptsInput(client, paneId)
-            if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || containsLineBreak(payloadBytes)) {
+            if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
                 sendBracketedPaste(client, paneId, payloadBytes)
             } else if (payload.isNotEmpty()) {
                 client.sendCommand("send-keys -l -t $paneId -- '${escapeSingleQuoted(payload)}'")
@@ -5467,7 +5468,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // [inputTokens] path so named keys (arrows, Escape, Tab,
         // BSpace) keep round-tripping as named keys — bracketed paste
         // would just confuse the receiving program for a one-liner.
-        if (containsLineBreak(bytes)) {
+        if (BracketedPaste.containsLineBreak(bytes)) {
             sendBracketedPaste(client, paneId, bytes)
             return
         }
@@ -5490,7 +5491,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         bytes: ByteArray,
     ) {
-        val hex = buildTmuxHex(bytes)
+        val hex = BracketedPaste.hex(bytes)
         if (hex.isEmpty()) return
         client.sendCommand("send-keys -H -t $paneId $hex")
     }
@@ -5533,7 +5534,7 @@ public class TmuxSessionViewModel @Inject constructor(
         bytes: ByteArray,
     ) {
         if (bytes.isEmpty()) return
-        for (hex in buildBracketedPasteHexChunks(bytes)) {
+        for (hex in BracketedPaste.hexChunks(bytes, TMUX_PASTE_BODY_CHUNK_BYTES)) {
             client.sendCommand("send-keys -H -t $paneId $hex")
                 .throwIfTmuxError("paste chunk into pane $paneId")
         }
@@ -6229,7 +6230,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * `send-keys -H`. Test-only.
      */
     internal fun buildBracketedPasteHexForTest(bytes: ByteArray): String =
-        buildBracketedPasteHex(bytes)
+        BracketedPaste.hexPayload(bytes)
 
     /**
      * Issue #209 test seam: predicate the production [sendInputBytesToPane]
@@ -6237,7 +6238,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * path. Test-only.
      */
     internal fun containsLineBreakForTest(bytes: ByteArray): Boolean =
-        containsLineBreak(bytes)
+        BracketedPaste.containsLineBreak(bytes)
 
     internal fun tmuxInputMetricsForTest(paneId: String): TmuxInputStressMetrics? =
         paneInputQueues[paneId]?.snapshot()
@@ -7012,75 +7013,6 @@ internal class TmuxPaneInputQueue(
 }
 
 /**
- * Issue #209: true when [bytes] contains a `\n` (0x0A) byte. Used by
- * [TmuxSessionViewModel.sendInputBytesToPane] to gate the bracketed-
- * paste wrapping path. We only check for LF — a lone `\r` (0x0D) is not
- * a paragraph separator in dictation transcripts, and the
- * input-tokenisation path already routes both `\r` and `\n` to a tmux
- * `Enter` named key when they appear in single-line input.
- */
-internal fun containsLineBreak(bytes: ByteArray): Boolean {
-    for (b in bytes) if (b == 0x0A.toByte()) return true
-    return false
-}
-
-/**
- * Issue #209: build the hex payload for a tmux `send-keys -H` call that
- * delivers [bytes] wrapped in bracketed-paste markers.
- *
- * The output is a space-separated list of two-character lowercase hex
- * pairs (e.g. `1b 5b 32 30 30 7e 61 0a 62 1b 5b 32 30 31 7e` for
- * `<ESC>[200~a\nb<ESC>[201~`). The prefix is the 6 bytes of `\e[200~`,
- * the suffix is the 6 bytes of `\e[201~`, and the body is the UTF-8
- * representation of the input with `\r\n` pairs normalised to `\n`.
- * Returns an empty string for empty input (the caller skips the
- * `send-keys -H` invocation entirely in that case).
- *
- * Normalisation of `\r\n` -> `\n` keeps the receiving program from
- * seeing a doubled paragraph break when the source platform happens to
- * emit Windows line endings (Whisper transcripts on Android use `\n`;
- * the normalisation is defensive against shares from other apps).
- */
-internal fun buildBracketedPasteHex(bytes: ByteArray): String {
-    if (bytes.isEmpty()) return ""
-    val normalised = normaliseLineEndingsForPaste(bytes)
-    val builder = StringBuilder(2 * (PASTE_START.size + normalised.size + PASTE_END.size) + 32)
-    appendHex(builder, PASTE_START)
-    appendHex(builder, normalised)
-    appendHex(builder, PASTE_END)
-    return builder.toString()
-}
-
-internal fun buildBracketedPasteHexChunks(
-    bytes: ByteArray,
-    bodyChunkBytes: Int = TMUX_PASTE_BODY_CHUNK_BYTES,
-): List<String> {
-    if (bytes.isEmpty()) return emptyList()
-    val chunkSize = bodyChunkBytes.coerceAtLeast(1)
-    val normalised = normaliseLineEndingsForPaste(bytes)
-    val chunks = ArrayList<String>((normalised.size + chunkSize - 1) / chunkSize + 2)
-    chunks += buildTmuxHex(PASTE_START)
-    var offset = 0
-    while (offset < normalised.size) {
-        val length = minOf(chunkSize, normalised.size - offset)
-        chunks += buildTmuxHex(normalised, offset, length)
-        offset += length
-    }
-    chunks += buildTmuxHex(PASTE_END)
-    return chunks
-}
-
-internal fun buildTmuxHex(bytes: ByteArray): String =
-    buildTmuxHex(bytes, 0, bytes.size)
-
-private fun buildTmuxHex(bytes: ByteArray, offset: Int, length: Int): String {
-    if (length <= 0) return ""
-    val builder = StringBuilder(3 * length)
-    appendHex(builder, bytes, offset, length)
-    return builder.toString()
-}
-
-/**
  * Issue #243: true when [bytes] contains only complete terminal emulator
  * report sequences that should be forwarded to the remote pane as raw
  * bytes. These are local replies to remote terminal queries, not typed
@@ -7212,46 +7144,6 @@ private fun terminatorEnd(bytes: ByteArray, terminatorStart: Int): Int =
 
 private fun isDigitByte(byte: Byte): Boolean = byte >= DIGIT_ZERO && byte <= DIGIT_NINE
 
-private fun normaliseLineEndingsForPaste(bytes: ByteArray): ByteArray {
-    // Fast path: no `\r` at all.
-    var sawCr = false
-    for (b in bytes) if (b == 0x0D.toByte()) { sawCr = true; break }
-    if (!sawCr) return bytes
-    val out = java.io.ByteArrayOutputStream(bytes.size)
-    var i = 0
-    while (i < bytes.size) {
-        val b = bytes[i]
-        if (b == 0x0D.toByte() && i + 1 < bytes.size && bytes[i + 1] == 0x0A.toByte()) {
-            // \r\n -> \n
-            out.write(0x0A)
-            i += 2
-        } else {
-            out.write(b.toInt() and 0xFF)
-            i += 1
-        }
-    }
-    return out.toByteArray()
-}
-
-private fun appendHex(
-    builder: StringBuilder,
-    bytes: ByteArray,
-    offset: Int = 0,
-    length: Int = bytes.size,
-) {
-    val end = minOf(bytes.size, offset + length)
-    for (index in offset until end) {
-        val b = bytes[index]
-        if (builder.isNotEmpty() && builder.last() != ' ') builder.append(' ')
-        val v = b.toInt() and 0xFF
-        builder.append(HEX_DIGITS[(v ushr 4) and 0xF])
-        builder.append(HEX_DIGITS[v and 0xF])
-    }
-}
-
-private val PASTE_START: ByteArray = byteArrayOf(0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E)
-private val PASTE_END: ByteArray = byteArrayOf(0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E)
-private val HEX_DIGITS: CharArray = "0123456789abcdef".toCharArray()
 private val ESC: Byte = 0x1B
 private val BEL: Byte = 0x07
 private val CSI: Byte = '['.code.toByte()
@@ -7436,7 +7328,7 @@ internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"
 internal const val TMUX_INPUT_MAX_PENDING_BYTES: Int = 64 * 1024
 internal const val TMUX_INPUT_MAX_BATCH_BYTES: Int = 4 * 1024
 internal const val TMUX_INPUT_CHUNK_BYTES: Int = 512
-internal const val TMUX_PASTE_BODY_CHUNK_BYTES: Int = 1024
+internal const val TMUX_PASTE_BODY_CHUNK_BYTES: Int = BracketedPaste.BODY_CHUNK_BYTES
 internal const val TMUX_INPUT_MAX_PENDING_CHUNKS: Int =
     TMUX_INPUT_MAX_PENDING_BYTES / TMUX_INPUT_CHUNK_BYTES - 1
 

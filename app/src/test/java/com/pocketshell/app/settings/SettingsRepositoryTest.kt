@@ -190,6 +190,7 @@ class SettingsRepositoryTest {
             .putBoolean("terminal_keyboard_mode", true)
             .putString("tmux_on_attach_default", "yes")
             .putString("voice_silence_seconds", "soon")
+            .putBoolean("voice_transcription_provider", true)
             .putString("show_system_notes", "maybe")
             .putBoolean("host_detail_view_mode", true)
             .putString("usage_warn_threshold_percent", "eighty")
@@ -203,6 +204,7 @@ class SettingsRepositoryTest {
         assertEquals(TerminalKeyboardMode.RawCommand, snap.terminalKeyboardMode)
         assertTrue(snap.tmuxOnAttachByDefault)
         assertEquals(AppSettings.DEFAULT_VOICE_SILENCE_SECONDS, snap.voiceSilenceThresholdSeconds, 0f)
+        assertEquals(AppSettings.DEFAULT_VOICE_TRANSCRIPTION_PROVIDER, snap.voiceTranscriptionProvider)
         assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
         assertEquals(AppSettings.DEFAULT_USAGE_WARN_PERCENT, snap.usageWarnThresholdPercent)
@@ -294,6 +296,21 @@ class SettingsRepositoryTest {
         assertEquals(
             VoiceTranscriptionProvider.AndroidSpeech,
             SettingsRepository(context).settings.value.voiceTranscriptionProvider,
+        )
+    }
+
+    @Test
+    fun `unknown voice transcription provider falls back to OpenAI`() {
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("voice_transcription_provider", "DeviceWhisper")
+            .commit()
+
+        val repo = SettingsRepository(context)
+
+        assertEquals(
+            AppSettings.DEFAULT_VOICE_TRANSCRIPTION_PROVIDER,
+            repo.settings.value.voiceTranscriptionProvider,
         )
     }
 

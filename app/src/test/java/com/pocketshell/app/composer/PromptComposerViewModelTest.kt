@@ -781,14 +781,20 @@ class PromptComposerViewModelTest {
 
     @Test
     fun androidSpeechProviderStartsWithoutOpenAiKey() = runTest {
+        val mic = FakeMicCapture()
+        var whisperCalls = 0
         val speech = FakeSpeechRecognitionProvider()
         val voice = FakeVoiceSettings(
             provider = VoiceTranscriptionProvider.AndroidSpeech,
             language = "en",
         )
         val vm = newVm(
+            mic = mic,
             storage = newStorage(),
-            whisper = null,
+            whisper = fakeWhisperClient {
+                whisperCalls++
+                Result.success("should not be used")
+            },
             voiceSettings = voice,
             speechRecognitionProvider = speech,
             samplerDispatcher = StandardTestDispatcher(testScheduler),
@@ -801,6 +807,8 @@ class PromptComposerViewModelTest {
         assertEquals(RecordingState.Recording, vm.uiState.value.recording)
         assertEquals(1, speech.startCount)
         assertEquals("en", speech.language)
+        assertEquals(0, mic.startCount)
+        assertEquals(0, whisperCalls)
         assertNull(vm.uiState.value.error)
     }
 

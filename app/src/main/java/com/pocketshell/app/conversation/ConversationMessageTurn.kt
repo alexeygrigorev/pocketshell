@@ -163,6 +163,7 @@ private fun ExpandedMessageBody(
     onLinkTap: ((ConversationLink) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
+    val displayBody = remember(text) { conversationExpandedMessageDisplayBody(text) }
     val baseFontSize = PocketShellType.bodyDense.fontSize
     val baseLineHeight = PocketShellType.bodyDense.lineHeight
     val targetFontSp = LocalConversationFontSizeSp.current
@@ -175,7 +176,7 @@ private fun ExpandedMessageBody(
             ),
         ) {
             MarkdownText(
-                text = text,
+                text = displayBody.text,
                 color = PocketShellColors.Text,
                 fontSize = targetFontSp.sp,
                 fontFamily = FontFamily.Monospace,

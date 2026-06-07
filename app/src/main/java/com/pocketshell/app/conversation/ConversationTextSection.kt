@@ -84,6 +84,9 @@ internal data class ConversationTextSectionDisplayBody(
     val wasTruncated: Boolean,
 )
 
+private const val CONVERSATION_RENDER_LINE_LIMIT = 200
+private const val CONVERSATION_RENDER_CHAR_LIMIT = 5_000
+
 /**
  * Compose still measures the whole `Text` inside a bounded verticalScroll. For
  * very large tool outputs that can make transcript interaction or tab switching
@@ -91,22 +94,44 @@ internal data class ConversationTextSectionDisplayBody(
  * rendered preview to the same "too long" boundary the section already used.
  */
 internal fun conversationTextSectionDisplayBody(body: String): ConversationTextSectionDisplayBody {
-    val lineLimit = 200
-    val charLimit = 5_000
-    val lineCount = body.count { it == '\n' } + 1
-    if (lineCount <= lineLimit && body.length <= charLimit) {
-        return ConversationTextSectionDisplayBody(text = body, wasTruncated = false)
-    }
+    return boundedConversationDisplayBody(
+        body = body,
+        truncatedNotice = "[Output truncated in view. Copy for full text.]",
+    )
+}
 
+/**
+ * Expanded transcript rows can be tapped immediately before switching back to
+ * Terminal. Bound the text handed to Compose/Markdown so the click cannot make
+ * the main thread parse and measure an unbounded transcript block (#605).
+ */
+internal fun conversationExpandedMessageDisplayBody(body: String): ConversationTextSectionDisplayBody {
+    return boundedConversationDisplayBody(
+        body = body,
+        truncatedNotice = "[Message truncated in view. Copy for full text.]",
+    )
+}
+
+private fun boundedConversationDisplayBody(
+    body: String,
+    truncatedNotice: String,
+): ConversationTextSectionDisplayBody {
     var newlineCount = 0
     var endExclusive = 0
-    while (endExclusive < body.length && endExclusive < charLimit && newlineCount < lineLimit) {
+    while (
+        endExclusive < body.length &&
+        endExclusive < CONVERSATION_RENDER_CHAR_LIMIT &&
+        newlineCount < CONVERSATION_RENDER_LINE_LIMIT
+    ) {
         if (body[endExclusive] == '\n') newlineCount += 1
         endExclusive += 1
     }
+    if (endExclusive == body.length) {
+        return ConversationTextSectionDisplayBody(text = body, wasTruncated = false)
+    }
     val preview = body.substring(0, endExclusive).trimEnd()
     return ConversationTextSectionDisplayBody(
-        text = "$preview\n\n[Output truncated in view. Copy for full text.]",
+        text = "$preview\n\n$truncatedNotice",
         wasTruncated = true,
     )
 }

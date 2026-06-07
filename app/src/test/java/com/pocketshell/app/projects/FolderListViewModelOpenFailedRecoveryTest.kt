@@ -173,6 +173,38 @@ class FolderListViewModelOpenFailedRecoveryTest {
         }
     }
 
+    @Test
+    fun refreshSessionsReloadsVisibleSessionSnapshot() = runTest {
+        val gateway = ScriptedGateway(
+            results = listOf(
+                FolderListResult.Sessions(rows = listOf(sessionRow("alpha"))),
+                FolderListResult.Sessions(rows = listOf(sessionRow("alpha"), sessionRow("beta"))),
+            ),
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+            assertEquals(setOf("alpha"), readySessionNames(vm))
+
+            vm.refreshSessions()
+            runCurrent()
+
+            assertEquals(
+                "manual Refresh sessions must reload sessions created outside PocketShell",
+                setOf("alpha", "beta"),
+                readySessionNames(vm),
+            )
+            val actionStatus = vm.actionStatus.value
+            when (actionStatus) {
+                is FolderActionStatus.Succeeded -> assertEquals("Sessions refreshed", actionStatus.message)
+                else -> fail("expected refresh success banner, got $actionStatus")
+            }
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
     private fun bind(vm: FolderListViewModel) {
         vm.bind(
             hostId = HOST.id,

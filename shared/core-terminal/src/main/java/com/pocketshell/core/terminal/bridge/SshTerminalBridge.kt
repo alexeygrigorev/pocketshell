@@ -11,6 +11,15 @@ import java.lang.reflect.Field
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
+public class TerminalSeedGateOverflowException(
+    public val pendingBytes: Int,
+    public val incomingBytes: Int,
+    public val maxBytes: Int,
+) : IllegalStateException(
+    "terminal seed gate live buffer overflow: pendingBytes=$pendingBytes " +
+        "incomingBytes=$incomingBytes maxBytes=$maxBytes",
+)
+
 /**
  * Bridges raw bytes from a remote source (typically an SSH `Session.startShell`
  * channel) into the vendored Termux [TerminalEmulator] / [TerminalSession]
@@ -209,6 +218,16 @@ public class SshTerminalBridge(
         // feed below runs without it.
         synchronized(gateLock) {
             if (gated) {
+                val pendingBytes = gatedLiveBuffer.size()
+                if (pendingBytes + count > MAX_SEED_GATE_LIVE_BUFFER_BYTES) {
+                    gatedLiveBuffer.reset()
+                    gated = false
+                    throw TerminalSeedGateOverflowException(
+                        pendingBytes = pendingBytes,
+                        incomingBytes = count,
+                        maxBytes = MAX_SEED_GATE_LIVE_BUFFER_BYTES,
+                    )
+                }
                 gatedLiveBuffer.write(data, offset, count)
                 return
             }
@@ -531,6 +550,7 @@ public class SshTerminalBridge(
          */
         internal const val PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES: Int = 64 * 1024
         internal const val PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES: Int = 16 * 1024
+        public const val MAX_SEED_GATE_LIVE_BUFFER_BYTES: Int = 2 * 1024 * 1024
 
         private const val TRACE_WAIT_THRESHOLD_NANOS: Long = 1_000_000
     }

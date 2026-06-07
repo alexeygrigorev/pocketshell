@@ -388,6 +388,38 @@ class SshTerminalBridgeTest {
         assertEquals(listOf("live-a", "live-b"), visible)
     }
 
+    @Test
+    fun seedGateRejectsLiveBufferOverflowAndClearsTheGate() {
+        val bridge = SshTerminalBridge(columns = 40, rows = 8, transcriptRows = 100)
+        bridge.closeSeedGate()
+
+        val overflow = try {
+            bridge.feedBytes(ByteArray(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1) {
+                'x'.code.toByte()
+            })
+            null
+        } catch (expected: TerminalSeedGateOverflowException) {
+            expected
+        }
+
+        assertTrue("seed gate should reject unbounded live buffering", overflow != null)
+        assertEquals(0, overflow!!.pendingBytes)
+        assertEquals(
+            SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1,
+            overflow.incomingBytes,
+        )
+        assertEquals(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES, overflow.maxBytes)
+
+        bridge.feedBytes("after-overflow".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(
+            "overflow should clear the gate so no further bytes accumulate behind a failed seed",
+            "after-overflow",
+            bridge.emulator.screen.transcriptText.trimEnd(),
+        )
+    }
+
     /**
      * Heavy/bursty deterministic stress: while gated, drive a large burst of
      * numbered live frames concurrently with the seed. The final grid must be

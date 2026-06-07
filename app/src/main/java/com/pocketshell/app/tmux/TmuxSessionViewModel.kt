@@ -59,6 +59,7 @@ import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.terminal.bridge.TerminalSeedGateOverflowException
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.terminal.input.BracketedPaste
@@ -1459,6 +1460,19 @@ public class TmuxSessionViewModel @Inject constructor(
                 .sortedWith(compareBy({ it.windowIndex ?: Int.MAX_VALUE }, { it.windowId }, { it.paneIndex }, { it.paneId }))
             for (pane in parsed) {
                 val state = TerminalSurfaceState()
+                val row = TmuxPaneState(
+                    paneId = pane.paneId,
+                    windowId = pane.windowId,
+                    windowIndex = pane.windowIndex,
+                    sessionId = pane.sessionId,
+                    title = pane.title,
+                    cwd = pane.cwd,
+                    currentCommand = pane.currentCommand,
+                    paneTty = pane.paneTty,
+                    inCopyMode = pane.inCopyMode,
+                    terminalState = state,
+                )
+                paneRows[pane.paneId] = row
                 val producerJob = state.attachExternalProducer(
                     scope = bridgeScope,
                     stdout = client.outputFor(pane.paneId).map { it.data },
@@ -1473,20 +1487,16 @@ public class TmuxSessionViewModel @Inject constructor(
                     // until seedPrewarmedPane applies the capture-pane snapshot,
                     // so the snapshot cannot race the live stream.
                     awaitSeed = true,
+                    onTerminalFeedFailure = {
+                        markPrewarmedPaneSurfaceError(
+                            paneId = pane.paneId,
+                            paneRows = paneRows,
+                            paneProducerJobs = paneProducerJobs,
+                            paneInputQueues = paneInputQueues,
+                            paneInputJobs = paneInputJobs,
+                        )
+                    },
                 )
-                val row = TmuxPaneState(
-                    paneId = pane.paneId,
-                    windowId = pane.windowId,
-                    windowIndex = pane.windowIndex,
-                    sessionId = pane.sessionId,
-                    title = pane.title,
-                    cwd = pane.cwd,
-                    currentCommand = pane.currentCommand,
-                    paneTty = pane.paneTty,
-                    inCopyMode = pane.inCopyMode,
-                    terminalState = state,
-                )
-                paneRows[pane.paneId] = row
                 paneProducerJobs[pane.paneId] = producerJob
                 // Issue #448 (epic #432 slice C): also tap the prewarmed
                 // pane's shared output flow for new-port detection.
@@ -1510,6 +1520,22 @@ public class TmuxSessionViewModel @Inject constructor(
             ).closePartialPrewarm()
             throw t
         }
+    }
+
+    private fun markPrewarmedPaneSurfaceError(
+        paneId: String,
+        paneRows: MutableMap<String, TmuxPaneState>,
+        paneProducerJobs: MutableMap<String, Job>,
+        paneInputQueues: MutableMap<String, TmuxPaneInputQueue>,
+        paneInputJobs: MutableMap<String, Job>,
+    ) {
+        val existing = paneRows[paneId] ?: return
+        if (existing.surfaceError) return
+        paneProducerJobs.remove(paneId)?.cancel()
+        paneInputJobs.remove(paneId)?.cancel()
+        paneInputQueues.remove(paneId)?.close()
+        runCatching { existing.terminalState.detachExternalProducer() }
+        paneRows[paneId] = existing.copy(surfaceError = true)
     }
 
     private suspend fun seedPrewarmedPane(client: TmuxClient, pane: TmuxPaneState) {
@@ -4234,6 +4260,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 // deltas and strand frames. The gate opens when the seed lands
                 // (or via the seed-failure fallback below).
                 awaitSeed = true,
+                onTerminalFeedFailure = { cause ->
+                    if (cause is TerminalSeedGateOverflowException) {
+                        handleTerminalSeedGateOverflow(paneId, cause)
+                    } else {
+                        reportTerminalSurfaceFailure(paneId, cause)
+                    }
+                },
             )
         }.onSuccess { job ->
             paneProducerJobs[paneId] = job
@@ -4400,6 +4433,53 @@ public class TmuxSessionViewModel @Inject constructor(
         paneRows[overflow.paneId] = errored
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == overflow.paneId) errored else row }
+        }
+    }
+
+    private fun handleTerminalSeedGateOverflow(
+        paneId: String,
+        overflow: TerminalSeedGateOverflowException,
+    ) {
+        val existing = paneRows[paneId] ?: return
+        if (existing.surfaceError) return
+        Log.w(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-terminal-seed-gate-overflow pane=$paneId " +
+                "pendingBytes=${overflow.pendingBytes} incomingBytes=${overflow.incomingBytes} " +
+                "maxBytes=${overflow.maxBytes} status=${_connectionStatus.value}",
+            overflow,
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "terminal_output_overflow",
+            "pane" to paneId,
+            "pendingBytes" to overflow.pendingBytes,
+            "incomingBytes" to overflow.incomingBytes,
+            "maxBytes" to overflow.maxBytes,
+            "status" to _connectionStatus.value.javaClass.simpleName,
+            "source" to "seed_gate_live_buffer",
+            "hostId" to activeTarget?.hostId,
+            "host" to activeTarget?.host,
+            "port" to activeTarget?.port,
+            "user" to activeTarget?.user,
+            "session" to activeTarget?.sessionName,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
+            "generation" to connectGeneration,
+            "attempt" to activeAttachMilestone?.attempt,
+            "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
+        )
+
+        paneProducerJobs.remove(paneId)?.cancel()
+        paneOutputActivityJobs.remove(paneId)?.cancel()
+        panePortDetectorJobs.remove(paneId)?.cancel()
+        paneInputJobs.remove(paneId)?.cancel()
+        paneInputQueues.remove(paneId)?.close()
+        runCatching { existing.terminalState.detachExternalProducer() }
+
+        val errored = existing.copy(surfaceError = true)
+        paneRows[paneId] = errored
+        _panes.update { rows ->
+            rows.map { row -> if (row.paneId == paneId) errored else row }
         }
     }
 
@@ -4671,9 +4751,15 @@ public class TmuxSessionViewModel @Inject constructor(
             .let { parseTmuxPaneCursor(it) }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
         val appendStartedAtMs = SystemClock.elapsedRealtime()
-        pane.terminalState.appendRemoteOutput(
-            response.output.toTerminalViewportBytes(cursor),
-        )
+        try {
+            pane.terminalState.appendRemoteOutput(
+                response.output.toTerminalViewportBytes(cursor),
+            )
+        } catch (cause: Throwable) {
+            if (cause is CancellationException) throw cause
+            reportTerminalSurfaceFailure(pane.paneId, cause)
+            return false
+        }
         if (recordMilestone) {
             activeAttachMilestone?.let { milestone ->
                 if (!milestone.firstCaptureReadyLogged) {

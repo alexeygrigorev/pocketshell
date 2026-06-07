@@ -22,6 +22,7 @@ import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.uikit.model.KeyModifierState
@@ -2876,6 +2877,121 @@ class TmuxSessionViewModelTest {
                 "local overflow must not start reconnect diagnostics",
                 diagnostics.eventsNamed("reconnect_start").isEmpty(),
             )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
+    fun seedGateLiveBufferOverflowIsLocalPaneErrorNotReconnect() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val diagnostics = installRecordingDiagnosticSink()
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
+        val client = FakeTmuxClient()
+        try {
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "codex",
+                client = client,
+            )
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        "%0",
+                        "@0",
+                        "\$0",
+                        "codex",
+                        paneIndex = 0,
+                        sessionName = "codex",
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val emittedConnectionStatuses =
+                mutableListOf<TmuxSessionViewModel.ConnectionStatus>()
+            val statusCollector = launch {
+                vm.connectionStatus.collect { status ->
+                    emittedConnectionStatuses += status
+                }
+            }
+            runCurrent()
+
+            try {
+                client.emittedEvents.emit(
+                    ControlEvent.Output(
+                        "%0",
+                        ByteArray(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1),
+                    ),
+                )
+
+                val surfaced = withTimeoutOrNull(5_000) {
+                    while (!vm.panes.value.single().surfaceError) {
+                        shadowOf(Looper.getMainLooper()).idle()
+                        runCurrent()
+                        delay(10)
+                    }
+                    true
+                } ?: false
+
+                assertTrue(
+                    "seed-gate live buffer overflow should become a local pane surface error",
+                    surfaced,
+                )
+                val connectionFailureStatuses = emittedConnectionStatuses.filter { status ->
+                    status is TmuxSessionViewModel.ConnectionStatus.Connecting ||
+                        status is TmuxSessionViewModel.ConnectionStatus.Reconnecting ||
+                        status is TmuxSessionViewModel.ConnectionStatus.Failed
+                }
+                assertTrue(
+                    "seed-gate overflow must not emit reconnect/disconnect VM states; " +
+                        "observed=$emittedConnectionStatuses",
+                    connectionFailureStatuses.isEmpty(),
+                )
+                assertTrue(
+                    "seed-gate overflow is terminal-local backpressure, not an SSH/tmux disconnect",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+                assertEquals(
+                    "stable mocked transport must not be reopened for local seed-gate overflow",
+                    0,
+                    connector.connectCount,
+                )
+                assertEquals(
+                    "local seed-gate overflow must not enqueue tmux reconnect attempts",
+                    0,
+                    TMUX_CONNECT_ATTEMPTS.get(),
+                )
+                assertFalse(
+                    "local seed-gate overflow must not flip the tmux disconnected signal",
+                    client.disconnectedSignal.value,
+                )
+
+                val overflow = diagnostics.eventsNamed("terminal_output_overflow").single()
+                assertEquals("seed_gate_live_buffer", overflow.fields["source"])
+                assertEquals("%0", overflow.fields["pane"])
+                assertTrue(
+                    "local overflow must not be logged as passive SSH/tmux EOF",
+                    diagnostics.eventsNamed("passive_disconnect").isEmpty(),
+                )
+                assertTrue(
+                    "local overflow must not start reconnect diagnostics",
+                    diagnostics.eventsNamed("reconnect_start").isEmpty(),
+                )
+            } finally {
+                statusCollector.cancel()
+            }
         } finally {
             diagnostics.close()
         }

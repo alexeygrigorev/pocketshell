@@ -14,6 +14,7 @@ import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -507,6 +508,7 @@ class TerminalSurfaceState internal constructor(
         remoteStdin: OutputStream? = null,
         suppressQueryResponses: Boolean = false,
         awaitSeed: Boolean = false,
+        onTerminalFeedFailure: ((Throwable) -> Unit)? = null,
     ): Job {
         // Tear down any existing bridge so we never have two producers
         // racing on the same emulator.
@@ -545,21 +547,31 @@ class TerminalSurfaceState internal constructor(
             try {
                 stdout.collect { bytes ->
                     if (bytes.isNotEmpty()) {
-                        val clean = if (suppressQueryResponses) {
-                            TerminalQueryResponseSanitizer.sanitize(bytes)
-                        } else {
-                            bytes
-                        }
-                        if (clean.isNotEmpty()) {
-                            newBridge.feedBytes(clean)
-                            _output.tryEmit(clean)
-                            // Tick the buffer signal so debounced consumers of
-                            // [flowOfMatches] re-run the detector. Cheap: just a
-                            // counter increment.
-                            bufferTick.value = bufferTick.value + 1
+                        try {
+                            val clean = if (suppressQueryResponses) {
+                                TerminalQueryResponseSanitizer.sanitize(bytes)
+                            } else {
+                                bytes
+                            }
+                            if (clean.isNotEmpty()) {
+                                newBridge.feedBytes(clean)
+                                _output.tryEmit(clean)
+                                // Tick the buffer signal so debounced consumers of
+                                // [flowOfMatches] re-run the detector. Cheap: just a
+                                // counter increment.
+                                bufferTick.value = bufferTick.value + 1
+                            }
+                        } catch (t: Throwable) {
+                            if (t is CancellationException) throw t
+                            runCatching { onTerminalFeedFailure?.invoke(t) }
+                            throw TerminalProducerFeedFailure(t)
                         }
                     }
                 }
+            } catch (t: TerminalProducerFeedFailure) {
+                // Feed/render failures are local to the terminal surface. The
+                // owner callback above decides how to expose recovery without
+                // letting the producer exception escape into SSH/tmux lifecycle.
             } finally {
                 // If the producer flow completes naturally (SSH session
                 // closed), tear the bridge down so the View's references
@@ -601,3 +613,5 @@ class TerminalSurfaceState internal constructor(
         private const val MATCH_DEBOUNCE_MS = 250L
     }
 }
+
+private class TerminalProducerFeedFailure(cause: Throwable) : RuntimeException(cause)

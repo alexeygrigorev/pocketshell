@@ -1,9 +1,12 @@
 package com.pocketshell.core.terminal.ui
 
 import android.os.Looper
+import com.pocketshell.core.terminal.bridge.SshTerminalBridge
+import com.pocketshell.core.terminal.bridge.TerminalSeedGateOverflowException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
@@ -168,6 +171,48 @@ class TerminalSurfaceStateInputRoutingTest {
             )
         } finally {
             slowCollector.cancel()
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun externalProducerFeedFailureInvokesLocalCallbackAndDoesNotFailParentScope() = runBlocking {
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val failure = CompletableDeferred<Throwable>()
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = RecordingOutputStream(),
+            awaitSeed = true,
+            onTerminalFeedFailure = { cause ->
+                failure.complete(cause)
+            },
+        )
+        yield()
+
+        try {
+            stdout.emit(ByteArray(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1))
+
+            val cause = withTimeout(2_000) { failure.await() }
+            assertTrue(
+                "seed-gate feed overflow should surface through the local terminal callback",
+                cause is TerminalSeedGateOverflowException,
+            )
+            withTimeout(2_000) {
+                while (producerJob.isActive) {
+                    shadowOf(Looper.getMainLooper()).idle()
+                    delay(10)
+                }
+            }
+            assertTrue(
+                "terminal feed failure must be contained to the producer job",
+                producerScope.coroutineContext[Job]?.isActive == true,
+            )
+        } finally {
             producerJob.cancel()
             producerScope.cancel()
             state.detachExternalProducer()

@@ -6,6 +6,7 @@ import androidx.annotation.RequiresPermission
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
@@ -282,6 +283,7 @@ public class PromptComposerViewModel @Inject constructor(
         stage: suspend () -> Result<List<String>>,
     ) {
         if (count <= 0 || attachmentJob?.isActive == true) return
+        DiagnosticEvents.record("action", "attachment_stage_start", "count" to count)
         attachmentJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
@@ -300,6 +302,12 @@ public class PromptComposerViewModel @Inject constructor(
             }
             result.fold(
                 onSuccess = { paths ->
+                    DiagnosticEvents.record(
+                        "action",
+                        "attachment_stage_success",
+                        "requestedCount" to count,
+                        "stagedCount" to paths.count { it.isNotBlank() },
+                    )
                     if (paths.isEmpty()) {
                         _uiState.update {
                             it.copy(
@@ -335,6 +343,13 @@ public class PromptComposerViewModel @Inject constructor(
                     }
                 },
                 onFailure = { error ->
+                    DiagnosticEvents.record(
+                        "action",
+                        "attachment_stage_fail",
+                        "requestedCount" to count,
+                        "cause" to error.javaClass.simpleName,
+                        "message" to error.message,
+                    )
                     _uiState.update {
                         it.copy(
                             attachmentUpload = AttachmentUploadState.Idle,
@@ -479,6 +494,14 @@ public class PromptComposerViewModel @Inject constructor(
         // Send when there is either typed text or at least one attachment.
         // (A pure-attachment send still has a non-empty composed `text`.)
         if (text.isEmpty()) return
+        DiagnosticEvents.record(
+            "action",
+            "composer_send",
+            "textBytes" to text.toByteArray(Charsets.UTF_8).size,
+            "attachmentCount" to attachments.size,
+            "uploadInFlight" to uploadInFlight,
+            "withEnter" to withEnter,
+        )
         // Clear the draft via the same code path the user's typing
         // takes so [SavedStateHandle] is mirrored. Order matters: we
         // emit the SendRequest BEFORE clearing the draft so a slow

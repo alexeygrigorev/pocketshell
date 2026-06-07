@@ -16,6 +16,8 @@
     - `report-archives/` (issue #575): the crash reports screen zips
       local reports there before handing the bundle to Android's share
       sheet.
+    - `diagnostics-export/` (issue #549): Settings -> Diagnostics copies
+      the current connection/action event log there for ACTION_SEND.
 -->
 <paths>
     <cache-path
@@ -27,4 +29,7 @@
     <cache-path
         name="report-archives"
         path="report-archives/" />
+    <cache-path
+        name="diagnostics-export"
+        path="diagnostics-export/" />
 </paths>

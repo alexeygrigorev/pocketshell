@@ -190,6 +190,12 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(agentSubmitEnterDelayMs = snapped)
     }
 
+    fun setDiagnosticsRecordingEnabled(enabled: Boolean) {
+        if (_settings.value.diagnosticsRecordingEnabled == enabled) return
+        prefs.edit().putBoolean(KEY_DIAGNOSTICS_RECORDING_ENABLED, enabled).apply()
+        _settings.value = _settings.value.copy(diagnosticsRecordingEnabled = enabled)
+    }
+
     private fun readSnapshot(): AppSettings {
         val font = prefs.safeFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
@@ -250,6 +256,10 @@ class SettingsRepository @Inject constructor(
                 AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
             ),
         )
+        val diagnosticsRecordingEnabled = prefs.safeBoolean(
+            KEY_DIAGNOSTICS_RECORDING_ENABLED,
+            AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
+        )
         return AppSettings(
             terminalFontSizeSp = font,
             conversationFontSizeSp = conversationFont,
@@ -263,6 +273,7 @@ class SettingsRepository @Inject constructor(
             hostDetailViewMode = hostDetailViewMode,
             usageWarnThresholdPercent = usageWarnPercent,
             agentSubmitEnterDelayMs = agentSubmitEnterDelayMs,
+            diagnosticsRecordingEnabled = diagnosticsRecordingEnabled,
         )
     }
 
@@ -357,5 +368,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_HOST_DETAIL_VIEW_MODE = "host_detail_view_mode"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
         const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
+        const val KEY_DIAGNOSTICS_RECORDING_ENABLED = "diagnostics_recording_enabled"
     }
 }

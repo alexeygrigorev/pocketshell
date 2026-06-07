@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.usage.UsageRemoteSource
 import com.pocketshell.app.usage.UsageScheduler
@@ -92,7 +93,14 @@ class SettingsViewModelTest {
         vault: PromptComposerViewModel.ApiKeyVault = FakeVault(),
         assistantStore: AssistantConfigStore = FakeAssistantStore(),
     ): SettingsViewModel =
-        SettingsViewModel(repo, vault, assistantStore, hostDao, newUsageScheduler())
+        SettingsViewModel(
+            repo,
+            vault,
+            assistantStore,
+            DiagnosticRecorder(context, repo),
+            hostDao,
+            newUsageScheduler(),
+        )
 
     @Before
     fun setUp() {
@@ -156,6 +164,13 @@ class SettingsViewModelTest {
         val vm = newVm()
         vm.setTmuxOnAttachByDefault(false)
         assertEquals(false, repo.settings.value.tmuxOnAttachByDefault)
+    }
+
+    @Test
+    fun `setDiagnosticsRecordingEnabled flows through to repository`() {
+        val vm = newVm()
+        vm.setDiagnosticsRecordingEnabled(true)
+        assertEquals(true, repo.settings.value.diagnosticsRecordingEnabled)
     }
 
     @Test

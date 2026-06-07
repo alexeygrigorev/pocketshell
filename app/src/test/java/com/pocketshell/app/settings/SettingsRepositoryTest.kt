@@ -65,6 +65,7 @@ class SettingsRepositoryTest {
         assertTrue("expected default to be ON", snap.showSystemNotes)
         assertEquals(null, snap.defaultHostId)
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
+        assertEquals(AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED, snap.diagnosticsRecordingEnabled)
     }
 
     @Test
@@ -154,6 +155,14 @@ class SettingsRepositoryTest {
         repo.setTmuxOnAttachByDefault(false)
         assertEquals(false, repo.settings.value.tmuxOnAttachByDefault)
         assertEquals(false, SettingsRepository(context).settings.value.tmuxOnAttachByDefault)
+    }
+
+    @Test
+    fun `setDiagnosticsRecordingEnabled toggles and persists`() {
+        val repo = SettingsRepository(context)
+        repo.setDiagnosticsRecordingEnabled(true)
+        assertEquals(true, repo.settings.value.diagnosticsRecordingEnabled)
+        assertEquals(true, SettingsRepository(context).settings.value.diagnosticsRecordingEnabled)
     }
 
     @Test

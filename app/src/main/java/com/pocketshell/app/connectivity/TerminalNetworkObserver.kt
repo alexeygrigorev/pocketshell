@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -87,6 +88,14 @@ class TerminalNetworkObserver @Inject constructor(
             TAG,
             "terminal-network-change sequence=${change.sequence} reason=${change.reason} " +
                 "previous=${change.previous.logValue} current=${change.current.logValue}",
+        )
+        DiagnosticEvents.record(
+            "network",
+            "validated_default_changed",
+            "sequence" to change.sequence,
+            "reason" to change.reason,
+            "previous" to change.previous.logValue,
+            "current" to change.current.logValue,
         )
         _changes.tryEmit(change)
         return change

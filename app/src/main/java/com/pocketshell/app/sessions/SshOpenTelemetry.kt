@@ -1,6 +1,7 @@
 package com.pocketshell.app.sessions
 
 import android.util.Log
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -28,6 +29,16 @@ internal object SshOpenTelemetry {
             LOG_TAG,
             "ssh-open source=$source sourceCount=$sourceCount total=$totalCount " +
                 "host=$host port=$port user=$user",
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "ssh_open",
+            "source" to source,
+            "sourceCount" to sourceCount,
+            "total" to totalCount,
+            "host" to host,
+            "port" to port,
+            "user" to user,
         )
         return sourceCount
     }

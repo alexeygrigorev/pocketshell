@@ -17,6 +17,7 @@ import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.composer.PromptAttachmentStager
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.snippets.snippetDispatchText
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
@@ -290,6 +291,15 @@ public class SessionViewModel @Inject constructor(
         val target = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf(), hostId)
         if (connectJob?.isActive == true) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
+        DiagnosticEvents.record(
+            "connection",
+            "connect_start",
+            "hostId" to hostId,
+            "host" to host,
+            "port" to port,
+            "user" to user,
+            "mode" to "raw_ssh",
+        )
         closeCurrentConnection(clearActiveTarget = activeTarget != target)
         connectingTarget = target
         refreshReconnectAvailability()
@@ -304,6 +314,15 @@ public class SessionViewModel @Inject constructor(
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = activeTarget ?: connectingTarget ?: return false
+        DiagnosticEvents.record(
+            "action",
+            "reconnect_tapped",
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "mode" to "raw_ssh",
+        )
         connect(
             host = target.host,
             port = target.port,
@@ -466,6 +485,15 @@ public class SessionViewModel @Inject constructor(
             sendTerminalInput("\r".toByteArray())
 
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+            DiagnosticEvents.record(
+                "connection",
+                "connect_success",
+                "hostId" to hostId,
+                "host" to host,
+                "port" to port,
+                "user" to user,
+                "mode" to "raw_ssh",
+            )
             activeTarget = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf(), hostId)
             acquiredLease = null
             connectingTarget = null
@@ -482,6 +510,17 @@ public class SessionViewModel @Inject constructor(
                 ConnectionStatus.Failed(
                     "error: ${t.javaClass.simpleName}: ${t.message}. Tap Reconnect to retry.",
                 )
+            DiagnosticEvents.record(
+                "connection",
+                "connect_fail",
+                "hostId" to hostId,
+                "host" to host,
+                "port" to port,
+                "user" to user,
+                "mode" to "raw_ssh",
+                "cause" to t.javaClass.simpleName,
+                "message" to t.message,
+            )
         } finally {
             val uninstalledLease = acquiredLease
             if (uninstalledLease != null) {
@@ -996,6 +1035,12 @@ public class SessionViewModel @Inject constructor(
     public fun sendToAgentResult(text: String): Boolean {
         val payload = text.trim()
         if (payload.isEmpty()) return true
+        DiagnosticEvents.record(
+            "action",
+            "agent_prompt_send",
+            "textBytes" to payload.toByteArray(Charsets.UTF_8).size,
+            "mode" to "raw_ssh",
+        )
         val current = _agentConversation.value
         val detection = current.detection ?: return false
         // Issue #494: insert the optimistic pending turn FIRST — before any
@@ -1075,6 +1120,7 @@ public class SessionViewModel @Inject constructor(
     }
 
     public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
+        DiagnosticEvents.record("action", "raw_attachment_stage_start", "count" to uris.size)
         // Issue #451: the file picker backgrounds the app while selecting.
         // Attach now behaves like Send: on a not-currently-live session it
         // lazily connects-then-uploads instead of failing fast. #450 keeps
@@ -1093,10 +1139,32 @@ public class SessionViewModel @Inject constructor(
             target != null -> "${target.user}-${target.host}-${target.port}"
             else -> "session"
         }
-        return PromptAttachmentStager(
+        val result = PromptAttachmentStager(
             resolver = applicationContext.contentResolver,
             cacheDir = applicationContext.cacheDir,
         ).stage(session, scopeKey, uris)
+        result.fold(
+            onSuccess = { paths ->
+                DiagnosticEvents.record(
+                    "action",
+                    "raw_attachment_stage_success",
+                    "requestedCount" to uris.size,
+                    "stagedCount" to paths.count { it.isNotBlank() },
+                    "scope" to scopeKey,
+                )
+            },
+            onFailure = { error ->
+                DiagnosticEvents.record(
+                    "action",
+                    "raw_attachment_stage_fail",
+                    "requestedCount" to uris.size,
+                    "scope" to scopeKey,
+                    "cause" to error.javaClass.simpleName,
+                    "message" to error.message,
+                )
+            },
+        )
+        return result
     }
 
     /**
@@ -1166,6 +1234,7 @@ public class SessionViewModel @Inject constructor(
     }
 
     private fun sendTerminalInput(bytes: ByteArray) {
+        DiagnosticEvents.record("action", "raw_terminal_input", "bytes" to bytes.size)
         terminalState.writeInput(bytes)
     }
 
@@ -1193,6 +1262,16 @@ public class SessionViewModel @Inject constructor(
             else -> "Disconnected from $user@$host:$port: ${cause.javaClass.simpleName}: ${cause.message}. " +
                 "Tap Reconnect to retry."
         }
+        DiagnosticEvents.record(
+            "connection",
+            "disconnect",
+            "cause" to (cause?.javaClass?.simpleName ?: "producer_completed"),
+            "message" to cause?.message,
+            "host" to host,
+            "port" to port,
+            "user" to user,
+            "mode" to "raw_ssh",
+        )
         val target = activeTarget ?: connectingTarget ?: RawSshTarget(
             host = host,
             port = port,
@@ -1228,6 +1307,19 @@ public class SessionViewModel @Inject constructor(
                     retryDelayMs = delayMs,
                     reason = reason,
                 )
+                DiagnosticEvents.record(
+                    "connection",
+                    "reconnect_start",
+                    "attempt" to (index + 1),
+                    "maxAttempts" to delays.size,
+                    "retryDelayMs" to delayMs,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "user" to target.user,
+                    "mode" to "raw_ssh",
+                    "reason" to reason,
+                )
                 if (delayMs > 0) delay(delayMs)
                 closeCurrentConnection(clearActiveTarget = false)
                 connectingTarget = target
@@ -1242,6 +1334,16 @@ public class SessionViewModel @Inject constructor(
                     producerScope = viewModelScope,
                 )
                 if (_connectionStatus.value is ConnectionStatus.Connected) {
+                    DiagnosticEvents.record(
+                        "connection",
+                        "reconnect_success",
+                        "attempt" to (index + 1),
+                        "hostId" to target.hostId,
+                        "host" to target.host,
+                        "port" to target.port,
+                        "user" to target.user,
+                        "mode" to "raw_ssh",
+                    )
                     autoReconnectJob = null
                     return@launch
                 }
@@ -1250,6 +1352,17 @@ public class SessionViewModel @Inject constructor(
             refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Failed(
                 "$reason Auto reconnect failed after ${delays.size} attempts.",
+            )
+            DiagnosticEvents.record(
+                "connection",
+                "reconnect_fail",
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "mode" to "raw_ssh",
+                "attempts" to delays.size,
+                "reason" to reason,
             )
             autoReconnectJob = null
         }

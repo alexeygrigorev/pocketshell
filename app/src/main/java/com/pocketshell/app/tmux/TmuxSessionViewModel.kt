@@ -22,6 +22,7 @@ import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
@@ -525,6 +526,25 @@ public class TmuxSessionViewModel @Inject constructor(
             "requestedTrigger" to trigger.logValue,
             "generation" to generation,
         )
+        DiagnosticEvents.record(
+            "connection",
+            when (effectiveTrigger) {
+                TmuxConnectTrigger.Reconnect,
+                TmuxConnectTrigger.AutoReconnect,
+                TmuxConnectTrigger.NetworkReconnect,
+                -> "reconnect_start"
+                else -> "connect_start"
+            },
+            "attempt" to attempt,
+            "hostId" to hostId,
+            "host" to host,
+            "port" to port,
+            "user" to user,
+            "session" to target.sessionName,
+            "trigger" to effectiveTrigger.logValue,
+            "requestedTrigger" to trigger.logValue,
+            "generation" to generation,
+        )
         Log.i(
             ISSUE_145_RECONNECT_TAG,
             "tmux-connect-attempt count=$attempt trigger=${effectiveTrigger.logValue} " +
@@ -543,6 +563,18 @@ public class TmuxSessionViewModel @Inject constructor(
         }
 
         if (tryActivateCachedRuntime(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)) {
+            DiagnosticEvents.record(
+                "connection",
+                "connect_success",
+                "attempt" to attempt,
+                "hostId" to hostId,
+                "host" to host,
+                "port" to port,
+                "user" to user,
+                "session" to target.sessionName,
+                "trigger" to effectiveTrigger.logValue,
+                "source" to "runtime_cache",
+            )
             return
         }
         cancelTmuxSessionPrewarm()
@@ -784,6 +816,15 @@ public class TmuxSessionViewModel @Inject constructor(
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = activeTarget ?: connectingTarget ?: return false
+        DiagnosticEvents.record(
+            "action",
+            "reconnect_tapped",
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+        )
         connect(
             hostId = target.hostId,
             hostName = target.hostName,
@@ -942,6 +983,16 @@ public class TmuxSessionViewModel @Inject constructor(
                 targetLogFields(target) +
                 intent?.target?.let { " intendedSession=${it.sessionName}" }.orEmpty() +
                 intent?.trigger?.let { " intendedTrigger=${it.logValue}" }.orEmpty(),
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "disconnect",
+            "cause" to "background_teardown",
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
         )
         if (backgroundDetachJob?.isActive == true) return
         val preserveConnectingTarget = connectingTarget?.takeIf { connecting ->
@@ -1952,6 +2003,24 @@ public class TmuxSessionViewModel @Inject constructor(
                 event = "tmux-connect-ready",
                 trigger = trigger,
             )
+            DiagnosticEvents.record(
+                "connection",
+                when (trigger) {
+                    TmuxConnectTrigger.Reconnect,
+                    TmuxConnectTrigger.AutoReconnect,
+                    TmuxConnectTrigger.NetworkReconnect,
+                    -> "reconnect_success"
+                    else -> "connect_success"
+                },
+                "attempt" to attempt,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "trigger" to trigger.logValue,
+                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+            )
             maybeRefreshControlClientSize()
             // Issue #553: tmux `-CC` does not re-emit existing pane content on
             // a fresh control-client attach — only subsequent `%output`
@@ -2248,6 +2317,29 @@ public class TmuxSessionViewModel @Inject constructor(
                 detail = "cause=${cause.javaClass.simpleName}: ${cause.message}",
             ),
             cause,
+        )
+        val trigger = latestConnectIntent?.takeIf {
+            sameSessionIdentity(it.target, target)
+        }?.trigger ?: TmuxConnectTrigger.UserTap
+        DiagnosticEvents.record(
+            "connection",
+            when (trigger) {
+                TmuxConnectTrigger.Reconnect,
+                TmuxConnectTrigger.AutoReconnect,
+                TmuxConnectTrigger.NetworkReconnect,
+                -> "reconnect_fail"
+                else -> "connect_fail"
+            },
+            "attempt" to attempt,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "trigger" to trigger.logValue,
+            "cause" to cause.javaClass.simpleName,
+            "message" to cause.message,
+            "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
         )
         withContext(NonCancellable) {
             closeCurrentConnectionAndJoin()
@@ -2696,6 +2788,18 @@ public class TmuxSessionViewModel @Inject constructor(
                     targetLogFields(target) +
                     " elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}",
             )
+            DiagnosticEvents.record(
+                "connection",
+                "reconnect_success",
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                "source" to "silent_reattach",
+                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+            )
             true
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -2802,6 +2906,18 @@ public class TmuxSessionViewModel @Inject constructor(
                     targetLogFields(target) +
                     " elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}",
             )
+            DiagnosticEvents.record(
+                "connection",
+                "reconnect_success",
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                "source" to "silent_transport_reattach",
+                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+            )
             true
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -2833,6 +2949,15 @@ public class TmuxSessionViewModel @Inject constructor(
             "tmux-mid-session-disconnect host=${current?.host ?: target?.host.orEmpty()} " +
                 "port=${current?.port ?: target?.port ?: 0} " +
                 "user=${current?.user ?: target?.user.orEmpty()}",
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "disconnect",
+            "cause" to "tmux_control_channel_closed",
+            "host" to (current?.host ?: target?.host.orEmpty()),
+            "port" to (current?.port ?: target?.port ?: 0),
+            "user" to (current?.user ?: target?.user.orEmpty()),
+            "session" to (target?.sessionName ?: "unknown"),
         )
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
@@ -2880,6 +3005,20 @@ public class TmuxSessionViewModel @Inject constructor(
                     retryDelayMs = delayMs,
                     reason = reason,
                 )
+                DiagnosticEvents.record(
+                    "connection",
+                    "reconnect_start",
+                    "attempt" to (index + 1),
+                    "maxAttempts" to delays.size,
+                    "retryDelayMs" to delayMs,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "user" to target.user,
+                    "session" to target.sessionName,
+                    "trigger" to trigger.logValue,
+                    "reason" to reason,
+                )
                 if (delayMs > 0) delay(delayMs)
                 if (!appActive) return@launch
                 val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
@@ -2899,6 +3038,18 @@ public class TmuxSessionViewModel @Inject constructor(
                     "tmux-connect-attempt count=$attempt trigger=${trigger.logValue} " +
                         "requestedTrigger=${trigger.logValue} generation=$generation " +
                         targetLogFields(target),
+                )
+                DiagnosticEvents.record(
+                    "connection",
+                    "connect_start",
+                    "attempt" to attempt,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "user" to target.user,
+                    "session" to target.sessionName,
+                    "trigger" to trigger.logValue,
+                    "generation" to generation,
                 )
                 withContext(NonCancellable) {
                     closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
@@ -3734,6 +3885,13 @@ public class TmuxSessionViewModel @Inject constructor(
             "tmux-terminal-output-backlog-overflow pane=${overflow.paneId} " +
                 "droppedEvents=${overflow.droppedEvents} status=${_connectionStatus.value}",
         )
+        DiagnosticEvents.record(
+            "connection",
+            "terminal_output_overflow",
+            "pane" to overflow.paneId,
+            "droppedEvents" to overflow.droppedEvents,
+            "status" to _connectionStatus.value.javaClass.simpleName,
+        )
 
         paneProducerJobs.remove(overflow.paneId)?.cancel()
         paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
@@ -4424,6 +4582,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
+        DiagnosticEvents.record("action", "tmux_attachment_stage_start", "count" to uris.size)
         val context = applicationContext
             ?: return Result.failure(IllegalStateException("Attachment staging unavailable."))
         // Issue #451: the system file picker backgrounds the app while the
@@ -4444,10 +4603,32 @@ public class TmuxSessionViewModel @Inject constructor(
             null -> "tmux-session"
             else -> "host-${target.hostId}-${target.sessionName}"
         }
-        return PromptAttachmentStager(
+        val result = PromptAttachmentStager(
             resolver = context.contentResolver,
             cacheDir = context.cacheDir,
         ).stage(session, scopeKey, uris)
+        result.fold(
+            onSuccess = { paths ->
+                DiagnosticEvents.record(
+                    "action",
+                    "tmux_attachment_stage_success",
+                    "requestedCount" to uris.size,
+                    "stagedCount" to paths.count { it.isNotBlank() },
+                    "scope" to scopeKey,
+                )
+            },
+            onFailure = { error ->
+                DiagnosticEvents.record(
+                    "action",
+                    "tmux_attachment_stage_fail",
+                    "requestedCount" to uris.size,
+                    "scope" to scopeKey,
+                    "cause" to error.javaClass.simpleName,
+                    "message" to error.message,
+                )
+            },
+        )
+        return result
     }
 
     /**
@@ -4495,6 +4676,12 @@ public class TmuxSessionViewModel @Inject constructor(
     internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
+        DiagnosticEvents.record(
+            "action",
+            "agent_prompt_send",
+            "pane" to paneId,
+            "textBytes" to payload.toByteArray(Charsets.UTF_8).size,
+        )
         val current = _agentConversations.value[paneId]
             ?: return Result.failure(IllegalStateException("No agent conversation for pane $paneId."))
         val detection = current.detection
@@ -5028,6 +5215,7 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun writeInputToPane(paneId: String, bytes: ByteArray) {
         if (bytes.isEmpty()) return
+        DiagnosticEvents.record("action", "pane_input", "pane" to paneId, "bytes" to bytes.size)
         val client = clientRef ?: return
         bridgeScope.launch {
             writeInputToPaneResult(client, paneId, bytes)
@@ -5062,6 +5250,13 @@ public class TmuxSessionViewModel @Inject constructor(
         prepareSmartText: Boolean = true,
     ) {
         if (byte !in 0x00..0x1F || repeatCount <= 0) return
+        DiagnosticEvents.record(
+            "action",
+            "pane_control_input",
+            "pane" to paneId,
+            "byte" to byte,
+            "repeatCount" to repeatCount,
+        )
         val client = clientRef ?: return
         if (prepareSmartText) {
             paneRows[paneId]?.terminalState?.prepareForRawTerminalInput(TerminalRawInputPolicy.ClearSmartText)
@@ -5200,6 +5395,12 @@ public class TmuxSessionViewModel @Inject constructor(
                         val batch = newQueue.takeBatch() ?: break
                         val targetClient = client ?: clientRef ?: continue
                         val sendStartedNs = System.nanoTime()
+                        DiagnosticEvents.record(
+                            "action",
+                            "pane_input_batch",
+                            "pane" to paneId,
+                            "bytes" to batch.bytes.size,
+                        )
                         runCatching { sendInputBytesToPane(targetClient, paneId, batch.bytes) }
                             .onSuccess {
                                 newQueue.recordSent(batch, System.nanoTime() - sendStartedNs)

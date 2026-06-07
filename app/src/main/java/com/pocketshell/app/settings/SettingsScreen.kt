@@ -1,7 +1,9 @@
 package com.pocketshell.app.settings
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,6 +37,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,6 +51,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.assistant.AssistantProvider
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
@@ -57,6 +61,7 @@ import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import java.io.File
 import kotlin.math.roundToInt
 
 /**
@@ -110,6 +115,7 @@ fun SettingsScreen(
     val settings by viewModel.state.collectAsState()
     val keyStatus by viewModel.keyStatus.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
+    val diagnosticsShareState by viewModel.diagnosticsShareState.collectAsState()
     val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
     val hosts by viewModel.hosts.collectAsState()
     val usageProviderRecords by viewModel.usageProviderRecords.collectAsState()
@@ -132,6 +138,27 @@ fun SettingsScreen(
             )
         } catch (_: Exception) {
             AppBuildInfo(versionName = "unknown", versionCode = null)
+        }
+    }
+
+    LaunchedEffect(diagnosticsShareState) {
+        when (val state = diagnosticsShareState) {
+            is DiagnosticsShareState.Prepared -> {
+                runCatching { shareDiagnosticsFile(context, state.file) }
+                    .onSuccess { viewModel.markDiagnosticsShareLaunched() }
+                    .onFailure { error ->
+                        viewModel.diagnosticsShareLaunchFailed(
+                            error.message ?: "Could not open share sheet.",
+                        )
+                    }
+            }
+            is DiagnosticsShareState.Failed -> {
+                Toast.makeText(context, state.message, Toast.LENGTH_SHORT).show()
+                viewModel.clearDiagnosticsShareState()
+            }
+            DiagnosticsShareState.Idle,
+            DiagnosticsShareState.Preparing,
+            -> Unit
         }
     }
 
@@ -216,7 +243,14 @@ fun SettingsScreen(
                 )
             }
             item {
-                DiagnosticsSection(onOpenCrashReports = onOpenCrashReports)
+                DiagnosticsSection(
+                    recordingEnabled = settings.diagnosticsRecordingEnabled,
+                    shareState = diagnosticsShareState,
+                    onRecordingChange = viewModel::setDiagnosticsRecordingEnabled,
+                    onShareLog = viewModel::shareDiagnosticsLog,
+                    onClearLog = viewModel::clearDiagnosticsLog,
+                    onOpenCrashReports = onOpenCrashReports,
+                )
             }
             item {
                 AboutFooter(appBuildInfo = appBuildInfo)
@@ -1574,10 +1608,69 @@ private fun UsageSection(
 }
 
 @Composable
-private fun DiagnosticsSection(onOpenCrashReports: () -> Unit) {
+private fun DiagnosticsSection(
+    recordingEnabled: Boolean,
+    shareState: DiagnosticsShareState,
+    onRecordingChange: (Boolean) -> Unit,
+    onShareLog: () -> Unit,
+    onClearLog: () -> Unit,
+    onOpenCrashReports: () -> Unit,
+) {
     Column {
         SectionLabel("Diagnostics")
         SectionCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Record diagnostics log",
+                        color = PocketShellColors.Text,
+                        style = PocketShellType.bodyDense,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Connection, lifecycle, network, and coarse action metadata. Command contents and keystrokes are not recorded.",
+                        color = PocketShellColors.TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                Switch(
+                    checked = recordingEnabled,
+                    onCheckedChange = onRecordingChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PocketShellColors.OnAccent,
+                        checkedTrackColor = PocketShellColors.Accent,
+                        uncheckedThumbColor = PocketShellColors.TextSecondary,
+                        uncheckedTrackColor = PocketShellColors.Surface,
+                        uncheckedBorderColor = PocketShellColors.Border,
+                    ),
+                    modifier = Modifier.testTag(DIAGNOSTICS_RECORDING_SWITCH_TAG),
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            ListRow(
+                title = if (shareState is DiagnosticsShareState.Preparing) {
+                    "Preparing diagnostics log..."
+                } else {
+                    "Share diagnostics log"
+                },
+                trailing = { NavChevron() },
+                onClick = {
+                    if (shareState !is DiagnosticsShareState.Preparing) {
+                        onShareLog()
+                    }
+                },
+                modifier = Modifier.testTag(DIAGNOSTICS_SHARE_LOG_TAG),
+            )
+            ListRow(
+                title = "Clear diagnostics log",
+                onClick = onClearLog,
+                modifier = Modifier.testTag(DIAGNOSTICS_CLEAR_LOG_TAG),
+            )
+            Spacer(modifier = Modifier.height(12.dp))
             SettingsNavRow(
                 title = "Crash reports",
                 description = "Local-only crash logs you can share manually.",
@@ -1586,6 +1679,20 @@ private fun DiagnosticsSection(onOpenCrashReports: () -> Unit) {
             )
         }
     }
+}
+
+private fun shareDiagnosticsFile(context: android.content.Context, file: File) {
+    val authority = context.packageName + ".fileprovider"
+    val uri = FileProvider.getUriForFile(context, authority, file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, "PocketShell diagnostics log")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share diagnostics log").apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    })
 }
 
 /**
@@ -1710,6 +1817,9 @@ internal const val AGENT_SUBMIT_DELAY_VALUE_TAG = "settings:terminal:agent-submi
 internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"
 internal const val DEFAULT_HOST_EMPTY_TAG = "settings:startup:default-host:empty"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
+internal const val DIAGNOSTICS_RECORDING_SWITCH_TAG = "settings:diagnostics:recording-switch"
+internal const val DIAGNOSTICS_SHARE_LOG_TAG = "settings:diagnostics:share-log"
+internal const val DIAGNOSTICS_CLEAR_LOG_TAG = "settings:diagnostics:clear-log"
 internal const val USAGE_OPEN_TAG = "settings:usage:open"
 internal const val USAGE_EMPTY_HINT_TAG = "settings:usage:empty-hint"
 internal const val USAGE_EMPTY_HINT_DOCS_LINK_TAG = "settings:usage:empty-hint:docs-link"

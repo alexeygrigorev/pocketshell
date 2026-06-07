@@ -3,6 +3,7 @@ package com.pocketshell.app.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.core.assistant.AssistantProvider
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -45,6 +47,7 @@ class SettingsViewModel @Inject constructor(
     private val repository: SettingsRepository,
     private val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
     private val assistantConfigStore: AssistantConfigStore,
+    private val diagnosticRecorder: DiagnosticRecorder,
     hostDao: HostDao,
     usageScheduler: UsageScheduler,
 ) : ViewModel() {
@@ -138,6 +141,11 @@ class SettingsViewModel @Inject constructor(
      */
     val assistantState: StateFlow<AssistantSettingsUiState> = _assistantState.asStateFlow()
 
+    private val _diagnosticsShareState: MutableStateFlow<DiagnosticsShareState> =
+        MutableStateFlow(DiagnosticsShareState.Idle)
+    val diagnosticsShareState: StateFlow<DiagnosticsShareState> =
+        _diagnosticsShareState.asStateFlow()
+
     fun setTerminalFontSizeSp(sizeSp: Float) = repository.setTerminalFontSizeSp(sizeSp)
 
     fun setTerminalKeyboardMode(mode: TerminalKeyboardMode) =
@@ -201,6 +209,49 @@ class SettingsViewModel @Inject constructor(
      */
     fun setAgentSubmitEnterDelayMs(delayMs: Int) =
         repository.setAgentSubmitEnterDelayMs(delayMs)
+
+    fun setDiagnosticsRecordingEnabled(enabled: Boolean) =
+        repository.setDiagnosticsRecordingEnabled(enabled)
+
+    fun shareDiagnosticsLog() {
+        if (_diagnosticsShareState.value is DiagnosticsShareState.Preparing) return
+        _diagnosticsShareState.value = DiagnosticsShareState.Preparing
+        viewModelScope.launch {
+            val file = runCatching { diagnosticRecorder.exportSnapshot() }
+                .getOrElse { error ->
+                    _diagnosticsShareState.value = DiagnosticsShareState.Failed(
+                        error.message ?: "Could not prepare diagnostics log.",
+                    )
+                    return@launch
+                }
+            if (file == null) {
+                _diagnosticsShareState.value = DiagnosticsShareState.Failed("No diagnostics log recorded yet.")
+            } else {
+                _diagnosticsShareState.value = DiagnosticsShareState.Prepared(file)
+            }
+        }
+    }
+
+    fun markDiagnosticsShareLaunched() {
+        if (_diagnosticsShareState.value is DiagnosticsShareState.Prepared) {
+            _diagnosticsShareState.value = DiagnosticsShareState.Idle
+        }
+    }
+
+    fun diagnosticsShareLaunchFailed(message: String) {
+        _diagnosticsShareState.value = DiagnosticsShareState.Failed(message)
+    }
+
+    fun clearDiagnosticsShareState() {
+        _diagnosticsShareState.value = DiagnosticsShareState.Idle
+    }
+
+    fun clearDiagnosticsLog() {
+        viewModelScope.launch {
+            diagnosticRecorder.clear()
+            _diagnosticsShareState.value = DiagnosticsShareState.Idle
+        }
+    }
 
     /**
      * Persist [key] through the keystore-backed vault. The caller still
@@ -354,4 +405,11 @@ data class AssistantSettingsUiState(
         AssistantProvider.Anthropic -> anthropicModel
         AssistantProvider.Zai -> zaiModel
     }
+}
+
+sealed interface DiagnosticsShareState {
+    data object Idle : DiagnosticsShareState
+    data object Preparing : DiagnosticsShareState
+    data class Prepared(val file: File) : DiagnosticsShareState
+    data class Failed(val message: String) : DiagnosticsShareState
 }

@@ -9,6 +9,8 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.crash.CrashReporter
+import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
@@ -83,6 +85,9 @@ class App : Application() {
 
     @Inject
     lateinit var tmuxRuntimeCache: TmuxSessionRuntimeCache
+
+    @Inject
+    lateinit var diagnosticRecorder: DiagnosticRecorder
 
     /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
@@ -168,10 +173,12 @@ class App : Application() {
         when (event) {
             Lifecycle.Event.ON_STOP -> {
                 processForeground = false
+                DiagnosticEvents.record("app", "background")
                 backgroundGraceController.onBackground()
             }
             Lifecycle.Event.ON_START -> {
                 processForeground = true
+                DiagnosticEvents.record("app", "foreground")
                 backgroundGraceController.onForeground()
             }
             else -> Unit
@@ -181,6 +188,8 @@ class App : Application() {
     override fun onCreate() {
         StartupTiming.mark("app-on-create-start")
         super.onCreate()
+        DiagnosticEvents.install(diagnosticRecorder)
+        DiagnosticEvents.record("app", "created")
         CrashReporter.install(this)
         StartupTiming.mark("app-crash-reporter-installed")
         // No-background-work hook-up (issue #161 / D21). Attach the
@@ -214,6 +223,14 @@ class App : Application() {
                         "terminal-network-change-deferred sequence=${change.sequence} " +
                             "reason=${change.reason}",
                     )
+                    DiagnosticEvents.record(
+                        "network",
+                        "change_deferred",
+                        "sequence" to change.sequence,
+                        "reason" to change.reason,
+                        "previous" to change.previous.logValue,
+                        "current" to change.current.logValue,
+                    )
                 }
             }
         }
@@ -235,6 +252,15 @@ class App : Application() {
                 "sequence=${change.sequence} reason=${change.reason} " +
                 "previous=${change.previous.logValue} current=${change.current.logValue}",
         )
+        DiagnosticEvents.record(
+            "network",
+            "change",
+            "hookCount" to hooks.size,
+            "sequence" to change.sequence,
+            "reason" to change.reason,
+            "previous" to change.previous.logValue,
+            "current" to change.current.logValue,
+        )
         for (hook in hooks) {
             terminalNetworkScope.launch {
                 runCatching { hook.onNetworkChanged(change) }
@@ -253,6 +279,7 @@ class App : Application() {
             APP_LIFECYCLE_TAG,
             "tmux-on-stop fanout count=${hooks.size}",
         )
+        DiagnosticEvents.record("app", "terminal_background_teardown", "hookCount" to hooks.size)
         for (hook in hooks) {
             tmuxLifecycleScope.launch {
                 runCatching { hook.onBackground() }
@@ -268,6 +295,7 @@ class App : Application() {
             APP_LIFECYCLE_TAG,
             "tmux-on-start fanout count=${hooks.size}",
         )
+        DiagnosticEvents.record("app", "terminal_foreground_reattach", "hookCount" to hooks.size)
         for (hook in hooks) {
             tmuxLifecycleScope.launch {
                 runCatching { hook.onForeground() }
@@ -353,10 +381,12 @@ internal class BackgroundGraceController(
         if (graceJob?.isActive == true) return
         teardownFired = false
         Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$graceMillis")
+        DiagnosticEvents.record("app", "background_grace_start", "millis" to graceMillis)
         graceJob = scope.launch {
             delay(graceMillis)
             teardownFired = true
             Log.i(GRACE_LIFECYCLE_TAG, "grace-window-elapsed teardown")
+            DiagnosticEvents.record("app", "background_grace_elapsed", "teardown" to true)
             onGraceElapsed()
         }
     }
@@ -369,6 +399,11 @@ internal class BackgroundGraceController(
         Log.i(
             GRACE_LIFECYCLE_TAG,
             "grace-window-foreground resumedWithinGrace=$resumedWithinGrace",
+        )
+        DiagnosticEvents.record(
+            "app",
+            "background_grace_foreground",
+            "resumedWithinGrace" to resumedWithinGrace,
         )
         scope.launch { onForeground(resumedWithinGrace) }
     }

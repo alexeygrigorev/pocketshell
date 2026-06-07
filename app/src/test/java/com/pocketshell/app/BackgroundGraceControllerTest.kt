@@ -4,6 +4,7 @@ import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -601,6 +602,114 @@ class BackgroundGraceControllerTest {
             listOf("tmux:background", "ssh:stop", "ssh:start", "tmux:foreground"),
             events,
         )
+    }
+
+    @Test
+    fun `foreground at grace boundary waits for background teardown before reattach`() = runTest {
+        val events = mutableListOf<String>()
+        val teardownStarted = CompletableDeferred<Unit>()
+        val allowTeardownToFinish = CompletableDeferred<Unit>()
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                events += "tmux:background:start"
+                teardownStarted.complete(Unit)
+                allowTeardownToFinish.await()
+                events += "tmux:background:finish"
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "tmux:foreground:resumedWithinGrace=$resumedWithinGrace"
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis + 1)
+        runCurrent()
+        teardownStarted.await()
+
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            "post-grace foreground must not reattach while background teardown is still in flight",
+            listOf("tmux:background:start"),
+            events,
+        )
+
+        allowTeardownToFinish.complete(Unit)
+        runCurrent()
+
+        assertEquals(
+            listOf(
+                "tmux:background:start",
+                "tmux:background:finish",
+                "tmux:foreground:resumedWithinGrace=false",
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun `port forwarding remains active while terminal reconnects after grace teardown`() = runTest {
+        val events = mutableListOf<String>()
+        val forwardingActive = true
+        var terminalRuntimeCached = true
+        var sshLeaseStopped = false
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = { events += "terminal:background" },
+                onForeground = { events += "terminal:foreground" },
+            ),
+        )
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onBackground() }
+                terminalRuntimeCached = false
+                sshLeaseStopped = true
+                events += "terminal:runtime-cache-cleared"
+                events += "ssh:stop"
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "ssh:start"
+                if (!resumedWithinGrace) {
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                }
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis + 1)
+        runCurrent()
+
+        assertEquals(
+            "terminal grace teardown must not disable the independent forwarding supervisor",
+            true,
+            forwardingActive,
+        )
+        assertEquals(false, terminalRuntimeCached)
+        assertEquals(true, sshLeaseStopped)
+
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            listOf(
+                "terminal:background",
+                "terminal:runtime-cache-cleared",
+                "ssh:stop",
+                "ssh:start",
+                "terminal:foreground",
+            ),
+            events,
+        )
+        assertEquals(true, forwardingActive)
     }
 
     private fun kotlinx.coroutines.test.TestScope.controller(

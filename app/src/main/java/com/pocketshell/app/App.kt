@@ -640,7 +640,9 @@ internal class BackgroundGraceController(
         val pending = graceJob
         graceJob = null
         val resumedWithinGrace = pending?.isActive == true && !teardownFired
-        pending?.cancel()
+        if (resumedWithinGrace) {
+            pending?.cancel()
+        }
         Log.i(
             GRACE_LIFECYCLE_TAG,
             "grace-window-foreground resumedWithinGrace=$resumedWithinGrace",
@@ -653,7 +655,12 @@ internal class BackgroundGraceController(
             "source" to "process_lifecycle",
             "trigger" to "on_start",
         )
-        scope.launch { onForeground(resumedWithinGrace) }
+        scope.launch {
+            if (!resumedWithinGrace) {
+                pending?.join()
+            }
+            onForeground(resumedWithinGrace)
+        }
     }
 
     /** Test seam: true while the grace timer is counting down. */

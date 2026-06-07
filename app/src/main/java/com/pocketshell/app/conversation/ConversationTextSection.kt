@@ -34,8 +34,8 @@ internal fun ConversationTextSection(
     clipboardLabel: String = "conversation tool $label",
 ) {
     if (body.isEmpty()) return
-    val lineCount = body.count { it == '\n' } + 1
-    val tooLong = lineCount > 200 || body.length > 5000
+    val displayBody = conversationTextSectionDisplayBody(body)
+    val tooLong = displayBody.wasTruncated
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -70,11 +70,43 @@ internal fun ConversationTextSection(
         }
         SelectionContainer(modifier = selectableModifier) {
             Text(
-                text = body,
+                text = displayBody.text,
                 color = PocketShellColors.TermText,
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
             )
         }
     }
+}
+
+internal data class ConversationTextSectionDisplayBody(
+    val text: String,
+    val wasTruncated: Boolean,
+)
+
+/**
+ * Compose still measures the whole `Text` inside a bounded verticalScroll. For
+ * very large tool outputs that can make transcript interaction or tab switching
+ * stall the main thread (#605). Keep Copy wired to the full body, but cap the
+ * rendered preview to the same "too long" boundary the section already used.
+ */
+internal fun conversationTextSectionDisplayBody(body: String): ConversationTextSectionDisplayBody {
+    val lineLimit = 200
+    val charLimit = 5_000
+    val lineCount = body.count { it == '\n' } + 1
+    if (lineCount <= lineLimit && body.length <= charLimit) {
+        return ConversationTextSectionDisplayBody(text = body, wasTruncated = false)
+    }
+
+    var newlineCount = 0
+    var endExclusive = 0
+    while (endExclusive < body.length && endExclusive < charLimit && newlineCount < lineLimit) {
+        if (body[endExclusive] == '\n') newlineCount += 1
+        endExclusive += 1
+    }
+    val preview = body.substring(0, endExclusive).trimEnd()
+    return ConversationTextSectionDisplayBody(
+        text = "$preview\n\n[Output truncated in view. Copy for full text.]",
+        wasTruncated = true,
+    )
 }

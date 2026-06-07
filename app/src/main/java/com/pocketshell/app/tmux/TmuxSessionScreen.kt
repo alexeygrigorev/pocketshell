@@ -3148,10 +3148,12 @@ internal fun TmuxConversationPane(
         val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
         if (showSystemNotes) timelineEvents else timelineEvents.filterNot { it is ConversationEvent.SystemNote }
     }
-    val filteredConversation = remember(visibleEvents, effectiveQuery) {
+    val toolResultPairing = remember(visibleEvents) { visibleEvents.toolResultPairing() }
+    val filteredConversation = remember(visibleEvents, effectiveQuery, toolResultPairing) {
         filterConversationRows(
             events = visibleEvents,
             query = effectiveQuery,
+            pairing = toolResultPairing,
         )
     }
     val filteredEvents = filteredConversation.events
@@ -3164,13 +3166,15 @@ internal fun TmuxConversationPane(
     // collapsed by default, the user's choice is sticky for the lifetime
     // of the conversation pane.
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
-    val runningToolIds = remember(events) { runningToolCallIds(events) }
-    val rowMap = remember(events) { events.associateBy { it.id } }
+    val runningToolIds = remember(visibleEvents, toolResultPairing) {
+        runningToolCallIds(visibleEvents, toolResultPairing)
+    }
     // Issue #573: scrolling upward through a large Codex transcript can
     // compose many older ToolCall rows in quick succession. Looking up each
     // ToolCall's result with a full event-list scan turns that scroll into
     // repeated O(n) work on the UI thread. Index once per event snapshot.
-    val toolResultsByCallId = remember(events) { events.toolResultsByCallId() }
+    // Issue #604: the same index also owns deterministic adjacent fallback
+    // pairing for parser outputs that do not carry a reliable toolCallId.
 
     // Issue #401: terminal-style tail-follow. The pane opens at the newest
     // row and follows appended events until the user intentionally scrolls
@@ -3245,8 +3249,7 @@ internal fun TmuxConversationPane(
                     ConversationEventRow(
                         event = event,
                         runningToolIds = runningToolIds,
-                        eventsById = rowMap,
-                        toolResultsByCallId = toolResultsByCallId,
+                        toolResultPairing = toolResultPairing,
                         isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
                             event.id in filteredConversation.searchExpandedToolCallIds,
                         isMessageExpanded = expandedMessages.value.contains(event.id),
@@ -3469,8 +3472,7 @@ private fun TabsRowWithPulse(
 private fun ConversationEventRow(
     event: ConversationEvent,
     runningToolIds: Set<String>,
-    eventsById: Map<String, ConversationEvent>,
-    toolResultsByCallId: Map<String, ConversationEvent.ToolResult>,
+    toolResultPairing: ToolResultPairing,
     isExplicitlyExpanded: Boolean,
     isMessageExpanded: Boolean,
     onToggleMessageExpand: (String) -> Unit,
@@ -3490,13 +3492,13 @@ private fun ConversationEventRow(
         )
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
-            result = toolResultsByCallId[event.id],
+            result = toolResultPairing.resultsByCallId[event.id],
             isRunning = event.id in runningToolIds,
             isExplicitlyExpanded = isExplicitlyExpanded,
             onToggle = { onToggleExpand(event.id) },
         )
         is ConversationEvent.ToolResult -> {
-            if (event.toolCallId == null || eventsById[event.toolCallId] !is ConversationEvent.ToolCall) {
+            if (event.id !in toolResultPairing.pairedResultIds) {
                 // Orphan tool result with no parent ToolCall — render as a
                 // standalone, very subtle row.
                 ConversationToolResultRow(event)
@@ -3527,22 +3529,65 @@ private fun ConversationMessageRow(
     )
 }
 
-private fun List<ConversationEvent>.toolResultsByCallId(): Map<String, ConversationEvent.ToolResult> =
-    buildMap {
-        for (result in this@toolResultsByCallId.filterIsInstance<ConversationEvent.ToolResult>()) {
-            val toolCallId = result.toolCallId ?: continue
-            putIfAbsent(toolCallId, result)
+internal data class ToolResultPairing(
+    val resultsByCallId: Map<String, ConversationEvent.ToolResult>,
+    val pairedResultIds: Set<String>,
+    val callIdsByResultId: Map<String, String>,
+)
+
+/**
+ * Build the UI's tool-call/result pairing index.
+ *
+ * Explicit parser links win first. Some transcripts can still surface an
+ * unlinked result immediately after its call, so the fallback pairs only the
+ * visible adjacent shape `ToolCall` -> `ToolResult` when that result has no
+ * visible explicit parent and the call does not already have a result. That is
+ * deterministic and intentionally conservative: non-adjacent or many-to-one
+ * ambiguities stay as standalone result rows.
+ */
+internal fun List<ConversationEvent>.toolResultPairing(): ToolResultPairing {
+    val eventsById = associateBy { it.id }
+    val resultsByCallId = linkedMapOf<String, ConversationEvent.ToolResult>()
+    val pairedResultIds = linkedSetOf<String>()
+    val callIdsByResultId = linkedMapOf<String, String>()
+
+    for (result in filterIsInstance<ConversationEvent.ToolResult>()) {
+        val toolCallId = result.toolCallId ?: continue
+        if (eventsById[toolCallId] is ConversationEvent.ToolCall) {
+            if (resultsByCallId.putIfAbsent(toolCallId, result) == null) {
+                pairedResultIds += result.id
+                callIdsByResultId[result.id] = toolCallId
+            }
         }
     }
+
+    for (index in 0 until lastIndex) {
+        val call = this[index] as? ConversationEvent.ToolCall ?: continue
+        val result = this[index + 1] as? ConversationEvent.ToolResult ?: continue
+        if (call.id in resultsByCallId) continue
+        if (result.id in pairedResultIds) continue
+        if (result.hasExplicitVisibleParentToolCall(eventsById)) continue
+        resultsByCallId[call.id] = result
+        pairedResultIds += result.id
+        callIdsByResultId[result.id] = call.id
+    }
+
+    return ToolResultPairing(
+        resultsByCallId = resultsByCallId,
+        pairedResultIds = pairedResultIds,
+        callIdsByResultId = callIdsByResultId,
+    )
+}
 
 /**
  * Identify every tool call that has no matching tool result yet so the
  * compact row can show a running status glyph without expanding details.
  */
-internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
-    val resolved = events
-        .filterIsInstance<ConversationEvent.ToolResult>()
-        .mapNotNullTo(mutableSetOf()) { it.toolCallId }
+internal fun runningToolCallIds(
+    events: List<ConversationEvent>,
+    pairing: ToolResultPairing = events.toolResultPairing(),
+): Set<String> {
+    val resolved = pairing.resultsByCallId.keys
     return events
         .filterIsInstance<ConversationEvent.ToolCall>()
         .map { it.id }
@@ -3553,28 +3598,27 @@ internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
 private fun Set<String>.toggle(id: String): Set<String> =
     if (contains(id)) this - id else this + id
 
-private data class ConversationFilterResult(
+internal data class ConversationFilterResult(
     val events: List<ConversationEvent>,
     val searchExpandedToolCallIds: Set<String> = emptySet(),
 )
 
-private fun filterConversationRows(
+internal fun filterConversationRows(
     events: List<ConversationEvent>,
     query: String,
+    pairing: ToolResultPairing = events.toolResultPairing(),
 ): ConversationFilterResult {
-    val eventsById = events.associateBy { it.id }
     val q = query.trim()
     if (q.isBlank()) {
         return ConversationFilterResult(
-            events = events.filterNot { it is ConversationEvent.ToolResult && it.hasVisibleParentToolCall(eventsById) },
+            events = events.filterNot { it is ConversationEvent.ToolResult && it.id in pairing.pairedResultIds },
         )
     }
 
     val resultMatchedParentToolCallIds = events
         .filterIsInstance<ConversationEvent.ToolResult>()
         .mapNotNull { result ->
-            result.toolCallId
-                ?.takeIf { result.hasVisibleParentToolCall(eventsById) }
+            pairing.callIdsByResultId[result.id]
                 ?.takeIf { result.searchText().contains(q, ignoreCase = true) }
         }
         .toSet()
@@ -3594,7 +3638,7 @@ private fun filterConversationRows(
                     }
                 is ConversationEvent.ToolResult ->
                     event.takeIf {
-                        !event.hasVisibleParentToolCall(eventsById) &&
+                        event.id !in pairing.pairedResultIds &&
                             event.searchText().contains(q, ignoreCase = true)
                     }
                 else -> event.takeIf { event.searchText().contains(q, ignoreCase = true) }
@@ -3604,7 +3648,7 @@ private fun filterConversationRows(
     )
 }
 
-private fun ConversationEvent.ToolResult.hasVisibleParentToolCall(
+private fun ConversationEvent.ToolResult.hasExplicitVisibleParentToolCall(
     eventsById: Map<String, ConversationEvent>,
 ): Boolean = toolCallId?.let { eventsById[it] is ConversationEvent.ToolCall } == true
 

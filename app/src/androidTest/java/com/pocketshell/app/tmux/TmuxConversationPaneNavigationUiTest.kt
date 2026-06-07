@@ -196,6 +196,48 @@ class TmuxConversationPaneNavigationUiTest {
     }
 
     @Test
+    fun adjacentToolResultDetailsAreMergedIntoExpandedToolCall() {
+        val events = listOf(
+            ConversationEvent.ToolCall(
+                id = "tool-1",
+                agent = AgentKind.Codex,
+                name = "exec_command",
+                input = """{"cmd":"./gradlew test"}""",
+            ),
+            ConversationEvent.ToolResult(
+                id = "result-1",
+                agent = AgentKind.Codex,
+                output = "adjacent-output-only",
+                isError = false,
+            ),
+        )
+        compose.setContent {
+            PocketShellTheme {
+                TmuxConversationPane(
+                    events = events,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")
+            .assertIsDisplayed()
+        compose.onAllNodesWithText("adjacent-output-only")
+            .fetchSemanticsNodes()
+            .let { assertEquals(0, it.size) }
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")
+            .performClick()
+        compose.waitForIdle()
+        compose.onAllNodes(
+            hasText("adjacent-output-only") and
+                hasAnyAncestor(hasTestTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")),
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes()
+            .let { assertEquals(1, it.size) }
+    }
+
+    @Test
     fun searchForParentedToolResultOutputPromotesAndExpandsToolCall() {
         val events = listOf(
             ConversationEvent.ToolCall(

@@ -2,6 +2,7 @@ package com.pocketshell.app
 
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
@@ -66,6 +67,51 @@ class BackgroundGraceControllerTest {
         advanceTimeBy(graceMillis)
         runCurrent()
         assertEquals(listOf("foreground:resumedWithinGrace=true"), events)
+    }
+
+    @Test
+    fun `diagnostics distinguish within-grace foreground from elapsed teardown`() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val controller = BackgroundGraceController(
+                scope = backgroundScope,
+                graceMillis = graceMillis,
+                onGraceElapsed = {},
+                onForeground = {},
+            )
+
+            controller.onBackground()
+            runCurrent()
+            advanceTimeBy(graceMillis / 2)
+            runCurrent()
+            controller.onForeground()
+            runCurrent()
+
+            val withinGraceForeground = diagnostics.eventsNamed("background_grace_foreground").single()
+            assertEquals(true, withinGraceForeground.fields["resumedWithinGrace"])
+            assertEquals(true, withinGraceForeground.fields["withinGrace"])
+            assertEquals("on_start", withinGraceForeground.fields["trigger"])
+            assertTrue(
+                "within-grace resume must not emit grace elapsed",
+                diagnostics.eventsNamed("background_grace_elapsed").isEmpty(),
+            )
+
+            controller.onBackground()
+            runCurrent()
+            advanceTimeBy(graceMillis + 1)
+            runCurrent()
+            controller.onForeground()
+            runCurrent()
+
+            val elapsed = diagnostics.eventsNamed("background_grace_elapsed").single()
+            assertEquals(true, elapsed.fields["teardown"])
+            assertEquals("grace_timeout", elapsed.fields["trigger"])
+            val postGraceForeground = diagnostics.eventsNamed("background_grace_foreground").last()
+            assertEquals(false, postGraceForeground.fields["resumedWithinGrace"])
+            assertEquals(false, postGraceForeground.fields["withinGrace"])
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

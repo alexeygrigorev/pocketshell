@@ -31,6 +31,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -622,6 +623,9 @@ internal class RealTmuxClient(
         // because the underlying read is blocking. A growable buffer
         // accumulates the current line; we emit a copy on each LF and trim a
         // trailing CR (tmux on alpine emits LF-only, but be robust to CRLF).
+        var readerExitSource = "eof"
+        var readerFailureClass: String? = null
+        var readerFailureMessage: String? = null
         val lines = flow {
             val buffer = java.io.ByteArrayOutputStream(DEFAULT_LINE_BUFFER_BYTES)
             val chunk = ByteArray(READ_CHUNK_BYTES)
@@ -629,6 +633,9 @@ internal class RealTmuxClient(
                 val read = try {
                     input.read(chunk)
                 } catch (t: Throwable) {
+                    readerExitSource = "read_failure"
+                    readerFailureClass = t.javaClass.simpleName
+                    readerFailureMessage = t.message
                     // Channel torn down (close() called, transport drop,
                     // etc.). End the flow rather than re-throw so the reader
                     // loop completes cleanly. We surface the cause via the
@@ -745,6 +752,18 @@ internal class RealTmuxClient(
                 }
             }
         } finally {
+            TmuxClientDiagnostics.record(
+                "tmux_client_reader_exit",
+                buildMap {
+                    put("session", sessionName)
+                    put("source", readerExitSource)
+                    put("clientHash", System.identityHashCode(this@RealTmuxClient))
+                    put("closed", closed)
+                    put("connected", connected)
+                    readerFailureClass?.let { put("cause", it) }
+                    readerFailureMessage?.let { put("message", it) }
+                },
+            )
             // Issue #173: the reader has exited — either because [close]
             // already flipped `closed` (in which case `_disconnected` is
             // already true), or because the underlying SSH socket died
@@ -879,12 +898,24 @@ internal class RealTmuxClient(
         private val job: Job,
         private val onOverflow: (TmuxOutputBacklogOverflow) -> Unit,
         private val droppedEvents: AtomicInteger = AtomicInteger(0),
+        private val overflowDiagnosticEmitted: AtomicBoolean = AtomicBoolean(false),
     ) {
         fun send(event: ControlEvent.Output) {
             val result = channel.trySend(event)
             if (result.isFailure) {
                 val dropped = droppedEvents.incrementAndGet()
                 onOverflow(TmuxOutputBacklogOverflow(event.paneId, dropped))
+                if (overflowDiagnosticEmitted.compareAndSet(false, true)) {
+                    TmuxClientDiagnostics.record(
+                        "tmux_client_pane_output_backlog_overflow",
+                        mapOf(
+                            "pane" to event.paneId,
+                            "bytes" to event.data.size,
+                            "droppedEvents" to dropped,
+                            "capacity" to OUTPUT_BACKLOG_EVENTS,
+                        ),
+                    )
+                }
                 Log.w(
                     ISSUE_105_DIAG_TAG,
                     "tmux-output-backlog-overflow pane=${event.paneId} " +

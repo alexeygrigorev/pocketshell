@@ -1112,6 +1112,7 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun eofDisconnectWaitsForExplicitReconnect() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
@@ -1120,42 +1121,65 @@ class TmuxSessionViewModelTest {
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(0L))
-        val deadClient = FakeTmuxClient()
-        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
-        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
-            assertEquals("work", sessionName)
-            reconnectClient
+        try {
+            val deadClient = FakeTmuxClient()
+            val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+            vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+                assertEquals("work", sessionName)
+                reconnectClient
+            }
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = deadClient,
+            )
+
+            deadClient.disconnectedSignal.value = true
+            runCurrent()
+
+            assertEquals(
+                "passive EOF should not start a visible auto-reconnect loop before the user taps Reconnect",
+                0,
+                connector.connectCount,
+            )
+            assertEquals("work", vm.activeSessionNameForTest())
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed)
+            assertTrue("manual reconnect must remain available after EOF disconnect", vm.canReconnect.value)
+
+            val passive = diagnostics.eventsNamed("passive_disconnect").single()
+            assertEquals("tmux_client_disconnected", passive.fields["source"])
+            assertEquals("alpha.example", passive.fields["host"])
+            assertEquals("work", passive.fields["session"])
+            val surfaced = diagnostics.eventsNamed("disconnect").single()
+            assertEquals("passive_disconnect", surfaced.fields["source"])
+            assertEquals("tmux_control_channel_closed", surfaced.fields["cause"])
+            assertTrue(
+                "passive EOF must not be logged as terminal render overflow",
+                diagnostics.eventsNamed("terminal_output_overflow").isEmpty(),
+            )
+
+            assertTrue(vm.reconnect())
+            advanceUntilIdle()
+
+            assertEquals(1, connector.connectCount)
+            assertSame(reconnectClient, registry.clients.value[7L]?.client)
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            assertEquals("work", vm.activeSessionNameForTest())
+            assertTrue(
+                "manual reconnect should emit reconnect_start",
+                diagnostics.eventsNamed("reconnect_start").any {
+                    it.fields["trigger"] == TmuxConnectTrigger.Reconnect.logValue &&
+                        it.fields["session"] == "work"
+                },
+            )
+        } finally {
+            diagnostics.close()
         }
-        vm.replaceClientForTest(
-            hostId = 7L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = deadClient,
-        )
-
-        deadClient.disconnectedSignal.value = true
-        runCurrent()
-
-        assertEquals(
-            "passive EOF should not start a visible auto-reconnect loop before the user taps Reconnect",
-            0,
-            connector.connectCount,
-        )
-        assertEquals("work", vm.activeSessionNameForTest())
-        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed)
-        assertTrue("manual reconnect must remain available after EOF disconnect", vm.canReconnect.value)
-
-        assertTrue(vm.reconnect())
-        advanceUntilIdle()
-
-        assertEquals(1, connector.connectCount)
-        assertSame(reconnectClient, registry.clients.value[7L]?.client)
-        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
-        assertEquals("work", vm.activeSessionNameForTest())
     }
 
     @Test
@@ -2523,31 +2547,48 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun terminalOutputBacklogOverflowIsLocalPaneErrorNotReconnect() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         val client = FakeTmuxClient()
-        vm.attachClientForTest(client)
-        vm.applyParsedPanesForTest(
-            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "codex", paneIndex = 0)),
-        )
-        advanceUntilIdle()
+        try {
+            vm.attachClientForTest(client)
+            vm.applyParsedPanesForTest(
+                listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "codex", paneIndex = 0)),
+            )
+            advanceUntilIdle()
 
-        client.outputBacklogOverflowEvents.emit(
-            TmuxOutputBacklogOverflow(paneId = "%0", droppedEvents = 1),
-        )
-        advanceUntilIdle()
+            client.outputBacklogOverflowEvents.emit(
+                TmuxOutputBacklogOverflow(paneId = "%0", droppedEvents = 1),
+            )
+            advanceUntilIdle()
 
-        assertTrue(
-            "terminal backlog overflow is a local pane error, not reconnect",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
-        )
-        assertFalse(
-            "terminal backlog overflow must not flip tmux disconnected",
-            client.disconnectedSignal.value,
-        )
-        assertTrue(
-            "overflowed pane should enter explicit terminal recovery state",
-            vm.panes.value.single().surfaceError,
-        )
+            assertTrue(
+                "terminal backlog overflow is a local pane error, not reconnect",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertFalse(
+                "terminal backlog overflow must not flip tmux disconnected",
+                client.disconnectedSignal.value,
+            )
+            assertTrue(
+                "overflowed pane should enter explicit terminal recovery state",
+                vm.panes.value.single().surfaceError,
+            )
+            val overflow = diagnostics.eventsNamed("terminal_output_overflow").single()
+            assertEquals("pane_output_backlog", overflow.fields["source"])
+            assertEquals("%0", overflow.fields["pane"])
+            assertEquals(1, overflow.fields["droppedEvents"])
+            assertTrue(
+                "local overflow must not be logged as passive SSH/tmux EOF",
+                diagnostics.eventsNamed("passive_disconnect").isEmpty(),
+            )
+            assertTrue(
+                "local overflow must not start reconnect diagnostics",
+                diagnostics.eventsNamed("reconnect_start").isEmpty(),
+            )
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

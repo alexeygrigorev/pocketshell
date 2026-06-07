@@ -31,6 +31,7 @@ import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.nio.charset.StandardCharsets
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -56,6 +57,7 @@ class TmuxClientTest {
 
     @After
     fun tearDown() {
+        TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
         scope.cancel()
     }
 
@@ -584,6 +586,14 @@ class TmuxClientTest {
         val client = RealTmuxClient(session, scope, commandTimeoutMs = 1_000L)
         val firstOutputBlocked = CompletableDeferred<Unit>()
         val releasePaneCollector = CompletableDeferred<Unit>()
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields ->
+            if (event == "tmux_client_pane_output_backlog_overflow") {
+                diagnosticEvents += event to fields
+            }
+        }
         try {
             client.connect()
             withTimeout(2_000) {
@@ -619,6 +629,9 @@ class TmuxClientTest {
             val overflowEvent = withTimeout(3_000) { overflow.await() }
             assertEquals("%0", overflowEvent.paneId)
             assertTrue("overflow must report dropped events", overflowEvent.droppedEvents > 0)
+            withTimeout(3_000) {
+                while (diagnosticEvents.isEmpty()) { yield(); delay(10) }
+            }
 
             val result = withTimeout(3_000) { response.await() }
             assertFalse(result.isError)
@@ -628,6 +641,12 @@ class TmuxClientTest {
                 client.disconnected.value,
             )
             withTimeout(3_000) { feedJob.await() }
+            assertEquals(
+                "core overflow diagnostics must be first-overflow-only per pipe",
+                1,
+                diagnosticEvents.size,
+            )
+            assertEquals("%0", diagnosticEvents.single().second["pane"])
             blockedPaneCollector.cancel()
         } finally {
             releasePaneCollector.complete(Unit)

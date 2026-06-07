@@ -19,6 +19,7 @@ import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
 import com.pocketshell.app.tmux.closeCachedRuntime
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -179,7 +180,12 @@ class App : Application() {
         when (event) {
             Lifecycle.Event.ON_STOP -> {
                 terminalNetworkLifecycleGate.onBackground()
-                DiagnosticEvents.record("app", "background")
+                DiagnosticEvents.record(
+                    "app",
+                    "background",
+                    "source" to "process_lifecycle",
+                    "trigger" to "on_stop",
+                )
                 backgroundGraceController.setGraceMillis(
                     settingsRepository.settings.value.backgroundGraceMillis,
                 )
@@ -187,7 +193,12 @@ class App : Application() {
             }
             Lifecycle.Event.ON_START -> {
                 terminalNetworkLifecycleGate.onForegroundResumeStarted()
-                DiagnosticEvents.record("app", "foreground")
+                DiagnosticEvents.record(
+                    "app",
+                    "foreground",
+                    "source" to "process_lifecycle",
+                    "trigger" to "on_start",
+                )
                 backgroundGraceController.onForeground()
             }
             else -> Unit
@@ -198,6 +209,9 @@ class App : Application() {
         StartupTiming.mark("app-on-create-start")
         super.onCreate()
         DiagnosticEvents.install(diagnosticRecorder)
+        TmuxClientDiagnostics.install { event, fields ->
+            DiagnosticEvents.record("connection", event, *fields.toList().toTypedArray())
+        }
         DiagnosticEvents.record("app", "created")
         CrashReporter.install(this)
         StartupTiming.mark("app-crash-reporter-installed")
@@ -317,7 +331,14 @@ class App : Application() {
             APP_LIFECYCLE_TAG,
             "tmux-on-stop fanout count=${hooks.size}",
         )
-        DiagnosticEvents.record("app", "terminal_background_teardown", "hookCount" to hooks.size)
+        DiagnosticEvents.record(
+            "app",
+            "terminal_background_teardown",
+            "hookCount" to hooks.size,
+            "source" to "background_grace_elapsed",
+            "trigger" to "process_background",
+            "withinGrace" to false,
+        )
         for (hook in hooks) {
             tmuxLifecycleScope.launch {
                 runCatching { hook.onBackground() }
@@ -333,7 +354,13 @@ class App : Application() {
             APP_LIFECYCLE_TAG,
             "tmux-on-start fanout count=${hooks.size}",
         )
-        DiagnosticEvents.record("app", "terminal_foreground_reattach", "hookCount" to hooks.size)
+        DiagnosticEvents.record(
+            "app",
+            "terminal_foreground_reattach",
+            "hookCount" to hooks.size,
+            "source" to "background_grace_foreground",
+            "trigger" to "process_foreground",
+        )
         for (hook in hooks) {
             tmuxLifecycleScope.launch {
                 runCatching { hook.onForeground() }
@@ -485,12 +512,24 @@ internal class BackgroundGraceController(
         if (graceJob?.isActive == true) return
         teardownFired = false
         Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$graceMillis")
-        DiagnosticEvents.record("app", "background_grace_start", "millis" to graceMillis)
+        DiagnosticEvents.record(
+            "app",
+            "background_grace_start",
+            "millis" to graceMillis,
+            "source" to "process_lifecycle",
+            "trigger" to "on_stop",
+        )
         graceJob = scope.launch {
             delay(graceMillis)
             teardownFired = true
             Log.i(GRACE_LIFECYCLE_TAG, "grace-window-elapsed teardown")
-            DiagnosticEvents.record("app", "background_grace_elapsed", "teardown" to true)
+            DiagnosticEvents.record(
+                "app",
+                "background_grace_elapsed",
+                "teardown" to true,
+                "source" to "timer",
+                "trigger" to "grace_timeout",
+            )
             onGraceElapsed()
         }
     }
@@ -508,6 +547,9 @@ internal class BackgroundGraceController(
             "app",
             "background_grace_foreground",
             "resumedWithinGrace" to resumedWithinGrace,
+            "withinGrace" to resumedWithinGrace,
+            "source" to "process_lifecycle",
+            "trigger" to "on_start",
         )
         scope.launch { onForeground(resumedWithinGrace) }
     }

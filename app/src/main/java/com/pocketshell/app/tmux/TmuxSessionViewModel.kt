@@ -536,6 +536,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "trigger" to effectiveTrigger.logValue,
             "requestedTrigger" to trigger.logValue,
             "generation" to generation,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
         )
         DiagnosticEvents.record(
             "connection",
@@ -585,6 +586,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 "session" to target.sessionName,
                 "trigger" to effectiveTrigger.logValue,
                 "source" to "runtime_cache",
+                "generation" to generation,
+                "clientHash" to clientRef?.let { System.identityHashCode(it) },
             )
             return
         }
@@ -841,6 +844,8 @@ public class TmuxSessionViewModel @Inject constructor(
             "port" to target.port,
             "user" to target.user,
             "session" to target.sessionName,
+            "trigger" to TmuxConnectTrigger.Reconnect.logValue,
+            "generation" to connectGeneration,
         )
         connect(
             hostId = target.hostId,
@@ -1005,11 +1010,15 @@ public class TmuxSessionViewModel @Inject constructor(
             "connection",
             "disconnect",
             "cause" to "background_teardown",
+            "source" to "app_lifecycle",
+            "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
+            "generation" to (intent?.generation ?: connectGeneration),
             "hostId" to target.hostId,
             "host" to target.host,
             "port" to target.port,
             "user" to target.user,
             "session" to target.sessionName,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
         )
         if (backgroundDetachJob?.isActive == true) return
         val preserveConnectingTarget = connectingTarget?.takeIf { connecting ->
@@ -1107,6 +1116,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-reattach-on-foreground trigger=${TmuxConnectTrigger.LifecycleReattach.logValue} " +
                     "generation=${pending.generation} " +
                     targetLogFields(target),
+            )
+            DiagnosticEvents.record(
+                "connection",
+                "foreground_reattach",
+                "source" to "app_lifecycle",
+                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
+                "generation" to pending.generation,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
             )
             foregroundReattachForTest?.invoke() ?: connect(
                 hostId = target.hostId,
@@ -1527,6 +1548,20 @@ public class TmuxSessionViewModel @Inject constructor(
                     "current=${change.current.logValue} " +
                     targetLogFields(target),
             )
+            DiagnosticEvents.record(
+                "connection",
+                "network_reconnect_skip",
+                "source" to "network_observer",
+                "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+                "reason" to reason,
+                "cause" to "no_real_validated_handoff",
+                "sequence" to change.sequence,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+            )
             return
         }
         val reconnectReason = "Network changed; reconnecting ${current.user}@${current.host}:${current.port}."
@@ -1534,6 +1569,20 @@ public class TmuxSessionViewModel @Inject constructor(
             ISSUE_548_NETWORK_TAG,
             "tmux-network-proactive-reconnect reason=$reason " +
                 targetLogFields(target),
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "network_reconnect_start",
+            "source" to "network_observer",
+            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+            "reason" to reason,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
         )
         unregisterCurrentClient()
         scheduleAutoReconnect(
@@ -2051,6 +2100,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "user" to target.user,
                 "session" to target.sessionName,
                 "trigger" to trigger.logValue,
+                "clientHash" to System.identityHashCode(client),
                 "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
             )
             maybeRefreshControlClientSize()
@@ -2657,6 +2707,19 @@ public class TmuxSessionViewModel @Inject constructor(
         disconnectedJob = bridgeScope.launch {
             client.disconnected.collect { dead ->
                 if (!dead) return@collect
+                val target = activeTarget ?: connectingTarget
+                DiagnosticEvents.record(
+                    "connection",
+                    "passive_disconnect",
+                    "source" to "tmux_client_disconnected",
+                    "hostId" to target?.hostId,
+                    "host" to target?.host,
+                    "port" to target?.port,
+                    "user" to target?.user,
+                    "session" to target?.sessionName,
+                    "clientHash" to System.identityHashCode(client),
+                    "status" to _connectionStatus.value.javaClass.simpleName,
+                )
                 handlePassiveClientDisconnect(client)
             }
         }
@@ -2701,6 +2764,20 @@ public class TmuxSessionViewModel @Inject constructor(
         if (passiveDisconnectGraceMs <= 0L) return false
         val preferFreshTransport = leaseRef != null
         var transportReattachTried = false
+        DiagnosticEvents.record(
+            "connection",
+            "silent_reattach_start",
+            "source" to "passive_disconnect",
+            "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "clientHash" to System.identityHashCode(staleClient),
+            "timeoutMs" to passiveDisconnectGraceMs,
+            "preferFreshTransport" to preferFreshTransport,
+        )
         return withTimeoutOrNull<Boolean>(passiveDisconnectGraceMs) {
             while (true) {
                 if (!appActive) return@withTimeoutOrNull false
@@ -2744,6 +2821,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 delay(retryDelayMs)
             }
             false
+        }.also { recovered ->
+            if (recovered != true) {
+                DiagnosticEvents.record(
+                    "connection",
+                    "silent_reattach_fail",
+                    "source" to "passive_disconnect",
+                    "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "user" to target.user,
+                    "session" to target.sessionName,
+                    "clientHash" to System.identityHashCode(staleClient),
+                    "cause" to "grace_elapsed",
+                )
+            }
         } == true
     }
 
@@ -2836,6 +2929,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "session" to target.sessionName,
                 "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
                 "source" to "silent_reattach",
+                "clientHash" to System.identityHashCode(replacement),
                 "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
             )
             true
@@ -2858,6 +2952,21 @@ public class TmuxSessionViewModel @Inject constructor(
             if (clientRef === replacement) {
                 clientRef = staleClient
             }
+            DiagnosticEvents.record(
+                "connection",
+                "reconnect_fail",
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                "source" to "silent_reattach",
+                "cause" to t.javaClass.simpleName,
+                "message" to t.message,
+                "clientHash" to System.identityHashCode(replacement),
+                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+            )
             false
         }
     }
@@ -2939,6 +3048,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     "source" to "silent_transport_reattach",
                     "cause" to "attach_not_ready",
                     "evictedLease" to true,
+                    "clientHash" to replacement?.let { System.identityHashCode(it) },
                     "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
                 )
                 return false
@@ -2984,6 +3094,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "session" to target.sessionName,
                 "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
                 "source" to "silent_transport_reattach",
+                "clientHash" to System.identityHashCode(newClient),
                 "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
             )
             true
@@ -3031,6 +3142,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "cause" to t.javaClass.simpleName,
                 "message" to t.message,
                 "evictedLease" to true,
+                "clientHash" to replacement?.let { System.identityHashCode(it) },
                 "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
             )
             false
@@ -3055,10 +3167,14 @@ public class TmuxSessionViewModel @Inject constructor(
             "connection",
             "disconnect",
             "cause" to "tmux_control_channel_closed",
+            "source" to "passive_disconnect",
+            "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+            "hostId" to target?.hostId,
             "host" to (current?.host ?: target?.host.orEmpty()),
             "port" to (current?.port ?: target?.port ?: 0),
             "user" to (current?.user ?: target?.user.orEmpty()),
             "session" to (target?.sessionName ?: "unknown"),
+            "clientHash" to System.identityHashCode(client),
         )
         unregisterCurrentClient()
         if (target != null) {
@@ -3118,6 +3234,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     "session" to target.sessionName,
                     "trigger" to trigger.logValue,
                     "reason" to reason,
+                    "generation" to generation,
                 )
                 if (delayMs > 0) delay(delayMs)
                 if (!appActive) return@launch
@@ -3150,6 +3267,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     "session" to target.sessionName,
                     "trigger" to trigger.logValue,
                     "generation" to generation,
+                    "clientHash" to clientRef?.let { System.identityHashCode(it) },
                 )
                 withContext(NonCancellable) {
                     closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
@@ -4007,6 +4125,13 @@ public class TmuxSessionViewModel @Inject constructor(
             "pane" to overflow.paneId,
             "droppedEvents" to overflow.droppedEvents,
             "status" to _connectionStatus.value.javaClass.simpleName,
+            "source" to "pane_output_backlog",
+            "hostId" to activeTarget?.hostId,
+            "host" to activeTarget?.host,
+            "port" to activeTarget?.port,
+            "user" to activeTarget?.user,
+            "session" to activeTarget?.sessionName,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
         )
 
         paneProducerJobs.remove(overflow.paneId)?.cancel()

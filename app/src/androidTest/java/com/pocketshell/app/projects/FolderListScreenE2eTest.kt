@@ -399,6 +399,15 @@ class FolderListScreenE2eTest {
         // with the host actions plus separate global Settings and Workspace
         // settings entries.
         compose.onNodeWithTag(FOLDER_LIST_BROWSE_REPOS_TAG).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG)
+            .assertExists()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { fakeGateway.callCount.get() >= 2 }
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(FOLDER_LIST_ACTION_STATUS_TAG))
+        compose.onNodeWithTag(FOLDER_LIST_ACTION_STATUS_TAG).assertExists()
+        compose.onNodeWithText("Sessions refreshed").assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_USAGE_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG).assertExists()

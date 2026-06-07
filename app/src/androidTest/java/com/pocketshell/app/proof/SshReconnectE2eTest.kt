@@ -6,6 +6,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.lifecycle.ViewModelProvider
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -176,9 +177,11 @@ class SshReconnectE2eTest {
         recordTiming("flaky_before_blip_ms", SystemClock.elapsedRealtime() - beforeBlipStart)
 
         val tickerPrefix = "RIDE-$marker-"
+        val tickerPaneId = waitForVisibleTmuxPaneId()
         startTickerViaFixtureTmuxExec(
             key = key,
             sessionName = sessionName,
+            paneId = tickerPaneId,
             prefix = tickerPrefix,
             count = FLAKY_TICKER_COUNT,
         )
@@ -559,13 +562,19 @@ class SshReconnectE2eTest {
     private suspend fun startTickerViaFixtureTmuxExec(
         key: String,
         sessionName: String,
+        paneId: String,
         prefix: String,
         count: Int,
     ) {
         val command = "i=0; while [ \$i -lt $count ]; do " +
             "printf '${prefix}%02d\\n' \"\$i\"; " +
             "i=\$((i + 1)); sleep 1; done"
-        val script = "tmux send-keys -t ${shellQuote(sessionName)} ${shellQuote(command)} Enter"
+        val expectedTarget = "$sessionName:$paneId"
+        val script = "actual=\$(tmux display-message -p -t ${shellQuote(paneId)} " +
+            "${shellQuote("#{session_name}:#{pane_id}")}); " +
+            "[ \"\$actual\" = ${shellQuote(expectedTarget)} ] || " +
+            "{ echo \"wrong pane target: \$actual expected $expectedTarget\" >&2; exit 42; }; " +
+            "tmux send-keys -t ${shellQuote(paneId)} ${shellQuote(command)} Enter"
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
             port = FLAKY_PORT,
@@ -579,9 +588,27 @@ class SshReconnectE2eTest {
         val exec = result.getOrNull()
         assertTrue(
             "expected tmux ticker send-keys exec to succeed; " +
-                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+                "pane=$paneId exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
             exec?.exitCode == 0,
         )
+    }
+
+    private fun waitForVisibleTmuxPaneId(): String {
+        var paneIds: List<String> = emptyList()
+        compose.waitUntil(timeoutMillis = 15_000) {
+            launchedActivity?.onActivity { activity ->
+                paneIds = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                    .panes
+                    .value
+                    .map { it.paneId }
+            }
+            paneIds.isNotEmpty()
+        }
+        assertTrue(
+            "expected the app to expose at least one visible tmux pane before starting ticker",
+            paneIds.isNotEmpty(),
+        )
+        return paneIds.first()
     }
 
     private fun containsTickerAtLeast(transcript: String, prefix: String, minTick: Int): Boolean {

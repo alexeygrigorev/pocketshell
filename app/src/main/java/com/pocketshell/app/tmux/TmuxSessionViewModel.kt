@@ -3018,7 +3018,7 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget?,
     ) {
         if (_connectionStatus.value !is ConnectionStatus.Connected) return
-        if (clientRef !== client && clientRef?.disconnected?.value != true) return
+        if (clientRef !== client) return
         val current = _connectionStatus.value as? ConnectionStatus.Connected
         Log.w(
             ISSUE_145_RECONNECT_TAG,
@@ -7441,7 +7441,7 @@ internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
  * auto-reconnect path after this bounded foreground-only window.
  */
 internal const val PASSIVE_DISCONNECT_GRACE_MS: Long = 8_000L
-internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS: Long = 2_000L
+internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS: Long = 5_000L
 internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS: Long = 250L
 
 /**

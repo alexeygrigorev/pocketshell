@@ -3923,6 +3923,93 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun codexSendInFlightSurvivesTerminalOverflowWithoutReconnectOrDuplicateSend() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "codex",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newCodexDetection())
+
+        val send = async { vm.sendToAgentPaneResult("%0", "  previous user prompt  ") }
+        runCurrent()
+
+        assertEquals(
+            "precondition: Codex prompt text is typed once before delayed Enter",
+            listOf("send-keys -l -t %0 -- 'previous user prompt'"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+
+        client.outputBacklogOverflowEvents.emit(
+            TmuxOutputBacklogOverflow(paneId = "%0", droppedEvents = 2_048),
+        )
+        runCurrent()
+
+        assertTrue(
+            "terminal overflow must stay a pane-surface error, not a transport disconnect",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse("overflow must not flip the tmux disconnected signal", client.disconnected.value)
+        assertEquals(
+            "overflow must not start a reconnect or reacquire SSH",
+            0,
+            connector.connectCount,
+        )
+        assertEquals(
+            "overflow must not increment user-visible connect attempts",
+            0,
+            TMUX_CONNECT_ATTEMPTS.get(),
+        )
+        assertSame(
+            "stable transport should remain registered after pane overflow",
+            client,
+            registry.clients.value[7L]?.client,
+        )
+
+        advanceTimeBy(CODEX_AGENT_SUBMIT_DELAY_MS)
+        assertTrue(send.await().isSuccess)
+
+        val sendKeys = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            "overflow during the delayed Codex submit must not duplicate the composer prompt",
+            1,
+            sendKeys.count { it == "send-keys -l -t %0 -- 'previous user prompt'" },
+        )
+        assertEquals(1, sendKeys.count { it == "send-keys -t %0 Enter" })
+        val messages = vm.agentConversations.value["%0"]!!.events
+            .filterIsInstance<ConversationEvent.Message>()
+            .filter { it.role == ConversationRole.User && it.text == "previous user prompt" }
+        assertEquals("Conversation should keep one optimistic user turn", 1, messages.size)
+        assertEquals(MessageSendState.Pending, messages.single().sendState)
+        assertTrue("overflowed pane is shown as a surface error", vm.panes.value.single().surfaceError)
+    }
+
+    @Test
     fun agentSubmitDelaysFinalEnterByConfiguredDelayForClaudeCode() = runTest {
         // Issue #526: the composer/agent send path types the message text,
         // waits the user-configurable delay, then presses the submit Enter as

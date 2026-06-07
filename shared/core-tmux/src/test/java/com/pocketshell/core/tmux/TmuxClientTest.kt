@@ -701,11 +701,11 @@ class TmuxClientTest {
         val diagnosticEvents = Collections.synchronizedList(
             mutableListOf<Pair<String, Map<String, Any?>>>(),
         )
-        TmuxClientDiagnostics.install { event, fields ->
-            if (event == "tmux_client_pane_output_backlog_overflow") {
-                diagnosticEvents += event to fields
-            }
-        }
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_pane_output_backlog_overflow"),
+            diagnosticEvents,
+        )
         try {
             client.connect()
             withTimeout(2_000) {
@@ -806,14 +806,11 @@ class TmuxClientTest {
         val diagnosticEvents = Collections.synchronizedList(
             mutableListOf<Pair<String, Map<String, Any?>>>(),
         )
-        TmuxClientDiagnostics.install { event, fields ->
-            if (
-                event == "tmux_client_command_timeout" ||
-                event == "tmux_client_reader_exit"
-            ) {
-                diagnosticEvents += event to fields
-            }
-        }
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_command_timeout", "tmux_client_reader_exit"),
+            diagnosticEvents,
+        )
         try {
             client.connect()
             // Eat the spawn line so the command write is easy to assert.
@@ -1060,9 +1057,11 @@ class TmuxClientTest {
         val diagnosticEvents = Collections.synchronizedList(
             mutableListOf<Pair<String, Map<String, Any?>>>(),
         )
-        TmuxClientDiagnostics.install { event, fields ->
-            if (event == "tmux_client_reader_exit") diagnosticEvents += event to fields
-        }
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_reader_exit"),
+            diagnosticEvents,
+        )
         client.connect()
         // Eat the spawn line so the assertion below sees only the
         // detach traffic.
@@ -1117,9 +1116,11 @@ class TmuxClientTest {
         val diagnosticEvents = Collections.synchronizedList(
             mutableListOf<Pair<String, Map<String, Any?>>>(),
         )
-        TmuxClientDiagnostics.install { event, fields ->
-            if (event == "tmux_client_reader_exit") diagnosticEvents += event to fields
-        }
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_reader_exit"),
+            diagnosticEvents,
+        )
         try {
             client.connect()
             withTimeout(2_000) {
@@ -1131,7 +1132,11 @@ class TmuxClientTest {
                 while (!client.disconnected.value) { yield(); delay(10) }
             }
 
-            val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+            val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit") { fields ->
+                fields["disconnectCause"] == "read_eof" &&
+                    fields["intent"] == "unknown" &&
+                    fields["source"] == "eof"
+            }
             assertEquals("read_eof", exit["disconnectCause"])
             assertEquals("unknown", exit["intent"])
             assertEquals("eof", exit["source"])
@@ -1150,9 +1155,11 @@ class TmuxClientTest {
         val diagnosticEvents = Collections.synchronizedList(
             mutableListOf<Pair<String, Map<String, Any?>>>(),
         )
-        TmuxClientDiagnostics.install { event, fields ->
-            if (event == "tmux_client_reader_exit") diagnosticEvents += event to fields
-        }
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_reader_exit"),
+            diagnosticEvents,
+        )
         client.connect()
         withTimeout(2_000) {
             while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
@@ -1160,7 +1167,11 @@ class TmuxClientTest {
 
         client.close()
 
-        val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+        val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit") { fields ->
+            fields["disconnectCause"] == "local_close" &&
+                fields["intent"] == "local_close" &&
+                fields["closed"] == true
+        }
         assertEquals("local_close", exit["disconnectCause"])
         assertEquals("local_close", exit["intent"])
         assertEquals(true, exit["closed"])
@@ -1410,6 +1421,19 @@ class TmuxClientTest {
             }
             error("unreachable")
         }
+
+    private fun installDiagnosticsForClient(
+        client: RealTmuxClient,
+        eventNames: Set<String>,
+        events: MutableList<Pair<String, Map<String, Any?>>>,
+    ) {
+        val clientHash = System.identityHashCode(client)
+        TmuxClientDiagnostics.install { event, fields ->
+            if (event in eventNames && fields["clientHash"] == clientHash) {
+                events += event to fields
+            }
+        }
+    }
 
     // --- fakes --------------------------------------------------------------
 

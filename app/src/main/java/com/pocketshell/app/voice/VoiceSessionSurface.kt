@@ -11,19 +11,28 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.OpenInFull
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -292,7 +301,7 @@ internal fun assistantChoiceTag(path: String): String = "assistant:choice:$path"
  *
  * Per the #208 right-thumb ergonomics audit and design-system §9, the
  * high-frequency `show keyboard` (#131) and `+ snippet` chips are rendered
- * adjacent to the mic FAB in a non-scrolling sticky cluster (see
+ * adjacent to the composer launcher in a non-scrolling sticky cluster (see
  * [PrimaryChipCluster] and [BottomChipControls]) so they sit inside the
  * right-thumb arc on a Pixel-class viewport even when there are enough
  * leading static chips to overflow the scrolling region. Round-1 of #221
@@ -409,12 +418,12 @@ private fun PrimaryChipCluster(
  *    and the picker chip pinned to the right side of the chip area so they sit
  *    inside the right-thumb arc on a Pixel-class viewport regardless of
  *    how many static chips precede them.
- * 3. Optional mic FAB (sticky, non-scrolling) — raw SSH still keeps the
- *    dictate affordance; tmux terminal chrome omits it per #283.
+ * 3. Optional composer launcher (sticky, non-scrolling) — raw SSH still keeps
+ *    the prompt composer affordance; tmux terminal chrome omits it per #283.
  *
  * The redundant `dictate` chip that used to lead the row was removed
  * per design-system §9 and the right-thumb ergonomics audit
- * (#208 → #221): with the FAB already anchored to the right-thumb arc,
+ * (#208 → #221): with the launcher already anchored to the right-thumb arc,
  * the chip row need not duplicate it. Splitting the primary cluster out
  * of the scrolling region fixes the round-1 regression where the four
  * wide leading static chips pushed `show keyboard` / picker off-screen
@@ -437,11 +446,11 @@ internal fun BottomChipControls(
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
-    // Issue #249: gate the command chips and optional dictate mic on whether
+    // Issue #249: gate the command chips and optional composer launcher on whether
     // the SSH/tmux session is live. While disconnected or reconnecting a
     // chip tap would `writeInputToPane` into a dead bridge — the bytes
-    // would be silently dropped. We disable the chips, and when a mic is
-    // present render it in its [MicButtonState.Disabled] state so the user
+    // would be silently dropped. We disable the chips, and when the launcher is
+    // present render it in its disabled state so the user
     // sees that input is unavailable rather than losing a tap.
     inputEnabled: Boolean = true,
     modifier: Modifier = Modifier,
@@ -474,11 +483,11 @@ internal fun BottomChipControls(
                 modifier = Modifier
                     .width(80.dp)
                     .padding(end = 12.dp)
-                    .testTag(SESSION_MIC_FAB_TAG),
+                    .testTag(SESSION_COMPOSER_LAUNCHER_TAG),
                 contentAlignment = Alignment.CenterEnd,
             ) {
-                MicButton(
-                    state = if (inputEnabled) MicButtonState.Idle else MicButtonState.Disabled,
+                ComposerLauncherButton(
+                    enabled = inputEnabled,
                     onClick = onDictateTap,
                 )
             }
@@ -486,10 +495,46 @@ internal fun BottomChipControls(
     }
 }
 
+@Composable
+private fun ComposerLauncherButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val baseColor = if (enabled) PocketShellColors.Accent else PocketShellColors.SurfaceElev
+    val glyphColor = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted
+    val shadowModifier = if (enabled) {
+        Modifier.shadow(
+            elevation = 8.dp,
+            shape = CircleShape,
+            ambientColor = PocketShellColors.Accent,
+            spotColor = PocketShellColors.Accent,
+        )
+    } else {
+        Modifier
+    }
+
+    Box(
+        modifier = modifier
+            .size(56.dp)
+            .then(shadowModifier)
+            .background(color = baseColor, shape = CircleShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.OpenInFull,
+            contentDescription = null,
+            tint = glyphColor,
+            modifier = Modifier.size(24.dp),
+        )
+    }
+}
+
 /**
  * v1 chip set — matches `docs/mockups/session.html`'s `.chip-row`
- * (without the dictate entry, which the screen renders separately as the
- * mic FAB).
+ * (without the composer launcher, which the screen renders separately).
  */
 internal val DefaultSessionChips: List<String> = listOf(
     "git status",
@@ -589,17 +634,18 @@ internal const val SHOW_KEYBOARD_CHIP_TAG: String = "session:show-keyboard-chip"
 internal const val SESSION_ENTER_CHIP_TAG: String = "session:enter-chip"
 
 /**
- * Issue #221: stable test tag on the bottom-toolbar mic FAB container.
- * The mic FAB is now the only dictate entry point (the redundant
- * `dictate` chip was removed per design-system §9), so connected tests
- * that previously located the dictate affordance via
- * `onNodeWithText("dictate")` route through this tag instead.
+ * Issue #610: stable test tag on the bottom-toolbar Prompt Composer launcher
+ * container. This entry opens the full composer, where dictation is one
+ * available action, so its semantics deliberately avoid microphone wording.
  *
- * Placed on the wrapping [Box] rather than the [MicButton] itself so the
- * tag stays attached even if the FAB visual is swapped for a different
- * glyph component later.
+ * Placed on the wrapping [Box] rather than the button itself so the tag stays
+ * attached even if the launcher visual is swapped for a different component.
  */
-internal const val SESSION_MIC_FAB_TAG: String = "session:mic-fab"
+internal const val SESSION_COMPOSER_LAUNCHER_TAG: String = "session:composer-launcher"
+
+internal const val SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION: String = "Open prompt composer"
+
+internal const val SESSION_MIC_FAB_TAG: String = SESSION_COMPOSER_LAUNCHER_TAG
 
 /**
  * Issue #221 (round 2): stable test tag on the `+ snippet` chip inside

@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -27,8 +28,9 @@ import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
+import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
+import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
-import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.uikit.components.KeyBar
@@ -78,7 +80,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("^D").assertIsDisplayed()
         compose.onNodeWithText("Tab").assertIsDisplayed()
 
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
@@ -129,7 +131,7 @@ class TmuxSessionVoiceSurfaceUiTest {
             .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
 
         assertEquals(emptyList<String>(), keyTaps)
         assertEquals(1, enterTaps)
@@ -199,7 +201,10 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("shell-snippets-bottom-strip.png")
 
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithContentDescription(SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION)
+            .assertIsDisplayed()
+        compose.onNodeWithContentDescription("Dictate").assertDoesNotExist()
         assertEquals(1, dictateTaps)
         compose.onNodeWithText("dictate").assertDoesNotExist()
 
@@ -227,8 +232,9 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun agentBottomChipBandIsJustTheMicFab() {
-        // Issue #454: the agent-pane band is decluttered to JUST the mic FAB.
+    fun agentBottomChipBandIsJustTheComposerLauncher() {
+        // Issue #454/#610: the agent-pane band is decluttered to JUST the
+        // Prompt Composer launcher.
         // The former "/ commands" bottom chip is gone — the dedicated "/"
         // command-palette button in the session header (issue #462) is the
         // single, obvious entry to that palette, so the bottom chip was a
@@ -253,7 +259,7 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
         // The "/ commands" bottom chip is gone (it lives in the header now).
         compose.onNodeWithText(AgentCommandsChip).assertDoesNotExist()
@@ -264,9 +270,9 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText(ADD_PROMPT_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("git status").assertDoesNotExist()
-        captureViewportArtifact("agent-mic-only-bottom-strip.png")
+        captureViewportArtifact("agent-composer-launcher-only-bottom-strip.png")
 
-        // No band chips at all — only the mic FAB is interactive.
+        // No band chips at all — only the composer launcher is interactive.
         assertEquals(emptyList<String>(), chipTaps)
     }
 
@@ -275,7 +281,7 @@ class TmuxSessionVoiceSurfaceUiTest {
 
     /**
      * Issue #459: in the Conversation tab the bottom band is the unified
-     * composer entry — the mic FAB that opens the shared
+     * composer entry — the launcher that opens the shared
      * `PromptComposerSheet`. The Terminal-only "show keyboard" chip (raw-key
      * entry, the gateway to the key bar) must NOT appear. This mirrors how
      * [com.pocketshell.app.tmux.TmuxSessionScreen] wires `BottomChipControls`
@@ -288,8 +294,8 @@ class TmuxSessionVoiceSurfaceUiTest {
             PocketShellTheme {
                 // Exactly how TmuxSessionScreen renders the bottom band when
                 // the focused agent pane is showing its Conversation tab:
-                // agent exit chips, the snippet/prompt chip, the mic FAB, and
-                // NO show-keyboard chip (raw keys aren't sent from
+                // agent exit chips, the snippet/prompt chip, the composer
+                // launcher, and NO show-keyboard chip (raw keys aren't sent from
                 // Conversation — that's Terminal-only, #459).
                 BottomChipControls(
                     chips = AgentExitChips,
@@ -306,9 +312,9 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("issue459-conversation-bottom-unified-composer.png")
 
-        // The unified composer entry (mic FAB) is present — Conversation's
+        // The unified composer entry is present — Conversation's
         // only send affordance.
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
         // The Terminal-only "show keyboard" chip is absent in Conversation.
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
@@ -319,7 +325,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     /**
-     * Issue #459/#584: the Terminal tab keeps the same unified composer mic FAB
+     * Issue #459/#584/#610: the Terminal tab keeps the same unified composer launcher
      * AND the Terminal-only "show keyboard" chip (which raises the soft
      * keyboard / key bar for raw-key entry), plus standalone Enter while the
      * IME is hidden. Paired with
@@ -334,7 +340,7 @@ class TmuxSessionVoiceSurfaceUiTest {
             PocketShellTheme {
                 // How TmuxSessionScreen renders the bottom band on the
                 // Terminal tab of an agent pane when the IME is hidden:
-                // same mic FAB, plus standalone Enter and show-keyboard.
+                // same composer launcher, plus standalone Enter and show-keyboard.
                 BottomChipControls(
                     chips = AgentExitChips,
                     onChipTap = {},
@@ -351,7 +357,7 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("issue459-terminal-bottom-unified-composer.png")
 
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
             .assertIsDisplayed()
             .assertHasClickAction()

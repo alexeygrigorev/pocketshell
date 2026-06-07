@@ -334,8 +334,10 @@ class PortForwardIntegrationTest {
         // container — exactly what PortForwardPanelViewModel does on
         // reconnect.
         val liveSession = java.util.concurrent.atomic.AtomicReference<SshSession?>(null)
+        val sessionAttempts = java.util.concurrent.atomic.AtomicInteger(0)
         val supervisor = AutoForwarderSupervisor(
             sessionFactory = {
+                sessionAttempts.incrementAndGet()
                 connect().also { liveSession.set(it) }
             },
             config = config,
@@ -367,17 +369,20 @@ class PortForwardIntegrationTest {
             // Simulate a transport drop by closing the live session out
             // from under the supervisor. The session-health poll notices
             // and the supervisor reconnects.
-            requireNotNull(liveSession.get()).close()
+            val firstSession = requireNotNull(liveSession.get())
+            firstSession.close()
 
             // The supervisor must re-establish SSH and re-open :22 from its
             // desired-state set — without the user touching anything.
             waitUntil(ciScaled(20_000)) {
+                val newSessionMounted =
+                    sessionAttempts.get() >= 2 && liveSession.get() !== firstSession
                 val reconnected = supervisor.flowOfConnectionState().value ==
                     AutoForwarderSupervisor.ConnectionState.Connected
                 val forwardingAgain = supervisor.flowOfTunnels().value().any {
                     it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING
                 }
-                reconnected && forwardingAgain
+                newSessionMounted && reconnected && forwardingAgain
             }
 
             val restoredLocalPort = supervisor.flowOfTunnels().value()

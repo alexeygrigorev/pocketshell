@@ -317,6 +317,9 @@ public class AutoForwarderSupervisor(
             try {
                 connectionState.value =
                     if (attemptCount == 0) ConnectionState.Connecting else ConnectionState.Reconnecting
+                if (attemptCount > 0) {
+                    markTunnelsStopped()
+                }
 
                 val session = sessionFactory()
                 attemptCount += 1
@@ -344,6 +347,10 @@ public class AutoForwarderSupervisor(
                 // off historical, since-recovered failures.
                 reconnectDelay = initialReconnectDelayMs
                 consecutiveFailures = 0
+                // Do not let the previous session's FORWARDING snapshot
+                // satisfy restore/readiness observers while this fresh
+                // forwarder is still doing its first scan.
+                markTunnelsStopped()
                 connectionState.value = ConnectionState.Connected
                 eventsFlow.tryEmit(Event.Connected(attemptCount))
 

@@ -5,6 +5,9 @@ import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -16,6 +19,9 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Unit tests for [AutoForwarder] using a fully-faked [SshSession]. The fake
@@ -187,6 +193,49 @@ class AutoForwarderTest {
         assertEquals(0, forwarder.flowOfTunnels().first().size)
         job.cancel()
         runCurrent()
+    }
+
+    @Test
+    fun `stop closes a forward that finishes opening after stop`() = runTest {
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val openEntered = CountDownLatch(1)
+        val releaseOpen = CountDownLatch(1)
+        session.blockNextOpen(openEntered, releaseOpen)
+
+        val executor = Executors.newSingleThreadExecutor()
+        val dispatcher = executor.asCoroutineDispatcher()
+        val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + dispatcher)
+        val forwarder = AutoForwarder(session, smallConfig())
+        try {
+            val job = forwarder.start(scope)
+            assertTrue(
+                "openLocalPortForward should be in flight",
+                openEntered.await(2, TimeUnit.SECONDS),
+            )
+
+            forwarder.stop()
+            releaseOpen.countDown()
+            assertTrue(
+                "late-opened forward must be closed by stop()",
+                waitUntilReal(2_000L) {
+                    session.completedOpenAttempts.get() >= 1 &&
+                        session.openForwards.values.all { !it.isActive }
+                },
+            )
+            job.cancel()
+
+            assertTrue(
+                "stopped forwarder must not publish a late FORWARDING row",
+                forwarder.flowOfTunnels().first().isEmpty(),
+            )
+        } finally {
+            releaseOpen.countDown()
+            forwarder.stop()
+            scope.cancel()
+            dispatcher.close()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -586,17 +635,32 @@ class AutoForwarderTest {
         localPortRange = 3_500..3_600,
     )
 
+    private fun waitUntilReal(timeoutMs: Long, predicate: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (predicate()) return true
+            Thread.sleep(10)
+        }
+        return predicate()
+    }
+
     /** Fake SSH session that lets a test script `ss`/`netstat` output. */
     private class FakeSession : SshSession {
         @Volatile private var output: String = ""
         val openForwards: MutableMap<Int, FakeForward> = mutableMapOf()
         val totalOpenAttempts = AtomicInteger(0)
+        val completedOpenAttempts = AtomicInteger(0)
         private val failuresRemaining = AtomicInteger(0)
         private val failForever = AtomicBoolean(false)
         private val nextChannelId = AtomicInteger(0)
+        @Volatile private var blockedOpen: Pair<CountDownLatch, CountDownLatch>? = null
 
         fun setListening(ssOutput: String) {
             output = ssOutput
+        }
+
+        fun blockNextOpen(entered: CountDownLatch, release: CountDownLatch) {
+            blockedOpen = entered to release
         }
 
         /** Make the next [n] openLocalPortForward calls throw. */
@@ -630,6 +694,11 @@ class AutoForwarderTest {
             localPort: Int,
         ): SshPortForward {
             totalOpenAttempts.incrementAndGet()
+            blockedOpen?.let { (entered, release) ->
+                blockedOpen = null
+                entered.countDown()
+                release.await(2, TimeUnit.SECONDS)
+            }
             if (failForever.get()) {
                 throw RuntimeException("fake open failure (forever)")
             }
@@ -638,6 +707,7 @@ class AutoForwarderTest {
             }
             val f = FakeForward(remoteHost, remotePort, localPort, nextChannelId.incrementAndGet())
             openForwards[remotePort] = f
+            completedOpenAttempts.incrementAndGet()
             return f
         }
         override suspend fun uploadFile(file: java.io.File, remotePath: String): String =

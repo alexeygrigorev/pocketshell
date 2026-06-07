@@ -194,6 +194,7 @@ public class AutoForwarder(
      */
     public suspend fun togglePort(remotePort: Int) {
         mutex.withLock {
+            if (stopped) return
             if (remotePort in tunnels) {
                 stopTunnelLocked(remotePort)
                 manualPorts.remove(remotePort)
@@ -215,6 +216,7 @@ public class AutoForwarder(
      */
     public suspend fun ensurePort(remotePort: Int, enabled: Boolean) {
         mutex.withLock {
+            if (stopped) return
             if (enabled) {
                 if (manualPorts.add(remotePort) || remotePort !in tunnels) {
                     forwardPortLocked(remotePort)
@@ -249,6 +251,7 @@ public class AutoForwarder(
         val remotePortSet = remotePorts.map { it.port }.toSet()
 
         mutex.withLock {
+            if (stopped) return
             // Evict TTL'd deny-list entries up front so the rest of the
             // scan sees an accurate "is this port denied?" view.
             evictExpiredFailedPortsLocked()
@@ -316,6 +319,7 @@ public class AutoForwarder(
     }
 
     private fun forwardPortLocked(remotePort: Int) {
+        if (stopped) return
         if (remotePort in tunnels) return
         try {
             // resolveLocalPortLocked() throws when localPortRange is
@@ -324,6 +328,7 @@ public class AutoForwarder(
             // call. Without this widening, an exhausted range would
             // crash the scan loop instead of being memoed in failedPorts.
             val localPort = resolveLocalPortLocked(remotePort)
+            if (stopped) return
             // Forward 127.0.0.1:<remotePort> on the remote's side — the
             // standard "service bound to localhost on the dev box" case.
             // Matches the legacy ssh-auto-forward-android behaviour.
@@ -332,6 +337,10 @@ public class AutoForwarder(
                 remotePort = remotePort,
                 localPort = localPort,
             )
+            if (stopped) {
+                runCatching { forward.close() }
+                return
+            }
             tunnels[remotePort] = forward
             localPortMap[remotePort] = localPort
         } catch (_: Throwable) {

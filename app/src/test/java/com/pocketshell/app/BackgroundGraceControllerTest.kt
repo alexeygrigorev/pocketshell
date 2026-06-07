@@ -7,6 +7,7 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -254,6 +255,88 @@ class BackgroundGraceControllerTest {
             listOf("ssh:start"),
             events,
         )
+    }
+
+    @Test
+    fun `six second app switch within grace emits proof diagnostics and no auto reconnect fanout`() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val events = mutableListOf<String>()
+            val activeTmuxClients = ActiveTmuxClients()
+            activeTmuxClients.registerLifecycleHooks(
+                hostId = 1L,
+                hooks = ActiveTmuxClients.LifecycleHooks(
+                    onBackground = { events += "tmux:background" },
+                    onForeground = { events += "tmux:foreground" },
+                    onNetworkChanged = { change -> events += "network:${change.reason}" },
+                ),
+            )
+            val gate = TerminalNetworkLifecycleGate(nowMillis = { currentTime })
+            val networkChange = terminalNetworkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "six-second-switch-handoff",
+            )
+            val controller = BackgroundGraceController(
+                scope = backgroundScope,
+                graceMillis = BACKGROUND_GRACE_MILLIS,
+                onGraceElapsed = {
+                    events += "ssh:stop"
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onBackground() }
+                },
+                onForeground = { resumedWithinGrace ->
+                    events += "ssh:start"
+                    val decision = gate.onForegroundResumeFinished(
+                        resumedWithinGrace = resumedWithinGrace,
+                        hasLiveTerminalRuntime = true,
+                    )
+                    if (!resumedWithinGrace) {
+                        activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                    }
+                    if (decision is TerminalNetworkDecision.Dispatch) {
+                        activeTmuxClients.lifecycleHooksSnapshot().forEach {
+                            it.onNetworkChanged(decision.change)
+                        }
+                    }
+                },
+                nowMillis = { currentTime },
+            )
+
+            gate.onBackground()
+            controller.onBackground()
+            runCurrent()
+
+            advanceTimeBy(6_000L)
+            runCurrent()
+            assertTrue(gate.onNetworkChange(networkChange) is TerminalNetworkDecision.Defer)
+
+            gate.onForegroundResumeStarted()
+            controller.onForeground()
+            runCurrent()
+
+            assertEquals(
+                "a 6s app-switch must not detach tmux, foreground-reattach tmux, or replay network reconnect",
+                listOf("ssh:start"),
+                events,
+            )
+            assertTrue(
+                "within-grace app-switch must not emit auto-reconnect decisions",
+                diagnostics.eventsNamed("auto_reconnect_decision").isEmpty(),
+            )
+            assertTrue(
+                "within-grace app-switch must not emit grace elapsed teardown",
+                diagnostics.eventsNamed("background_grace_elapsed").isEmpty(),
+            )
+            val foreground = diagnostics.eventsNamed("background_grace_foreground").single()
+            assertEquals(true, foreground.fields["resumedWithinGrace"])
+            assertEquals(true, foreground.fields["withinGrace"])
+            assertEquals(6_000L, foreground.fields["elapsedMs"])
+            assertEquals(BACKGROUND_GRACE_MILLIS, foreground.fields["millis"])
+            assertEquals(1L, foreground.fields["backgroundCycleId"])
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

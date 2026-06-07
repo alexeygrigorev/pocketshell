@@ -686,9 +686,12 @@ internal class BackgroundGraceController(
     private var graceMillis: Long,
     private val onGraceElapsed: suspend () -> Unit,
     private val onForeground: suspend (resumedWithinGrace: Boolean) -> Unit,
+    private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     /** The in-flight grace timer, if the app is currently backgrounded. */
     private var graceJob: Job? = null
+    private var backgroundCycleId: Long = 0L
+    private var backgroundStartedAtMs: Long = 0L
 
     /**
      * True once [onGraceElapsed] has actually run for the current
@@ -712,23 +715,30 @@ internal class BackgroundGraceController(
         // A second ON_STOP without an intervening ON_START should not
         // restart the window — keep the original deadline.
         if (graceJob?.isActive == true) return
+        backgroundCycleId += 1L
+        backgroundStartedAtMs = nowMillis()
         teardownFired = false
         Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$graceMillis")
         DiagnosticEvents.record(
             "app",
             "background_grace_start",
             "millis" to graceMillis,
+            "backgroundCycleId" to backgroundCycleId,
             "source" to "process_lifecycle",
             "trigger" to "on_stop",
         )
         graceJob = scope.launch {
             delay(graceMillis)
             teardownFired = true
+            val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
             Log.i(GRACE_LIFECYCLE_TAG, "grace-window-elapsed teardown")
             DiagnosticEvents.record(
                 "app",
                 "background_grace_elapsed",
                 "teardown" to true,
+                "elapsedMs" to elapsedMs,
+                "millis" to graceMillis,
+                "backgroundCycleId" to backgroundCycleId,
                 "source" to "timer",
                 "trigger" to "grace_timeout",
             )
@@ -740,18 +750,22 @@ internal class BackgroundGraceController(
         val pending = graceJob
         graceJob = null
         val resumedWithinGrace = pending?.isActive == true && !teardownFired
+        val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
         if (resumedWithinGrace) {
             pending?.cancel()
         }
         Log.i(
             GRACE_LIFECYCLE_TAG,
-            "grace-window-foreground resumedWithinGrace=$resumedWithinGrace",
+            "grace-window-foreground resumedWithinGrace=$resumedWithinGrace elapsedMs=$elapsedMs",
         )
         DiagnosticEvents.record(
             "app",
             "background_grace_foreground",
             "resumedWithinGrace" to resumedWithinGrace,
             "withinGrace" to resumedWithinGrace,
+            "elapsedMs" to elapsedMs,
+            "millis" to graceMillis,
+            "backgroundCycleId" to backgroundCycleId,
             "source" to "process_lifecycle",
             "trigger" to "on_start",
         )

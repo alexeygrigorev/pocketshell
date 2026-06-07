@@ -1191,6 +1191,11 @@ class TmuxSessionViewModelTest {
                 "passive EOF must not be logged as terminal render overflow",
                 diagnostics.eventsNamed("terminal_output_overflow").isEmpty(),
             )
+            val autoDecision = diagnostics.eventsNamed("auto_reconnect_decision").single()
+            assertEquals("scheduled", autoDecision.fields["decision"])
+            assertEquals("retryable", autoDecision.fields["cause"])
+            assertEquals("tmux_eof_or_reader_disconnect", autoDecision.fields["reconnectSourceCandidate"])
+            assertEquals("reader_eof", autoDecision.fields["disconnectReason"])
             assertTrue(
                 "passive EOF should emit an automatic reconnect_start",
                 diagnostics.eventsNamed("reconnect_start").any {
@@ -2446,56 +2451,79 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun tmuxAutoReconnectDelayIsCancelledWhenAppBackgrounds() = runTest {
-        val registry = ActiveTmuxClients()
-        val connector = QueueLeaseConnector(FakeSshSession())
-        val vm = newVm(
-            registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
-        )
-        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
-        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
-        val client = FakeTmuxClient()
-        vm.replaceClientForTest(
-            hostId = 7L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = client,
-        )
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val registry = ActiveTmuxClients()
+            val connector = QueueLeaseConnector(FakeSshSession())
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            )
+            vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+            vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+            val client = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+            )
 
-        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
-            networkChange(reason = "validated-default-network-changed"),
-        )
-        runCurrent()
-        assertTrue(
-            "network reconnect must enter retry delay before background",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
-        )
+            registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+                networkChange(reason = "validated-default-network-changed"),
+            )
+            runCurrent()
+            assertTrue(
+                "network reconnect must enter retry delay before background",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+            )
 
-        vm.onAppBackgrounded()
-        advanceUntilIdle()
-        advanceTimeBy(60_000L)
-        advanceUntilIdle()
+            vm.onAppBackgrounded()
+            advanceUntilIdle()
+            advanceTimeBy(60_000L)
+            advanceUntilIdle()
 
-        assertEquals(
-            "backgrounding during retry delay must cancel tmux reconnect attempts",
-            0,
-            connector.connectCount,
-        )
-        val status = vm.connectionStatus.value
-        assertTrue(
-            "backgrounded reconnect should settle in a manual retry state, got $status",
-            status is TmuxSessionViewModel.ConnectionStatus.Failed,
-        )
-        assertTrue(
-            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
-            status.message.contains("Auto reconnect paused while PocketShell is in the background."),
-        )
-        assertEquals("work", vm.connectingSessionNameForTest())
-        assertTrue("manual reconnect remains available after background pause", vm.canReconnect.value)
+            assertEquals(
+                "backgrounding during retry delay must cancel tmux reconnect attempts",
+                0,
+                connector.connectCount,
+            )
+            val status = vm.connectionStatus.value
+            assertTrue(
+                "backgrounded reconnect should settle in a manual retry state, got $status",
+                status is TmuxSessionViewModel.ConnectionStatus.Failed,
+            )
+            assertTrue(
+                (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+                status.message.contains("Auto reconnect paused while PocketShell is in the background."),
+            )
+            assertEquals("work", vm.connectingSessionNameForTest())
+            assertTrue("manual reconnect remains available after background pause", vm.canReconnect.value)
+
+            val decisions = diagnostics.eventsNamed("auto_reconnect_decision")
+            assertTrue(
+                "network reconnect must log that auto reconnect was scheduled",
+                decisions.any {
+                    it.fields["decision"] == "scheduled" &&
+                        it.fields["cause"] == "retryable" &&
+                        it.fields["trigger"] == TmuxConnectTrigger.NetworkReconnect.logValue
+                },
+            )
+            assertTrue(
+                "backgrounded retry delay must log auto reconnect cancellation",
+                decisions.any {
+                    it.fields["decision"] == "cancelled_due_to_background" &&
+                        it.fields["cause"] == "app_background_lifecycle_pause" &&
+                        it.fields["trigger"] == TmuxConnectTrigger.NetworkReconnect.logValue
+                },
+            )
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

@@ -21,12 +21,43 @@ import com.pocketshell.core.agents.AgentKind
  * @property destructive whether the command clears or rolls back conversation
  *   context (e.g. `/clear`, `/new`, `/rewind`). Slice A only carries the flag
  *   so the catalog is complete; the confirm-before-send dialog is Slice C.
+ * @property argument optional inline argument metadata. Commands with an
+ *   argument do not fire bare from the sheet; the row expands first and the
+ *   sheet composes `/<command> <argument>` when sent.
  */
 public data class AgentCommand(
     val command: String,
     val label: String,
     val description: String,
     val destructive: Boolean = false,
+    val argument: AgentCommandArgument? = null,
+)
+
+public data class AgentCommandArgument(
+    val placeholder: String,
+    val required: Boolean,
+)
+
+public fun AgentCommand.dispatchText(argumentText: String): String {
+    if (argument == null) return command
+    val trimmed = argumentText.trim()
+    if (trimmed.isEmpty()) return command
+    return "$command $trimmed"
+}
+
+public fun AgentCommand.canDispatch(argumentText: String): Boolean {
+    val required = argument?.required ?: return true
+    return !required || argumentText.trim().isNotEmpty()
+}
+
+private val goalArgument = AgentCommandArgument(
+    placeholder = "Goal for this session",
+    required = true,
+)
+
+private val compactArgument = AgentCommandArgument(
+    placeholder = "Optional compaction instructions",
+    required = false,
 )
 
 /**
@@ -62,11 +93,13 @@ public object AgentCommandCatalog {
             command = "/compact",
             label = "Compact context",
             description = "Summarise the conversation to free up context.",
+            argument = compactArgument,
         ),
         AgentCommand(
             command = "/goal",
             label = "Goal",
             description = "Set a persistent objective for the session.",
+            argument = goalArgument,
         ),
         AgentCommand(
             command = "/rewind",
@@ -118,11 +151,13 @@ public object AgentCommandCatalog {
             command = "/compact",
             label = "Compact context",
             description = "Summarise the conversation to free up context.",
+            argument = compactArgument,
         ),
         AgentCommand(
             command = "/goal",
             label = "Goal",
             description = "Set a persistent objective for the session.",
+            argument = goalArgument,
         ),
         AgentCommand(
             command = "/diff",
@@ -174,6 +209,7 @@ public object AgentCommandCatalog {
             command = "/compact",
             label = "Compact context",
             description = "Summarise the conversation to free up context.",
+            argument = compactArgument,
         ),
         AgentCommand(
             command = "/sessions",

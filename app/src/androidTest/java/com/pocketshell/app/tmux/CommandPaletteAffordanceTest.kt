@@ -17,12 +17,15 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.agentcommands.AGENT_COMMAND_SHEET_TAG
 import com.pocketshell.app.agentcommands.AgentCommand
 import com.pocketshell.app.agentcommands.AgentCommandSheet
+import com.pocketshell.app.agentcommands.agentCommandArgumentFieldTag
+import com.pocketshell.app.agentcommands.agentCommandRowTag
 import com.pocketshell.app.agentcommands.agentCommandSendChipTag
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -46,8 +49,8 @@ import org.junit.runner.RunWith
  * [AgentCommandSheet] it opens. We verify:
  *
  *  1. The "/" affordance is visible in the agent-session header.
- *  2. One tap opens the palette (the #436 sheet), and a command row's Send chip
- *     routes the literal `/command` back to the caller (reused #436 behaviour).
+ *  2. One tap opens the palette (the #436 sheet), and a parameterized command
+ *     row routes the composed command text back to the caller.
  *  3. The affordance is absent for a plain (non-agent) shell header.
  *
  * A screenshot of the header + open palette is written for reviewer/maintainer
@@ -61,7 +64,7 @@ class CommandPaletteAffordanceTest {
 
     @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
     @Test
-    fun commandPaletteButtonOpensSheetAndSendsCommandInOneTap() {
+    fun commandPaletteButtonOpensSheetAndSendsParameterizedCommand() {
         var sheetOpen = false
         var sent: AgentCommand? = null
         compose.setContent {
@@ -109,10 +112,13 @@ class CommandPaletteAffordanceTest {
 
         captureFullDevice(File(artifactDir(), "command-palette-open-viewport.png"))
 
-        // 3. Selecting a command routes the literal `/command` (reused #436).
+        // 3. Parameterized commands expand first, then route the composed text.
+        compose.onNodeWithTag(agentCommandRowTag("/goal")).performClick()
+        compose.onNodeWithTag(agentCommandArgumentFieldTag("/goal"))
+            .performTextInput("ship command templates")
         compose.onNodeWithTag(agentCommandSendChipTag("/goal")).performClick()
         compose.waitForIdle()
-        assertEquals("/goal", sent?.command)
+        assertEquals("/goal ship command templates", sent?.command)
     }
 
     @Test

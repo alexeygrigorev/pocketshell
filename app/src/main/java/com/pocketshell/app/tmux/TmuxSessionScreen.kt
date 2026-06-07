@@ -1572,10 +1572,9 @@ public fun TmuxSessionScreen(
                     }
                 }
             },
-            // Issue #453: the former `Ctrl-C x2` / `Ctrl-D x2` band chips now
-            // live in this palette as session-control rows. Map each to the
-            // control bytes sent into the focused pane (×2 — the agent REPLs
-            // need a double interrupt/EOF to actually break out).
+            // Issue #453/#543: Claude-only `Ctrl-C x2` / `Ctrl-D x2` controls
+            // live at the bottom of this palette. Map each to the control
+            // bytes sent into the focused pane.
             onControlSend = { action ->
                 if (sessionLive) {
                     currentPane?.let { pane ->

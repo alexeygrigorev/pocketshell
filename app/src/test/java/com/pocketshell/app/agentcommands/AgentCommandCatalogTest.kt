@@ -124,6 +124,42 @@ class AgentCommandCatalogTest {
     }
 
     @Test
+    fun `goal requires an argument where available`() {
+        listOf(AgentKind.ClaudeCode, AgentKind.Codex).forEach { agent ->
+            val goal = AgentCommandCatalog.commandsFor(agent)
+                .first { it.command == "/goal" }
+
+            assertTrue("$agent /goal should require text", goal.argument?.required == true)
+            assertFalse(goal.canDispatch(""))
+            assertTrue(goal.canDispatch("ship command templates"))
+            assertEquals("/goal ship command templates", goal.dispatchText("  ship command templates  "))
+        }
+    }
+
+    @Test
+    fun `compact accepts optional argument where available`() {
+        AgentKind.entries.forEach { agent ->
+            val compact = AgentCommandCatalog.commandsFor(agent)
+                .first { it.command == "/compact" }
+
+            assertFalse("$agent /compact argument is optional", compact.argument?.required == true)
+            assertTrue(compact.canDispatch(""))
+            assertEquals("/compact", compact.dispatchText(""))
+            assertEquals("/compact keep git context", compact.dispatchText("keep git context"))
+        }
+    }
+
+    @Test
+    fun `plain commands dispatch as their command text`() {
+        val diff = AgentCommandCatalog.commandsFor(AgentKind.Codex)
+            .first { it.command == "/diff" }
+
+        assertEquals(null, diff.argument)
+        assertTrue(diff.canDispatch(""))
+        assertEquals("/diff", diff.dispatchText("ignored"))
+    }
+
+    @Test
     fun `blank query returns the full ordered catalog`() {
         AgentKind.entries.forEach { agent ->
             assertEquals(

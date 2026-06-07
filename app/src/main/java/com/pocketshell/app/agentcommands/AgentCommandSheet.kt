@@ -53,13 +53,14 @@ import com.pocketshell.uikit.theme.PocketShellTheme
  * Modal bottom sheet listing the agent slash-commands available for [agent]
  * (issue #436, Slice A — the spine). Visually clones [the snippet picker
  * sheet][com.pocketshell.app.snippets.SnippetPickerSheet] (search field +
- * row + send chip) but is backed by its OWN [AgentCommandCatalog], NOT the
+ * dense rows) but is backed by its OWN [AgentCommandCatalog], NOT the
  * per-host snippets data model — snippets are user CRUD with the wrong
  * lifecycle for an app-shipped per-agent catalog (see the issue #436 spike).
  *
  * Caller wiring:
- *  - [onCommandSend]: invoked when the user taps a row's `Send` chip. The
- *    caller routes the raw [AgentCommand.command] through
+ *  - [onCommandSend]: invoked when the user taps a plain command row or sends
+ *    an expanded parameterized row. The caller routes [AgentCommand.command]
+ *    through
  *    `TmuxSessionViewModel.sendToAgentPane(paneId, command)`, which types the
  *    literal text via `send-keys -l` then submits with Enter (the Codex
  *    submit delay is already handled inside that path).
@@ -78,11 +79,9 @@ public fun AgentCommandSheet(
     onCommandSend: (AgentCommand) -> Unit,
     modifier: Modifier = Modifier,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    // Issue #453: send a session-control action (interrupt / end-input) into
-    // the focused agent pane as control bytes. These were the `Ctrl-C x2` /
-    // `Ctrl-D x2` band chips; the band is decluttered to "/ commands + mic",
-    // so the two controls live at the top of this palette instead. Optional
-    // so previews / tests that only exercise slash commands keep compiling.
+    // Issue #453/#543: send a Claude session-control action (interrupt /
+    // end-input) into the focused agent pane as control bytes. Optional so
+    // previews / tests that only exercise slash commands keep compiling.
     onControlSend: ((SessionControlAction) -> Unit)? = null,
 ) {
     var query by remember { mutableStateOf("") }
@@ -102,14 +101,14 @@ public fun AgentCommandSheet(
             commands = filtered,
             query = query,
             onQueryChange = { query = it },
-            onCommandSend = { command ->
-                onCommandSend(command)
+            onCommandSend = { command, argumentText ->
+                onCommandSend(command.copy(command = command.dispatchText(argumentText)))
                 onDismiss()
             },
             onClose = onDismiss,
-            // Only show the controls when query is empty so a command search
-            // doesn't keep them pinned; firing one dismisses the sheet.
-            onControlSend = if (onControlSend != null) {
+            // The current double Ctrl-C / Ctrl-D semantics are Claude-specific;
+            // do not show them in Codex/OpenCode command sheets.
+            onControlSend = if (agent == AgentKind.ClaudeCode && onControlSend != null) {
                 { action ->
                     onControlSend(action)
                     onDismiss()
@@ -120,11 +119,9 @@ public fun AgentCommandSheet(
 }
 
 /**
- * Issue #453: a session-control action surfaced at the top of the agent
- * command palette. These replace the `Ctrl-C x2` / `Ctrl-D x2` band chips —
- * the band is decluttered to "/ commands + mic", so interrupt / end-input
- * move here. The caller maps each to the corresponding control bytes
- * (`Ctrl-C` ×2 / `Ctrl-D` ×2) sent into the focused pane.
+ * Issue #453/#543: a Claude session-control action surfaced at the bottom of
+ * the agent command palette. The caller maps each to the corresponding control
+ * bytes (`Ctrl-C` ×2 / `Ctrl-D` ×2) sent into the focused pane.
  */
 public enum class SessionControlAction(
     public val label: String,
@@ -145,11 +142,14 @@ internal fun AgentCommandSheetContent(
     commands: List<AgentCommand>,
     query: String,
     onQueryChange: (String) -> Unit,
-    onCommandSend: (AgentCommand) -> Unit,
+    onCommandSend: (AgentCommand, argumentText: String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     onControlSend: ((SessionControlAction) -> Unit)? = null,
 ) {
+    var expandedCommand by remember(commands) { mutableStateOf<String?>(null) }
+    var argumentText by remember(expandedCommand) { mutableStateOf("") }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -185,27 +185,6 @@ internal fun AgentCommandSheetContent(
                     color = PocketShellColors.TextSecondary,
                     fontSize = 20.sp,
                 )
-            }
-        }
-
-        // Issue #453: session controls (interrupt / end-input) live at the
-        // top of the palette — these are the former `Ctrl-C x2` / `Ctrl-D x2`
-        // band chips, moved here so the session band stays "/ commands + mic".
-        // Hidden while the user is searching commands so they don't pin.
-        if (onControlSend != null && query.isEmpty()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                SessionControlAction.values().forEach { action ->
-                    SessionControlChip(
-                        action = action,
-                        onClick = { onControlSend(action) },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
             }
         }
 
@@ -272,9 +251,44 @@ internal fun AgentCommandSheetContent(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 items(commands, key = { it.command }) { command ->
+                    val expanded = expandedCommand == command.command
                     AgentCommandRow(
                         command = command,
-                        onSend = { onCommandSend(command) },
+                        expanded = expanded,
+                        argumentText = if (expanded) argumentText else "",
+                        onArgumentChange = { argumentText = it },
+                        onRowClick = {
+                            if (command.argument == null) {
+                                onCommandSend(command, "")
+                            } else {
+                                expandedCommand = command.command
+                            }
+                        },
+                        onSend = {
+                            if (command.canDispatch(argumentText)) {
+                                onCommandSend(command, argumentText)
+                            }
+                        },
+                        onCancel = {
+                            expandedCommand = null
+                            argumentText = ""
+                        },
+                    )
+                }
+            }
+        }
+
+        if (onControlSend != null && query.isEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                SessionControlAction.values().forEach { action ->
+                    SessionControlChip(
+                        action = action,
+                        onClick = { onControlSend(action) },
+                        modifier = Modifier.weight(1f),
                     )
                 }
             }
@@ -285,7 +299,12 @@ internal fun AgentCommandSheetContent(
 @Composable
 private fun AgentCommandRow(
     command: AgentCommand,
+    expanded: Boolean,
+    argumentText: String,
+    onArgumentChange: (String) -> Unit,
+    onRowClick: () -> Unit,
     onSend: () -> Unit,
+    onCancel: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -296,7 +315,9 @@ private fun AgentCommandRow(
                 color = PocketShellColors.BorderSoft,
                 shape = RoundedCornerShape(10.dp),
             )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .clickable(role = Role.Button, onClick = onRowClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag(agentCommandRowTag(command.command)),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -322,7 +343,7 @@ private fun AgentCommandRow(
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = command.description,
                     color = PocketShellColors.TextMuted,
@@ -331,47 +352,146 @@ private fun AgentCommandRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            Spacer(modifier = Modifier.width(10.dp))
+            AgentCommandSendChip(
+                command = command,
+                label = if (command.argument == null) "Send" else "Fill",
+                enabled = true,
+                onClick = if (command.argument == null) onSend else onRowClick,
+                tag = if (command.argument == null) {
+                    agentCommandSendChipTag(command.command)
+                } else {
+                    agentCommandArgumentOpenChipTag(command.command)
+                },
+            )
         }
-        Spacer(modifier = Modifier.height(10.dp))
-        AgentCommandSendChip(
-            command = command,
-            onClick = onSend,
-            modifier = Modifier.fillMaxWidth(),
-        )
+
+        if (expanded && command.argument != null) {
+            Spacer(modifier = Modifier.height(10.dp))
+            AgentCommandArgumentEditor(
+                command = command,
+                value = argumentText,
+                onValueChange = onArgumentChange,
+                onSend = onSend,
+                onCancel = onCancel,
+            )
+        }
     }
 }
 
 /**
- * Single `Send` chip — commands always submit with Enter, so there is no
- * "Send vs Send + ↵" split (simpler than the snippet row). Reuses the
- * snippet picker's accent-fill primary-chip look.
+ * Compact trailing chip. Commands always submit with Enter, so there is no
+ * "Send vs Send + ↵" split.
  */
 @Composable
 private fun AgentCommandSendChip(
     command: AgentCommand,
+    label: String,
+    enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    tag: String = agentCommandSendChipTag(command.command),
 ) {
     Box(
         modifier = modifier
-            .background(PocketShellColors.Accent, RoundedCornerShape(8.dp))
+            .background(
+                if (enabled) PocketShellColors.Accent else PocketShellColors.Surface,
+                RoundedCornerShape(8.dp),
+            )
             .border(
                 width = 1.dp,
-                color = PocketShellColors.Accent,
+                color = if (enabled) PocketShellColors.Accent else PocketShellColors.BorderSoft,
                 shape = RoundedCornerShape(8.dp),
             )
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .testTag(agentCommandSendChipTag(command.command))
+            .then(if (enabled) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .testTag(tag)
             .semantics { contentDescription = "Send ${command.command} to agent" },
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "Send",
-            color = PocketShellColors.OnAccent,
+            text = label,
+            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
         )
+    }
+}
+
+@Composable
+private fun AgentCommandArgumentEditor(
+    command: AgentCommand,
+    value: String,
+    onValueChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val enabled = command.canDispatch(value)
+    Column {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+                .border(
+                    width = 1.dp,
+                    color = PocketShellColors.Border,
+                    shape = RoundedCornerShape(8.dp),
+                )
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(agentCommandArgumentFieldTag(command.command)),
+                textStyle = TextStyle(
+                    color = PocketShellColors.Text,
+                    fontSize = 14.sp,
+                ),
+                cursorBrush = SolidColor(PocketShellColors.Accent),
+                singleLine = true,
+                decorationBox = { inner ->
+                    if (value.isEmpty()) {
+                        Text(
+                            text = command.argument?.placeholder.orEmpty(),
+                            color = PocketShellColors.TextMuted,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    inner()
+                },
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .clickable(role = Role.Button, onClick = onCancel)
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Cancel",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            AgentCommandSendChip(
+                command = command,
+                label = if (enabled) "Send" else "Required",
+                enabled = enabled,
+                onClick = onSend,
+            )
+        }
     }
 }
 
@@ -383,9 +503,18 @@ private fun AgentCommandSendChip(
 internal fun agentCommandSendChipTag(command: String): String =
     "agent-command-send-${command.removePrefix("/")}"
 
+internal fun agentCommandRowTag(command: String): String =
+    "agent-command-row-${command.removePrefix("/")}"
+
+internal fun agentCommandArgumentFieldTag(command: String): String =
+    "agent-command-argument-${command.removePrefix("/")}"
+
+internal fun agentCommandArgumentOpenChipTag(command: String): String =
+    "agent-command-argument-open-${command.removePrefix("/")}"
+
 /**
- * Issue #453: a session-control chip (interrupt / end-input) shown at the
- * top of the palette. A bordered "danger-soft" chip so it reads as a system
+ * Issue #453/#543: a session-control chip (interrupt / end-input) shown at the
+ * bottom of the palette. A bordered "danger-soft" chip so it reads as a system
  * action distinct from the accent-filled slash-command Send chips.
  */
 @Composable
@@ -442,7 +571,7 @@ private fun AgentCommandSheetClaudePreview() {
                 commands = AgentCommandCatalog.commandsFor(AgentKind.ClaudeCode),
                 query = "",
                 onQueryChange = {},
-                onCommandSend = {},
+                onCommandSend = { _, _ -> },
                 onClose = {},
             )
         }
@@ -459,7 +588,7 @@ private fun AgentCommandSheetOpenCodePreview() {
                 commands = AgentCommandCatalog.commandsFor(AgentKind.OpenCode),
                 query = "",
                 onQueryChange = {},
-                onCommandSend = {},
+                onCommandSend = { _, _ -> },
                 onClose = {},
             )
         }

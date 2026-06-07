@@ -799,7 +799,7 @@ class TmuxClientTest {
     }
 
     @Test
-    fun `sendCommand timeout closes client and fails visibly`() = runBlocking {
+    fun `send-keys timeout after completed write fails open and does not mis-correlate next command`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
         val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
@@ -808,7 +808,7 @@ class TmuxClientTest {
         )
         installDiagnosticsForClient(
             client,
-            setOf("tmux_client_command_timeout", "tmux_client_reader_exit"),
+            setOf("tmux_client_command_timeout"),
             diagnosticEvents,
         )
         try {
@@ -831,11 +831,86 @@ class TmuxClientTest {
                 ex.message?.contains("tmux command `send-keys` timed out") == true,
             )
             assertEquals("send-keys -t %0 Enter\n", shell.stdinAsString())
+            assertFalse("send-keys timeout after write must not close the shell", shell.closed)
+            assertFalse(
+                "send-keys timeout after write must not trip disconnected latch",
+                client.disconnected.value,
+            )
+
+            val timeout = diagnosticEvents.first { it.first == "tmux_client_command_timeout" }.second
+            assertEquals("send-keys", timeout["commandKind"])
+            assertEquals("fail-open", timeout["timeoutMode"])
+            assertEquals(100L, timeout["timeoutMs"])
+            assertEquals(true, timeout["writeCompleted"])
+            assertTrue("timeout diagnostics should include stable client id", timeout["clientId"] is Long)
+
+            shell.resetStdin()
+            val next = scope.async {
+                client.sendCommand("list-panes -F ok")
+            }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+            // The timed-out send-keys response arrives after the next command
+            // is on the wire. It must be quarantined instead of completing
+            // the follow-up command with the wrong response block.
+            shell.feed(
+                "%begin 1 10 0\n" +
+                    "%end 1 10 0\n",
+            )
+            shell.feed(
+                "%begin 1 11 0\n" +
+                    "next-ok\n" +
+                    "%end 1 11 0\n",
+            )
+            val nextResponse = withTimeout(3_000) { next.await() }
+            assertEquals(11L, nextResponse.number)
+            assertEquals(listOf("next-ok"), nextResponse.output)
+            assertFalse("follow-up command must not disconnect client", client.disconnected.value)
+            assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `non send-keys sendCommand timeout closes client and fails visibly`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_command_timeout", "tmux_client_reader_exit"),
+            diagnosticEvents,
+        )
+        try {
+            client.connect()
+            // Eat the spawn line so the command write is easy to assert.
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val outcome = withTimeout(2_000) {
+                runCatching { client.sendCommand("kill-pane -t %0") }
+            }
+
+            assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify the command kind without logging full arguments",
+                ex.message?.contains("tmux command `kill-pane` timed out") == true,
+            )
+            assertEquals("kill-pane -t %0\n", shell.stdinAsString())
             assertTrue("timeout must close the shell", shell.closed)
             assertTrue("timeout must trip the disconnected latch", client.disconnected.value)
 
             val timeout = diagnosticEvents.first { it.first == "tmux_client_command_timeout" }.second
-            assertEquals("send-keys", timeout["commandKind"])
+            assertEquals("kill-pane", timeout["commandKind"])
             assertEquals("fatal", timeout["timeoutMode"])
             assertEquals(100L, timeout["timeoutMs"])
             assertEquals(true, timeout["writeCompleted"])
@@ -844,7 +919,7 @@ class TmuxClientTest {
             val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
             assertEquals("command_timeout", exit["disconnectCause"])
             assertEquals("command_timeout", exit["intent"])
-            assertEquals("send-keys", exit["commandKind"])
+            assertEquals("kill-pane", exit["commandKind"])
             assertEquals("fatal", exit["timeoutMode"])
         } finally {
             client.close()

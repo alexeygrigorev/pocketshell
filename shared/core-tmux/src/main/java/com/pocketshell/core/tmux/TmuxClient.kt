@@ -260,9 +260,11 @@ public data class TmuxOutputBacklogOverflow(
  *   transaction, including stdin write/flush and response wait. A
  *   structural command timeout closes the client so callers see a
  *   disconnect instead of waiting forever behind a stalled SSH/tmux
- *   channel. Best-effort commands get a short late-response drain window
- *   first so rendering reseeds can fail locally without misreporting a
- *   transport disconnect.
+ *   channel. Best-effort commands, fail-open rendering/resize commands,
+ *   and completed `send-keys` writes get a short late-response drain
+ *   window first so local output pressure does not masquerade as a
+ *   transport disconnect. Command writes that fail or never complete
+ *   remain fatal.
  */
 internal class RealTmuxClient(
     private val session: SshSession,
@@ -413,7 +415,7 @@ internal class RealTmuxClient(
     }
 
     override suspend fun sendCommand(cmd: String): CommandResponse =
-        sendCommandInternal(cmd, timeoutMode = CommandTimeoutMode.FatalClose)
+        sendCommandInternal(cmd, timeoutMode = timeoutModeForCommand(cmd))
 
     override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
         sendCommandInternal(cmd, timeoutMode = CommandTimeoutMode.BestEffortDrain)
@@ -477,15 +479,20 @@ internal class RealTmuxClient(
             val exception = TmuxClientException(
                 "tmux command `$kind` timed out after ${commandTimeoutMs}ms",
             )
+            val effectiveTimeoutMode = if (writeCompleted) {
+                timeoutMode
+            } else {
+                CommandTimeoutMode.FatalClose
+            }
             recordCommandTimeout(
                 kind = kind,
-                timeoutMode = timeoutMode,
+                timeoutMode = effectiveTimeoutMode,
                 writeCompleted = writeCompleted,
             )
-            if (timeoutMode != CommandTimeoutMode.FatalClose && writeCompleted) {
+            if (effectiveTimeoutMode != CommandTimeoutMode.FatalClose) {
                 Log.w(
                     ISSUE_244_DIAG_TAG,
-                    "tmux-command-${timeoutMode.logName}-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
+                    "tmux-command-${effectiveTimeoutMode.logName}-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
                         "lateDrainMs=$BEST_EFFORT_LATE_RESPONSE_DRAIN_MS",
                 )
                 val lateResponse = withTimeoutOrNull(BEST_EFFORT_LATE_RESPONSE_DRAIN_MS) {
@@ -494,24 +501,24 @@ internal class RealTmuxClient(
                 if (lateResponse != null) {
                     Log.i(
                         ISSUE_244_DIAG_TAG,
-                        "tmux-command-${timeoutMode.logName}-late-drained kind=$kind " +
+                        "tmux-command-${effectiveTimeoutMode.logName}-late-drained kind=$kind " +
                             "number=${lateResponse.number}",
                     )
                     throw exception
                 }
                 Log.w(
                     ISSUE_244_DIAG_TAG,
-                    "tmux-command-${timeoutMode.logName}-quarantine-expired kind=$kind",
+                    "tmux-command-${effectiveTimeoutMode.logName}-quarantine-expired kind=$kind",
                 )
                 val waitingForBegin = synchronized(responseCorrelationLock) {
                     val waiting = pendingCmd.commandNumber < 0L
-                    if (timeoutMode == CommandTimeoutMode.FailOpenDrain && waiting) {
+                    if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain && waiting) {
                         staleResponseBlocksToIgnore += 1
                     }
                     pendingQueue.remove(pendingCmd)
                     waiting
                 }
-                if (timeoutMode == CommandTimeoutMode.FailOpenDrain && waitingForBegin) {
+                if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain && waitingForBegin) {
                     Log.w(
                         ISSUE_244_DIAG_TAG,
                         "tmux-command-fail-open-stale-response-queued kind=$kind",
@@ -531,7 +538,7 @@ internal class RealTmuxClient(
             closeInternal(
                 ReaderExitIntent.CommandTimeout,
                 commandKind = kind,
-                timeoutMode = timeoutMode,
+                timeoutMode = effectiveTimeoutMode,
             )
             throw exception
         }
@@ -979,6 +986,13 @@ internal class RealTmuxClient(
 
         private fun commandKind(command: String): String =
             command.trim().substringBefore(' ').ifBlank { "unknown" }
+
+        private fun timeoutModeForCommand(command: String): CommandTimeoutMode =
+            if (commandKind(command) == "send-keys") {
+                CommandTimeoutMode.FailOpenDrain
+            } else {
+                CommandTimeoutMode.FatalClose
+            }
 
         /**
          * Buffer slack in the event bus so a brief subscriber stall

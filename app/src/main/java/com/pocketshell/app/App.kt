@@ -189,7 +189,9 @@ class App : Application() {
                     "trigger" to "on_stop",
                 )
                 backgroundGraceController.setGraceMillis(
-                    settingsRepository.settings.value.backgroundGraceMillis,
+                    BackgroundGraceTestOverride.currentOr(
+                        settingsRepository.settings.value.backgroundGraceMillis,
+                    ),
                 )
                 backgroundGraceController.onBackground()
             }
@@ -597,6 +599,22 @@ internal const val GRACE_LIFECYCLE_TAG: String = "PsAppBgGrace"
  * cycles; the default preserves the original hard-coded 60s behaviour.
  */
 internal const val BACKGROUND_GRACE_MILLIS: Long = AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS
+
+/**
+ * Test-only override for connected lifecycle proofs that need a short grace
+ * window without adding unsupported values to user-facing Settings.
+ */
+internal object BackgroundGraceTestOverride {
+    @Volatile
+    private var overrideMillis: Long? = null
+
+    fun setForTest(millis: Long?) {
+        require(millis == null || millis >= 0L) { "background grace override must be non-negative" }
+        overrideMillis = millis
+    }
+
+    fun currentOr(defaultMillis: Long): Long = overrideMillis ?: defaultMillis
+}
 
 /**
  * Issue #450: bounded grace-window state machine for the terminal

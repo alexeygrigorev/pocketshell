@@ -1,0 +1,554 @@
+package com.pocketshell.app.proof
+
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.os.SystemClock
+import android.view.View
+import android.view.ViewGroup
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
+import androidx.room.Room
+import androidx.test.core.app.ActivityScenario
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.BackgroundGraceTestOverride
+import com.pocketshell.app.MainActivity
+import com.pocketshell.app.diagnostics.DiagnosticEventSink
+import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
+import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
+import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.entity.HostEntity
+import com.termux.view.TerminalView
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
+
+/**
+ * Issue #548 / #450: real MainActivity -> host picker -> tmux attach proof
+ * for a quick app-switch returning inside the background grace window.
+ *
+ * The within-grace half is the regression guard: after ProcessLifecycle
+ * `ON_STOP` has started the bounded grace timer, foregrounding before that
+ * timer elapses must keep the live SSH/tmux control client intact. The user
+ * must not see Connecting/Reconnecting/Disconnected/Tap Reconnect, and the
+ * app must not record reconnect/reattach diagnostics.
+ *
+ * The same run also drives a short post-grace cycle using the test override
+ * seam so reviewers can see the opposite branch without a 30s connected-test
+ * sleep: once grace elapses, the app detaches and later foregrounds through
+ * the normal lifecycle reattach path.
+ */
+@RunWith(AndroidJUnit4::class)
+class BackgroundGraceReconnectE2eTest {
+
+    @get:Rule
+    val compose = createEmptyComposeRule()
+
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
+
+    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private var diagnostics: RecordingDiagnosticSink? = null
+    private var seededKey: String? = null
+    private val timings = mutableListOf<String>()
+
+    @Before
+    fun setUp() {
+        clearLastSessionPrefs()
+        BackgroundGraceTestOverride.setForTest(null)
+        diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+    }
+
+    @After
+    fun tearDown() {
+        runCatching { launchedActivity?.close() }
+        launchedActivity = null
+        BackgroundGraceTestOverride.setForTest(null)
+        diagnostics?.close()
+        diagnostics = null
+        clearLastSessionPrefs()
+        seededKey?.let { key ->
+            runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }
+        }
+    }
+
+    @Test
+    fun quickAppSwitchWithinBackgroundGraceDoesNotShowOrRecordReconnect() = runBlocking<Unit> {
+        val key = readFixtureKey()
+        seededKey = key
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSession(key)
+
+        val hostRowTag = seedDockerHost(key)
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        waitForClientCountAtLeast(1, "initial attach")
+        captureViewport("issue548-01-attached")
+        diagnostics!!.clear()
+
+        // Within-grace branch: ProcessLifecycle ON_STOP starts the timer,
+        // but foreground arrives before the short injected window elapses.
+        BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
+        val withinStart = SystemClock.elapsedRealtime()
+        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        waitForDiagnostic("background_grace_start", "within-grace background")
+        waitForClientCountAtLeast(1, "inside grace before foreground")
+        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        waitForDiagnostic("background_grace_foreground", "within-grace foreground") {
+            it.fields["withinGrace"] == true
+        }
+        recordTiming("within_grace_cycle_ms", SystemClock.elapsedRealtime() - withinStart)
+
+        waitForConnected("within-grace foreground")
+        assertNoVisibleReconnect("within-grace foreground")
+        watchNoVisibleReconnect("within-grace settle", WATCH_NO_RECONNECT_MS)
+        waitForVisibleTerminal("within-grace terminal") { it.contains(READY_MARKER) }
+        waitForClientCountAtLeast(1, "within-grace after foreground")
+        assertNoReconnectOrReattachDiagnostics("within-grace foreground")
+        captureViewport("issue548-02-within-grace-foreground")
+
+        // Post-grace branch: with the same real UI path still open, use a
+        // shorter override so the teardown branch is covered without waiting
+        // for the user-facing 30s minimum.
+        diagnostics!!.clear()
+        BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
+        val postStart = SystemClock.elapsedRealtime()
+        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        waitForDiagnostic("background_grace_elapsed", "post-grace elapsed") {
+            it.fields["teardown"] == true
+        }
+        waitForDiagnostic("terminal_background_teardown", "post-grace teardown")
+        waitForClientCountAtMost(0, "post-grace detached")
+        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        waitForDiagnostic("background_grace_foreground", "post-grace foreground") {
+            it.fields["withinGrace"] == false
+        }
+        waitForDiagnostic("terminal_foreground_reattach", "post-grace lifecycle reattach")
+        waitForDiagnostic("foreground_reattach", "post-grace vm reattach")
+        waitForConnected("post-grace reattach")
+        waitForVisibleTerminal("post-grace terminal") { it.contains(READY_MARKER) }
+        recordTiming("post_grace_cycle_ms", SystemClock.elapsedRealtime() - postStart)
+        captureViewport("issue548-03-post-grace-reattached")
+        writeTimings()
+    }
+
+    private fun attachSeededTmuxSession(hostRowTag: String) {
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
+            compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+    }
+
+    private fun waitForTerminalViewAttached() {
+        compose.waitUntil(timeoutMillis = 30_000) {
+            var attached = false
+            launchedActivity?.onActivity { activity ->
+                val view = activity.window.decorView.findTerminalView()
+                attached = view?.currentSession != null && view.mEmulator != null
+            }
+            attached
+        }
+    }
+
+    private fun waitForConnected(label: String) {
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected
+        }
+        assertTrue(
+            "expected Connected after $label, observed=${currentConnectionStatus()}",
+            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+    }
+
+    private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
+        var status: TmuxSessionViewModel.ConnectionStatus =
+            TmuxSessionViewModel.ConnectionStatus.Idle
+        launchedActivity?.onActivity { activity ->
+            status = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                .connectionStatus
+                .value
+        }
+        return status
+    }
+
+    private fun waitForVisibleTerminal(
+        label: String,
+        timeoutMillis: Long = TerminalTestTimeouts.terminalVisibilityTimeoutMs(),
+        predicate: (String) -> Boolean,
+    ): String {
+        var last = ""
+        compose.waitUntil(timeoutMillis = timeoutMillis) {
+            last = visibleTerminalText()
+            last.isNotBlank() && predicate(last)
+        }
+        assertTrue("expected visible terminal for $label; got:\n$last", predicate(last))
+        return last
+    }
+
+    private fun visibleTerminalText(): String {
+        var text = ""
+        launchedActivity?.onActivity { activity ->
+            text = activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.screen
+                ?.transcriptText
+                .orEmpty()
+        }
+        return text
+    }
+
+    private fun assertNoVisibleReconnect(label: String) {
+        assertEquals(
+            "expected no Connecting overlay for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        assertEquals(
+            "expected no Reconnecting/Disconnected pill for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_CONNECTION_STATUS_PILL_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        assertEquals(
+            "expected no disconnect band for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        assertEquals(
+            "expected no Tap Reconnect button for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        listOf("Connecting", "Reconnecting", "Disconnected", "Tap Reconnect").forEach { text ->
+            assertEquals(
+                "expected no visible '$text' text for $label",
+                0,
+                compose.onAllNodesWithText(text, substring = true, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .size,
+            )
+        }
+    }
+
+    private fun watchNoVisibleReconnect(label: String, durationMs: Long) {
+        val deadline = SystemClock.elapsedRealtime() + durationMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            assertNoVisibleReconnect(label)
+            SystemClock.sleep(100)
+        }
+    }
+
+    private fun assertNoReconnectOrReattachDiagnostics(label: String) {
+        val events = diagnostics!!.events
+        val forbidden = events.filter { event ->
+            event.name in setOf(
+                "reconnect_start",
+                "network_reconnect_start",
+                "foreground_reattach",
+                "terminal_background_teardown",
+                "terminal_foreground_reattach",
+            )
+        }
+        assertTrue(
+            "expected no reconnect/reattach diagnostics for $label; forbidden=$forbidden all=$events",
+            forbidden.isEmpty(),
+        )
+        assertTrue(
+            "within-grace cycle must not emit background_grace_elapsed; events=$events",
+            diagnostics!!.eventsNamed("background_grace_elapsed").isEmpty(),
+        )
+    }
+
+    private fun waitForDiagnostic(
+        name: String,
+        label: String,
+        timeoutMs: Long = DIAGNOSTIC_TIMEOUT_MS,
+        predicate: (RecordedDiagnosticEvent) -> Boolean = { true },
+    ): RecordedDiagnosticEvent {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var matches = emptyList<RecordedDiagnosticEvent>()
+        while (SystemClock.elapsedRealtime() < deadline) {
+            matches = diagnostics!!.eventsNamed(name).filter(predicate)
+            if (matches.isNotEmpty()) return matches.last()
+            SystemClock.sleep(50)
+        }
+        error("timed out waiting for diagnostic '$name' during $label; events=${diagnostics!!.events}")
+    }
+
+    private suspend fun waitForClientCountAtLeast(min: Int, label: String) {
+        val deadline = SystemClock.elapsedRealtime() + CLIENT_COUNT_TIMEOUT_MS
+        var lastCount = -1
+        var lastRaw = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            lastRaw = listClientsRaw()
+            lastCount = lastRaw.lines().count { it.isNotBlank() }
+            if (lastCount >= min) return
+            SystemClock.sleep(100)
+        }
+        error("expected at least $min tmux clients for $label, got $lastCount; raw=`$lastRaw`")
+    }
+
+    private suspend fun waitForClientCountAtMost(max: Int, label: String) {
+        val deadline = SystemClock.elapsedRealtime() + CLIENT_COUNT_TIMEOUT_MS
+        var lastCount = -1
+        var lastRaw = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            lastRaw = listClientsRaw()
+            lastCount = lastRaw.lines().count { it.isNotBlank() }
+            if (lastCount <= max) return
+            SystemClock.sleep(100)
+        }
+        error("expected at most $max tmux clients for $label, got $lastCount; raw=`$lastRaw`")
+    }
+
+    private suspend fun listClientsRaw(): String {
+        val key = requireNotNull(seededKey)
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec("tmux list-clients -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
+            }
+        }
+        return result.getOrNull()?.stdout.orEmpty()
+    }
+
+    private fun readFixtureKey(): String =
+        InstrumentationRegistry.getInstrumentation()
+            .context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+
+    private suspend fun seedDockerHost(key: String): String {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
+            .fallbackToDestructiveMigration(dropAllTables = true)
+            .build()
+        return try {
+            db.clearAllTables()
+            val storedKey = SshKeyStorage.persistKey(
+                context = appContext,
+                sshKeyDao = db.sshKeyDao(),
+                name = "issue548-bg-grace-key-${System.currentTimeMillis()}",
+                content = key,
+            )
+            val hostId = db.hostDao().insert(
+                HostEntity(
+                    name = "Issue548 Background Grace",
+                    hostname = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    username = DEFAULT_USER,
+                    keyId = storedKey.id,
+                    tmuxInstalled = true,
+                    lastBootstrapAt = System.currentTimeMillis(),
+                ),
+            )
+            HOST_ROW_TAG_PREFIX + hostId
+        } finally {
+            db.close()
+        }
+    }
+
+    private suspend fun seedTmuxSession(key: String) {
+        val script = buildString {
+            appendLine("set -eu")
+            appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
+            appendLine(
+                "tmux new-session -d -s ${shellQuote(SESSION_NAME)} " +
+                    shellQuote("printf '$READY_MARKER\\n'; exec sleep 600"),
+            )
+            appendLine("sleep 1")
+            appendLine("tmux list-sessions")
+        }
+        val result = execRemoteSetupUntilReady(
+            key = SshKey.Pem(key),
+            command = script,
+            description = "issue548 tmux seed session",
+        )
+        assertTrue(
+            "expected tmux seeding to succeed; exit=${result.exitCode} stderr='${result.stderr}'",
+            result.exitCode == 0,
+        )
+    }
+
+    private suspend fun cleanupRemoteTmuxSession(key: String) {
+        runCatching {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ).mapCatching { session ->
+                session.use {
+                    it.exec("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
+                }
+            }
+        }
+    }
+
+    private fun captureViewport(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+
+        var bitmap: Bitmap? = null
+        launchedActivity?.onActivity { activity ->
+            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
+            if (view.width <= 0 || view.height <= 0) return@onActivity
+            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(b))
+            bitmap = b
+        }
+        bitmap?.let { writeBitmap("$name-viewport", it) }
+        writeText("$name-visible-terminal.txt", visibleTerminalText())
+        bitmap?.recycle()
+    }
+
+    private fun writeBitmap(name: String, bitmap: Bitmap): File {
+        val file = artifactFile("$name.png")
+        FileOutputStream(file).use { out ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
+            }
+        }
+        println("ISSUE548_VIEWPORT ${file.absolutePath}")
+        return file
+    }
+
+    private fun writeText(name: String, text: String): File {
+        val file = artifactFile(name)
+        file.writeText(text)
+        println("ISSUE548_TEXT ${file.absolutePath}")
+        return file
+    }
+
+    private fun writeTimings(): File =
+        writeText("timings.txt", timings.joinToString(separator = "\n", postfix = "\n"))
+
+    private fun artifactFile(name: String): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
+        val dir = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME")
+        check(dir.exists() || dir.mkdirs()) {
+            "could not create artifact directory ${dir.absolutePath}"
+        }
+        return File(dir, name)
+    }
+
+    private fun recordTiming(name: String, value: Long) {
+        val line = "$name=$value"
+        timings += line
+        println("ISSUE548_TIMING $line")
+    }
+
+    private fun View.findTerminalView(): TerminalView? {
+        if (this is TerminalView) return this
+        if (this !is ViewGroup) return null
+        for (index in 0 until childCount) {
+            val match = getChildAt(index).findTerminalView()
+            if (match != null) return match
+        }
+        return null
+    }
+
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\"'\"'") + "'"
+
+    private data class RecordedDiagnosticEvent(
+        val category: String,
+        val name: String,
+        val fields: Map<String, Any?>,
+    )
+
+    private class RecordingDiagnosticSink : DiagnosticEventSink, AutoCloseable {
+        private val lock = Any()
+        private val recorded = mutableListOf<RecordedDiagnosticEvent>()
+
+        val events: List<RecordedDiagnosticEvent>
+            get() = synchronized(lock) { recorded.toList() }
+
+        override fun record(category: String, event: String, fields: Map<String, Any?>) {
+            synchronized(lock) { recorded += RecordedDiagnosticEvent(category, event, fields) }
+        }
+
+        fun eventsNamed(name: String): List<RecordedDiagnosticEvent> =
+            events.filter { it.name == name }
+
+        fun clear() {
+            synchronized(lock) { recorded.clear() }
+        }
+
+        override fun close() {
+            DiagnosticEvents.install(DiagnosticEventSink.Noop)
+        }
+    }
+
+    private companion object {
+        const val DATABASE_NAME: String = "pocketshell.db"
+        const val DEVICE_DIR_NAME: String = "issue548-background-grace-reconnect"
+        const val SESSION_NAME: String = "issue548-bg-grace-proof"
+        const val READY_MARKER: String = "ISSUE548-BG-GRACE-READY"
+
+        const val WITHIN_GRACE_MS: Long = 3_000L
+        const val POST_GRACE_MS: Long = 500L
+        const val WATCH_NO_RECONNECT_MS: Long = 1_200L
+        const val DIAGNOSTIC_TIMEOUT_MS: Long = 8_000L
+        const val CLIENT_COUNT_TIMEOUT_MS: Long = 8_000L
+
+        val CONNECTED_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 15_000L
+    }
+}

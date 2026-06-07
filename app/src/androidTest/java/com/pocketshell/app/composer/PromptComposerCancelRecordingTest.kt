@@ -72,11 +72,11 @@ class PromptComposerCancelRecordingTest {
 
         // The Transcribing surface + Cancel are visible.
         compose.onNodeWithText("Transcribing…").assertIsDisplayed()
-        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_CANCEL_TRANSCRIPTION_TAG).assertIsDisplayed()
 
         // Tap Cancel — it cancels the in-flight transcription and restores
         // the composer to Idle with the typed draft preserved.
-        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).performClick()
+        compose.onNodeWithTag(COMPOSER_CANCEL_TRANSCRIPTION_TAG).performClick()
         compose.waitForIdle()
 
         assertEquals(1, cancelCalls)
@@ -89,6 +89,7 @@ class PromptComposerCancelRecordingTest {
         // Back on Idle the Cancel affordance is gone and the editable input
         // + Send return.
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_CANCEL_TRANSCRIPTION_TAG).assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsDisplayed()
     }

@@ -857,7 +857,7 @@ internal fun SheetContent(
                     GhostButton(
                         label = "Cancel",
                         onClick = onCancelTranscription,
-                        modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
+                        modifier = Modifier.testTag(COMPOSER_CANCEL_TRANSCRIPTION_TAG),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     StopSendButton(
@@ -2173,11 +2173,18 @@ internal fun composerSendTooltipTestTag(label: String): String =
 
 
 /**
- * Issue #174: test tag for the recording discard control and the
- * transcribing cancel control. In `Recording` it stops the mic and drops the
- * buffer before Whisper; in `Transcribing` it aborts the in-flight round-trip.
+ * Issue #174: test tag for the recording discard control. It only appears in
+ * `Recording`, where it stops the mic and drops the buffer before Whisper.
  */
 internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recording"
+
+/**
+ * Issue #174/#453: test tag for the transcribing cancel control. Kept
+ * distinct from [COMPOSER_CANCEL_RECORDING_TAG] so tests can prove the active
+ * recording discard affordance exists without conflating it with the
+ * already-captured transcription cancel path.
+ */
+internal const val COMPOSER_CANCEL_TRANSCRIPTION_TAG = "prompt-composer-cancel-transcription"
 private const val MIC_LOCK_SWIPE_THRESHOLD_DP = 40
 
 /**

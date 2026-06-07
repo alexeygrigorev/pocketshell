@@ -100,7 +100,7 @@ class PromptComposerVisualScreenshotTest {
             )
         }
         compose.onNodeWithText("Transcribing…").assertExists()
-        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_CANCEL_TRANSCRIPTION_TAG).assertIsDisplayed()
         compose.onNodeWithText("TRANSCRIBING").assertDoesNotExist()
         compose.waitForIdle()
         WalkthroughScreenshotArtifacts.capture("07-composer-transcribing")

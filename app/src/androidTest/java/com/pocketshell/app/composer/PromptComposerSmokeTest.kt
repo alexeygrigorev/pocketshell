@@ -124,7 +124,7 @@ class PromptComposerSmokeTest {
         compose.onNodeWithText("TRANSCRIBING").assertDoesNotExist()
         // Issue #508: Cancel + Send are available during transcription (no
         // persistent Auto-send toggle).
-        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_CANCEL_TRANSCRIPTION_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
     }
 

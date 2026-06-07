@@ -40,6 +40,8 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.termux.view.TerminalView
@@ -783,12 +785,19 @@ class SshReconnectE2eTest {
      */
     private class DisconnectableStubTmuxClient : TmuxClient {
         private val disconnectedState = MutableStateFlow(false)
+        private val disconnectEventState = MutableStateFlow<TmuxDisconnectEvent?>(null)
 
         override val events: Flow<ControlEvent> = emptyFlow()
         override val disconnected: StateFlow<Boolean> = disconnectedState.asStateFlow()
+        override val disconnectEvent: StateFlow<TmuxDisconnectEvent?> = disconnectEventState.asStateFlow()
         override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> = emptyFlow()
 
         fun markDisconnected() {
+            disconnectEventState.value = TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderEof,
+                source = "stub",
+                intent = "unknown",
+            )
             disconnectedState.value = true
         }
 

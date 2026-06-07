@@ -67,6 +67,8 @@ import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -2900,10 +2902,18 @@ public class TmuxSessionViewModel @Inject constructor(
             client.disconnected.collect { dead ->
                 if (!dead) return@collect
                 val target = activeTarget ?: connectingTarget
+                val disconnectEvent = disconnectEventOrFallback(client)
                 DiagnosticEvents.record(
                     "connection",
                     "passive_disconnect",
                     "source" to "tmux_client_disconnected",
+                    "disconnectReason" to disconnectEvent.reason.logValue,
+                    "disconnectSource" to disconnectEvent.source,
+                    "disconnectIntent" to disconnectEvent.intent,
+                    "commandKind" to disconnectEvent.commandKind,
+                    "timeoutMode" to disconnectEvent.timeoutMode,
+                    "exceptionClass" to disconnectEvent.exceptionClass,
+                    "message" to disconnectEvent.message,
                     "hostId" to target?.hostId,
                     "host" to target?.host,
                     "port" to target?.port,
@@ -2915,12 +2925,15 @@ public class TmuxSessionViewModel @Inject constructor(
                     "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
                     "status" to _connectionStatus.value.javaClass.simpleName,
                 )
-                handlePassiveClientDisconnect(client)
+                handlePassiveClientDisconnect(client, disconnectEvent)
             }
         }
     }
 
-    private fun handlePassiveClientDisconnect(client: TmuxClient) {
+    private fun handlePassiveClientDisconnect(
+        client: TmuxClient,
+        disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
+    ) {
         val current = _connectionStatus.value
         if (current !is ConnectionStatus.Connected) return
         // Only react if this is still THE active client. The `connect()`
@@ -2929,8 +2942,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // must not overwrite the new client's Connected status.
         if (clientRef !== client) return
         val target = activeTarget ?: connectingTarget
-        val reason = "Disconnected from ${current.user}@${current.host}:${current.port}. " +
-            "Tap Reconnect to retry."
+        val reason = passiveDisconnectMessage(current, disconnectEvent)
         passiveDisconnectGraceJob?.cancel()
         val graceJob = viewModelScope.launch {
             val recovered = target != null && silentlyReattachWithinPassiveGrace(
@@ -2942,7 +2954,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 return@launch
             }
             passiveDisconnectGraceJob = null
-            surfacePassiveDisconnect(client = client, reason = reason, target = target)
+            surfacePassiveDisconnect(
+                client = client,
+                reason = reason,
+                target = target,
+                disconnectEvent = disconnectEvent,
+            )
         }
         passiveDisconnectGraceJob = graceJob
         graceJob.invokeOnCompletion {
@@ -3348,6 +3365,7 @@ public class TmuxSessionViewModel @Inject constructor(
         client: TmuxClient,
         reason: String,
         target: ConnectionTarget?,
+        disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
     ) {
         if (_connectionStatus.value !is ConnectionStatus.Connected) return
         if (clientRef !== client) return
@@ -3362,6 +3380,13 @@ public class TmuxSessionViewModel @Inject constructor(
             "connection",
             "disconnect",
             "cause" to "tmux_control_channel_closed",
+            "disconnectReason" to disconnectEvent.reason.logValue,
+            "disconnectSource" to disconnectEvent.source,
+            "disconnectIntent" to disconnectEvent.intent,
+            "commandKind" to disconnectEvent.commandKind,
+            "timeoutMode" to disconnectEvent.timeoutMode,
+            "exceptionClass" to disconnectEvent.exceptionClass,
+            "message" to disconnectEvent.message,
             "source" to "passive_disconnect",
             "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
             "hostId" to target?.hostId,
@@ -3382,6 +3407,28 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         _connectionStatus.value = ConnectionStatus.Failed(reason)
     }
+
+    private fun passiveDisconnectMessage(
+        current: ConnectionStatus.Connected,
+        disconnectEvent: TmuxDisconnectEvent,
+    ): String {
+        val prefix = when (disconnectEvent.reason) {
+            TmuxDisconnectReason.ReaderEof -> "Transport EOF"
+            TmuxDisconnectReason.ReaderException -> "Transport read failed"
+            TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
+            TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
+            TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
+            TmuxDisconnectReason.Unknown -> "Disconnected"
+        }
+        return "$prefix from ${current.user}@${current.host}:${current.port}. Tap Reconnect to retry."
+    }
+
+    private fun disconnectEventOrFallback(client: TmuxClient): TmuxDisconnectEvent =
+        client.disconnectEvent.value ?: TmuxDisconnectEvent(
+            reason = TmuxDisconnectReason.Unknown,
+            source = "boolean_disconnected",
+            intent = "unknown",
+        )
 
     private fun scheduleAutoReconnect(
         target: ConnectionTarget,

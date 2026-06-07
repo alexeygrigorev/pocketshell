@@ -908,6 +908,10 @@ class TmuxClientTest {
             assertEquals("kill-pane -t %0\n", shell.stdinAsString())
             assertTrue("timeout must close the shell", shell.closed)
             assertTrue("timeout must trip the disconnected latch", client.disconnected.value)
+            val disconnectEvent = client.disconnectEvent.value
+            assertEquals(TmuxDisconnectReason.CommandTimeout, disconnectEvent?.reason)
+            assertEquals("kill-pane", disconnectEvent?.commandKind)
+            assertEquals("fatal", disconnectEvent?.timeoutMode)
 
             val timeout = diagnosticEvents.first { it.first == "tmux_client_command_timeout" }.second
             assertEquals("kill-pane", timeout["commandKind"])
@@ -1173,6 +1177,7 @@ class TmuxClientTest {
             "expected client.disconnected to latch true after detachCleanly",
             client.disconnected.value,
         )
+        assertEquals(TmuxDisconnectReason.ExplicitDetach, client.disconnectEvent.value?.reason)
         val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit") { fields ->
             fields["disconnectCause"] == "detach_or_replace" &&
                 fields["intent"] == "detach_or_replace"
@@ -1207,6 +1212,8 @@ class TmuxClientTest {
                 while (!client.disconnected.value) { yield(); delay(10) }
             }
 
+            assertEquals(TmuxDisconnectReason.ReaderEof, client.disconnectEvent.value?.reason)
+            assertEquals("eof", client.disconnectEvent.value?.source)
             val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit") { fields ->
                 fields["disconnectCause"] == "read_eof" &&
                     fields["intent"] == "unknown" &&
@@ -1217,6 +1224,42 @@ class TmuxClientTest {
             assertEquals("eof", exit["source"])
             assertEquals(false, exit["closed"])
             assertEquals(0, exit["eventBusDroppedEvents"])
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `reader exception exposes reader exception disconnect event`() = runBlocking {
+        val shell = FailingReadShell(IOException("synthetic read failure"))
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_reader_exit"),
+            diagnosticEvents,
+        )
+        try {
+            client.connect()
+            withTimeout(3_000) {
+                while (!client.disconnected.value) { yield(); delay(10) }
+            }
+
+            val event = client.disconnectEvent.value
+            assertEquals(TmuxDisconnectReason.ReaderException, event?.reason)
+            assertEquals("read_failure", event?.source)
+            assertEquals("IOException", event?.exceptionClass)
+            assertEquals("synthetic read failure", event?.message)
+            val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit") { fields ->
+                fields["disconnectCause"] == "read_failure" &&
+                    fields["disconnectReason"] == "reader_exception"
+            }
+            assertEquals("read_failure", exit["disconnectCause"])
+            assertEquals("reader_exception", exit["disconnectReason"])
+            assertEquals("IOException", exit["cause"])
         } finally {
             client.close()
         }
@@ -1242,6 +1285,7 @@ class TmuxClientTest {
 
         client.close()
 
+        assertEquals(TmuxDisconnectReason.ExplicitClose, client.disconnectEvent.value?.reason)
         val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit") { fields ->
             fields["disconnectCause"] == "local_close" &&
                 fields["intent"] == "local_close" &&
@@ -1619,6 +1663,35 @@ class TmuxClientTest {
         }
         fun awaitBlockedStdinWrite(timeoutMs: Long): Boolean =
             stdinCapture.awaitBlockedWrite(timeoutMs)
+    }
+
+    private class FailingReadShell(
+        private val failure: IOException,
+    ) : SshShell {
+        private val stdinCapture = SynchronizedByteArrayOutputStream()
+
+        @Volatile
+        private var closed: Boolean = false
+
+        override val stdin: OutputStream = stdinCapture
+        override val stdout: InputStream = object : InputStream() {
+            override fun read(): Int {
+                throw failure
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                throw failure
+            }
+        }
+        override val stderr: InputStream = object : InputStream() {
+            override fun read(): Int = -1
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            runCatching { stdinCapture.close() }
+        }
     }
 
     /**

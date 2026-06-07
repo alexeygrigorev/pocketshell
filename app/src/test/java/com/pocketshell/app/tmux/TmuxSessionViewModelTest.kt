@@ -27,6 +27,8 @@ import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
@@ -205,6 +207,13 @@ class TmuxSessionViewModelTest {
             closeAndThrowException = TmuxClientException(
                 "tmux command `list-panes` timed out after 100ms",
             )
+            closeAndThrowDisconnectEvent = TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.CommandTimeout,
+                source = "command_timeout",
+                intent = "command_timeout",
+                commandKind = "list-panes",
+                timeoutMode = "fatal",
+            )
         }
         vm.attachClientForTest(client)
         runCurrent()
@@ -222,7 +231,7 @@ class TmuxSessionViewModelTest {
             status is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
         assertEquals(
-            "Disconnected from test@test:0. Tap Reconnect to retry.",
+            "Tmux command timed out from test@test:0. Tap Reconnect to retry.",
             (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
         )
     }
@@ -1145,7 +1154,13 @@ class TmuxSessionViewModelTest {
                 client = deadClient,
             )
 
-            deadClient.disconnectedSignal.value = true
+            deadClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "eof",
+                    intent = "unknown",
+                ),
+            )
             runCurrent()
 
             assertEquals(
@@ -1154,16 +1169,25 @@ class TmuxSessionViewModelTest {
                 connector.connectCount,
             )
             assertEquals("work", vm.activeSessionNameForTest())
-            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed)
+            val failedStatus = vm.connectionStatus.value
+            assertTrue(failedStatus is TmuxSessionViewModel.ConnectionStatus.Failed)
+            assertEquals(
+                "Transport EOF from alex@alpha.example:22. Tap Reconnect to retry.",
+                (failedStatus as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            )
             assertTrue("manual reconnect must remain available after EOF disconnect", vm.canReconnect.value)
 
             val passive = diagnostics.eventsNamed("passive_disconnect").single()
             assertEquals("tmux_client_disconnected", passive.fields["source"])
+            assertEquals("reader_eof", passive.fields["disconnectReason"])
+            assertEquals("eof", passive.fields["disconnectSource"])
+            assertEquals("unknown", passive.fields["disconnectIntent"])
             assertEquals("alpha.example", passive.fields["host"])
             assertEquals("work", passive.fields["session"])
             val surfaced = diagnostics.eventsNamed("disconnect").single()
             assertEquals("passive_disconnect", surfaced.fields["source"])
             assertEquals("tmux_control_channel_closed", surfaced.fields["cause"])
+            assertEquals("reader_eof", surfaced.fields["disconnectReason"])
             assertTrue(
                 "passive EOF must not be logged as terminal render overflow",
                 diagnostics.eventsNamed("terminal_output_overflow").isEmpty(),
@@ -6297,6 +6321,7 @@ class TmuxSessionViewModelTest {
         private val delegate = FakeTmuxClient()
         override val events = delegate.events
         override val disconnected = delegate.disconnected
+        override val disconnectEvent = delegate.disconnectEvent
         override val outputBacklogOverflows = delegate.outputBacklogOverflows
         val sentCommands: MutableList<String> get() = delegate.sentCommands
         override suspend fun connect() = delegate.connect()

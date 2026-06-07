@@ -145,6 +145,17 @@ public interface TmuxClient : AutoCloseable {
     public val disconnected: StateFlow<Boolean>
 
     /**
+     * Structured reason for [disconnected].
+     *
+     * Null while the client is live. Once the control channel is closed this
+     * latches to the best-known reason and [disconnected] remains the legacy
+     * Boolean compatibility signal. Code that needs UI or log diagnostics
+     * should prefer this flow so it can distinguish a remote reader EOF from
+     * local teardown.
+     */
+    public val disconnectEvent: StateFlow<TmuxDisconnectEvent?>
+
+    /**
      * Emits when a pane's lossless terminal-output backlog is exhausted.
      *
      * This is a local rendering/ingestion failure signal, not an SSH
@@ -234,6 +245,25 @@ public data class TmuxOutputBacklogOverflow(
     val droppedEvents: Int,
 )
 
+public data class TmuxDisconnectEvent(
+    val reason: TmuxDisconnectReason,
+    val source: String,
+    val intent: String,
+    val commandKind: String? = null,
+    val timeoutMode: String? = null,
+    val exceptionClass: String? = null,
+    val message: String? = null,
+)
+
+public enum class TmuxDisconnectReason(public val logValue: String) {
+    ExplicitClose("explicit_close"),
+    ExplicitDetach("explicit_detach"),
+    ReaderEof("reader_eof"),
+    ReaderException("reader_exception"),
+    CommandTimeout("command_timeout"),
+    Unknown("unknown"),
+}
+
 /**
  * Real implementation of [TmuxClient] backed by an [SshSession]'s shell
  * channel.
@@ -312,6 +342,10 @@ internal class RealTmuxClient(
     private val _disconnected: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
     override val disconnected: StateFlow<Boolean> = _disconnected.asStateFlow()
+
+    private val _disconnectEvent: MutableStateFlow<TmuxDisconnectEvent?> = MutableStateFlow(null)
+
+    override val disconnectEvent: StateFlow<TmuxDisconnectEvent?> = _disconnectEvent.asStateFlow()
 
     private val _outputBacklogOverflows = MutableSharedFlow<TmuxOutputBacklogOverflow>(
         replay = 0,
@@ -649,6 +683,12 @@ internal class RealTmuxClient(
         // Issue #173: signal disconnection BEFORE we tear the rest down
         // so observers like [TmuxSessionViewModel] can flip their
         // connection-status state without racing the scope cancel.
+        publishDisconnectEvent(
+            disconnectEventFor(
+                cause = classifyReaderExit("local"),
+                source = "local",
+            ),
+        )
         _disconnected.value = true
         readerJob?.cancel()
         readerJob = null
@@ -851,12 +891,21 @@ internal class RealTmuxClient(
             }
         } finally {
             val disconnectCause = classifyReaderExit(readerExitSource)
+            publishDisconnectEvent(
+                disconnectEventFor(
+                    cause = disconnectCause,
+                    source = readerExitSource,
+                    exceptionClass = readerFailureClass,
+                    message = readerFailureMessage,
+                ),
+            )
             TmuxClientDiagnostics.record(
                 "tmux_client_reader_exit",
                 buildMap {
                     put("session", sessionName)
                     put("source", readerExitSource)
                     put("disconnectCause", disconnectCause.logValue)
+                    put("disconnectReason", disconnectReasonFor(disconnectCause).logValue)
                     put("intent", readerExitIntent.logValue)
                     putAll(commonDiagnosticFields())
                     put("closed", closed)
@@ -955,6 +1004,49 @@ internal class RealTmuxClient(
             source == "eof" -> ReaderDisconnectCause.ReadEof
             closed -> ReaderDisconnectCause.LocalClose
             else -> ReaderDisconnectCause.Unknown
+        }
+
+    private fun disconnectEventFor(
+        cause: ReaderDisconnectCause,
+        source: String,
+        exceptionClass: String? = null,
+        message: String? = null,
+    ): TmuxDisconnectEvent =
+        TmuxDisconnectEvent(
+            reason = disconnectReasonFor(cause),
+            source = source,
+            intent = readerExitIntent.logValue,
+            commandKind = readerExitCommandKind,
+            timeoutMode = readerExitTimeoutMode?.logName,
+            exceptionClass = exceptionClass,
+            message = message,
+        )
+
+    private fun disconnectReasonFor(cause: ReaderDisconnectCause): TmuxDisconnectReason =
+        when (cause) {
+            ReaderDisconnectCause.LocalClose -> TmuxDisconnectReason.ExplicitClose
+            ReaderDisconnectCause.DetachOrReplace -> TmuxDisconnectReason.ExplicitDetach
+            ReaderDisconnectCause.CommandTimeout -> TmuxDisconnectReason.CommandTimeout
+            ReaderDisconnectCause.ReadEof -> TmuxDisconnectReason.ReaderEof
+            ReaderDisconnectCause.ReadFailure -> TmuxDisconnectReason.ReaderException
+            ReaderDisconnectCause.Unknown -> TmuxDisconnectReason.Unknown
+        }
+
+    private fun publishDisconnectEvent(event: TmuxDisconnectEvent) {
+        val current = _disconnectEvent.value
+        if (current == null || disconnectPriority(event.reason) >= disconnectPriority(current.reason)) {
+            _disconnectEvent.value = event
+        }
+    }
+
+    private fun disconnectPriority(reason: TmuxDisconnectReason): Int =
+        when (reason) {
+            TmuxDisconnectReason.Unknown -> 0
+            TmuxDisconnectReason.ReaderEof -> 1
+            TmuxDisconnectReason.ReaderException -> 2
+            TmuxDisconnectReason.ExplicitClose -> 3
+            TmuxDisconnectReason.ExplicitDetach -> 4
+            TmuxDisconnectReason.CommandTimeout -> 5
         }
 
     private fun commonDiagnosticFields(): Map<String, Any?> =

@@ -3,6 +3,8 @@ package com.pocketshell.app.tmux
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientException
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
@@ -65,6 +67,15 @@ internal class FakeTmuxClient : TmuxClient {
 
     override val disconnected: StateFlow<Boolean> = disconnectedSignal.asStateFlow()
 
+    val disconnectEventSignal: MutableStateFlow<TmuxDisconnectEvent?> = MutableStateFlow(null)
+
+    override val disconnectEvent: StateFlow<TmuxDisconnectEvent?> = disconnectEventSignal.asStateFlow()
+
+    fun markDisconnectedForTest(event: TmuxDisconnectEvent) {
+        disconnectEventSignal.value = event
+        disconnectedSignal.value = true
+    }
+
     val outputBacklogOverflowEvents: MutableSharedFlow<TmuxOutputBacklogOverflow> =
         MutableSharedFlow(replay = 0, extraBufferCapacity = 16)
 
@@ -114,6 +125,8 @@ internal class FakeTmuxClient : TmuxClient {
     var closeAndThrowOnCommandPrefix: String? = null
 
     var closeAndThrowException: Throwable = TmuxClientException("tmux command timed out")
+
+    var closeAndThrowDisconnectEvent: TmuxDisconnectEvent? = null
 
     var failBestEffortOnCommandPrefix: String? = null
 
@@ -171,7 +184,13 @@ internal class FakeTmuxClient : TmuxClient {
         }
         closeAndThrowOnCommandPrefix?.let { prefix ->
             if (cmd.startsWith(prefix)) {
-                close()
+                closeWithEvent(
+                    closeAndThrowDisconnectEvent ?: TmuxDisconnectEvent(
+                        reason = TmuxDisconnectReason.ExplicitClose,
+                        source = "fake_close_and_throw",
+                        intent = "local_close",
+                    ),
+                )
                 throw closeAndThrowException
             }
         }
@@ -252,7 +271,18 @@ internal class FakeTmuxClient : TmuxClient {
     }
 
     override fun close() {
+        closeWithEvent(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ExplicitClose,
+                source = "fake_close",
+                intent = "local_close",
+            ),
+        )
+    }
+
+    private fun closeWithEvent(event: TmuxDisconnectEvent) {
         closed = true
+        disconnectEventSignal.value = event
         disconnectedSignal.value = true
     }
 
@@ -282,6 +312,12 @@ internal class FakeTmuxClient : TmuxClient {
         // path runs against the real client or the fake.
         sentCommands += "detach-client"
         detachCleanlyGate?.await()
-        close()
+        closeWithEvent(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ExplicitDetach,
+                source = "fake_detach",
+                intent = "detach_or_replace",
+            ),
+        )
     }
 }

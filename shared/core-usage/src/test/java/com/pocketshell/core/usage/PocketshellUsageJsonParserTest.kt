@@ -48,6 +48,31 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
+    fun parse_codexFallsBackToDetailWindowsAndEpochResets() {
+        val records = parser.parse(
+            """
+            {"provider":"codex","status":"ok",
+             "short_term":{"percent_remaining":100.0,"reset_at":null},
+             "long_term":{"percent_remaining":69.0,"reset_at":null},
+             "block_reason":null,"error":null,
+             "details":{"limit_reached":false,"windows":{
+               "primary_window":{"used_percent":12,"reset_at":1780828285},
+               "secondary_window":{"used_percent":31,"reset_at":1781137638}
+             }}}
+            """.trimIndent(),
+        )
+
+        val record = records.single()
+        assertEquals(2, record.windows.size)
+        assertEquals("short_term", record.windows[0].name)
+        assertEquals(12.0, record.windows[0].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-07T10:31:25Z"), record.windows[0].resetAt)
+        assertEquals("long_term", record.windows[1].name)
+        assertEquals(31.0, record.windows[1].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-11T00:27:18Z"), record.windows[1].resetAt)
+    }
+
+    @Test
     fun parse_claudeHappyPath() {
         val records = parser.parse(
             """{"provider":"claude","status":"ok",
@@ -129,6 +154,23 @@ class PocketshellUsageJsonParserTest {
         assertEquals(UsageStatus.Error, record.status)
         assertEquals("login required: run codex login", record.lastError)
         assertTrue(record.windows.isEmpty())
+    }
+
+    @Test
+    fun parse_claudeUnauthorizedMapsToActionableAuthError() {
+        val record = parser.parse(
+            """{"provider":"claude","status":"error",
+              "short_term":{"percent_remaining":null,"reset_at":null},
+              "long_term":{"percent_remaining":null,"reset_at":null},
+              "block_reason":null,
+              "error":"HTTP Error 401: Unauthorized","details":{}}""".trimIndent(),
+        ).single()
+
+        assertEquals(UsageStatus.Error, record.status)
+        assertEquals(
+            "Claude Code authentication failed on this host. Run `claude /login` in the host shell, then refresh usage.",
+            record.lastError,
+        )
     }
 
     @Test

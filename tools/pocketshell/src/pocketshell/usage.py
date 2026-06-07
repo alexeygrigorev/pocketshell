@@ -1,10 +1,8 @@
 """`pocketshell usage` subcommand.
 
-First-PR implementation: delegate to the existing `quse` CLI via
-`subprocess.run`. The arguments and stdout are proxied through verbatim
-so the JSON payload (and human-readable lines) are byte-identical to
-`quse [provider] [--json]`. The existing Kotlin `QuseUsageJsonParser`
-keeps working when the Android app eventually switches its probe over.
+Implementation delegates to the existing `quse` CLI via `subprocess.run`
+and normalizes JSON records into PocketShell's app-facing schema. Human
+output is proxied verbatim.
 
 Daemon mode (issue #219, first PR scope)
 ----------------------------------------
@@ -52,9 +50,17 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
+import json
+from pathlib import Path
 from typing import Any, Optional, Sequence
+import urllib.error
+import urllib.request
 
 import click
+
+_CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+_CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 
 
 def _resolve_quse_binary() -> Optional[str]:
@@ -94,12 +100,259 @@ def _run_quse(args: Sequence[str]) -> int:
         capture_output=True,
         text=True,
     )
-    # Echo verbatim so the JSON output is byte-identical to `quse --json`.
+    # Human-readable output stays byte-identical to `quse`.
     if completed.stdout:
         sys.stdout.write(completed.stdout)
     if completed.stderr:
         sys.stderr.write(completed.stderr)
     return completed.returncode
+
+
+def _normalize_reset_at(value: Any) -> Optional[str]:
+    """Return an ISO-8601 UTC reset timestamp, accepting provider quirks.
+
+    OpenAI's Codex usage endpoint currently returns ``reset_at`` as Unix epoch
+    seconds. Older ``quse`` releases attempted ISO parsing only, which turned a
+    valid reset into ``null`` and left the app rendering ``resets —``.
+    """
+    if value is None:
+        return None
+    parsed: datetime
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            if text.isdigit():
+                parsed = datetime.fromtimestamp(float(text), tz=timezone.utc)
+            else:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (OverflowError, OSError, ValueError):
+            try:
+                parsed = datetime.strptime(text, "%Y-%m-%d")
+            except ValueError:
+                return None
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _percent_remaining_from_used(value: Any) -> Optional[float]:
+    try:
+        used = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, min(100.0, 100.0 - used)), 2)
+
+
+def _window_from_detail(detail: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(detail, dict):
+        return None
+    percent_remaining = _percent_remaining_from_used(detail.get("used_percent"))
+    reset_at = _normalize_reset_at(detail.get("reset_at"))
+    if percent_remaining is None and reset_at is None:
+        return None
+    return {
+        "percent_remaining": percent_remaining,
+        "reset_at": reset_at,
+    }
+
+
+def _merge_window(
+    current: Any,
+    detail: Any,
+    *,
+    prefer_detail_percent: bool = False,
+) -> Any:
+    if not isinstance(current, dict):
+        if not isinstance(detail, dict):
+            return current
+        current = {"percent_remaining": None, "reset_at": None}
+    else:
+        current = dict(current)
+
+    detail_window = _window_from_detail(detail)
+    if detail_window is not None:
+        if prefer_detail_percent or current.get("percent_remaining") is None:
+            current["percent_remaining"] = detail_window.get("percent_remaining")
+        if current.get("reset_at") is None:
+            current["reset_at"] = detail_window.get("reset_at")
+
+    current["reset_at"] = _normalize_reset_at(current.get("reset_at"))
+    return current
+
+
+def _actionable_error(provider: str, error: Any) -> Optional[str]:
+    if error is None:
+        return None
+    text = str(error).strip()
+    if not text:
+        return None
+    lower = text.lower()
+    if provider == "claude" and (
+        "http error 401" in lower
+        or "unauthorized" in lower
+        or lower in {"no-credentials", "no credentials"}
+    ):
+        return (
+            "Claude Code authentication failed on this host. "
+            "Run `claude /login` in the host shell, then refresh usage."
+        )
+    if provider == "codex" and lower in {"no auth token", "no-auth-token", "no credentials"}:
+        return (
+            "Codex authentication is missing on this host. "
+            "Run `codex login` in the host shell, then refresh usage."
+        )
+    return text
+
+
+def _read_codex_bearer_token(auth_path: Path = _CODEX_AUTH_PATH) -> Optional[str]:
+    try:
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    token = data.get("tokens", {}).get("access_token")
+    return token if isinstance(token, str) and token.strip() else None
+
+
+def _fetch_codex_detail_windows() -> Optional[dict[str, dict[str, Any]]]:
+    token = _read_codex_bearer_token()
+    if token is None:
+        return None
+    req = urllib.request.Request(
+        _CODEX_USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
+        return None
+    rate_limit = payload.get("rate_limit")
+    if not isinstance(rate_limit, dict):
+        return None
+    windows: dict[str, dict[str, Any]] = {}
+    for name in ("primary_window", "secondary_window"):
+        value = rate_limit.get(name)
+        if isinstance(value, dict):
+            windows[name] = value
+    return windows or None
+
+
+def _codex_needs_source_patch(record: dict[str, Any], detail_windows: dict[str, Any]) -> bool:
+    has_window_shape = any(
+        isinstance(record.get(key), dict) for key in ("short_term", "long_term")
+    ) or bool(detail_windows)
+    if not has_window_shape:
+        return False
+    for top_level_key, detail_key in (
+        ("short_term", "primary_window"),
+        ("long_term", "secondary_window"),
+    ):
+        top_level = record.get(top_level_key)
+        detail = detail_windows.get(detail_key)
+        top_level_reset = top_level.get("reset_at") if isinstance(top_level, dict) else None
+        detail_reset = detail.get("reset_at") if isinstance(detail, dict) else None
+        if top_level_reset is None and detail_reset is None:
+            return True
+    return False
+
+
+def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a provider record emitted by ``quse --json``.
+
+    PocketShell owns the app-facing schema even when it delegates provider
+    probing to ``quse``. Keep this post-processing focused on schema repairs
+    that older ``quse`` releases cannot express correctly.
+    """
+    normalized = dict(record)
+    provider = str(normalized.get("provider", "")).lower()
+    details = normalized.get("details")
+    detail_windows = details.get("windows") if isinstance(details, dict) else None
+    if not isinstance(detail_windows, dict):
+        detail_windows = {}
+
+    if provider == "codex":
+        # Codex's ChatGPT usage response exposes the real primary/secondary
+        # windows under details. Older quse versions hard-code short_term to
+        # 100% and lose epoch reset timestamps, which regressed issue #501.
+        if _codex_needs_source_patch(normalized, detail_windows):
+            fetched_windows = _fetch_codex_detail_windows()
+            if fetched_windows is not None:
+                detail_windows = {**detail_windows, **fetched_windows}
+                details_obj = dict(details) if isinstance(details, dict) else {}
+                details_obj["windows"] = detail_windows
+                normalized["details"] = details_obj
+        short_term = _merge_window(
+            normalized.get("short_term"),
+            detail_windows.get("primary_window"),
+            prefer_detail_percent=True,
+        )
+        if short_term is not None:
+            normalized["short_term"] = short_term
+        long_term = _merge_window(
+            normalized.get("long_term"),
+            detail_windows.get("secondary_window"),
+            prefer_detail_percent=True,
+        )
+        if long_term is not None:
+            normalized["long_term"] = long_term
+    elif provider == "claude":
+        short_term = _merge_window(
+            normalized.get("short_term"),
+            detail_windows.get("five_hour"),
+        )
+        if short_term is not None:
+            normalized["short_term"] = short_term
+        long_term = _merge_window(
+            normalized.get("long_term"),
+            detail_windows.get("seven_day"),
+        )
+        if long_term is not None:
+            normalized["long_term"] = long_term
+    else:
+        if isinstance(normalized.get("short_term"), dict):
+            normalized["short_term"] = _merge_window(normalized.get("short_term"), None)
+        if isinstance(normalized.get("long_term"), dict):
+            normalized["long_term"] = _merge_window(normalized.get("long_term"), None)
+
+    actionable = _actionable_error(provider, normalized.get("error"))
+    if actionable != normalized.get("error"):
+        normalized["error"] = actionable
+    return normalized
+
+
+def normalize_usage_stdout(stdout: str) -> str:
+    """Normalize NDJSON stdout from ``quse --json`` for app consumption."""
+    if not stdout.strip():
+        return stdout
+    lines: list[str] = []
+    changed = False
+    for raw_line in stdout.splitlines():
+        if not raw_line.strip():
+            lines.append(raw_line)
+            continue
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return stdout
+        if not isinstance(parsed, dict):
+            return stdout
+        normalized = normalize_usage_record(parsed)
+        changed = changed or normalized != parsed
+        lines.append(json.dumps(normalized, sort_keys=True))
+    suffix = "\n" if stdout.endswith("\n") else ""
+    return "\n".join(lines) + suffix if changed else stdout
 
 
 def _try_daemon_usage_fetch(
@@ -188,9 +441,8 @@ def usage_command(
     (``$XDG_RUNTIME_DIR/pocketshell/daemon.sock``) and dispatches a
     ``usage.fetch`` JSON-RPC call when the daemon is live. Otherwise
     it falls through to ``quse [provider] [--json]`` as a one-shot
-    subprocess. Output shape (both human and JSON) is byte-identical
-    to `quse [provider] [--json]` so any consumer that already parses
-    `quse` output keeps working.
+    subprocess. JSON output is normalized into PocketShell's schema so
+    the app is not pinned to provider-specific `quse` quirks.
     """
     # JSON output is the format the daemon caches against (NDJSON
     # straight from `quse --json`). Human-readable output is rare and
@@ -201,7 +453,7 @@ def usage_command(
         envelope = _try_daemon_usage_fetch(provider, no_cache=no_cache)
         if envelope is not None:
             if envelope.get("stdout"):
-                sys.stdout.write(envelope["stdout"])
+                sys.stdout.write(normalize_usage_stdout(str(envelope["stdout"])))
             if envelope.get("stderr"):
                 sys.stderr.write(envelope["stderr"])
             exit_code = int(envelope.get("returncode", 0))
@@ -214,9 +466,37 @@ def usage_command(
         args.append(provider)
     if json_output:
         args.append("--json")
-    exit_code = _run_quse(args)
+    if json_output:
+        exit_code = _run_quse_json(args)
+    else:
+        exit_code = _run_quse(args)
     # Click ignores the return value of a callback by default; we need to
     # explicitly propagate non-zero exit codes through `ctx.exit` so the
     # outer `main()` (and the OS) sees the same exit code `quse` reported.
     if exit_code != 0:
         ctx.exit(exit_code)
+
+
+def _run_quse_json(args: Sequence[str]) -> int:
+    """Invoke ``quse`` and normalize JSON stdout before proxying it."""
+    quse_path = _resolve_quse_binary()
+    if quse_path is None:
+        click.echo(
+            "pocketshell: `quse` is not installed on this host. "
+            "Install it via `uv tool install quse` or `pipx install quse` "
+            "and re-run.",
+            err=True,
+        )
+        return 127
+
+    completed = subprocess.run(
+        [quse_path, *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.stdout:
+        sys.stdout.write(normalize_usage_stdout(completed.stdout))
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+    return completed.returncode

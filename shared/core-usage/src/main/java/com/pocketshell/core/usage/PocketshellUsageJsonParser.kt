@@ -89,17 +89,44 @@ public class PocketshellUsageJsonParser {
     private fun parseRecord(obj: JSONObject): UsageProviderRecord {
         val provider = obj.requiredString("provider")
         val rawStatus = obj.optString("status", "unknown").ifBlank { "unknown" }
+        val detailWindows = obj.optJSONObject("details")?.optJSONObject("windows")
 
         val windows = mutableListOf<UsageWindow>()
-        parseWindow(obj, "short_term", "short_term", provider)?.let { windows += it }
-        parseWindow(obj, "long_term", "long_term", provider)?.let { windows += it }
+        parseWindow(
+            record = obj,
+            jsonKey = "short_term",
+            windowName = "short_term",
+            provider = provider,
+            detailWindow = detailWindows?.optJSONObject(
+                when (provider.lowercase()) {
+                    "codex" -> "primary_window"
+                    "claude" -> "five_hour"
+                    else -> ""
+                },
+            ),
+            preferDetailPercent = provider.equals("codex", ignoreCase = true),
+        )?.let { windows += it }
+        parseWindow(
+            record = obj,
+            jsonKey = "long_term",
+            windowName = "long_term",
+            provider = provider,
+            detailWindow = detailWindows?.optJSONObject(
+                when (provider.lowercase()) {
+                    "codex" -> "secondary_window"
+                    "claude" -> "seven_day"
+                    else -> ""
+                },
+            ),
+            preferDetailPercent = provider.equals("codex", ignoreCase = true),
+        )?.let { windows += it }
 
         return UsageProviderRecord(
             provider = provider,
             status = parseStatus(rawStatus),
             rawStatus = rawStatus,
             blockReason = obj.optionalString("block_reason"),
-            lastError = obj.optionalString("error"),
+            lastError = actionableProviderError(provider, obj.optionalString("error")),
             windows = windows,
         )
     }
@@ -119,24 +146,36 @@ public class PocketshellUsageJsonParser {
         jsonKey: String,
         windowName: String,
         provider: String,
+        detailWindow: JSONObject? = null,
+        preferDetailPercent: Boolean = false,
     ): UsageWindow? {
-        if (!record.has(jsonKey) || record.isNull(jsonKey)) return null
-        val obj = record.opt(jsonKey) as? JSONObject
+        val obj = if (!record.has(jsonKey) || record.isNull(jsonKey)) {
+            null
+        } else {
+            record.opt(jsonKey) as? JSONObject
             ?: throw UsageParseException("'$jsonKey' for $provider is not an object")
-        if (!obj.has("percent_remaining") || obj.isNull("percent_remaining")) {
+        }
+        val detailPercentRemaining = detailWindow?.percentRemainingFromUsedPercent()
+        val percentRemaining = when {
+            preferDetailPercent && detailPercentRemaining != null -> detailPercentRemaining
+            obj != null && obj.has("percent_remaining") && !obj.isNull("percent_remaining") ->
+                obj.requiredNumber("percent_remaining", provider, jsonKey)
+            detailPercentRemaining != null -> detailPercentRemaining
+            else -> null
+        }
+        if (percentRemaining == null) {
             // Per-provider window may exist but carry no value (e.g.
             // copilot short_term is hardcoded but other providers may
             // omit it). Treat as absent.
             return null
         }
-        val percentRemaining = obj.requiredNumber("percent_remaining", provider, jsonKey)
         val used = (100.0 - percentRemaining).coerceIn(0.0, 100.0)
         return UsageWindow(
             name = windowName,
             used = used,
             limit = 100.0,
             unit = "percent",
-            resetAt = obj.optionalInstant("reset_at"),
+            resetAt = obj?.optionalInstant("reset_at") ?: detailWindow?.optionalInstant("reset_at"),
         )
     }
 
@@ -161,6 +200,29 @@ public class PocketshellUsageJsonParser {
         "error" -> UsageStatus.Error
         "unsupported" -> UsageStatus.Unsupported
         else -> UsageStatus.Unknown
+    }
+}
+
+private fun actionableProviderError(provider: String, error: String?): String? {
+    val text = error?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val lower = text.lowercase()
+    return when {
+        provider.equals("claude", ignoreCase = true) &&
+            (
+                lower.contains("http error 401") ||
+                    lower.contains("unauthorized") ||
+                    lower == "no-credentials" ||
+                    lower == "no credentials"
+            ) ->
+            "Claude Code authentication failed on this host. Run `claude /login` in the host shell, then refresh usage."
+        provider.equals("codex", ignoreCase = true) &&
+            (
+                lower == "no auth token" ||
+                    lower == "no-auth-token" ||
+                    lower == "no credentials"
+            ) ->
+            "Codex authentication is missing on this host. Run `codex login` in the host shell, then refresh usage."
+        else -> text
     }
 }
 
@@ -193,10 +255,37 @@ private fun JSONObject.requiredNumber(name: String, provider: String, windowKey:
 }
 
 private fun JSONObject.optionalInstant(name: String): Instant? {
-    val raw = optionalString(name) ?: return null
+    if (!has(name) || isNull(name)) return null
+    val value = opt(name)
+    if (value is Number) {
+        return try {
+            Instant.ofEpochSecond(value.toLong())
+        } catch (e: Exception) {
+            throw UsageParseException("invalid '$name': $value", e)
+        }
+    }
+    val raw = value?.toString()?.trim()?.ifBlank { return null } ?: return null
+    raw.toLongOrNull()?.let { epochSeconds ->
+        return try {
+            Instant.ofEpochSecond(epochSeconds)
+        } catch (e: Exception) {
+            throw UsageParseException("invalid '$name': $raw", e)
+        }
+    }
     return try {
         Instant.parse(raw)
     } catch (e: Exception) {
         throw UsageParseException("invalid '$name': $raw", e)
     }
+}
+
+private fun JSONObject.percentRemainingFromUsedPercent(): Double? {
+    if (!has("used_percent") || isNull("used_percent")) return null
+    val value = opt("used_percent")
+    val used = when (value) {
+        is Number -> value.toDouble()
+        is String -> value.trim().toDoubleOrNull()
+        else -> null
+    } ?: return null
+    return (100.0 - used).coerceIn(0.0, 100.0)
 }

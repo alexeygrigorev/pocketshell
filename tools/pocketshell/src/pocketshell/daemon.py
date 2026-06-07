@@ -350,13 +350,12 @@ def _usage_fetch_handler(params: Mapping[str, Any]) -> dict[str, Any]:
          "provider": "codex"  // or null
        }
 
-    Returning raw stdout (rather than parsed JSON) preserves byte-for-
-    byte parity with ``quse --json``; the existing Kotlin
-    ``QuseUsageJsonParser`` keeps working without modification when the
-    CLI re-emits the daemon's response on stdout. ``quse --json``
-    actually emits **NDJSON** (one provider per line, not a single
-    document), so we cannot parse-then-re-serialise without changing
-    the wire format.
+    Returning stdout in the envelope preserves the CLI/daemon contract.
+    The stdout is normalized by :mod:`pocketshell.usage` before it is cached,
+    because ``quse --json`` can expose provider quirks that are not the
+    PocketShell app-facing schema. ``quse --json`` emits **NDJSON** (one
+    provider per line, not a single document), so normalization keeps that
+    line-oriented wire format.
     """
     # Lazy import to avoid a circular module load at startup: the
     # daemon module is imported from ``cli.py`` which also imports
@@ -397,7 +396,7 @@ def _usage_fetch_handler(params: Mapping[str, Any]) -> dict[str, Any]:
         text=True,
     )
     return {
-        "stdout": completed.stdout,
+        "stdout": _usage.normalize_usage_stdout(completed.stdout),
         "stderr": completed.stderr,
         "returncode": completed.returncode,
         "provider": provider,

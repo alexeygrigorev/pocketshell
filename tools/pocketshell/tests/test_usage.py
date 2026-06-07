@@ -3,7 +3,8 @@
 The first PR exercises:
  - `pocketshell --help` lists the `usage` subcommand.
  - `pocketshell usage --help` shows the click usage line.
- - `pocketshell usage --json` forwards through to `quse --json`.
+ - `pocketshell usage --json` forwards through to `quse --json` and
+   normalizes provider quirks into PocketShell's schema.
  - `pocketshell usage <provider>` forwards the positional arg.
  - Missing `quse` produces a friendly stderr message + exit 127.
  - stdout/stderr/exit-code from the subprocess are proxied verbatim.
@@ -11,7 +12,8 @@ The first PR exercises:
 The tests stub `pocketshell.usage._resolve_quse_binary` and
 `subprocess.run` so they never invoke a real `quse` binary; the contract
 under test is "pocketshell delegates correctly to whatever quse exists
-on the host", not "the provider check works".
+on the host and repairs known schema mismatches", not "the provider
+check works".
 """
 
 from __future__ import annotations
@@ -86,12 +88,116 @@ def test_usage_json_forwards_to_quse_and_proxies_stdout() -> None:
     ) as run:
         result = runner.invoke(usage_command, ["--json"])
     assert result.exit_code == 0, result.output
-    # The stdout we got back must be the exact bytes `quse --json` emitted.
+    # Non-provider-shaped JSON is left untouched.
     assert result.output == payload
     # Args forwarded to the quse subprocess must include `--json`.
     call_args = run.call_args
     invoked: Sequence[str] = call_args.args[0]
     assert invoked == ["/fake/quse", "--json"]
+
+
+def test_usage_json_normalizes_codex_detail_windows_and_epoch_resets() -> None:
+    raw = "\n".join(
+        [
+            json.dumps(
+                {
+                    "provider": "codex",
+                    "status": "ok",
+                    "short_term": {"percent_remaining": 100.0, "reset_at": None},
+                    "long_term": {"percent_remaining": 69.0, "reset_at": None},
+                    "block_reason": None,
+                    "error": None,
+                    "details": {
+                        "limit_reached": False,
+                        "windows": {
+                            "primary_window": {
+                                "used_percent": 12,
+                                "reset_at": 1780828285,
+                            },
+                            "secondary_window": {
+                                "used_percent": 31,
+                                "reset_at": 1781137638,
+                            },
+                        },
+                    },
+                },
+            ),
+            json.dumps(
+                {
+                    "provider": "claude",
+                    "status": "error",
+                    "short_term": {"percent_remaining": None, "reset_at": None},
+                    "long_term": {"percent_remaining": None, "reset_at": None},
+                    "block_reason": None,
+                    "error": "HTTP Error 401: Unauthorized",
+                    "details": {},
+                },
+            ),
+        ],
+    )
+    runner = CliRunner()
+    with patch("pocketshell.usage._resolve_quse_binary", return_value="/fake/quse"), patch(
+        "pocketshell.usage.subprocess.run",
+        return_value=_fake_completed(stdout=raw + "\n"),
+    ):
+        result = runner.invoke(usage_command, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    lines = [json.loads(line) for line in result.output.splitlines()]
+    codex = lines[0]
+    assert codex["short_term"] == {
+        "percent_remaining": 88.0,
+        "reset_at": "2026-06-07T10:31:25Z",
+    }
+    assert codex["long_term"] == {
+        "percent_remaining": 69.0,
+        "reset_at": "2026-06-11T00:27:18Z",
+    }
+    assert "claude /login" in lines[1]["error"]
+    assert "HTTP Error 401" not in lines[1]["error"]
+
+
+def test_usage_json_patches_codex_resets_from_source_when_quse_dropped_them() -> None:
+    raw = json.dumps(
+        {
+            "provider": "codex",
+            "status": "ok",
+            "short_term": {"percent_remaining": 100.0, "reset_at": None},
+            "long_term": {"percent_remaining": 69.0, "reset_at": None},
+            "block_reason": None,
+            "error": None,
+            "details": {
+                "limit_reached": False,
+                "windows": {
+                    "primary_window": {"used_percent": 13, "reset_at": None},
+                    "secondary_window": {"used_percent": 31, "reset_at": None},
+                },
+            },
+        },
+    )
+    runner = CliRunner()
+    with patch("pocketshell.usage._resolve_quse_binary", return_value="/fake/quse"), patch(
+        "pocketshell.usage.subprocess.run",
+        return_value=_fake_completed(stdout=raw + "\n"),
+    ), patch(
+        "pocketshell.usage._fetch_codex_detail_windows",
+        return_value={
+            "primary_window": {"used_percent": 13, "reset_at": 1780828285},
+            "secondary_window": {"used_percent": 31, "reset_at": 1781137638},
+        },
+    ):
+        result = runner.invoke(usage_command, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    codex = json.loads(result.output)
+    assert codex["short_term"] == {
+        "percent_remaining": 87.0,
+        "reset_at": "2026-06-07T10:31:25Z",
+    }
+    assert codex["long_term"] == {
+        "percent_remaining": 69.0,
+        "reset_at": "2026-06-11T00:27:18Z",
+    }
 
 
 def test_usage_forwards_provider_argument() -> None:

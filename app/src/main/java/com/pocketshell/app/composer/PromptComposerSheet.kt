@@ -1297,7 +1297,7 @@ internal fun micSwipeCrossedLockThreshold(
  */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun AttachmentTileGrid(
+internal fun AttachmentTileGrid(
     attachments: List<PromptComposerViewModel.StagedAttachment>,
     onRemove: (String) -> Unit,
     modifier: Modifier = Modifier,

@@ -103,6 +103,7 @@ import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
 import com.pocketshell.app.conversation.timelineActorLabel
 import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
+import com.pocketshell.app.composer.AttachmentTileGrid
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -1203,7 +1204,8 @@ public fun TmuxSessionScreen(
 
             currentPane?.let { pane ->
                 val isAgentPane = currentAgentConversation?.detection != null
-                TmuxTerminalBottomControls(
+                TmuxTerminalBottomControlsWithComposerAttachments(
+                    promptComposerViewModel = promptComposerViewModel,
                     isImeVisible = isImeVisible,
                     showConversation = showConversation,
                     sessionLive = sessionLive,
@@ -5123,7 +5125,8 @@ internal const val TmuxKeyBarCollapseLabel: String = "×"
  * the keyboard is hidden, the normal composer/chip band is shown instead.
  */
 @Composable
-internal fun TmuxTerminalBottomControls(
+private fun TmuxTerminalBottomControlsWithComposerAttachments(
+    promptComposerViewModel: PromptComposerViewModel,
     isImeVisible: Boolean,
     showConversation: Boolean,
     sessionLive: Boolean,
@@ -5140,48 +5143,102 @@ internal fun TmuxTerminalBottomControls(
     onAddSnippetTap: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    if (isImeVisible && !showConversation) {
-        KeyBar(
-            keys = tmuxKeyBarLayout(keyBarExpanded),
-            onKey = if (sessionLive) {
-                { binding ->
-                    // Issue #458: the `⋯` / `×` slot toggles the expander
-                    // locally; it is never a keystroke. All other taps route
-                    // to the pane.
-                    when (binding.label) {
-                        TmuxKeyBarExpandLabel -> {
-                            DiagnosticEvents.record("action", "hotkey_panel_show", "mode" to "tmux")
-                            onKeyBarExpandedChange(true)
+    val promptComposerState by promptComposerViewModel.uiState.collectAsState()
+    TmuxTerminalBottomControls(
+        isImeVisible = isImeVisible,
+        showConversation = showConversation,
+        sessionLive = sessionLive,
+        isAgentPane = isAgentPane,
+        keyBarExpanded = keyBarExpanded,
+        onKeyBarExpandedChange = onKeyBarExpandedChange,
+        onKey = onKey,
+        modifierStates = modifierStates,
+        onModifierStateChange = onModifierStateChange,
+        onChipTap = onChipTap,
+        onDictateTap = onDictateTap,
+        onEnterTap = onEnterTap,
+        onShowKeyboardTap = onShowKeyboardTap,
+        onAddSnippetTap = onAddSnippetTap,
+        stagedAttachments = promptComposerState.attachments,
+        onRemoveStagedAttachment = promptComposerViewModel::removeAttachment,
+        modifier = modifier,
+    )
+}
+
+@Composable
+internal fun TmuxTerminalBottomControls(
+    isImeVisible: Boolean,
+    showConversation: Boolean,
+    sessionLive: Boolean,
+    isAgentPane: Boolean,
+    keyBarExpanded: Boolean,
+    onKeyBarExpandedChange: (Boolean) -> Unit,
+    onKey: (KeyBinding) -> Unit,
+    modifierStates: Map<String, KeyModifierState> = emptyMap(),
+    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
+    onChipTap: (String) -> Unit,
+    onDictateTap: (() -> Unit)?,
+    onEnterTap: (() -> Unit)?,
+    onShowKeyboardTap: (() -> Unit)?,
+    onAddSnippetTap: (() -> Unit)?,
+    stagedAttachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
+    onRemoveStagedAttachment: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface),
+    ) {
+        if (stagedAttachments.isNotEmpty()) {
+            AttachmentTileGrid(
+                attachments = stagedAttachments,
+                onRemove = onRemoveStagedAttachment,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        if (isImeVisible && !showConversation) {
+            KeyBar(
+                keys = tmuxKeyBarLayout(keyBarExpanded),
+                onKey = if (sessionLive) {
+                    { binding ->
+                        // Issue #458: the `⋯` / `×` slot toggles the expander
+                        // locally; it is never a keystroke. All other taps route
+                        // to the pane.
+                        when (binding.label) {
+                            TmuxKeyBarExpandLabel -> {
+                                DiagnosticEvents.record("action", "hotkey_panel_show", "mode" to "tmux")
+                                onKeyBarExpandedChange(true)
+                            }
+                            TmuxKeyBarCollapseLabel -> {
+                                DiagnosticEvents.record("action", "hotkey_panel_hide", "mode" to "tmux")
+                                onKeyBarExpandedChange(false)
+                            }
+                            else -> onKey(binding)
                         }
-                        TmuxKeyBarCollapseLabel -> {
-                            DiagnosticEvents.record("action", "hotkey_panel_hide", "mode" to "tmux")
-                            onKeyBarExpandedChange(false)
-                        }
-                        else -> onKey(binding)
                     }
-                }
-            } else {
-                { _ -> }
-            },
-            modifierStates = modifierStates,
-            onModifierStateChange = onModifierStateChange,
-        )
-    } else {
-        BottomChipControls(
-            chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
-            onChipTap = onChipTap,
-            onDictateTap = onDictateTap,
-            onEnterTap = if (!showConversation) onEnterTap else null,
-            onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
-            onAddSnippetTap = onAddSnippetTap,
-            addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-            addSnippetIcon = SnippetsChipIcon,
-            // Project navigation on tmux panes is a separate follow-up — see
-            // #123 notes on per-pane cwd / project-root wiring.
-            onProjectNavigationTap = null,
-            inputEnabled = sessionLive,
-            modifier = modifier,
-        )
+                } else {
+                    { _ -> }
+                },
+                modifierStates = modifierStates,
+                onModifierStateChange = onModifierStateChange,
+            )
+        } else {
+            BottomChipControls(
+                chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
+                onChipTap = onChipTap,
+                onDictateTap = onDictateTap,
+                onEnterTap = if (!showConversation) onEnterTap else null,
+                onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
+                onAddSnippetTap = onAddSnippetTap,
+                addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+                addSnippetIcon = SnippetsChipIcon,
+                // Project navigation on tmux panes is a separate follow-up — see
+                // #123 notes on per-pane cwd / project-root wiring.
+                onProjectNavigationTap = null,
+                inputEnabled = sessionLive,
+            )
+        }
     }
 }
 

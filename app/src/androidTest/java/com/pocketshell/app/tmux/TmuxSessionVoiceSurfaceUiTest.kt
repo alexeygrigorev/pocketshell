@@ -1,6 +1,8 @@
 package com.pocketshell.app.tmux
 
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -16,6 +18,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
+import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.composerAttachmentChipTestTag
+import com.pocketshell.app.composer.composerAttachmentRemoveTestTag
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
@@ -136,6 +142,53 @@ class TmuxSessionVoiceSurfaceUiTest {
         assertEquals(emptyList<String>(), keyTaps)
         assertEquals(1, enterTaps)
         assertEquals(1, keyboardTaps)
+    }
+
+    @Test
+    fun stagedAttachmentRemainsRemovableAfterComposerSheetIsClosed() {
+        val attachment = PromptComposerViewModel.StagedAttachment(
+            remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
+            displayName = "shot.png",
+        )
+        var staged by mutableStateOf(listOf(attachment))
+        var composerOpen by mutableStateOf(true)
+
+        compose.setContent {
+            PocketShellTheme {
+                if (!composerOpen) {
+                    TmuxTerminalBottomControls(
+                        isImeVisible = false,
+                        showConversation = false,
+                        sessionLive = true,
+                        isAgentPane = true,
+                        keyBarExpanded = false,
+                        onKeyBarExpandedChange = {},
+                        onKey = {},
+                        onChipTap = {},
+                        onDictateTap = { composerOpen = true },
+                        onEnterTap = {},
+                        onShowKeyboardTap = {},
+                        onAddSnippetTap = {},
+                        stagedAttachments = staged,
+                        onRemoveStagedAttachment = { remotePath ->
+                            staged = staged.filterNot { it.remotePath == remotePath }
+                        },
+                    )
+                }
+            }
+        }
+
+        compose.runOnIdle { composerOpen = false }
+
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertDoesNotExist()
     }
 
     @Test

@@ -670,7 +670,7 @@ class BackgroundGraceControllerTest {
             sequence = 2L,
         )
 
-        gate.onBackground()
+        gate.onBackground(graceMillis = 2_000L)
         gate.onForegroundResumeStarted()
         assertTrue(
             gate.onForegroundResumeFinished(
@@ -704,7 +704,7 @@ class BackgroundGraceControllerTest {
             reason = "later-foreground-wifi-cellular-handoff",
         )
 
-        gate.onBackground()
+        gate.onBackground(graceMillis = 2_000L)
         gate.onForegroundResumeStarted()
         assertTrue(
             gate.onForegroundResumeFinished(
@@ -722,6 +722,53 @@ class BackgroundGraceControllerTest {
         )
         assertEquals("dispatch", foregroundDecision.gateDiagnostics.decision)
         assertEquals("foreground_active", foregroundDecision.gateDiagnostics.reason)
+    }
+
+    @Test
+    fun `six second app switch suppresses late network callback until configured grace deadline`() = runTest {
+        val events = mutableListOf<String>()
+        val activeTmuxClients = ActiveTmuxClients()
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = 1L,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = { events += "tmux:background" },
+                onForeground = { events += "tmux:foreground" },
+                onNetworkChanged = { change -> events += "network:${change.reason}" },
+            ),
+        )
+        var now = 100_000L
+        val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
+        val lateBackgroundChange = terminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "late-background-callback-after-short-switch",
+        )
+
+        gate.onBackground(graceMillis = 30_000L)
+        now += 6_000L
+        gate.onForegroundResumeStarted()
+        val foregroundDecision = gate.onForegroundResumeFinished(
+            resumedWithinGrace = true,
+            hasLiveTerminalRuntime = true,
+        ) as TerminalNetworkDecision.Suppress
+        assertEquals(null, foregroundDecision.change)
+        assertEquals("no_pending_change", foregroundDecision.gateDiagnostics.reason)
+
+        now += 6_000L
+        val lateDecision = gate.onNetworkChange(lateBackgroundChange)
+        if (lateDecision is TerminalNetworkDecision.Dispatch) {
+            activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onNetworkChanged(lateDecision.change) }
+        }
+
+        val suppress = lateDecision as TerminalNetworkDecision.Suppress
+        assertEquals(lateBackgroundChange, suppress.change)
+        assertEquals("post_resume_within_grace_live_runtime", suppress.gateDiagnostics.reason)
+        assertEquals(
+            "a short app-switch under the configured grace must not fan out a late network reconnect",
+            emptyList<String>(),
+            events,
+        )
     }
 
     @Test

@@ -2504,6 +2504,91 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun shortAppSwitchPassiveDisconnectResumesAutoReconnectOnScreenStart() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 60_000L, silentReattachTimeoutMs = 1_000L)
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        val backgroundDeadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = backgroundDeadClient,
+        )
+        runCurrent()
+
+        vm.onScreenStopped()
+        backgroundDeadClient.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderEof,
+                source = "device_background",
+                intent = "unknown",
+            ),
+        )
+        runCurrent()
+
+        assertFalse(
+            "short app-switch disconnect must not detach tmux while the screen is stopped",
+            backgroundDeadClient.detachCleanlyCalled,
+        )
+        assertEquals(
+            "no SSH reconnect may run while the app is still in the short background switch",
+            0,
+            connector.connectCount,
+        )
+        assertTrue(
+            "dead background client must be removed from the live registry",
+            registry.clients.value.isEmpty(),
+        )
+        val backgroundStatus = vm.connectionStatus.value
+        assertTrue(
+            "background passive EOF should be paused for foreground auto-reconnect, got $backgroundStatus",
+            backgroundStatus is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            (backgroundStatus as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            backgroundStatus.message.contains("Auto reconnect paused while PocketShell is in the background."),
+        )
+
+        advanceTimeBy(6_000L)
+        runCurrent()
+        assertEquals(
+            "a 6 second app switch is below the configured grace and must not start background SSH",
+            0,
+            connector.connectCount,
+        )
+
+        vm.onScreenStarted()
+        advanceUntilIdle()
+
+        assertEquals(
+            "foreground return must automatically resume the paused reconnect",
+            1,
+            connector.connectCount,
+        )
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(
+            "foreground return must not remain in the manual reconnect-needed state; got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertTrue("automatic foreground reconnect should open the replacement client", reconnectClient.connectCalled)
+    }
+
+    @Test
     fun writeInputToPaneSeparatesLeadingDashLiteralFromTmuxOptions() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

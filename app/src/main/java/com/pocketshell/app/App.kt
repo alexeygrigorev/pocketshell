@@ -181,18 +181,17 @@ class App : Application() {
     private val terminalLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         when (event) {
             Lifecycle.Event.ON_STOP -> {
-                terminalNetworkLifecycleGate.onBackground()
+                val terminalGraceMillis = BackgroundGraceTestOverride.currentOr(
+                    settingsRepository.settings.value.backgroundGraceMillis,
+                )
+                terminalNetworkLifecycleGate.onBackground(graceMillis = terminalGraceMillis)
                 DiagnosticEvents.record(
                     "app",
                     "background",
                     "source" to "process_lifecycle",
                     "trigger" to "on_stop",
                 )
-                backgroundGraceController.setGraceMillis(
-                    BackgroundGraceTestOverride.currentOr(
-                        settingsRepository.settings.value.backgroundGraceMillis,
-                    ),
-                )
+                backgroundGraceController.setGraceMillis(terminalGraceMillis)
                 backgroundGraceController.onBackground()
             }
             Lifecycle.Event.ON_START -> {
@@ -418,15 +417,19 @@ internal class TerminalNetworkLifecycleGate(
     private var foregroundResumePending: Boolean = false
     private var pendingTerminalNetworkChange: TerminalNetworkChange? = null
     private var backgroundCycleId: Long = 0L
+    private var backgroundStartedMillis: Long? = null
+    private var backgroundGraceMillis: Long = BACKGROUND_GRACE_MILLIS
     // Android can deliver default-network callbacks caused by the just-ended
     // background interval after ON_START. Keep suppressing callbacks for that
     // same cycle until the bounded attribution window expires.
     private var postResumeNetworkSuppression: PostResumeNetworkSuppression? = null
 
-    fun onBackground() {
+    fun onBackground(graceMillis: Long = BACKGROUND_GRACE_MILLIS) {
         backgroundCycleId += 1L
         processForeground = false
         foregroundResumePending = false
+        backgroundStartedMillis = nowMillis()
+        backgroundGraceMillis = graceMillis.coerceAtLeast(0L)
         postResumeNetworkSuppression = null
     }
 
@@ -451,7 +454,7 @@ internal class TerminalNetworkLifecycleGate(
             if (resumedWithinGrace && hasLiveTerminalRuntime) {
                 PostResumeNetworkSuppression(
                     backgroundCycleId = backgroundCycleId,
-                    untilMillis = nowMillis() + POST_RESUME_NETWORK_ATTRIBUTION_MILLIS,
+                    untilMillis = postResumeNetworkSuppressionUntilMillis(),
                 )
             } else {
                 null
@@ -546,6 +549,17 @@ internal class TerminalNetworkLifecycleGate(
                 ),
             )
         }
+    }
+
+    private fun postResumeNetworkSuppressionUntilMillis(): Long {
+        val now = nowMillis()
+        val originalGraceDeadline = backgroundStartedMillis
+            ?.let { started -> started + backgroundGraceMillis }
+            ?: now
+        return maxOf(
+            now + POST_RESUME_NETWORK_ATTRIBUTION_MILLIS,
+            originalGraceDeadline,
+        )
     }
 
     private data class PostResumeNetworkSuppression(

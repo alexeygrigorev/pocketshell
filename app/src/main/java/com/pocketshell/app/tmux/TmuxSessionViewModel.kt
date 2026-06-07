@@ -1206,6 +1206,10 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onScreenStarted() {
         screenStartedForCleared = true
+        val paused = pausedAutoReconnect
+        if (paused != null && pendingReattach == null) {
+            resumePausedAutoReconnect(paused)
+        }
     }
 
     public fun onScreenStopped() {
@@ -2976,6 +2980,15 @@ public class TmuxSessionViewModel @Inject constructor(
         if (clientRef !== client) return
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
+        if (target != null && !screenStartedForCleared) {
+            passiveDisconnectGraceJob?.cancel()
+            passiveDisconnectGraceJob = null
+            pauseAutoReconnectUntilForeground(
+                target = target,
+                reason = reason,
+            )
+            return
+        }
         passiveDisconnectGraceJob?.cancel()
         val graceJob = viewModelScope.launch {
             val recovered = target != null && silentlyReattachWithinPassiveGrace(
@@ -3471,10 +3484,10 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob?.cancel()
         passiveDisconnectGraceJob = null
         if (!appActive) {
-            activeTarget = target
-            connectingTarget = null
-            refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Failed(reason)
+            pauseAutoReconnectUntilForeground(
+                target = target,
+                reason = reason,
+            )
             return
         }
         if (autoReconnectJob?.isActive == true) return
@@ -3588,6 +3601,25 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             autoReconnectJob = null
         }
+    }
+
+    private fun pauseAutoReconnectUntilForeground(
+        target: ConnectionTarget,
+        reason: String,
+    ) {
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
+        unregisterCurrentClient()
+        activeTarget = target
+        connectingTarget = null
+        pausedAutoReconnect = PausedAutoReconnect(
+            target = target,
+            reason = reason,
+        )
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Failed(
+            "$reason Auto reconnect paused while PocketShell is in the background.",
+        )
     }
 
     /**

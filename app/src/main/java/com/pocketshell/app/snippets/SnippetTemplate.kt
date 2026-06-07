@@ -1,10 +1,12 @@
 package com.pocketshell.app.snippets
 
+import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 
 private val PLACEHOLDER_REGEX = Regex("""\{\{\s*([A-Za-z][A-Za-z0-9_-]{0,39})\s*}}""")
 
 private const val BUILT_IN_GIT_COMMIT_PUSH_ID: Long = -556_001L
+private const val USER_COMMAND_TEMPLATE_SNIPPET_ID_OFFSET: Long = -1_556_000L
 
 private val BUILT_IN_COMMAND_TEMPLATES: List<SnippetEntity> = listOf(
     SnippetEntity(
@@ -40,6 +42,28 @@ internal fun snippetsForPickerWithBuiltIns(
     }
     return builtIns + snippets
 }
+
+internal fun snippetsForPickerWithBuiltInsAndCommandTemplates(
+    snippets: List<SnippetEntity>,
+    commandTemplates: List<CommandTemplateEntity>,
+    kindFilter: SnippetKind?,
+): List<SnippetEntity> {
+    val base = snippetsForPickerWithBuiltIns(snippets, kindFilter)
+    if (kindFilter == SnippetKind.Prompt) return base
+    return base + commandTemplates.map(::commandTemplateAsSnippet)
+}
+
+internal fun commandTemplateAsSnippet(template: CommandTemplateEntity): SnippetEntity =
+    SnippetEntity(
+        id = commandTemplateSnippetId(template.id),
+        hostId = template.hostId,
+        label = template.label,
+        body = template.commands,
+        kind = SnippetKind.Command.storageValue,
+    )
+
+internal fun commandTemplateSnippetId(templateId: Long): Long =
+    USER_COMMAND_TEMPLATE_SNIPPET_ID_OFFSET - templateId
 
 private data class SnippetDuplicateKey(
     val kind: SnippetKind,

@@ -1,6 +1,7 @@
 package com.pocketshell.app.snippets
 
 import com.pocketshell.core.storage.entity.SnippetEntity
+import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -125,6 +126,53 @@ class SnippetTemplateTest {
             "git add .\rgit commit -m 'callz'\rgit push\r",
             snippetDispatchText(expanded, withEnter = true),
         )
+    }
+
+    @Test
+    fun userCommandTemplates_areIncludedInCommandPickerAsDispatchableSnippets() {
+        val template = CommandTemplateEntity(
+            id = 7L,
+            hostId = 1L,
+            label = "Release",
+            commands = "git tag {{version}}\ngit push origin {{version}}",
+        )
+
+        val rows = snippetsForPickerWithBuiltInsAndCommandTemplates(
+            snippets = emptyList(),
+            commandTemplates = listOf(template),
+            kindFilter = SnippetKind.Command,
+        )
+
+        val macro = rows.single { it.displayLabel() == "Release" }
+        assertEquals(commandTemplateSnippetId(7L), macro.id)
+        assertEquals("command", macro.kind)
+        assertEquals(listOf("version"), snippetTemplateParameters(macro.body))
+
+        val expanded = macro.copy(
+            body = expandSnippetTemplate(macro.body, mapOf("version" to "v1.2.3")),
+        )
+        assertEquals(
+            "git tag v1.2.3\rgit push origin v1.2.3\r",
+            snippetDispatchText(expanded, withEnter = true),
+        )
+    }
+
+    @Test
+    fun userCommandTemplates_areHiddenFromPromptPicker() {
+        val template = CommandTemplateEntity(
+            id = 7L,
+            hostId = 1L,
+            label = "Release",
+            commands = "git push",
+        )
+
+        val rows = snippetsForPickerWithBuiltInsAndCommandTemplates(
+            snippets = emptyList(),
+            commandTemplates = listOf(template),
+            kindFilter = SnippetKind.Prompt,
+        )
+
+        assertEquals(emptyList<SnippetEntity>(), rows)
     }
 
     private fun snippet(body: String, kind: String = "command"): SnippetEntity =

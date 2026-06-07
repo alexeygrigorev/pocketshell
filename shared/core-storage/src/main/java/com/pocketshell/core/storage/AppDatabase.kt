@@ -6,6 +6,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.pocketshell.core.storage.dao.AgentSessionDao
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
+import com.pocketshell.core.storage.dao.CommandTemplateDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
@@ -16,6 +17,7 @@ import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.AgentSessionEntity
 import com.pocketshell.core.storage.entity.AiApiCallEntry
+import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
@@ -25,7 +27,7 @@ import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 12
+const val APP_DATABASE_SCHEMA_VERSION = 13
 
 /**
  * Issue #261 left a deliberately unsupported pre-migration v1 shape in the
@@ -63,6 +65,7 @@ val APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS: IntArray = intArrayOf(1)
         AgentSessionEntity::class,
         AiApiCallEntry::class,
         PendingTranscriptionEntity::class,
+        CommandTemplateEntity::class,
     ],
     version = APP_DATABASE_SCHEMA_VERSION,
     exportSchema = false,
@@ -78,6 +81,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun agentSessionDao(): AgentSessionDao
     abstract fun aiApiCallLogDao(): AiApiCallLogDao
     abstract fun pendingTranscriptionDao(): PendingTranscriptionDao
+    abstract fun commandTemplateDao(): CommandTemplateDao
 }
 
 val MIGRATION_8_10: Migration = object : Migration(8, 10) {
@@ -145,8 +149,26 @@ val MIGRATION_11_12: Migration = object : Migration(11, 12) {
     }
 }
 
+val MIGRATION_12_13: Migration = object : Migration(12, 13) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS command_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                commands TEXT NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_command_templates_hostId ON command_templates(hostId)")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_8_10,
     MIGRATION_10_11,
     MIGRATION_11_12,
+    MIGRATION_12_13,
 )

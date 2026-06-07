@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.entity.AgentSessionEntity
 import com.pocketshell.core.storage.entity.AiApiCallEntry
+import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
@@ -151,6 +152,26 @@ class AppDatabaseTest {
         val explicit = snippets.first { it.label == "ls" }
         assertEquals("ls -la", explicit.body)
         assertEquals("command", explicit.kind)
+    }
+
+    @Test
+    fun commandTemplate_insert_then_read_by_host() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId),
+        )
+        db.commandTemplateDao().insert(
+            CommandTemplateEntity(
+                hostId = hostId,
+                label = "Git commit push",
+                commands = "git add .\ngit commit -m '{{message}}'\ngit push",
+            ),
+        )
+
+        val templates = db.commandTemplateDao().getByHostId(hostId).first()
+        assertEquals(1, templates.size)
+        assertEquals("Git commit push", templates[0].label)
+        assertEquals("git add .\ngit commit -m '{{message}}'\ngit push", templates[0].commands)
     }
 
     @Test

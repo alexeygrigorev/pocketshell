@@ -100,19 +100,26 @@ public fun SnippetPickerSheet(
     modifier: Modifier = Modifier,
     kindFilter: SnippetKind? = null,
     viewModel: SnippetsViewModel = hiltViewModel(),
+    commandTemplatesViewModel: CommandTemplatesViewModel = hiltViewModel(),
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
     LaunchedEffect(hostId) {
         viewModel.bindHost(hostId)
+        commandTemplatesViewModel.bindHost(hostId)
     }
 
     val snippets by viewModel.snippets.collectAsState()
+    val commandTemplates by commandTemplatesViewModel.templates.collectAsState()
     var query by remember { mutableStateOf("") }
     var showManage by remember { mutableStateOf(false) }
     var pendingTemplate by remember { mutableStateOf<PendingSnippetTemplate?>(null) }
 
-    val pickerSnippets = remember(snippets, kindFilter) {
-        snippetsForPickerWithBuiltIns(snippets, kindFilter)
+    val pickerSnippets = remember(snippets, commandTemplates, kindFilter) {
+        snippetsForPickerWithBuiltInsAndCommandTemplates(
+            snippets = snippets,
+            commandTemplates = commandTemplates,
+            kindFilter = kindFilter,
+        )
     }
     val kindFiltered = remember(pickerSnippets, kindFilter) {
         filterSnippetsForPicker(snippets = pickerSnippets, query = "", kindFilter = kindFilter)
@@ -177,6 +184,7 @@ public fun SnippetPickerSheet(
                 onBack = { showManage = false },
                 modifier = Modifier.fillMaxWidth(),
                 viewModel = viewModel,
+                commandTemplatesViewModel = commandTemplatesViewModel,
             )
         }
     }

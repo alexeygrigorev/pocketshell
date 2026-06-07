@@ -6,6 +6,7 @@ import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
 import com.pocketshell.core.storage.APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
+import com.pocketshell.core.storage.dao.CommandTemplateDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
@@ -67,6 +68,9 @@ object StorageModule {
     // Issue #17: snippet library DAO consumed by SnippetsViewModel.
     @Provides
     fun provideSnippetDao(db: AppDatabase): SnippetDao = db.snippetDao()
+
+    @Provides
+    fun provideCommandTemplateDao(db: AppDatabase): CommandTemplateDao = db.commandTemplateDao()
 
     // Issue #181: per-call cost log consumed by CostsViewModel and the
     // Whisper instrumentation in VoiceModule.

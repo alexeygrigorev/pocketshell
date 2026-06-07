@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,6 +44,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -83,18 +85,25 @@ public fun SnippetsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SnippetsViewModel = hiltViewModel(),
+    commandTemplatesViewModel: CommandTemplatesViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(hostId) {
         viewModel.bindHost(hostId)
+        commandTemplatesViewModel.bindHost(hostId)
     }
 
     val snippets by viewModel.snippets.collectAsState()
     val error by viewModel.error.collectAsState()
+    val commandTemplates by commandTemplatesViewModel.templates.collectAsState()
+    val commandTemplateError by commandTemplatesViewModel.error.collectAsState()
 
     var editorTarget: SnippetEntity? by remember { mutableStateOf(null) }
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingDelete: SnippetEntity? by remember { mutableStateOf(null) }
-    var selectedKind by remember { mutableStateOf(SnippetKind.Prompt) }
+    var selectedTab by remember { mutableStateOf(SnippetLibraryTab.Prompts) }
+    var showAddTemplateDialog by remember { mutableStateOf(false) }
+    var templateEditorTarget: CommandTemplateEntity? by remember { mutableStateOf(null) }
+    var pendingTemplateDelete: CommandTemplateEntity? by remember { mutableStateOf(null) }
     // Rename surface for changing a snippet label without editing the
     // body. Reuses the rename text field shape so the user can clear an
     // override (returning to derived-label behaviour) or type a new
@@ -104,16 +113,23 @@ public fun SnippetsScreen(
     BackHandler {
         when {
             pendingDelete != null -> pendingDelete = null
+            pendingTemplateDelete != null -> pendingTemplateDelete = null
             renameTarget != null -> renameTarget = null
             editorTarget != null -> editorTarget = null
+            templateEditorTarget != null -> templateEditorTarget = null
             showAddDialog -> showAddDialog = false
+            showAddTemplateDialog -> showAddTemplateDialog = false
             else -> onBack()
         }
     }
 
     val commands = remember(snippets) { snippetsForKind(snippets, SnippetKind.Command) }
     val prompts = remember(snippets) { snippetsForKind(snippets, SnippetKind.Prompt) }
-    val visibleSnippets = if (selectedKind == SnippetKind.Prompt) prompts else commands
+    val visibleSnippets = when (selectedTab) {
+        SnippetLibraryTab.Prompts -> prompts
+        SnippetLibraryTab.Commands -> commands
+        SnippetLibraryTab.Macros -> emptyList()
+    }
 
     Box(
         modifier = modifier
@@ -123,9 +139,9 @@ public fun SnippetsScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             SnippetsAppBar(onBack = onBack)
 
-            SnippetKindTabs(
-                selectedKind = selectedKind,
-                onSelect = { selectedKind = it },
+            SnippetLibraryTabs(
+                selectedTab = selectedTab,
+                onSelect = { selectedTab = it },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -140,7 +156,13 @@ public fun SnippetsScreen(
                     .padding(bottom = 12.dp),
             ) {
                 Button(
-                    onClick = { showAddDialog = true },
+                    onClick = {
+                        if (selectedTab == SnippetLibraryTab.Macros) {
+                            showAddTemplateDialog = true
+                        } else {
+                            showAddDialog = true
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = PocketShellColors.Accent,
@@ -148,7 +170,7 @@ public fun SnippetsScreen(
                     ),
                 ) {
                     Text(
-                        text = "Add ${selectedKind.label.lowercase()}",
+                        text = addButtonTextForTab(selectedTab),
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -173,8 +195,48 @@ public fun SnippetsScreen(
                     }
                 }
             }
+            commandTemplateError?.let { msg ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(PocketShellColors.Surface)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = msg,
+                        color = PocketShellColors.Red,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = commandTemplatesViewModel::clearError) {
+                        Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
+                    }
+                }
+            }
 
-            if (visibleSnippets.isEmpty()) {
+            if (selectedTab == SnippetLibraryTab.Macros) {
+                if (commandTemplates.isEmpty()) {
+                    EmptyLibraryState(
+                        title = "No command macros",
+                        message = "Tap Add macro to create a multi-command template.",
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(commandTemplates, key = { "macro-${it.id}" }) { template ->
+                            CommandTemplateRow(
+                                template = template,
+                                onEdit = { templateEditorTarget = template },
+                                onDelete = { pendingTemplateDelete = template },
+                            )
+                        }
+                    }
+                }
+            } else if (visibleSnippets.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -183,14 +245,14 @@ public fun SnippetsScreen(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = emptyTitleForKind(selectedKind),
+                            text = emptyTitleForTab(selectedTab),
                             color = PocketShellColors.Text,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = emptyMessageForKind(selectedKind, snippets.isEmpty()),
+                            text = emptyMessageForTab(selectedTab, snippets.isEmpty()),
                             color = PocketShellColors.TextSecondary,
                             fontSize = 13.sp,
                         )
@@ -202,7 +264,7 @@ public fun SnippetsScreen(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(visibleSnippets, key = { "${selectedKind.storageValue}-${it.id}" }) { snippet ->
+                    items(visibleSnippets, key = { "${selectedTab.name}-${it.id}" }) { snippet ->
                         SnippetRow(
                             snippet = snippet,
                             onEdit = { editorTarget = snippet },
@@ -220,11 +282,37 @@ public fun SnippetsScreen(
         // null at insert time so the read-side renderer derives it from
         // the body's first line.
         SnippetAddDialog(
-            initialKind = selectedKind,
+            initialKind = if (selectedTab == SnippetLibraryTab.Commands) {
+                SnippetKind.Command
+            } else {
+                SnippetKind.Prompt
+            },
             onDismiss = { showAddDialog = false },
             onSave = { body, kind ->
                 viewModel.addSnippet(label = null, body = body, kind = kind)
                 showAddDialog = false
+            },
+        )
+    }
+
+    if (showAddTemplateDialog) {
+        CommandTemplateEditorDialog(
+            initial = null,
+            onDismiss = { showAddTemplateDialog = false },
+            onSave = { label, commands ->
+                commandTemplatesViewModel.addTemplate(label = label, commands = commands)
+                showAddTemplateDialog = false
+            },
+        )
+    }
+
+    templateEditorTarget?.let { target ->
+        CommandTemplateEditorDialog(
+            initial = target,
+            onDismiss = { templateEditorTarget = null },
+            onSave = { label, commands ->
+                commandTemplatesViewModel.updateTemplate(target.copy(label = label, commands = commands))
+                templateEditorTarget = null
             },
         )
     }
@@ -289,6 +377,39 @@ public fun SnippetsScreen(
             containerColor = PocketShellColors.Surface,
         )
     }
+
+    pendingTemplateDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingTemplateDelete = null },
+            title = { Text("Delete this macro?", color = PocketShellColors.Text) },
+            text = {
+                Text(
+                    text = "\"${target.label}\" will be removed permanently.",
+                    color = PocketShellColors.TextSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    commandTemplatesViewModel.deleteTemplate(target)
+                    pendingTemplateDelete = null
+                }) {
+                    Text("Delete", color = PocketShellColors.Red)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingTemplateDelete = null }) {
+                    Text("Cancel", color = PocketShellColors.Accent)
+                }
+            },
+            containerColor = PocketShellColors.Surface,
+        )
+    }
+}
+
+internal enum class SnippetLibraryTab(val label: String) {
+    Prompts("Prompts"),
+    Commands("Commands"),
+    Macros("Macros"),
 }
 
 internal fun snippetsForKind(
@@ -297,14 +418,25 @@ internal fun snippetsForKind(
 ): List<SnippetEntity> =
     snippets.filter { SnippetKind.fromStorage(it.kind) == kind }
 
-private fun emptyTitleForKind(kind: SnippetKind): String =
-    "No ${kind.label.lowercase()} snippets"
+private fun addButtonTextForTab(tab: SnippetLibraryTab): String =
+    when (tab) {
+        SnippetLibraryTab.Prompts -> "Add prompt"
+        SnippetLibraryTab.Commands -> "Add command"
+        SnippetLibraryTab.Macros -> "Add macro"
+    }
 
-private fun emptyMessageForKind(kind: SnippetKind, libraryIsEmpty: Boolean): String =
+private fun emptyTitleForTab(tab: SnippetLibraryTab): String =
+    when (tab) {
+        SnippetLibraryTab.Prompts -> "No prompt snippets"
+        SnippetLibraryTab.Commands -> "No command snippets"
+        SnippetLibraryTab.Macros -> "No command macros"
+    }
+
+private fun emptyMessageForTab(tab: SnippetLibraryTab, libraryIsEmpty: Boolean): String =
     if (libraryIsEmpty) {
-        "Tap Add to create a command or prompt template."
+        "Tap Add to create a command, prompt, or macro template."
     } else {
-        "Switch tabs or add a ${kind.label.lowercase()} snippet."
+        "Switch tabs or add a ${tab.label.dropLast(1).lowercase()}."
     }
 
 /**
@@ -341,9 +473,9 @@ private fun SnippetsAppBar(onBack: () -> Unit) {
  * this split; Commands remain one tap away for plain shell sessions.
  */
 @Composable
-private fun SnippetKindTabs(
-    selectedKind: SnippetKind,
-    onSelect: (SnippetKind) -> Unit,
+private fun SnippetLibraryTabs(
+    selectedTab: SnippetLibraryTab,
+    onSelect: (SnippetLibraryTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -357,24 +489,30 @@ private fun SnippetKindTabs(
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        SnippetKindTab(
-            kind = SnippetKind.Prompt,
-            selected = selectedKind == SnippetKind.Prompt,
-            onClick = { onSelect(SnippetKind.Prompt) },
+        SnippetLibraryTabButton(
+            tab = SnippetLibraryTab.Prompts,
+            selected = selectedTab == SnippetLibraryTab.Prompts,
+            onClick = { onSelect(SnippetLibraryTab.Prompts) },
             modifier = Modifier.weight(1f),
         )
-        SnippetKindTab(
-            kind = SnippetKind.Command,
-            selected = selectedKind == SnippetKind.Command,
-            onClick = { onSelect(SnippetKind.Command) },
+        SnippetLibraryTabButton(
+            tab = SnippetLibraryTab.Commands,
+            selected = selectedTab == SnippetLibraryTab.Commands,
+            onClick = { onSelect(SnippetLibraryTab.Commands) },
+            modifier = Modifier.weight(1f),
+        )
+        SnippetLibraryTabButton(
+            tab = SnippetLibraryTab.Macros,
+            selected = selectedTab == SnippetLibraryTab.Macros,
+            onClick = { onSelect(SnippetLibraryTab.Macros) },
             modifier = Modifier.weight(1f),
         )
     }
 }
 
 @Composable
-private fun SnippetKindTab(
-    kind: SnippetKind,
+private fun SnippetLibraryTabButton(
+    tab: SnippetLibraryTab,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -391,12 +529,12 @@ private fun SnippetKindTab(
                 shape = RoundedCornerShape(8.dp),
             )
             .clickable(onClick = onClick)
-            .testTag(snippetKindTabTag(kind))
+            .testTag(snippetLibraryTabTag(tab))
             .padding(horizontal = 10.dp, vertical = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "${kind.label}s",
+            text = tab.label,
             color = if (selected) PocketShellColors.Accent else PocketShellColors.TextSecondary,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
@@ -407,7 +545,40 @@ private fun SnippetKindTab(
 }
 
 internal fun snippetKindTabTag(kind: SnippetKind): String =
-    "snippets-kind-tab-${kind.storageValue}"
+    snippetLibraryTabTag(
+        when (kind) {
+            SnippetKind.Prompt -> SnippetLibraryTab.Prompts
+            SnippetKind.Command -> SnippetLibraryTab.Commands
+        },
+    )
+
+internal fun snippetLibraryTabTag(tab: SnippetLibraryTab): String =
+    "snippets-library-tab-${tab.name.lowercase()}"
+
+@Composable
+private fun ColumnScope.EmptyLibraryState(title: String, message: String) {
+    Box(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = title,
+                color = PocketShellColors.Text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = message,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 13.sp,
+            )
+        }
+    }
+}
 
 /**
  * Single snippet row, composed from the shared dense-row primitives (#479
@@ -450,6 +621,56 @@ private fun SnippetRow(
             )
         },
     )
+}
+
+@Composable
+private fun CommandTemplateRow(
+    template: CommandTemplateEntity,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    ListRow(
+        title = template.label,
+        subtitle = commandTemplatePreview(template.commands),
+        trailing = {
+            MacroTag()
+            Kebab(
+                items = listOf(
+                    KebabItem(label = "Edit", onClick = onEdit),
+                    KebabItem(label = "Delete", onClick = onDelete),
+                ),
+            )
+        },
+    )
+}
+
+private fun commandTemplatePreview(commands: String): String? =
+    commands
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString("  \u2192  ")
+        .takeIf { it.isNotBlank() }
+
+@Composable
+private fun MacroTag() {
+    Box(
+        modifier = Modifier
+            .background(PocketShellColors.AccentSoft, RoundedCornerShape(6.dp))
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.AccentDim,
+                shape = RoundedCornerShape(6.dp),
+            )
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        Text(
+            text = "macro",
+            color = PocketShellColors.Accent,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
 }
 
 /**
@@ -695,6 +916,84 @@ internal fun SnippetRenameDialog(
         textContentColor = PocketShellColors.TextSecondary,
     )
 }
+
+@Composable
+internal fun CommandTemplateEditorDialog(
+    initial: CommandTemplateEntity?,
+    onDismiss: () -> Unit,
+    onSave: (label: String, commands: String) -> Unit,
+) {
+    var label by remember(initial) { mutableStateOf(initial?.label.orEmpty()) }
+    var commands by remember(initial) { mutableStateOf(initial?.commands.orEmpty()) }
+    val ready = label.isNotBlank() && commands.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (initial == null) "Add macro" else "Edit macro",
+                color = PocketShellColors.Text,
+            )
+        },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(commandTemplateLabelFieldTag()),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    colors = dialogFieldColors(),
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = commands,
+                    onValueChange = { commands = it },
+                    label = { Text("Commands, one per line") },
+                    minLines = 4,
+                    maxLines = 8,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(commandTemplateCommandsFieldTag()),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+                    colors = dialogFieldColors(),
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Use {{name}} placeholders; they will be filled before sending.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(label, commands) },
+                enabled = ready,
+            ) {
+                Text(
+                    text = "Save",
+                    color = if (ready) PocketShellColors.Accent else PocketShellColors.TextMuted,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+        titleContentColor = PocketShellColors.Text,
+        textContentColor = PocketShellColors.TextSecondary,
+    )
+}
+
+internal fun commandTemplateLabelFieldTag(): String = "command-template-label"
+
+internal fun commandTemplateCommandsFieldTag(): String = "command-template-commands"
 
 /**
  * Pill toggle used in the editor dialog to pick between Command and

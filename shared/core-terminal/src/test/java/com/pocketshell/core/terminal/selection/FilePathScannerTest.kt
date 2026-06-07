@@ -34,6 +34,37 @@ class FilePathScannerTest {
     }
 
     @Test
+    fun detectsGeneratedImageAbsolutePathFromIssue611() {
+        val generated =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255de6bac8819197d2528102528ee2.png"
+
+        assertEquals(listOf(generated), paths("generated image: $generated"))
+    }
+
+    @Test
+    fun detectsFileUriAsDecodedAbsolutePathFromIssue611() {
+        val decoded =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1.png"
+        val uri = "file://$decoded"
+
+        assertEquals(listOf(decoded), paths("generated image: $uri"))
+    }
+
+    @Test
+    fun fileUriPathIsPercentDecodedForViewerRoute() {
+        val uri = "file:///home/alexey/.codex/generated_images/a%20b/out%20image.png"
+
+        assertEquals(
+            listOf("/home/alexey/.codex/generated_images/a b/out image.png"),
+            paths("generated image: $uri"),
+        )
+    }
+
+    @Test
     fun detectsHomeRelativePath() {
         assertEquals(
             listOf("~/projects/foo/main.kt"),

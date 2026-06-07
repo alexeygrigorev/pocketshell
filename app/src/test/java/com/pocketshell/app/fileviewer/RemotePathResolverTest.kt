@@ -14,6 +14,17 @@ class RemotePathResolverTest {
     }
 
     @Test
+    fun `local file uri decodes to absolute path`() {
+        assertEquals(
+            "/home/alexey/.codex/generated_images/a b/out image.png",
+            RemotePathResolver.resolve(
+                "file:///home/alexey/.codex/generated_images/a%20b/out%20image.png",
+                "/home/me/proj",
+            ),
+        )
+    }
+
+    @Test
     fun `tilde path passes through unchanged`() {
         assertEquals("~/notes.txt", RemotePathResolver.resolve("~/notes.txt", "/home/me/proj"))
         assertEquals("~", RemotePathResolver.resolve("~", "/home/me/proj"))

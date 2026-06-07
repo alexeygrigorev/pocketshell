@@ -1,6 +1,7 @@
 package com.pocketshell.app.fileviewer
 
 import com.pocketshell.core.terminal.selection.PathNormalizer
+import com.pocketshell.core.terminal.selection.decodeLocalFileUriPath
 
 /**
  * Resolve a user-/agent-supplied remote path against the session's working
@@ -11,6 +12,9 @@ import com.pocketshell.core.terminal.selection.PathNormalizer
  * must turn it into something the remote shell can open.
  *
  * Rules:
+ *  - Local `file://` URIs (`file:///home/me/out.png`) decode to their absolute
+ *    path before the normal rooted-path handling. Non-local authorities are not
+ *    rewritten.
  *  - Absolute paths (`/...`) pass through, with `.`/`..` segments collapsed
  *    ([PathNormalizer]) so a tapped `…/git/pocketshell/../../../tmp/x.md`
  *    resolves AND displays as the canonical `/tmp/x.md` (issue #558 bug 1).
@@ -30,6 +34,7 @@ object RemotePathResolver {
     fun resolve(input: String, cwd: String?): String {
         val path = input.trim()
         if (path.isEmpty()) return path
+        decodeLocalFileUriPath(path)?.let { return PathNormalizer.normalize(it) }
         if (isAlreadyRooted(path)) return PathNormalizer.normalize(path)
 
         val base = cwd?.trim().orEmpty()

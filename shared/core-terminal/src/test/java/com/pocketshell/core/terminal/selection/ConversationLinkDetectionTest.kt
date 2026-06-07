@@ -67,6 +67,19 @@ class ConversationLinkDetectionTest {
         assertEquals(ConversationLinkKind.FILE, out[0].kind)
     }
 
+    @Test
+    fun detectsGeneratedImageFileUriAsDecodedFileLink() {
+        val decoded =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1.png"
+        val out = links("generated image: file://$decoded")
+
+        assertEquals(1, out.size)
+        assertEquals(decoded, out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
     // --- Directories --------------------------------------------------------
 
     @Test

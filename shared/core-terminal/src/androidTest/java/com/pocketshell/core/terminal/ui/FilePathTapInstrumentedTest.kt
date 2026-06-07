@@ -217,6 +217,157 @@ class FilePathTapInstrumentedTest {
         }
     }
 
+    @Test
+    fun generatedImagePathsWrappedAcrossRowsRouteFullFileViewerPath() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+        val absolutePath =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255de6bac8819197d2528102528ee2.png"
+        val fileUriDecodedPath =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1.png"
+        val fileUri = "file://$fileUriDecodedPath"
+
+        try {
+            val viewRef = arrayOfNulls<TerminalView>(1)
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(540, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                viewRef[0] = view
+            }
+            val view = requireNotNull(viewRef[0])
+
+            state.appendRemoteOutput(
+                ("absolute $absolutePath\r\nuri $fileUri\r\n")
+                    .toByteArray(Charsets.US_ASCII),
+            )
+
+            val paths = arrayOfNulls<List<FilePathRegion>>(1)
+            withTimeout(5_000) {
+                while (true) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        paths[0] = findVisibleFilePaths(view)
+                    }
+                    val found = paths[0].orEmpty()
+                    val absoluteRows = found.filter { it.path == absolutePath }
+                        .map { it.row }
+                        .distinct()
+                    val fileUriRows = found.filter { it.path == fileUriDecodedPath }
+                        .map { it.row }
+                        .distinct()
+                    if (absoluteRows.size >= 2 && fileUriRows.size >= 2) break
+                }
+            }
+            val found = requireNotNull(paths[0])
+            val absoluteRegions = found.filter { it.path == absolutePath }
+            val fileUriRegions = found.filter { it.path == fileUriDecodedPath }
+
+            assertTrue(
+                "absolute generated-image path should wrap into multiple tappable regions: $found",
+                absoluteRegions.map { it.row }.distinct().size >= 2,
+            )
+            assertTrue(
+                "file:// generated-image URI should wrap into multiple tappable regions: $found",
+                fileUriRegions.map { it.row }.distinct().size >= 2,
+            )
+            assertTrue(
+                "every absolute-path fragment must carry the full path: $absoluteRegions",
+                absoluteRegions.all { it.path == absolutePath },
+            )
+            assertTrue(
+                "every file:// fragment must carry the decoded path: $fileUriRegions",
+                fileUriRegions.all { it.path == fileUriDecodedPath },
+            )
+
+            val tappedPaths = mutableListOf<String>()
+            client.onTapMaybeUrl = { x, y ->
+                val hit = hitTestFilePath(view, found, x, y)
+                if (hit != null) {
+                    tappedPaths.add(hit.path)
+                    true
+                } else {
+                    false
+                }
+            }
+            try {
+                val absoluteContinuation = absoluteRegions.first { it.row != absoluteRegions.first().row }
+                val fileUriContinuation = fileUriRegions.first { it.row != fileUriRegions.first().row }
+                instrumentation.runOnMainSync {
+                    assertEquals(
+                        absolutePath,
+                        hitTestFilePath(
+                            view,
+                            found,
+                            centerX(absoluteContinuation, view),
+                            centerY(absoluteContinuation, view),
+                        )?.path,
+                    )
+                    assertEquals(
+                        fileUriDecodedPath,
+                        hitTestFilePath(
+                            view,
+                            found,
+                            centerX(fileUriContinuation, view),
+                            centerY(fileUriContinuation, view),
+                        )?.path,
+                    )
+                    assertTrue(
+                        client.onTapMaybeUrl?.invoke(
+                            centerX(absoluteContinuation, view),
+                            centerY(absoluteContinuation, view),
+                        ) ?: false,
+                    )
+                    assertTrue(
+                        client.onTapMaybeUrl?.invoke(
+                            centerX(fileUriContinuation, view),
+                            centerY(fileUriContinuation, view),
+                        ) ?: false,
+                    )
+                }
+                assertEquals(listOf(absolutePath, fileUriDecodedPath), tappedPaths)
+            } finally {
+                client.onTapMaybeUrl = null
+            }
+
+            instrumentation.runOnMainSync {
+                saveViewportScreenshot(view, "issue-611-generated-image-file-paths-viewport.png")
+            }
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    private fun centerX(region: FilePathRegion, view: TerminalView): Float {
+        val renderer = requireNotNull(view.mRenderer) { "renderer should be initialised" }
+        return (region.startCol + (region.endColExclusive - region.startCol) / 2f) * renderer.fontWidth
+    }
+
+    private fun centerY(region: FilePathRegion, view: TerminalView): Float {
+        val renderer = requireNotNull(view.mRenderer) { "renderer should be initialised" }
+        val rowOnScreen = region.row - view.topRow
+        return renderer.fontLineSpacingAndAscent + (rowOnScreen + 0.5f) * renderer.fontLineSpacing
+    }
+
     /**
      * Render the live [TerminalView] off-screen to a bitmap and persist it
      * under `additional_test_output/issue-500/` for reviewer inspection.

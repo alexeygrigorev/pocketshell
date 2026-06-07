@@ -154,4 +154,65 @@ class WrappedLineReassemblyTest {
         assertEquals(0, pathRegions[1].startCol)
         assertEquals(rows[1].text.length, pathRegions[1].endColExclusive)
     }
+
+    @Test
+    fun `wrapped generated image absolute path emits full file target per visual row`() {
+        val path =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255de6bac8819197d2528102528ee2.png"
+        val firstSplit = path.indexOf("019e9d03")
+        val secondSplit = path.indexOf("ig_")
+        val rows = listOf(
+            VisualRow(30, "image ${path.take(firstSplit)}", wrapsToNext = false),
+            VisualRow(31, path.substring(firstSplit, secondSplit), wrapsToNext = false),
+            VisualRow(32, path.substring(secondSplit), wrapsToNext = false),
+        )
+
+        val regions = filePathRegionsForRows(rows, columns = 120)
+
+        assertEquals(3, regions.size)
+        assertEquals(listOf(30, 31, 32), regions.map { it.row })
+        assertTrue(
+            "every visual fragment should carry the complete path: $regions",
+            regions.all { it.path == path },
+        )
+        assertEquals(6, regions[0].startCol)
+        assertEquals(rows[0].text.length, regions[0].endColExclusive)
+        assertEquals(0, regions[1].startCol)
+        assertEquals(rows[1].text.length, regions[1].endColExclusive)
+        assertEquals(0, regions[2].startCol)
+        assertEquals(rows[2].text.length, regions[2].endColExclusive)
+    }
+
+    @Test
+    fun `wrapped generated image file uri emits decoded file target per visual row`() {
+        val decoded =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1.png"
+        val uri = "file://$decoded"
+        val firstSplit = uri.indexOf("019e9d03")
+        val secondSplit = uri.indexOf("ig_")
+        val rows = listOf(
+            VisualRow(40, uri.take(firstSplit), wrapsToNext = false),
+            VisualRow(41, uri.substring(firstSplit, secondSplit), wrapsToNext = false),
+            VisualRow(42, uri.substring(secondSplit), wrapsToNext = false),
+        )
+
+        val regions = filePathRegionsForRows(rows, columns = 120)
+
+        assertEquals(3, regions.size)
+        assertEquals(listOf(40, 41, 42), regions.map { it.row })
+        assertTrue(
+            "every visual fragment should carry the decoded complete path: $regions",
+            regions.all { it.path == decoded },
+        )
+        assertEquals(0, regions[0].startCol)
+        assertEquals(rows[0].text.length, regions[0].endColExclusive)
+        assertEquals(0, regions[1].startCol)
+        assertEquals(rows[1].text.length, regions[1].endColExclusive)
+        assertEquals(0, regions[2].startCol)
+        assertEquals(rows[2].text.length, regions[2].endColExclusive)
+    }
 }

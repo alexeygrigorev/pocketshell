@@ -2,6 +2,7 @@ package com.pocketshell.core.terminal.selection
 
 import android.util.Patterns
 import com.termux.view.TerminalView
+import java.net.URI
 
 /**
  * A file path detected on the visible terminal viewport with the grid
@@ -67,6 +68,9 @@ public data class DetectedFilePath(
  *
  * - Absolute paths that end in a known extension: `/home/me/out/report.png`,
  *   `/var/log/app.log`.
+ * - Local file URIs that point at absolute paths: `file:///home/me/out.png`.
+ *   The visible/tappable span includes the `file://` URI, but the emitted
+ *   [FilePathRegion.path] is the decoded absolute path for the file viewer.
  * - Home-relative paths: `~/projects/foo/main.kt`.
  * - Explicit-relative paths: `./build.gradle.kts`, `../docs/readme.md`.
  * - Project-relative paths with at least one `/` and a known extension:
@@ -120,8 +124,17 @@ public fun findVisibleFilePaths(view: TerminalView): List<FilePathRegion> {
         visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
     }
 
+    return filePathRegionsForRows(visualRows, columns)
+}
+
+internal fun filePathRegionsForRows(
+    visualRows: List<VisualRow>,
+    columns: Int,
+): List<FilePathRegion> {
+    if (columns <= 0 || visualRows.isEmpty()) return emptyList()
+
     val out = mutableListOf<FilePathRegion>()
-    for (logical in reassemble(markAttachmentContinuationWraps(visualRows))) {
+    for (logical in reassemble(markFilePathContinuationWraps(visualRows))) {
         val line = logical.text
         for (detected in detectFilePathsInLine(line, urlSpans(line))) {
             for (span in logical.mapSpanToRows(detected.start, detected.endExclusive)) {
@@ -178,6 +191,10 @@ public fun detectFilePathsInLine(
     if (line.isEmpty()) return emptyList()
     val out = mutableListOf<DetectedFilePath>()
 
+    for (detected in detectLocalFileUrisInLine(line, excludedRanges)) {
+        out += detected
+    }
+
     for (detected in detectAttachmentFilePathsInLine(line, excludedRanges)) {
         out += detected
     }
@@ -207,6 +224,51 @@ public fun detectFilePathsInLine(
         )
     }
     return out
+}
+
+/**
+ * Detect `file://` URIs that point at local/server-visible absolute files.
+ * The span covers the URI as printed, but [DetectedFilePath.path] is the
+ * decoded file path so the existing file-viewer route can fetch it directly.
+ */
+private fun detectLocalFileUrisInLine(
+    line: String,
+    excludedRanges: List<IntRange>,
+): List<DetectedFilePath> {
+    val out = mutableListOf<DetectedFilePath>()
+    val matcher = FILE_URI_PATTERN.matcher(line)
+    while (matcher.find()) {
+        val start = matcher.start()
+        if (excludedRanges.any { start in it }) continue
+        var raw = matcher.group() ?: continue
+        var endTrim = raw.length
+        while (endTrim > 0 && raw[endTrim - 1] in PATH_TRAILING_PUNCTUATION) {
+            endTrim--
+        }
+        if (endTrim <= 0) continue
+        if (endTrim != raw.length) {
+            raw = raw.substring(0, endTrim)
+        }
+        val decoded = decodeLocalFileUriPath(raw) ?: continue
+        if (!endsWithKnownExtension(decoded)) continue
+        out += DetectedFilePath(
+            path = decoded,
+            start = start,
+            endExclusive = start + raw.length,
+        )
+    }
+    return out
+}
+
+public fun decodeLocalFileUriPath(uriText: String): String? {
+    val uri = runCatching { URI(uriText.trim()) }.getOrNull() ?: return null
+    if (!uri.scheme.orEmpty().equals("file", ignoreCase = true)) return null
+    val authority = uri.authority.orEmpty()
+    if (authority.isNotEmpty() && !authority.equals("localhost", ignoreCase = true)) {
+        return null
+    }
+    val path = uri.path ?: return null
+    return path.takeIf { it.startsWith("/") && it.length > 1 }
 }
 
 /**
@@ -287,7 +349,8 @@ private fun compactLineBreaks(line: String): CompactedLine {
  */
 private fun urlSpans(line: String): List<IntRange> {
     val spans = mutableListOf<IntRange>()
-    val matcher = Patterns.WEB_URL.matcher(line)
+    val pattern = runCatching { Patterns.WEB_URL }.getOrNull() ?: return emptyList()
+    val matcher = pattern.matcher(line)
     while (matcher.find()) {
         val raw = matcher.group() ?: continue
         if (raw.startsWith("http://", ignoreCase = true) ||
@@ -386,19 +449,30 @@ private val ATTACHMENT_TIMESTAMPED_BASENAME_PATTERN: java.util.regex.Pattern =
         java.util.regex.Pattern.CASE_INSENSITIVE,
     )
 
-internal fun markAttachmentContinuationWraps(rows: List<VisualRow>): List<VisualRow> {
+internal fun markAttachmentContinuationWraps(rows: List<VisualRow>): List<VisualRow> =
+    markFilePathContinuationWraps(rows)
+
+internal fun markFilePathContinuationWraps(rows: List<VisualRow>): List<VisualRow> {
     if (rows.size < 2) return rows
     var changed = false
     val out = rows.toMutableList()
+    var carryingGeneratedImagePath = false
     for (index in 0 until rows.lastIndex) {
         val current = out[index]
         if (current.wrapsToNext) continue
-        if (looksLikeUnfinishedAttachmentPath(current.text) &&
+        val joinsAttachment = looksLikeUnfinishedAttachmentPath(current.text) &&
             looksLikeAttachmentContinuation(rows[index + 1].text)
-        ) {
+        val currentIsGeneratedImagePath = carryingGeneratedImagePath ||
+            looksLikeUnfinishedGeneratedImagePath(current.text)
+        val joinsGeneratedImage = currentIsGeneratedImagePath &&
+            !lastTokenEndsWithKnownExtension(current.text) &&
+            looksLikeGeneratedImageContinuation(rows[index + 1].text)
+
+        if (joinsAttachment || joinsGeneratedImage) {
             out[index] = current.copy(wrapsToNext = true)
             changed = true
         }
+        carryingGeneratedImagePath = joinsGeneratedImage
     }
     return if (changed) out else rows
 }
@@ -431,9 +505,45 @@ private fun looksLikeAttachmentContinuationFragment(path: String): Boolean {
     return ATTACHMENT_TIMESTAMPED_BASENAME_PATTERN.matcher(leaf).matches()
 }
 
+private fun looksLikeUnfinishedGeneratedImagePath(text: String): Boolean {
+    val token = lastNonWhitespaceToken(text)
+    if (token.isEmpty()) return false
+    if (!token.contains(GENERATED_IMAGES_ROOT)) return false
+    return !endsWithKnownExtension(token)
+}
+
+private fun looksLikeGeneratedImageContinuation(text: String): Boolean {
+    val token = text.trimStart()
+    if (token.isEmpty()) return false
+    return GENERATED_IMAGE_CONTINUATION_PATTERN.matcher(token).find()
+}
+
+private fun lastTokenEndsWithKnownExtension(text: String): Boolean =
+    endsWithKnownExtension(lastNonWhitespaceToken(text))
+
+private fun lastNonWhitespaceToken(text: String): String {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty()) return ""
+    val start = trimmed.indexOfLast { it.isWhitespace() } + 1
+    return trimmed.substring(start)
+}
+
 private fun endsWithKnownExtension(token: String): Boolean {
     val dot = token.lastIndexOf('.')
     if (dot < 0 || dot == token.length - 1) return false
     val ext = token.substring(dot + 1).lowercase()
     return ext in FILE_PATH_EXTENSIONS
 }
+
+private const val GENERATED_IMAGES_ROOT: String = "/.codex/generated_images/"
+
+private val FILE_URI_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.compile(
+    "(?<![\\w/.~-])file://[^\\s`\"'<>]+",
+    java.util.regex.Pattern.CASE_INSENSITIVE,
+)
+
+private val GENERATED_IMAGE_CONTINUATION_PATTERN: java.util.regex.Pattern =
+    java.util.regex.Pattern.compile(
+        "^[\\w.%@+-]+(?:/[\\w.%@+-]+)*/?",
+        java.util.regex.Pattern.CASE_INSENSITIVE,
+    )

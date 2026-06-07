@@ -120,6 +120,12 @@ android {
                     .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
                     .get()
                 test.systemProperty("api.version", apiVersion)
+
+                // Real provider calls are local, opt-in evidence only.
+                // They live in src/test for access to app-internal
+                // assistant classes, but the standard unit-test suite must
+                // never execute them. Use :app:realLlmTest explicitly.
+                test.exclude("**/*RealLlmTest.class")
             }
         }
     }
@@ -245,5 +251,25 @@ androidComponents {
         variant.androidTest?.packaging?.resources?.excludes?.addAll(
             duplicateJavaResourceExcludes
         )
+    }
+}
+
+project.afterEvaluate {
+    tasks.register<Test>("realLlmTest") {
+        group = "verification"
+        description = "Runs opt-in real LLM assistant action-planning tests (requires repo .env credentials)."
+
+        val unitTest = tasks.named<Test>("testDebugUnitTest").get()
+        testClassesDirs = unitTest.testClassesDirs
+        classpath = unitTest.classpath
+
+        useJUnit()
+        include("**/*RealLlmTest.class")
+        shouldRunAfter(unitTest)
+
+        testLogging {
+            events("passed", "skipped", "failed")
+            showStandardStreams = true
+        }
     }
 }

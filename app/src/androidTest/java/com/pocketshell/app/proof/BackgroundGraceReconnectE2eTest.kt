@@ -1,5 +1,6 @@
 package com.pocketshell.app.proof
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.SystemClock
@@ -17,6 +18,7 @@ import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.BACKGROUND_GRACE_MILLIS
 import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -77,6 +79,7 @@ class BackgroundGraceReconnectE2eTest {
     @Before
     fun setUp() {
         clearLastSessionPrefs()
+        clearBackgroundGraceSetting()
         BackgroundGraceTestOverride.setForTest(null)
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
     }
@@ -89,6 +92,7 @@ class BackgroundGraceReconnectE2eTest {
         diagnostics?.close()
         diagnostics = null
         clearLastSessionPrefs()
+        clearBackgroundGraceSetting()
         seededKey?.let { key ->
             runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }
         }
@@ -153,6 +157,61 @@ class BackgroundGraceReconnectE2eTest {
         waitForVisibleTerminal("post-grace terminal") { it.contains(READY_MARKER) }
         recordTiming("post_grace_cycle_ms", SystemClock.elapsedRealtime() - postStart)
         captureViewport("issue548-03-post-grace-reattached")
+        writeTimings()
+    }
+
+    @Test
+    fun sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect() = runBlocking<Unit> {
+        val key = readFixtureKey()
+        seededKey = key
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSession(key)
+
+        val hostRowTag = seedDockerHost(key)
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        waitForClientCountAtLeast(1, "initial attach")
+        captureViewport("issue548-sixsec-01-attached")
+        diagnostics!!.clear()
+
+        // The production/default grace window is 60s. This holds the app
+        // backgrounded for the reported short app-switch interval (~6s),
+        // then foregrounds before grace can elapse. If #548/#450 regresses,
+        // the assertions below catch the stuck "Tap Reconnect" state or any
+        // reconnect/reattach diagnostic emitted during the cycle.
+        BackgroundGraceTestOverride.setForTest(null)
+        val switchStart = SystemClock.elapsedRealtime()
+        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        waitForDiagnostic("background_grace_start", "six-second production-grace background") {
+            (it.fields["millis"] as? Number)?.toLong() == BACKGROUND_GRACE_MILLIS
+        }
+        SystemClock.sleep(SIX_SECOND_APP_SWITCH_MS)
+        waitForClientCountAtLeast(1, "six-second production-grace background hold")
+        assertTrue(
+            "six-second production-grace cycle must not elapse before foreground; events=${diagnostics!!.events}",
+            diagnostics!!.eventsNamed("background_grace_elapsed").isEmpty(),
+        )
+
+        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        assertNoVisibleReconnect("immediately after six-second production-grace foreground")
+        waitForDiagnostic("background_grace_foreground", "six-second production-grace foreground") {
+            it.fields["withinGrace"] == true
+        }
+        recordTiming(
+            "six_second_production_grace_cycle_ms",
+            SystemClock.elapsedRealtime() - switchStart,
+        )
+
+        waitForConnected("six-second production-grace foreground")
+        assertNoVisibleReconnect("six-second production-grace foreground")
+        watchNoVisibleReconnect("six-second production-grace settle", WATCH_NO_RECONNECT_MS)
+        waitForVisibleTerminal("six-second production-grace terminal") { it.contains(READY_MARKER) }
+        waitForClientCountAtLeast(1, "six-second production-grace after foreground")
+        assertNoReconnectOrReattachDiagnostics("six-second production-grace foreground")
+        captureViewport("issue548-sixsec-02-foreground")
         writeTimings()
     }
 
@@ -369,6 +428,14 @@ class BackgroundGraceReconnectE2eTest {
             .bufferedReader()
             .use { it.readText() }
 
+    private fun clearBackgroundGraceSetting() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+        ctx.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .remove("background_grace_millis")
+            .commit()
+    }
+
     private suspend fun seedDockerHost(key: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
@@ -514,6 +581,7 @@ class BackgroundGraceReconnectE2eTest {
 
         const val WITHIN_GRACE_MS: Long = 3_000L
         const val POST_GRACE_MS: Long = 500L
+        const val SIX_SECOND_APP_SWITCH_MS: Long = 6_000L
         const val WATCH_NO_RECONNECT_MS: Long = 1_200L
         const val DIAGNOSTIC_TIMEOUT_MS: Long = 8_000L
         const val CLIENT_COUNT_TIMEOUT_MS: Long = 8_000L

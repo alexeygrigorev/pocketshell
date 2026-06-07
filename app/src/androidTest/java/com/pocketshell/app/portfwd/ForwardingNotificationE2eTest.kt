@@ -166,7 +166,7 @@ class ForwardingNotificationE2eTest {
         val channel = notificationManager.getNotificationChannel(posted.notification.channelId)
         assertEquals(
             "foreground notification should use the upgrade-safe status channel",
-            "pocketshell_forwarding_status",
+            "pocketshell_forwarding_status_v2",
             posted.notification.channelId,
         )
         assertNotNull("foreground notification channel must be registered", channel)
@@ -174,6 +174,10 @@ class ForwardingNotificationE2eTest {
             "foreground notification channel must be visible in the main shade",
             NotificationManager.IMPORTANCE_DEFAULT,
             requireNotNull(channel).importance,
+        )
+        assertNotNull(
+            "foreground notification channel must not be configured silent",
+            channel.sound,
         )
         // Issue #521: body says it's running in the background + the host +
         // tunnel count (Recorder "Recording now" feel).

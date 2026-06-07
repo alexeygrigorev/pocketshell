@@ -483,7 +483,7 @@ class ForwardingControllerTest {
     }
 
     @Test
-    fun `notification uses default-importance status channel without sound or vibration`() {
+    fun `notification uses default-importance status channel that is not configured silent`() {
         val service = Robolectric.buildService(ForwardingService::class.java).get()
         service.createNotificationChannel()
         val notification = service.buildNotification(
@@ -494,7 +494,7 @@ class ForwardingControllerTest {
         val manager = context.getSystemService(NotificationManager::class.java)
         val channel = manager.getNotificationChannel(notification.channelId)
 
-        assertEquals("pocketshell_forwarding_status", notification.channelId)
+        assertEquals("pocketshell_forwarding_status_v2", notification.channelId)
         assertNotNull("foreground-service notification channel must be registered", channel)
         val forwardingChannel = requireNotNull(channel)
         assertEquals(
@@ -508,12 +508,21 @@ class ForwardingControllerTest {
             @Suppress("DEPRECATION")
             notification.priority,
         )
-        assertNull("default-importance channel should not make noise", forwardingChannel.sound)
-        assertEquals(
-            "default-importance channel should not vibrate",
-            false,
-            forwardingChannel.shouldVibrate(),
+        assertNotNull(
+            "forwarding channel must not be configured silent; keep Android's default alert sound",
+            forwardingChannel.sound,
         )
+        runCatching {
+            android.app.Notification::class.java
+                .getMethod("getForegroundServiceBehavior")
+                .invoke(notification) as Int
+        }.onSuccess { behavior ->
+            assertEquals(
+                "FGS notification should request immediate status-area display where supported",
+                NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE,
+                behavior,
+            )
+        }
     }
 
     private fun drainStartedServices() {

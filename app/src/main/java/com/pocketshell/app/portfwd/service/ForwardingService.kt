@@ -74,7 +74,7 @@ class ForwardingService : Service() {
 
     companion object {
         private const val TAG = "PsForwardingService"
-        private const val CHANNEL_ID = "pocketshell_forwarding_status"
+        private const val CHANNEL_ID = "pocketshell_forwarding_status_v2"
         private const val NOTIFICATION_ID = 0x70_46_53_56 // "pFSV" — unique within app
 
         const val ACTION_START = "com.pocketshell.app.portfwd.action.START_FORWARDING"
@@ -435,14 +435,19 @@ class ForwardingService : Service() {
             // the old generic ic_dialog_info.
             .setSmallIcon(R.drawable.ic_stat_forwarding)
             .setContentIntent(contentIntent)
-            // Ongoing + the no-clear flag make the notification persistent and
-            // non-dismissable while ≥1 tunnel is active (the user stops it via
-            // the Stop action or by disabling forwarding), matching the
-            // ongoing-media feel the maintainer asked for in #487.
+            // Ongoing is the closest supported FGS contract to "non-
+            // dismissible": while ≥1 tunnel is active Android keeps this as
+            // the service's foreground notification and the user stops it via
+            // Stop or by disabling forwarding. Newer Android versions may
+            // still expose limited system-managed dismissal controls for some
+            // foreground-service notifications, so we also remove it
+            // immediately on Stop / zero active hosts.
             .setOngoing(true)
+            .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
@@ -459,11 +464,8 @@ class ForwardingService : Service() {
             "Port forwarding",
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
-            description = "Always-on status while SSH port forwarding is active"
+            description = "Prominent ongoing status while SSH port forwarding is active"
             setShowBadge(false)
-            setSound(null, null)
-            enableVibration(false)
-            enableLights(false)
         }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)

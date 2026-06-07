@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -22,7 +22,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -479,9 +478,7 @@ internal fun BottomChipControls(
         if (onDictateTap != null) {
             Box(
                 modifier = Modifier
-                    .width(80.dp)
-                    .padding(end = 12.dp)
-                    .testTag(SESSION_COMPOSER_LAUNCHER_TAG),
+                    .padding(top = 8.dp, bottom = 8.dp, end = 8.dp),
                 contentAlignment = Alignment.CenterEnd,
             ) {
                 ComposerLauncherButton(
@@ -499,34 +496,33 @@ private fun ComposerLauncherButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val baseColor = if (enabled) PocketShellColors.Accent else PocketShellColors.SurfaceElev
-    val glyphColor = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted
-    val shadowModifier = if (enabled) {
-        Modifier.shadow(
-            elevation = 8.dp,
-            shape = CircleShape,
-            ambientColor = PocketShellColors.Accent,
-            spotColor = PocketShellColors.Accent,
-        )
-    } else {
-        Modifier
-    }
+    val containerColor = if (enabled) PocketShellColors.SurfaceElev else PocketShellColors.Surface
+    val borderColor = if (enabled) PocketShellColors.AccentDim else PocketShellColors.BorderSoft
+    val glyphColor = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted
+    val shape = RoundedCornerShape(8.dp)
 
     Box(
         modifier = modifier
-            .size(56.dp)
-            .then(shadowModifier)
-            .background(color = baseColor, shape = CircleShape)
+            .size(48.dp)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION },
+            .semantics { contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION }
+            .testTag(SESSION_COMPOSER_LAUNCHER_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = ComposerLauncherIcon,
-            contentDescription = null,
-            tint = glyphColor,
-            modifier = Modifier.size(24.dp),
-        )
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .background(color = containerColor, shape = shape)
+                .border(width = 1.dp, color = borderColor, shape = shape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = ComposerLauncherIcon,
+                contentDescription = null,
+                tint = glyphColor,
+                modifier = Modifier.size(18.dp),
+            )
+        }
     }
 }
 

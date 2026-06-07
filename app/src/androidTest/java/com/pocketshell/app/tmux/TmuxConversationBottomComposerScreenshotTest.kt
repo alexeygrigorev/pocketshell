@@ -26,7 +26,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
-import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
+import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -39,7 +39,7 @@ import org.junit.runner.RunWith
 /**
  * Issue #459 screenshot evidence — proves the Conversation tab's bottom is
  * IDENTICAL to the Terminal tab's bottom: the unified composer band (the
- * mic FAB that opens the shared `PromptComposerSheet`), with the
+ * compact launcher that opens the shared `PromptComposerSheet`), with the
  * Terminal-only "show keyboard" chip / key bar absent in Conversation.
  *
  * The full `TmuxSessionScreen` needs Hilt + a live tmux connect, so this
@@ -51,7 +51,7 @@ import org.junit.runner.RunWith
  *    so the "Conversation == Terminal composer; key bar is Terminal-only"
  *    convergence is visible in one frame.
  *
- * Asserts the contract too: the mic FAB is present in both; the
+ * Asserts the contract too: the composer launcher is present in both; the
  * show-keyboard chip is present only on Terminal; the key bar (Esc/Tab raw
  * keys) never appears.
  */
@@ -75,8 +75,8 @@ class TmuxConversationBottomComposerScreenshotTest {
                 ) {
                     SectionLabel("Conversation tab — unified composer (no key bar)")
                     // How TmuxSessionScreen wires the bottom band for an agent
-                    // pane on its Conversation tab (#459): mic FAB only, the
-                    // Terminal-only show-keyboard chip is null.
+                    // pane on its Conversation tab (#459): composer launcher
+                    // only, the Terminal-only show-keyboard chip is null.
                     BottomChipControls(
                         chips = AgentExitChips,
                         onChipTap = {},
@@ -92,8 +92,9 @@ class TmuxConversationBottomComposerScreenshotTest {
                     Spacer(modifier = Modifier.height(24.dp))
 
                     SectionLabel("Terminal tab — same composer + show-keyboard")
-                    // The Terminal tab keeps the identical mic FAB plus the
-                    // Terminal-only show-keyboard chip (raises the key bar).
+                    // The Terminal tab keeps the identical composer launcher
+                    // plus the Terminal-only show-keyboard chip (raises the key
+                    // bar).
                     BottomChipControls(
                         chips = AgentExitChips,
                         onChipTap = {},
@@ -118,11 +119,11 @@ class TmuxConversationBottomComposerScreenshotTest {
         // assertions below are the authoritative contract check.
         captureFullDevice(File(artifactDir(), "issue459-bottoms-side-by-side.png"))
 
-        // Contract: the unified composer mic FAB is present in BOTH bands.
-        compose.onAllNodesWithTag(SESSION_MIC_FAB_TAG).let { nodes ->
-            // Two bands → two mic FABs.
+        // Contract: the unified composer launcher is present in BOTH bands.
+        compose.onAllNodesWithTag(SESSION_COMPOSER_LAUNCHER_TAG).let { nodes ->
+            // Two bands -> two composer launchers.
             assert(nodes.fetchSemanticsNodes().size == 2) {
-                "expected the unified mic FAB in BOTH bottoms (Conversation + Terminal)"
+                "expected the unified composer launcher in BOTH bottoms (Conversation + Terminal)"
             }
         }
         // The Terminal-only show-keyboard chip appears exactly once (Terminal).

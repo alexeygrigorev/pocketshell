@@ -8,6 +8,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -410,7 +411,15 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("issue459-terminal-bottom-unified-composer.png")
 
-        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
+        val launcherBounds = compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .getUnclippedBoundsInRoot()
+        assertTrue(
+            "composer launcher should align with the bottom-control bar instead of rendering as a large FAB",
+            (launcherBounds.right - launcherBounds.left).value <= 48.5f &&
+                (launcherBounds.bottom - launcherBounds.top).value <= 48.5f,
+        )
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
             .assertIsDisplayed()
             .assertHasClickAction()

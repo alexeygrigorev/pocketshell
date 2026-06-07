@@ -141,6 +141,7 @@ import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.launch
@@ -1125,114 +1126,55 @@ public fun TmuxSessionScreen(
                 onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
-            // Issue #459: the Conversation tab and the Terminal tab now
-            // share an identical bottom — the unified composer band
-            // ([BottomChipControls], which opens the #453
-            // [PromptComposerSheet] via the mic). The terminal key bar is a
-            // Terminal-only, keyboard-up affordance for sending raw keys into
-            // the focused pane; in Conversation you only ever send via the
-            // composer, so the key bar must NOT appear there even if the IME
-            // happens to be up. Gating it on `!showConversation` keeps it
-            // Terminal-only and leaves Conversation with just the unified
-            // composer band below.
-            if (isImeVisible && currentPane != null && !showConversation) {
-                KeyBar(
-                    keys = tmuxKeyBarLayout(keyBarExpanded),
-                    onKey = if (sessionLive) {
-                        { binding ->
-                            // Issue #458: the `⋯` / `×` slot toggles the
-                            // expander locally; it is never a keystroke. All
-                            // other taps route to the pane (control bytes via
-                            // the `send-keys -H` overlay path — no redraw).
-                            when (binding.label) {
-                                TmuxKeyBarExpandLabel -> keyBarExpanded = true
-                                TmuxKeyBarCollapseLabel -> keyBarExpanded = false
-                                else -> viewModel.onKeyBarKey(currentPane.paneId, binding.label)
-                            }
-                        }
-                    } else {
-                        { _ -> }
-                    },
-                    // Issue #458: feed the `Ctrl` slot's armed state from the
-                    // view model so the bar renders the accent and the
-                    // sticky FSM stays in sync with the chord decision in
-                    // [onKeyBarKey]. The map is keyed by the binding label.
+            currentPane?.let { pane ->
+                val isAgentPane = currentAgentConversation?.detection != null
+                TmuxTerminalBottomControls(
+                    isImeVisible = isImeVisible,
+                    showConversation = showConversation,
+                    sessionLive = sessionLive,
+                    isAgentPane = isAgentPane,
+                    keyBarExpanded = keyBarExpanded,
+                    onKeyBarExpandedChange = { keyBarExpanded = it },
+                    onKey = { binding -> viewModel.onKeyBarKey(pane.paneId, binding.label) },
                     modifierStates = mapOf(TmuxCtrlModifierLabel to ctrlModifierState),
                     onModifierStateChange = { binding, state ->
                         viewModel.onKeyBarModifierState(binding.label, state)
                     },
-                )
-            } else if (currentPane != null && (showConversation || !isImeVisible)) {
-                val isAgentPane = currentAgentConversation?.detection != null
-                BottomChipControls(
-                    chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                     onChipTap = { chip ->
-                        currentPane?.let { pane ->
-                            // Issue #454: the agent band no longer carries the
-                            // "/ commands" chip (the dedicated "/" header button
-                            // from issue #462 is the single palette entry now),
-                            // so the only chips reaching this handler are the
-                            // shell-pane quick-run commands ([DefaultSessionChips]).
-                            // Each runs literally in the focused pane — mirrors
-                            // `SessionViewModel.onChipTap`, appending a CR that
-                            // the tmux input bridge translates into a named
-                            // `Enter` key.
-                            viewModel.writeInputToPane(
-                                pane.paneId,
-                                (chip + "\r").toByteArray(Charsets.UTF_8),
-                            )
-                        }
+                        // Issue #454: the agent band no longer carries the
+                        // "/ commands" chip (the dedicated "/" header button
+                        // from issue #462 is the single palette entry now), so
+                        // the only chips reaching this handler are shell-pane
+                        // quick-run commands ([DefaultSessionChips]). Each
+                        // runs literally in the focused pane — mirrors
+                        // `SessionViewModel.onChipTap`, appending a CR that
+                        // the tmux input bridge translates into named `Enter`.
+                        viewModel.writeInputToPane(
+                            pane.paneId,
+                            (chip + "\r").toByteArray(Charsets.UTF_8),
+                        )
                     },
                     onDictateTap = { showMicSheet = true },
-                    onEnterTap = if (!showConversation) {
-                        { viewModel.onKeyBarKey(currentPane.paneId, "Enter") }
-                    } else null,
-                    // Issue #131: surface the show-keyboard chip on the
-                    // tmux route too. The helper looks up the
-                    // `TerminalView` of the currently visible pane (the
-                    // pager renders one pane at a time, so there is only
-                    // ever a single attached `TerminalView` to find under
-                    // the Compose root).
-                    //
-                    // Issue #459: the show-keyboard chip raises the soft
-                    // keyboard to type raw keys straight into the focused
-                    // terminal pane. In the Conversation tab there is no
-                    // attached `TerminalView` and you only ever send via the
-                    // composer, so the chip would be a dead no-op — hide it
-                    // (null) there. Terminal keeps it.
-                    onShowKeyboardTap = if (showConversation) {
-                        null
-                    } else {
-                        {
-                            showTerminalSoftKeyboard(
-                                composeRootView,
-                                onLocalTerminalError = { cause ->
-                                    currentPane?.paneId?.let { paneId ->
-                                        viewModel.reportTerminalSurfaceFailure(paneId, cause)
-                                    }
-                                },
-                            )
-                        }
+                    onEnterTap = { viewModel.onKeyBarKey(pane.paneId, "Enter") },
+                    // Issue #131: surface the show-keyboard chip on the tmux
+                    // route too. The helper looks up the TerminalView of the
+                    // currently visible pane.
+                    onShowKeyboardTap = {
+                        showTerminalSoftKeyboard(
+                            composeRootView,
+                            onLocalTerminalError = { cause ->
+                                currentPane?.paneId?.let { paneId ->
+                                    viewModel.reportTerminalSurfaceFailure(paneId, cause)
+                                }
+                            },
+                        )
                     },
-                    // Issue #453: no snippet chip on agent panes — the composer
-                    // sheet's `{}` affordance already inserts saved prompts, so
-                    // the band chip was a redundant third way to do the same
-                    // thing. Issue #454: shell panes keep the saved-snippet
-                    // picker, now rendered as a clear `snippets` chip with a
-                    // list glyph (the old `+ command` / `+ prompt` labels read
-                    // as "add a new command" and were the affordance the
-                    // maintainer found unclear).
+                    // Issue #453: no snippet chip on agent panes — the
+                    // composer's `{}` affordance already inserts saved prompts.
+                    // Issue #454: shell panes keep the saved-snippet picker.
                     onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
                         { showSnippetPicker = true }
                     } else null,
-                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                    addSnippetIcon = SnippetsChipIcon,
-                    // Project navigation on tmux panes is a separate
-                    // follow-up — see #123 notes on per-pane cwd /
-                    // project-root wiring.
-                    onProjectNavigationTap = null,
-                    // Issue #249: gate chips on liveness.
-                    inputEnabled = sessionLive,
                     modifier = Modifier.navigationBarsPadding(),
                 )
             }
@@ -4938,6 +4880,75 @@ private fun PageIndicator(pageCount: Int, currentPage: Int) {
  */
 internal const val TmuxKeyBarExpandLabel: String = "⋯"
 internal const val TmuxKeyBarCollapseLabel: String = "×"
+
+/**
+ * Bottom terminal controls for tmux panes.
+ *
+ * Issue #588: once the terminal keyboard is up, this area is strictly a
+ * terminal-control accessory. It renders only the hotkey/shortcut bar and
+ * removes the unified composer mic/chips, Prompt/Command affordances, snippet
+ * entry, and any other text-entry surface from the keyboard area. Prompt text
+ * belongs in [PromptComposerSheet], opened from the IME-hidden bottom band.
+ *
+ * Issue #584 is preserved by keeping the key bar behind [isImeVisible]; when
+ * the keyboard is hidden, the normal composer/chip band is shown instead.
+ */
+@Composable
+internal fun TmuxTerminalBottomControls(
+    isImeVisible: Boolean,
+    showConversation: Boolean,
+    sessionLive: Boolean,
+    isAgentPane: Boolean,
+    keyBarExpanded: Boolean,
+    onKeyBarExpandedChange: (Boolean) -> Unit,
+    onKey: (KeyBinding) -> Unit,
+    modifierStates: Map<String, KeyModifierState> = emptyMap(),
+    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
+    onChipTap: (String) -> Unit,
+    onDictateTap: (() -> Unit)?,
+    onEnterTap: (() -> Unit)?,
+    onShowKeyboardTap: (() -> Unit)?,
+    onAddSnippetTap: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    if (isImeVisible && !showConversation) {
+        KeyBar(
+            keys = tmuxKeyBarLayout(keyBarExpanded),
+            onKey = if (sessionLive) {
+                { binding ->
+                    // Issue #458: the `⋯` / `×` slot toggles the expander
+                    // locally; it is never a keystroke. All other taps route
+                    // to the pane.
+                    when (binding.label) {
+                        TmuxKeyBarExpandLabel -> onKeyBarExpandedChange(true)
+                        TmuxKeyBarCollapseLabel -> onKeyBarExpandedChange(false)
+                        else -> onKey(binding)
+                    }
+                }
+            } else {
+                { _ -> }
+            },
+            modifierStates = modifierStates,
+            onModifierStateChange = onModifierStateChange,
+        )
+    } else {
+        BottomChipControls(
+            chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
+            onChipTap = onChipTap,
+            onDictateTap = onDictateTap,
+            onEnterTap = if (!showConversation) onEnterTap else null,
+            onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
+            onAddSnippetTap = onAddSnippetTap,
+            addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+            addSnippetIcon = SnippetsChipIcon,
+            // Project navigation on tmux panes is a separate follow-up — see
+            // #123 notes on per-pane cwd / project-root wiring.
+            onProjectNavigationTap = null,
+            inputEnabled = sessionLive,
+            modifier = modifier,
+        )
+    }
+}
 
 /**
  * Issue #458: the `Ctrl` modifier slot. A [KeyKind.Modifier] so the ui-kit

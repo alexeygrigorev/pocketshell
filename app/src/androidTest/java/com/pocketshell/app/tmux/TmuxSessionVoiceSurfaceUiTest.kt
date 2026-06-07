@@ -53,23 +53,43 @@ class TmuxSessionVoiceSurfaceUiTest {
 
     @Test
     fun tmuxKeyboardOpenAccessoryShowsHotkeysOnly() {
+        val keyTaps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
-                KeyBar(
-                    keys = tmuxKeyBarLayout(expanded = false),
-                    onKey = {},
+                TmuxTerminalBottomControls(
+                    isImeVisible = true,
+                    showConversation = false,
+                    sessionLive = true,
+                    isAgentPane = false,
+                    keyBarExpanded = false,
+                    onKeyBarExpandedChange = {},
+                    onKey = { keyTaps += it.label },
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
                 )
             }
         }
 
-        compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction()
+        compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("^C").assertIsDisplayed()
         compose.onNodeWithText("^D").assertIsDisplayed()
         compose.onNodeWithText("Tab").assertIsDisplayed()
+
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithText("show keyboard").assertDoesNotExist()
+        compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("Prompt").assertDoesNotExist()
         compose.onNodeWithText("Command").assertDoesNotExist()
         compose.onNodeWithText("Ready").assertDoesNotExist()
         compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
+
+        assertEquals(listOf("Esc"), keyTaps)
     }
 
     @Test

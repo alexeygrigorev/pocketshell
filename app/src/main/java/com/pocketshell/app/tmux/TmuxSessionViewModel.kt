@@ -1650,7 +1650,6 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
         if (
-            change.deferredFromBackground &&
             lifecycleCoalesce != null &&
             lifecycleCoalesce.generation == connectGeneration &&
             sameSessionIdentity(lifecycleCoalesce.target, target)
@@ -1661,6 +1660,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-network-proactive-reconnect-skip reason=$reason " +
                     "cause=coalesced-with-lifecycle-reattach " +
                     "sequence=${change.sequence} generation=${lifecycleCoalesce.generation} " +
+                    "deferredFromBackground=${change.deferredFromBackground} " +
                     targetLogFields(target),
             )
             DiagnosticEvents.record(
@@ -3415,6 +3415,14 @@ public class TmuxSessionViewModel @Inject constructor(
     ) {
         if (_connectionStatus.value !is ConnectionStatus.Connected) return
         if (clientRef !== client) return
+        if (target != null && shouldAutoReconnectPassiveDisconnect(disconnectEvent)) {
+            scheduleAutoReconnect(
+                target = target,
+                reason = passiveAutoReconnectMessage(disconnectEvent, target),
+                trigger = TmuxConnectTrigger.AutoReconnect,
+            )
+            return
+        }
         val current = _connectionStatus.value as? ConnectionStatus.Connected
         Log.w(
             ISSUE_145_RECONNECT_TAG,
@@ -3454,6 +3462,18 @@ public class TmuxSessionViewModel @Inject constructor(
         _connectionStatus.value = ConnectionStatus.Failed(reason)
     }
 
+    private fun shouldAutoReconnectPassiveDisconnect(disconnectEvent: TmuxDisconnectEvent): Boolean =
+        when (disconnectEvent.reason) {
+            TmuxDisconnectReason.ReaderEof,
+            TmuxDisconnectReason.ReaderException,
+            TmuxDisconnectReason.CommandTimeout,
+            -> true
+            TmuxDisconnectReason.ExplicitClose,
+            TmuxDisconnectReason.ExplicitDetach,
+            TmuxDisconnectReason.Unknown,
+            -> false
+        }
+
     private fun passiveDisconnectMessage(
         current: ConnectionStatus.Connected,
         disconnectEvent: TmuxDisconnectEvent,
@@ -3467,6 +3487,21 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.Unknown -> "Disconnected"
         }
         return "$prefix from ${current.user}@${current.host}:${current.port}. Tap Reconnect to retry."
+    }
+
+    private fun passiveAutoReconnectMessage(
+        disconnectEvent: TmuxDisconnectEvent,
+        target: ConnectionTarget,
+    ): String {
+        val prefix = when (disconnectEvent.reason) {
+            TmuxDisconnectReason.ReaderEof -> "Transport EOF"
+            TmuxDisconnectReason.ReaderException -> "Transport read failed"
+            TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
+            TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
+            TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
+            TmuxDisconnectReason.Unknown -> "Disconnected"
+        }
+        return "$prefix from ${target.user}@${target.host}:${target.port}; reconnecting."
     }
 
     private fun disconnectEventOrFallback(client: TmuxClient): TmuxDisconnectEvent =

@@ -1134,7 +1134,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun eofDisconnectWaitsForExplicitReconnect() = runTest {
+    fun readerEofDisconnectStartsAutoReconnectAfterSilentGrace() = runTest {
         val diagnostics = installRecordingDiagnosticSink()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
@@ -1169,21 +1169,16 @@ class TmuxSessionViewModelTest {
                     intent = "unknown",
                 ),
             )
-            runCurrent()
+            advanceUntilIdle()
 
             assertEquals(
-                "passive EOF should not start a visible auto-reconnect loop before the user taps Reconnect",
-                0,
+                "structured transport EOF should enter the bounded auto-reconnect loop",
+                1,
                 connector.connectCount,
             )
             assertEquals("work", vm.activeSessionNameForTest())
-            val failedStatus = vm.connectionStatus.value
-            assertTrue(failedStatus is TmuxSessionViewModel.ConnectionStatus.Failed)
-            assertEquals(
-                "Transport EOF from alex@alpha.example:22. Tap Reconnect to retry.",
-                (failedStatus as TmuxSessionViewModel.ConnectionStatus.Failed).message,
-            )
-            assertTrue("manual reconnect must remain available after EOF disconnect", vm.canReconnect.value)
+            assertSame(reconnectClient, registry.clients.value[7L]?.client)
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
 
             val passive = diagnostics.eventsNamed("passive_disconnect").single()
             assertEquals("tmux_client_disconnected", passive.fields["source"])
@@ -1192,26 +1187,14 @@ class TmuxSessionViewModelTest {
             assertEquals("unknown", passive.fields["disconnectIntent"])
             assertEquals("alpha.example", passive.fields["host"])
             assertEquals("work", passive.fields["session"])
-            val surfaced = diagnostics.eventsNamed("disconnect").single()
-            assertEquals("passive_disconnect", surfaced.fields["source"])
-            assertEquals("tmux_control_channel_closed", surfaced.fields["cause"])
-            assertEquals("reader_eof", surfaced.fields["disconnectReason"])
             assertTrue(
                 "passive EOF must not be logged as terminal render overflow",
                 diagnostics.eventsNamed("terminal_output_overflow").isEmpty(),
             )
-
-            assertTrue(vm.reconnect())
-            advanceUntilIdle()
-
-            assertEquals(1, connector.connectCount)
-            assertSame(reconnectClient, registry.clients.value[7L]?.client)
-            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
-            assertEquals("work", vm.activeSessionNameForTest())
             assertTrue(
-                "manual reconnect should emit reconnect_start",
+                "passive EOF should emit an automatic reconnect_start",
                 diagnostics.eventsNamed("reconnect_start").any {
-                    it.fields["trigger"] == TmuxConnectTrigger.Reconnect.logValue &&
+                    it.fields["trigger"] == TmuxConnectTrigger.AutoReconnect.logValue &&
                         it.fields["session"] == "work"
                 },
             )
@@ -2132,6 +2115,91 @@ class TmuxSessionViewModelTest {
         assertEquals(1, connector.connectCount)
         assertEquals(1, TMUX_CONNECT_ATTEMPTS.get())
         assertSame(lifecycleClient, registry.clients.value[7L]?.client)
+    }
+
+    @Test
+    fun postGraceLifecycleReattachCoalescesForegroundNetworkReplayWithoutForceFreshReconnect() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val staleIdleSession = FakeSshSession()
+        val lifecycleSession = FakeSshSession()
+        val networkReconnectSession = FakeSshSession()
+        val connector = QueueLeaseConnector(
+            staleIdleSession,
+            lifecycleSession,
+            networkReconnectSession,
+        )
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        manager.acquire(testLeaseTarget()).getOrThrow().release()
+        runCurrent()
+
+        val lifecycleClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = manager,
+        )
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            sessionsSeenByFactory += session
+            lifecycleClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onBackground()
+        advanceUntilIdle()
+        registry.lifecycleHooksSnapshot().single().onForeground()
+        advanceUntilIdle()
+
+        assertTrue("post-grace lifecycle attach must evict the old idle transport", staleIdleSession.closed)
+        assertEquals(listOf(lifecycleSession), sessionsSeenByFactory)
+        assertEquals(2, connector.connectCount)
+        assertSame(lifecycleClient, registry.clients.value[1L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "process-foreground",
+                sequence = 43L,
+                deferredFromBackground = false,
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "foreground network replay after fresh lifecycle attach must not force-refresh the active lease",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse("fresh lifecycle SSH session must remain active", lifecycleSession.closed)
+        assertFalse("no network reconnect transport should be opened", networkReconnectSession.closed)
+        assertEquals(
+            "foreground replay must not schedule a second NetworkReconnect acquire",
+            2,
+            connector.connectCount,
+        )
+        assertEquals(listOf(lifecycleSession), sessionsSeenByFactory)
+        assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+        assertSame(lifecycleClient, registry.clients.value[1L]?.client)
     }
 
     @Test

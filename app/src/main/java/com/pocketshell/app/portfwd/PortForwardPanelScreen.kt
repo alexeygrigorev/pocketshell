@@ -1,8 +1,5 @@
 package com.pocketshell.app.portfwd
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -33,21 +30,26 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.portfwd.TunnelInfo
+import com.pocketshell.core.terminal.ui.openUrlWithFallback
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
@@ -64,12 +66,16 @@ fun PortForwardPanelScreen(
     // start its forward in one step. Null = the normal manual flow
     // (discovery scan + tap a row to forward).
     prefillRemotePort: Int? = null,
+    openBrowserWhenForwardedRemotePort: Int? = null,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: PortForwardPanelViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    var pendingAutoOpenRemotePort by remember(hostId, openBrowserWhenForwardedRemotePort) {
+        mutableStateOf(openBrowserWhenForwardedRemotePort)
+    }
 
     fun leave() {
         viewModel.leavePanel()
@@ -98,6 +104,31 @@ fun PortForwardPanelScreen(
             discoverPorts = true,
             prefillRemotePort = prefillRemotePort,
         )
+    }
+
+    val autoOpenUrl = pendingAutoOpenRemotePort?.let { remotePort ->
+        localForwardedUrlFor(state.tunnels, remotePort)
+    }
+    LaunchedEffect(autoOpenUrl) {
+        val url = autoOpenUrl ?: return@LaunchedEffect
+        val remotePort = pendingAutoOpenRemotePort ?: return@LaunchedEffect
+        pendingAutoOpenRemotePort = null
+        DiagnosticEvents.record(
+            "action",
+            "port_forward_auto_open_url",
+            "hostId" to hostId,
+            "remotePort" to remotePort,
+        )
+        openUrlWithFallback(context, url)
+    }
+
+    val autoOpenFailed = pendingAutoOpenRemotePort?.let { remotePort ->
+        shouldClearPendingForwardAutoOpen(state, remotePort)
+    } == true
+    LaunchedEffect(autoOpenFailed) {
+        if (autoOpenFailed) {
+            pendingAutoOpenRemotePort = null
+        }
     }
 
     Box(
@@ -187,14 +218,8 @@ fun PortForwardPanelScreen(
                                 tunnel = tunnel,
                                 onToggle = { viewModel.togglePort(tunnel.remotePort) },
                                 onOpen = {
-                                    if (tunnel.status == TunnelInfo.Status.FORWARDING) {
-                                        val url = "http://127.0.0.1:${tunnel.localPort}"
-                                        try {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                                        } catch (_: ActivityNotFoundException) {
-                                            // No browser on stripped-down Android images. Keep the panel stable.
-                                        }
-                                    }
+                                    localForwardedUrlFor(listOf(tunnel), tunnel.remotePort)
+                                        ?.let { url -> openUrlWithFallback(context, url) }
                                 },
                             )
                         }
@@ -204,6 +229,19 @@ fun PortForwardPanelScreen(
         }
     }
 }
+
+internal fun localForwardedUrlFor(tunnels: List<TunnelInfo>, remotePort: Int): String? {
+    val tunnel = tunnels.firstOrNull {
+        it.remotePort == remotePort && it.status == TunnelInfo.Status.FORWARDING
+    } ?: return null
+    return "http://127.0.0.1:${tunnel.localPort}"
+}
+
+internal fun shouldClearPendingForwardAutoOpen(state: PortForwardPanelState, remotePort: Int): Boolean =
+    state.connectionState == PortForwardConnectionState.Error ||
+        state.tunnels.any {
+            it.remotePort == remotePort && it.status == TunnelInfo.Status.FAILED
+        }
 
 @Composable
 private fun PanelHeader(

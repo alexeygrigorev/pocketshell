@@ -236,7 +236,7 @@ public fun TmuxSessionScreen(
     // action opens the same panel pre-filled with the detected remote
     // port (#447 prefillRemotePort). MainActivity navigates with the
     // port; back returns to this exact session.
-    onOpenPortForwardingWithPort: (Int) -> Unit = {},
+    onOpenPortForwardingWithPort: (remotePort: Int, openBrowserWhenForwarded: Boolean) -> Unit = { _, _ -> },
     /** Route an assistant-requested navigation (issue #266). */
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
@@ -535,7 +535,8 @@ public fun TmuxSessionScreen(
     // yet forwarded for this host. Non-null drives the "Forward port N from
     // <host>?" confirm dialog; confirming routes through the existing
     // port-forward flow (#447/#448 prefill), which opens the panel and sets up
-    // the tunnel so the user can open the working local URL.
+    // the tunnel. If this prompt is accepted, the panel opens the working local
+    // URL once the tunnel reports its actual device-side port.
     var pendingLocalhostForward by remember {
         mutableStateOf<com.pocketshell.core.terminal.selection.LocalhostUrl?>(null)
     }
@@ -1474,7 +1475,7 @@ public fun TmuxSessionScreen(
                 .imePadding(),
             onForward = {
                 val accepted = viewModel.acceptDetectedPort()
-                if (accepted != null) onOpenPortForwardingWithPort(accepted)
+                if (accepted != null) onOpenPortForwardingWithPort(accepted, false)
             },
             onDismiss = { viewModel.dismissDetectedPort() },
         )
@@ -1483,7 +1484,8 @@ public fun TmuxSessionScreen(
     // Issue #488: confirm dialog for a tapped server-local URL whose remote
     // port is not yet forwarded. Confirming routes through the existing
     // port-forward flow (#447/#448 prefill) which opens the panel and sets up
-    // the tunnel, then the user opens the working local URL from there.
+    // the tunnel, then opens the working local URL once the actual local port
+    // is known.
     pendingLocalhostForward?.let { pending ->
         val targetHost = hostName.ifBlank { host }
         AlertDialog(
@@ -1501,7 +1503,7 @@ public fun TmuxSessionScreen(
                     onClick = {
                         val port = pending.remotePort
                         pendingLocalhostForward = null
-                        onOpenPortForwardingWithPort(port)
+                        onOpenPortForwardingWithPort(port, true)
                     },
                 ) {
                     Text("Forward")

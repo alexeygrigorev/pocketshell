@@ -100,6 +100,9 @@ sealed interface AppDestination {
         // or a "known port" entry point). Additive + defaulted so the
         // #432a kebab nav call site and other constructors stay valid.
         val prefillRemotePort: Int? = null,
+        // Issue #608: when a localhost link created this prefilled forward,
+        // open the browser once the requested remote port is actually mapped.
+        val openBrowserWhenForwardedRemotePort: Int? = null,
     ) : AppDestination
 
     /**

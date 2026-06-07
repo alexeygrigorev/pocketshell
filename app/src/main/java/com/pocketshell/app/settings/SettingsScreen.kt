@@ -53,6 +53,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.release.launchUpdateDownload
 import com.pocketshell.core.assistant.AssistantProvider
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.uikit.components.ListRow
@@ -116,6 +118,7 @@ fun SettingsScreen(
     val keyStatus by viewModel.keyStatus.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
     val diagnosticsShareState by viewModel.diagnosticsShareState.collectAsState()
+    val updateCheckState by viewModel.updateCheckState.collectAsState()
     val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
     val hosts by viewModel.hosts.collectAsState()
     val usageProviderRecords by viewModel.usageProviderRecords.collectAsState()
@@ -255,7 +258,19 @@ fun SettingsScreen(
                 )
             }
             item {
-                AboutFooter(appBuildInfo = appBuildInfo)
+                AboutFooter(
+                    appBuildInfo = appBuildInfo,
+                    updateCheckState = updateCheckState,
+                    onCheckForUpdates = { viewModel.checkForAppUpdate(appBuildInfo.versionName) },
+                    onDownloadUpdate = { info ->
+                        launchUpdateDownload(
+                            context = context,
+                            info = info,
+                            onStarted = viewModel::onUpdateDownloadStarted,
+                            onFailed = viewModel::onUpdateDownloadFailed,
+                        )
+                    },
+                )
             }
         }
     }
@@ -1786,7 +1801,12 @@ private fun WorkspaceRootsSection(
 }
 
 @Composable
-internal fun AboutFooter(appBuildInfo: AppBuildInfo) {
+internal fun AboutFooter(
+    appBuildInfo: AppBuildInfo,
+    updateCheckState: SettingsUpdateCheckState = SettingsUpdateCheckState.Idle,
+    onCheckForUpdates: () -> Unit = {},
+    onDownloadUpdate: (ReleaseInfo) -> Unit = {},
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1807,6 +1827,91 @@ internal fun AboutFooter(appBuildInfo: AppBuildInfo) {
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.testTag(ABOUT_VERSION_TAG),
         )
+        Spacer(modifier = Modifier.height(8.dp))
+        SettingsUpdateCheckRow(
+            state = updateCheckState,
+            onCheckForUpdates = onCheckForUpdates,
+            onDownloadUpdate = onDownloadUpdate,
+        )
+    }
+}
+
+@Composable
+private fun SettingsUpdateCheckRow(
+    state: SettingsUpdateCheckState,
+    onCheckForUpdates: () -> Unit,
+    onDownloadUpdate: (ReleaseInfo) -> Unit,
+) {
+    val label: String
+    val detail: String
+    when (state) {
+        SettingsUpdateCheckState.Idle -> {
+            label = "Check for updates"
+            detail = "Ask GitHub for the latest APK."
+        }
+        SettingsUpdateCheckState.Checking -> {
+            label = "Checking..."
+            detail = "Contacting GitHub releases."
+        }
+        SettingsUpdateCheckState.UpToDate -> {
+            label = "Up to date"
+            detail = "This APK is the latest release."
+        }
+        is SettingsUpdateCheckState.UpdateAvailable -> {
+            label = "Download ${state.info.tagName}"
+            detail = "New APK available."
+        }
+        is SettingsUpdateCheckState.Failed -> {
+            label = "Retry update check"
+            detail = "Couldn't check for updates: ${state.reason}"
+        }
+        is SettingsUpdateCheckState.DownloadStarted -> {
+            label = "Downloading ${state.tagName}"
+            detail = "Check your notifications / Downloads."
+        }
+        is SettingsUpdateCheckState.DownloadFailed -> {
+            label = "Open update again"
+            detail = "Couldn't start the download: ${state.reason}"
+        }
+    }
+    val enabled = state != SettingsUpdateCheckState.Checking
+    val click = {
+        when (state) {
+            is SettingsUpdateCheckState.UpdateAvailable -> onDownloadUpdate(state.info)
+            else -> onCheckForUpdates()
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (enabled) {
+                    Modifier.clickable(role = Role.Button, onClick = click)
+                } else {
+                    Modifier
+                },
+            )
+            .testTag(ABOUT_UPDATE_CHECK_ROW_TAG)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(ABOUT_UPDATE_CHECK_LABEL_TAG),
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = detail,
+                color = PocketShellColors.TextMuted,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag(ABOUT_UPDATE_CHECK_DETAIL_TAG),
+            )
+        }
     }
 }
 
@@ -1877,6 +1982,9 @@ internal const val USAGE_DOCS_URL: String =
     "https://github.com/alexeygrigorev/pocketshell/blob/main/docs/usage-panel.md"
 internal const val ABOUT_FOOTER_TAG = "settings:about:footer"
 internal const val ABOUT_VERSION_TAG = "settings:about:version"
+internal const val ABOUT_UPDATE_CHECK_ROW_TAG = "settings:about:update-check"
+internal const val ABOUT_UPDATE_CHECK_LABEL_TAG = "settings:about:update-check:label"
+internal const val ABOUT_UPDATE_CHECK_DETAIL_TAG = "settings:about:update-check:detail"
 internal const val VOICE_API_KEY_ROW_TAG = "settings:voice:api-key-row"
 internal const val VOICE_API_KEY_CLEAR_TAG = "settings:voice:api-key-clear"
 internal const val VOICE_API_KEY_FIELD_TAG = "settings:voice:api-key-field"

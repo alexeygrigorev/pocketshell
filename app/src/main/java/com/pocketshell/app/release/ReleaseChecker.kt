@@ -69,10 +69,9 @@ sealed interface ReleaseCheckResult {
  * - All network IO runs on [Dispatchers.IO]; the public surface is a
  *   single `suspend` function so the caller (a `ViewModel`) can launch
  *   it within `viewModelScope`.
- * - Any failure (network down, 404 for a fresh repo with no releases,
- *   JSON shape unexpected) silently returns `null`. The update banner
- *   is a courtesy; we never want a transient network blip to surface
- *   an error to the user.
+     * - The primary [checkForUpdate] API classifies failures so callers can
+     *   log and surface a retry. The legacy [check] wrapper still returns
+     *   `null` for callers that only need "release or nothing" semantics.
  *
  * The check picks the exact dotted-version debug APK asset, e.g.
  * `pocketshell-0.2.1-debug.apk`, so a tagged release points the browser

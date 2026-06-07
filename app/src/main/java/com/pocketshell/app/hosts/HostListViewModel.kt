@@ -78,10 +78,10 @@ import javax.inject.Inject
  * [SshKeysViewModel].
  *
  * Issue #40 adds the GitHub-Releases update-availability check. The
- * checker fires once at construction time and can be re-fired by the UI
- * (e.g. pull-to-refresh) via [checkForUpdates]. Any failure leaves
- * [updateAvailable] at `null` — the banner is a courtesy, not a hard
- * requirement, so we never surface network errors to the user.
+     * checker fires once at construction time and can be re-fired by the UI
+     * via [checkForUpdates]. Issue #515 splits "up to date" from "check
+     * failed": a failed poll leaves any known [updateAvailable] in place and
+     * raises [updateCheckFailed] so the UI can offer a visible retry.
  *
  * Issue #49 adds the host-bootstrap flow. On tap-to-connect we open a
  * short-lived SSH session, probe for `tmux`, and either:

@@ -6,6 +6,9 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.release.ReleaseCheckResult
+import com.pocketshell.app.release.ReleaseChecker
+import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.usage.UsageRemoteSource
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.core.assistant.AssistantProvider
@@ -92,12 +95,14 @@ class SettingsViewModelTest {
     private fun newVm(
         vault: PromptComposerViewModel.ApiKeyVault = FakeVault(),
         assistantStore: AssistantConfigStore = FakeAssistantStore(),
+        releaseChecker: ReleaseChecker = FakeReleaseChecker(ReleaseCheckResult.UpToDate),
     ): SettingsViewModel =
         SettingsViewModel(
             repo,
             vault,
             assistantStore,
             DiagnosticRecorder(context, repo),
+            releaseChecker,
             hostDao,
             newUsageScheduler(),
         )
@@ -131,6 +136,21 @@ class SettingsViewModelTest {
      */
     private fun newUsageScheduler(): UsageScheduler =
         UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
+
+    private class FakeReleaseChecker(
+        private val result: ReleaseCheckResult,
+    ) : ReleaseChecker() {
+        var callCount: Int = 0
+            private set
+        var lastCurrentVersion: String? = null
+            private set
+
+        override suspend fun checkForUpdate(currentVersion: String): ReleaseCheckResult {
+            callCount += 1
+            lastCurrentVersion = currentVersion
+            return result
+        }
+    }
 
     @Test
     fun `state exposes repository snapshot`() {
@@ -332,6 +352,76 @@ class SettingsViewModelTest {
         assertTrue("Whisper key should still be Set", voiceStatus is WhisperKeyStatus.Set)
         assertEquals("1234", (voiceStatus as WhisperKeyStatus.Set).maskedTail)
         assertArrayEquals("sk-whisper-1234".toCharArray(), voiceVault.load())
+    }
+
+    // -- Issue #515 reopened: manual Settings update path --------------------
+
+    @Test
+    fun `checkForAppUpdate exposes available release in Settings`() = runTest {
+        val info = ReleaseInfo(
+            tagName = "v9.9.9",
+            htmlUrl = "https://example.com/releases/v9.9.9",
+            apkUrl = "https://example.com/pocketshell-9.9.9-debug.apk",
+        )
+        val checker = FakeReleaseChecker(ReleaseCheckResult.UpdateAvailable(info))
+        val vm = newVm(releaseChecker = checker)
+
+        vm.checkForAppUpdate("0.3.22")
+
+        assertEquals(1, checker.callCount)
+        assertEquals("0.3.22", checker.lastCurrentVersion)
+        assertEquals(SettingsUpdateCheckState.UpdateAvailable(info), vm.updateCheckState.value)
+    }
+
+    @Test
+    fun `checkForAppUpdate exposes failure reason in Settings`() = runTest {
+        val checker = FakeReleaseChecker(ReleaseCheckResult.Failed("GitHub returned HTTP 403"))
+        val vm = newVm(releaseChecker = checker)
+
+        vm.checkForAppUpdate("0.3.22")
+
+        assertEquals(
+            SettingsUpdateCheckState.Failed("GitHub returned HTTP 403"),
+            vm.updateCheckState.value,
+        )
+    }
+
+    @Test
+    fun `checkForAppUpdate exposes up to date result in Settings`() = runTest {
+        val checker = FakeReleaseChecker(ReleaseCheckResult.UpToDate)
+        val vm = newVm(releaseChecker = checker)
+
+        vm.checkForAppUpdate("0.3.23")
+
+        assertEquals(SettingsUpdateCheckState.UpToDate, vm.updateCheckState.value)
+    }
+
+    @Test
+    fun `checkForAppUpdate fails visibly when installed version is unknown`() = runTest {
+        val checker = FakeReleaseChecker(ReleaseCheckResult.UpToDate)
+        val vm = newVm(releaseChecker = checker)
+
+        vm.checkForAppUpdate("unknown")
+
+        assertEquals(0, checker.callCount)
+        assertEquals(
+            SettingsUpdateCheckState.Failed("Installed version is unknown"),
+            vm.updateCheckState.value,
+        )
+    }
+
+    @Test
+    fun `Settings update download feedback is observable`() {
+        val vm = newVm()
+
+        vm.onUpdateDownloadStarted("v9.9.9")
+        assertEquals(SettingsUpdateCheckState.DownloadStarted("v9.9.9"), vm.updateCheckState.value)
+
+        vm.onUpdateDownloadFailed("no app can open the download link")
+        assertEquals(
+            SettingsUpdateCheckState.DownloadFailed("no app can open the download link"),
+            vm.updateCheckState.value,
+        )
     }
 
     // -- Issue #157 polish item 5: Usage discoverability flow --------------

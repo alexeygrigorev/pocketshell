@@ -4,6 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
+import com.pocketshell.app.release.ReleaseCheckResult
+import com.pocketshell.app.release.ReleaseChecker
+import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.core.assistant.AssistantProvider
@@ -48,6 +51,7 @@ class SettingsViewModel @Inject constructor(
     private val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
     private val assistantConfigStore: AssistantConfigStore,
     private val diagnosticRecorder: DiagnosticRecorder,
+    private val releaseChecker: ReleaseChecker,
     hostDao: HostDao,
     usageScheduler: UsageScheduler,
 ) : ViewModel() {
@@ -145,6 +149,15 @@ class SettingsViewModel @Inject constructor(
         MutableStateFlow(DiagnosticsShareState.Idle)
     val diagnosticsShareState: StateFlow<DiagnosticsShareState> =
         _diagnosticsShareState.asStateFlow()
+
+    /**
+     * Manual update-check state for Settings → About. This gives the user a
+     * deterministic in-app fallback even if the host-list courtesy banner
+     * misses, is dismissed, or the app opens directly into another surface.
+     */
+    private val _updateCheckState: MutableStateFlow<SettingsUpdateCheckState> =
+        MutableStateFlow(SettingsUpdateCheckState.Idle)
+    val updateCheckState: StateFlow<SettingsUpdateCheckState> = _updateCheckState.asStateFlow()
 
     fun setTerminalFontSizeSp(sizeSp: Float) = repository.setTerminalFontSizeSp(sizeSp)
 
@@ -254,6 +267,31 @@ class SettingsViewModel @Inject constructor(
             diagnosticRecorder.clear()
             _diagnosticsShareState.value = DiagnosticsShareState.Idle
         }
+    }
+
+    fun checkForAppUpdate(currentVersion: String) {
+        if (_updateCheckState.value == SettingsUpdateCheckState.Checking) return
+        val normalizedVersion = currentVersion.trim()
+        if (normalizedVersion.isEmpty() || normalizedVersion == "unknown") {
+            _updateCheckState.value = SettingsUpdateCheckState.Failed("Installed version is unknown")
+            return
+        }
+        _updateCheckState.value = SettingsUpdateCheckState.Checking
+        viewModelScope.launch {
+            _updateCheckState.value = when (val result = releaseChecker.checkForUpdate(normalizedVersion)) {
+                is ReleaseCheckResult.UpdateAvailable -> SettingsUpdateCheckState.UpdateAvailable(result.info)
+                ReleaseCheckResult.UpToDate -> SettingsUpdateCheckState.UpToDate
+                is ReleaseCheckResult.Failed -> SettingsUpdateCheckState.Failed(result.reason)
+            }
+        }
+    }
+
+    fun onUpdateDownloadStarted(tagName: String) {
+        _updateCheckState.value = SettingsUpdateCheckState.DownloadStarted(tagName)
+    }
+
+    fun onUpdateDownloadFailed(reason: String) {
+        _updateCheckState.value = SettingsUpdateCheckState.DownloadFailed(reason)
     }
 
     /**
@@ -415,4 +453,14 @@ sealed interface DiagnosticsShareState {
     data object Preparing : DiagnosticsShareState
     data class Prepared(val file: File) : DiagnosticsShareState
     data class Failed(val message: String) : DiagnosticsShareState
+}
+
+sealed interface SettingsUpdateCheckState {
+    data object Idle : SettingsUpdateCheckState
+    data object Checking : SettingsUpdateCheckState
+    data object UpToDate : SettingsUpdateCheckState
+    data class UpdateAvailable(val info: ReleaseInfo) : SettingsUpdateCheckState
+    data class Failed(val reason: String) : SettingsUpdateCheckState
+    data class DownloadStarted(val tagName: String) : SettingsUpdateCheckState
+    data class DownloadFailed(val reason: String) : SettingsUpdateCheckState
 }

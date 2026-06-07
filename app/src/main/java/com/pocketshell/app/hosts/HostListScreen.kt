@@ -1,6 +1,5 @@
 package com.pocketshell.app.hosts
 
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -58,6 +57,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.release.launchUpdateDownload
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -916,52 +916,12 @@ internal fun launchApkDownload(
     info: ReleaseInfo,
     viewModel: HostListViewModel,
 ) {
-    try {
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
-        )
-        viewModel.onUpdateDownloadStarted(info.tagName)
-    } catch (e: ActivityNotFoundException) {
-        launchReleasePageFallback(
-            context,
-            info,
-            viewModel,
-            e.message ?: "no app can open the download link",
-        )
-    } catch (e: SecurityException) {
-        launchReleasePageFallback(
-            context,
-            info,
-            viewModel,
-            e.message ?: "the download was blocked",
-        )
-    }
-}
-
-/**
- * Issue #476: shared fallback path for the update tap. When the primary
- * APK-download intent ([ReleaseInfo.apkUrl] via `ACTION_VIEW`) can't be
- * launched, open the release page instead — a browser always handles an
- * `https` page URL — and record a concrete failure reason so the user
- * sees what happened rather than a silent no-op. If even the release page
- * can't be opened, the failure message still surfaces.
- */
-internal fun launchReleasePageFallback(
-    context: Context,
-    info: ReleaseInfo,
-    viewModel: HostListViewModel,
-    reason: String,
-) {
-    try {
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse(info.htmlUrl)),
-        )
-    } catch (_: ActivityNotFoundException) {
-        // Even the release page couldn't be opened; the failure message
-        // below still tells the user the tap didn't succeed.
-    } catch (_: SecurityException) {
-    }
-    viewModel.onUpdateDownloadFailed(reason)
+    launchUpdateDownload(
+        context = context,
+        info = info,
+        onStarted = { tag -> viewModel.onUpdateDownloadStarted(tag) },
+        onFailed = { reason -> viewModel.onUpdateDownloadFailed(reason) },
+    )
 }
 
 /**

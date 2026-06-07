@@ -204,6 +204,7 @@ class FolderListScreenE2eTest {
         // instrumentation thread (the @Test body runs off the main thread).
         val viewModel = constructFolderListViewModel(fakeGateway)
         val dictationViewModel = noopAssistantDictationViewModel()
+        var openedSettings = false
         var openedWorkspaceSettings = false
         var editedEnvPath: String? = null
 
@@ -221,6 +222,7 @@ class FolderListScreenE2eTest {
                     onOpenSession = { _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
+                    onOpenSettings = { openedSettings = true },
                     onOpenWorkspaceSettings = { openedWorkspaceSettings = true },
                     onEditEnv = { path, _, _ -> editedEnvPath = path },
                     modifier = Modifier.fillMaxSize(),
@@ -291,13 +293,22 @@ class FolderListScreenE2eTest {
         // Open the header kebab, then tap the "Workspace settings" menu item
         // (#522 item 2). Tapping a menu item dismisses the menu.
         compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
-        // #522 item 2 evidence: the single header kebab opens a menu with the
-        // three consolidated actions (Host assistant / Browse repos / Workspace
-        // settings) instead of three cramped circular buttons.
+        // #522 item 2 + #592 evidence: the single header kebab opens a menu
+        // with the host actions plus separate global Settings and Workspace
+        // settings entries.
         compose.onNodeWithTag(FOLDER_LIST_BROWSE_REPOS_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG).assertExists()
         android.os.SystemClock.sleep(200)
         WalkthroughScreenshotArtifacts.capture("issue522-header-kebab-open")
+        compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG)
+            .assertExists()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedSettings }
+        assertEquals(false, openedWorkspaceSettings)
+        // Re-open the menu and verify the original Workspace settings action
+        // still routes separately from the global app settings action.
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_WORKSPACE_SETTINGS_TAG)
             .assertExists()
             .performClick()

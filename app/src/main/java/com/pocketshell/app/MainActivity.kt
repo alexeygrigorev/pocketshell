@@ -1020,6 +1020,7 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenSettings = { navigate(AppDestination.Settings) },
             onOpenWorkspaceSettings = {
                 navigate(
                     AppDestination.WatchedFolders(

@@ -121,8 +121,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
  *    [SessionTypePickerSheet] without a pre-filled folder (the user
  *    types one). Per the refinement-comment AC: "+ New session"
  *    prompts for type (agent / shell) with an agent CLI sub-picker.
- *  - Tap the app-bar settings gear → opens workspace settings where
- *    roots and the default tree/flat mode are configured.
+ *  - Tap "Workspace settings" in the app-bar overflow → opens workspace
+ *    settings where roots and the default tree/flat mode are configured.
+ *  - Tap "Settings" in the app-bar overflow → opens the global app settings.
  */
 @Composable
 fun FolderListScreen(
@@ -152,6 +153,7 @@ fun FolderListScreen(
      */
     onBrowseRepos: (cloneRoot: String?) -> Unit,
     onOpenPortForwarding: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     onOpenWorkspaceSettings: () -> Unit = {},
     /**
      * Issue #264: open the per-folder `.env` / `.envrc` key manager.
@@ -284,6 +286,7 @@ fun FolderListScreen(
                 headerGroups = headerGroups,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
+                onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
                 onOpenAssistant = { showAssistant = true },
             )
@@ -615,10 +618,11 @@ internal fun knownSessionNames(state: FolderListUiState): Set<String> =
  * Host-detail header (#522 items 1 + 2). Mockup #489 shows the host name ONCE,
  * with the `N active · M idle · K sessions` count line directly beneath it and a
  * single `⋮` kebab on the right — not the old three cramped circular action
- * buttons and not a second host-name band in the list. The former Browse repos /
- * Host assistant / Workspace settings buttons are now items in the kebab overflow
- * menu (same affordance pattern as the host-list card kebab), and the count
- * subtitle ([headerGroups]) is the single host-level summary the screen carries.
+ * buttons and not a second host-name band in the list. Host assistant, Browse
+ * repos, global Settings, and Workspace settings are items in the kebab
+ * overflow menu (same affordance pattern as the host-list card kebab), and the
+ * count subtitle ([headerGroups]) is the single host-level summary the screen
+ * carries.
  */
 @Composable
 private fun FolderListAppBar(
@@ -626,6 +630,7 @@ private fun FolderListAppBar(
     headerGroups: FlatSessionGroups?,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
     onOpenAssistant: () -> Unit,
 ) {
@@ -672,6 +677,7 @@ private fun FolderListAppBar(
             FolderListOverflowMenu(
                 onBrowseRepos = onBrowseRepos,
                 onOpenAssistant = onOpenAssistant,
+                onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
             )
         },
@@ -691,6 +697,7 @@ private fun FolderListAppBar(
 private fun FolderListOverflowMenu(
     onBrowseRepos: () -> Unit,
     onOpenAssistant: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
 ) {
     Kebab(
@@ -707,6 +714,12 @@ private fun FolderListOverflowMenu(
                 onClick = onBrowseRepos,
                 contentDescription = "Browse repos",
                 testTag = FOLDER_LIST_BROWSE_REPOS_TAG,
+            ),
+            KebabItem(
+                label = "Settings",
+                onClick = onOpenSettings,
+                contentDescription = "Settings",
+                testTag = FOLDER_LIST_SETTINGS_TAG,
             ),
             KebabItem(
                 label = "Workspace settings",
@@ -2166,6 +2179,7 @@ private const val FLAT_ACTIVE_SECTION_KEY: String = "flat-section-active"
 private const val FLAT_IDLE_SECTION_KEY: String = "flat-section-idle"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
+const val FOLDER_LIST_SETTINGS_TAG: String = "folder-list:settings"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
 const val FOLDER_LIST_WORKSPACE_SETTINGS_TAG: String = "folder-list:workspace-settings"
 const val FOLDER_LIST_ASSISTANT_TAG: String = "folder-list:assistant"

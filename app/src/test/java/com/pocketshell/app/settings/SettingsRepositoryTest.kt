@@ -160,9 +160,9 @@ class SettingsRepositoryTest {
     @Test
     fun `setDiagnosticsRecordingEnabled toggles and persists`() {
         val repo = SettingsRepository(context)
-        repo.setDiagnosticsRecordingEnabled(true)
-        assertEquals(true, repo.settings.value.diagnosticsRecordingEnabled)
-        assertEquals(true, SettingsRepository(context).settings.value.diagnosticsRecordingEnabled)
+        repo.setDiagnosticsRecordingEnabled(false)
+        assertEquals(false, repo.settings.value.diagnosticsRecordingEnabled)
+        assertEquals(false, SettingsRepository(context).settings.value.diagnosticsRecordingEnabled)
     }
 
     @Test

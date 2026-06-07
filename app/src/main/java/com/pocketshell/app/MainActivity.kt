@@ -43,6 +43,7 @@ import com.pocketshell.app.costs.CostsScreen
 import com.pocketshell.app.crash.CrashReportContext
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.crash.CrashReportsScreen
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.HostListViewModel
@@ -604,6 +605,11 @@ private fun AppNavigator(
     LaunchedEffect(current) {
         StartupTiming.mark("app-navigator-current", "destination" to current.timingName())
         CrashReporter.updateContext(current.crashReportContext())
+        DiagnosticEvents.record(
+            "navigation",
+            "route_changed",
+            "route" to current.diagnosticRouteName(),
+        )
         onCurrentDestinationChanged(current)
     }
 
@@ -1589,6 +1595,28 @@ internal fun AppDestination.timingName(): String = when (this) {
     is AppDestination.FileViewer -> "FileViewer(hostId=$hostId)"
     is AppDestination.FileExplorer -> "FileExplorer(hostId=$hostId)"
     is AppDestination.RecurringJobs -> "RecurringJobs(session=$sessionName)"
+}
+
+internal fun AppDestination.diagnosticRouteName(): String = when (this) {
+    AppDestination.HostList -> "HostList"
+    AppDestination.AddHost -> "AddHost"
+    is AppDestination.EditHost -> "EditHost"
+    AppDestination.Scan -> "Scan"
+    AppDestination.CrashReports -> "CrashReports"
+    AppDestination.Settings -> "Settings"
+    AppDestination.Usage -> "Usage"
+    AppDestination.AiCosts -> "AiCosts"
+    AppDestination.PortForwardChooser -> "PortForwardChooser"
+    is AppDestination.Session -> "Session"
+    is AppDestination.PortForwardPanel -> "PortForwardPanel"
+    is AppDestination.WatchedFolders -> "WatchedFolders"
+    is AppDestination.TmuxSession -> "TmuxSession"
+    is AppDestination.FolderList -> "FolderList"
+    is AppDestination.RepoBrowser -> "RepoBrowser"
+    is AppDestination.EnvFiles -> "EnvFiles"
+    is AppDestination.FileViewer -> "FileViewer"
+    is AppDestination.FileExplorer -> "FileExplorer"
+    is AppDestination.RecurringJobs -> "RecurringJobs"
 }
 
 internal fun AppDestination.crashReportContext(): CrashReportContext = when (this) {

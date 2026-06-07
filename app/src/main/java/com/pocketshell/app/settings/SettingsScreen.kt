@@ -1625,14 +1625,14 @@ private fun DiagnosticsSection(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Record diagnostics log",
+                        text = "Diagnostics flight recorder",
                         color = PocketShellColors.Text,
                         style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Connection, lifecycle, network, and coarse action metadata. Command contents and keystrokes are not recorded.",
+                        text = "Always-on bounded JSONL metadata. Command contents, prompts, secrets, and keystrokes are not recorded.",
                         color = PocketShellColors.TextSecondary,
                         style = MaterialTheme.typography.labelSmall,
                     )
@@ -1653,9 +1653,9 @@ private fun DiagnosticsSection(
             Spacer(modifier = Modifier.height(12.dp))
             ListRow(
                 title = if (shareState is DiagnosticsShareState.Preparing) {
-                    "Preparing diagnostics log..."
+                    "Preparing diagnostics JSONL..."
                 } else {
-                    "Share diagnostics log"
+                    "Share diagnostics JSONL"
                 },
                 trailing = { NavChevron() },
                 onClick = {
@@ -1666,7 +1666,7 @@ private fun DiagnosticsSection(
                 modifier = Modifier.testTag(DIAGNOSTICS_SHARE_LOG_TAG),
             )
             ListRow(
-                title = "Clear diagnostics log",
+                title = "Clear diagnostics recorder",
                 onClick = onClearLog,
                 modifier = Modifier.testTag(DIAGNOSTICS_CLEAR_LOG_TAG),
             )

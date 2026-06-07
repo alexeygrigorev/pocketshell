@@ -13,6 +13,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import org.json.JSONObject
 
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
@@ -31,20 +32,69 @@ class DiagnosticRecorderTest {
     }
 
     @Test
-    fun `recorder is off by default and exports only after enabled`() = runTest {
+    fun `recorder is on by default and exports ndjson events`() = runTest {
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
-        recorder.record("connection", "connect_start", mapOf("host" to "dev"))
-        assertEquals(null, recorder.exportSnapshot())
-
-        settingsRepository.setDiagnosticsRecordingEnabled(true)
         recorder.record("connection", "connect_start", mapOf("host" to "dev"))
         val exported = recorder.exportSnapshot()
 
         assertNotNull(exported)
-        val text = exported!!.readText()
-        assertTrue(text.contains("category=connection"))
-        assertTrue(text.contains("event=connect_start"))
-        assertTrue(text.contains("host=dev"))
+        assertTrue(exported!!.name.endsWith(".jsonl"))
+        val lines = exported.readLines()
+        assertEquals(1, lines.size)
+        val json = JSONObject(lines.single())
+        assertEquals(1L, json.getLong("sequence"))
+        assertEquals("connection", json.getString("category"))
+        assertEquals("connect_start", json.getString("name"))
+        assertEquals("dev", json.getJSONObject("metadata").getString("host"))
+        assertTrue(json.has("wallClockTime"))
+        assertTrue(json.has("monotonicTimestampNanos"))
+    }
+
+    @Test
+    fun `recorder skips new events when disabled`() = runTest {
+        settingsRepository.setDiagnosticsRecordingEnabled(false)
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+
+        recorder.record("connection", "connect_start", mapOf("host" to "dev"))
+
+        assertEquals(null, recorder.exportSnapshot())
+        assertEquals(emptyList<DiagnosticsEvent>(), recorder.readEvents())
+    }
+
+    @Test
+    fun `readEvents returns recorded events in sequence order`() = runTest {
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+
+        recorder.record("app", "created")
+        recorder.record("app", "foreground")
+
+        val events = recorder.readEvents()
+
+        assertEquals(listOf(1L, 2L), events.map { it.sequence })
+        assertEquals(listOf("created", "foreground"), events.map { it.name })
+    }
+
+    @Test
+    fun `recorder redacts sensitive metadata before export`() = runTest {
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+
+        recorder.record(
+            "action",
+            "dangerous_test",
+            mapOf(
+                "prompt" to "please run sk-secret",
+                "command" to "cat ~/.ssh/id_rsa",
+                "message" to "failed with user prompt",
+                "textBytes" to 12,
+            ),
+        )
+
+        val metadata = JSONObject(recorder.exportSnapshot()!!.readLines().single())
+            .getJSONObject("metadata")
+        assertEquals("[redacted]", metadata.getString("prompt"))
+        assertEquals("[redacted]", metadata.getString("command"))
+        assertEquals("[redacted]", metadata.getString("message"))
+        assertEquals(12, metadata.getInt("textBytes"))
     }
 }

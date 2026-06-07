@@ -10,6 +10,7 @@ internal class DiagnosticLogStore(
     private val exportDirectory: File,
     private val clock: Clock = Clock.systemUTC(),
     private val maxBytes: Long = DEFAULT_MAX_BYTES,
+    private val maxEvents: Int = DEFAULT_MAX_EVENTS,
 ) {
     fun appendLine(line: String) {
         logFile.parentFile?.mkdirs()
@@ -33,20 +34,33 @@ internal class DiagnosticLogStore(
 
     fun readText(): String = if (logFile.isFile) logFile.readText() else ""
 
-    private fun trimToLimit() {
-        if (maxBytes <= 0L || logFile.length() <= maxBytes) return
-        val bytes = logFile.readBytes()
-        val keep = bytes.copyOfRange(
-            (bytes.size - maxBytes.toInt()).coerceAtLeast(0),
-            bytes.size,
-        )
-        val firstNewline = keep.indexOf('\n'.code.toByte())
-        val trimmed = if (firstNewline >= 0 && firstNewline + 1 < keep.size) {
-            keep.copyOfRange(firstNewline + 1, keep.size)
+    fun readEvents(): List<DiagnosticsEvent> =
+        if (!logFile.isFile) {
+            emptyList()
         } else {
-            keep
+            logFile.readLines().mapNotNull(DiagnosticEventJson::decode)
         }
-        logFile.writeBytes(trimmed)
+
+    fun lastSequence(): Long = readEvents().maxOfOrNull { it.sequence } ?: 0L
+
+    private fun trimToLimit() {
+        if (!logFile.isFile) return
+        val lines = logFile.readLines()
+        val eventBounded = if (maxEvents > 0 && lines.size > maxEvents) {
+            lines.takeLast(maxEvents)
+        } else {
+            lines
+        }
+        if (maxBytes <= 0L && eventBounded === lines) return
+        var bounded = eventBounded
+        if (maxBytes > 0L) {
+            while (bounded.isNotEmpty() && bounded.joinToString(separator = "\n", postfix = "\n").toByteArray().size > maxBytes) {
+                bounded = bounded.drop(1)
+            }
+        }
+        if (bounded !== lines) {
+            logFile.writeText(bounded.joinToString(separator = "\n", postfix = if (bounded.isEmpty()) "" else "\n"))
+        }
     }
 
     private fun exportFileName(deviceLabel: String): String {
@@ -57,11 +71,12 @@ internal class DiagnosticLogStore(
             .trim('-')
             .ifBlank { "device" }
             .take(40)
-        return "pocketshell-diagnostics-$safeDevice-$timestamp.log"
+        return "pocketshell-diagnostics-$safeDevice-$timestamp.jsonl"
     }
 
     companion object {
-        const val DEFAULT_MAX_BYTES: Long = 256L * 1024L
+        const val DEFAULT_MAX_BYTES: Long = 512L * 1024L
+        const val DEFAULT_MAX_EVENTS: Int = 2_000
 
         private val ExportTimestampFormatter: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")

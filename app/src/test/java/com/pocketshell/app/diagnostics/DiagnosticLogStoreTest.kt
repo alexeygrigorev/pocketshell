@@ -1,5 +1,6 @@
 package com.pocketshell.app.diagnostics
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -17,34 +18,91 @@ class DiagnosticLogStoreTest {
     val tmp = TemporaryFolder()
 
     @Test
-    fun `formatter writes one sanitized metadata line without raw whitespace`() {
-        val line = DiagnosticLogFormatter.format(
-            timestamp = Instant.parse("2026-06-07T10:15:30Z"),
-            category = "connection",
-            event = "connect fail",
-            fields = mapOf(
-                "host" to "dev box",
-                "cause" to "Socket timeout\nretry",
-                "attempt" to 2,
+    fun `event json writes one compact ndjson object`() {
+        val line = DiagnosticEventJson.encode(
+            DiagnosticsEvent(
+                sequence = 7L,
+                wallClockTime = Instant.parse("2026-06-07T10:15:30Z"),
+                monotonicTimestampNanos = 123_456L,
+                category = "connection",
+                name = "connect fail",
+                metadata = mapOf(
+                    "host" to "dev box",
+                    "attempt" to 2,
+                    "foreground" to true,
+                ),
             ),
         )
 
-        assertEquals(
-            "2026-06-07T10:15:30Z category=connection event=connect_fail " +
-                "attempt=2 cause=Socket_timeout_retry host=dev_box",
-            line,
+        assertFalse(line.contains('\n'))
+        val json = JSONObject(line)
+        assertEquals(7L, json.getLong("sequence"))
+        assertEquals("2026-06-07T10:15:30Z", json.getString("wallClockTime"))
+        assertEquals(123_456L, json.getLong("monotonicTimestampNanos"))
+        assertEquals("connection", json.getString("category"))
+        assertEquals("connect fail", json.getString("name"))
+        val metadata = json.getJSONObject("metadata")
+        assertEquals("dev box", metadata.getString("host"))
+        assertEquals(2, metadata.getInt("attempt"))
+        assertEquals(true, metadata.getBoolean("foreground"))
+    }
+
+    @Test
+    fun `redactor removes command prompts and secrets but keeps coarse counters`() {
+        val fields = DiagnosticRedactor.redact(
+            mapOf(
+                "command" to "rm -rf /private/project",
+                "prompt" to "fix my production secret",
+                "apiToken" to "sk-test-secret-value",
+                "message" to "failed while running user content",
+                "textBytes" to 42,
+                "attachmentCount" to 3,
+                "cause" to "TimeoutException",
+            ),
         )
+
+        assertEquals("[redacted]", fields["command"])
+        assertEquals("[redacted]", fields["prompt"])
+        assertEquals("[redacted]", fields["apiToken"])
+        assertEquals("[redacted]", fields["message"])
+        assertEquals(42, fields["textBytes"])
+        assertEquals(3, fields["attachmentCount"])
+        assertEquals("TimeoutException", fields["cause"])
+    }
+
+    @Test
+    fun `event json decodes event for read api`() {
+        val event = DiagnosticsEvent(
+            sequence = 1L,
+            wallClockTime = Instant.parse("2026-06-07T10:15:30Z"),
+            monotonicTimestampNanos = 99L,
+            category = "connection",
+            name = "connect_start",
+            metadata = mapOf("attempt" to 2),
+        )
+
+        assertEquals(event, DiagnosticEventJson.decode(DiagnosticEventJson.encode(event)))
     }
 
     @Test
     fun `exportSnapshot copies current log to timestamped share file`() {
         val store = newStore()
-        store.appendLine("2026-06-07T10:15:30Z category=app event=foreground")
+        val line = DiagnosticEventJson.encode(
+            DiagnosticsEvent(
+                sequence = 1L,
+                wallClockTime = Instant.parse("2026-06-07T10:15:30Z"),
+                monotonicTimestampNanos = 1L,
+                category = "app",
+                name = "foreground",
+            ),
+        )
+        store.appendLine(line)
 
         val exported = store.exportSnapshot("Pixel Test")
 
         assertNotNull(exported)
         assertTrue(exported!!.name.startsWith("pocketshell-diagnostics-pixel-test-20260607-101530"))
+        assertTrue(exported.name.endsWith(".jsonl"))
         assertEquals(store.readText(), exported.readText())
     }
 
@@ -56,23 +114,51 @@ class DiagnosticLogStoreTest {
     @Test
     fun `appendLine trims old complete lines when max size is exceeded`() {
         val store = newStore(maxBytes = 70L)
-        store.appendLine("line-1 abcdefghijklmnopqrstuvwxyz")
-        store.appendLine("line-2 abcdefghijklmnopqrstuvwxyz")
-        store.appendLine("line-3 abcdefghijklmnopqrstuvwxyz")
+        store.appendLine("""{"sequence":1,"metadata":{"value":"abcdefghijklmnopqrstuvwxyz"}}""")
+        store.appendLine("""{"sequence":2,"metadata":{"value":"abcdefghijklmnopqrstuvwxyz"}}""")
+        store.appendLine("""{"sequence":3,"metadata":{"value":"abcdefghijklmnopqrstuvwxyz"}}""")
 
         val text = store.readText()
-        assertFalse(text.contains("line-1"))
-        assertTrue(text.contains("line-3"))
+        assertFalse(text.contains(""""sequence":1"""))
+        assertTrue(text.contains(""""sequence":3"""))
         assertTrue(text.length <= 70)
     }
 
-    private fun newStore(maxBytes: Long = DiagnosticLogStore.DEFAULT_MAX_BYTES): DiagnosticLogStore {
+    @Test
+    fun `appendLine trims old events when max event count is exceeded`() {
+        val store = newStore(maxEvents = 2)
+        store.appendLine(eventLine(sequence = 1L))
+        store.appendLine(eventLine(sequence = 2L))
+        store.appendLine(eventLine(sequence = 3L))
+
+        val events = store.readEvents()
+
+        assertEquals(listOf(2L, 3L), events.map { it.sequence })
+        assertEquals(3L, store.lastSequence())
+    }
+
+    private fun eventLine(sequence: Long): String =
+        DiagnosticEventJson.encode(
+            DiagnosticsEvent(
+                sequence = sequence,
+                wallClockTime = Instant.parse("2026-06-07T10:15:30Z"),
+                monotonicTimestampNanos = sequence,
+                category = "app",
+                name = "event",
+            ),
+        )
+
+    private fun newStore(
+        maxBytes: Long = DiagnosticLogStore.DEFAULT_MAX_BYTES,
+        maxEvents: Int = DiagnosticLogStore.DEFAULT_MAX_EVENTS,
+    ): DiagnosticLogStore {
         val root = tmp.newFolder()
         return DiagnosticLogStore(
             logFile = File(root, "files/diagnostics.log"),
             exportDirectory = File(root, "cache/diagnostics-export"),
             clock = Clock.fixed(Instant.parse("2026-06-07T10:15:30Z"), ZoneOffset.UTC),
             maxBytes = maxBytes,
+            maxEvents = maxEvents,
         )
     }
 }

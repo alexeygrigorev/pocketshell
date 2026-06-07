@@ -118,9 +118,9 @@ data class AppSettings(
      */
     val agentSubmitEnterDelayMs: Int = DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
     /**
-     * Issue #549: user-facing diagnostics recording mode. Off by default;
-     * when enabled the app records timestamped connection/action metadata
-     * to an in-app log that can be shared manually from Settings.
+     * Issue #549: always-on diagnostics flight recorder. On by default;
+     * records bounded, privacy-redacted connection/action metadata to an
+     * in-app JSONL log that can be shared manually from Settings.
      */
     val diagnosticsRecordingEnabled: Boolean = DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
 ) {
@@ -266,7 +266,7 @@ data class AppSettings(
         const val MAX_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 1000
         const val DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 150
 
-        const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = false
+        const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = true
         const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
     }
 }

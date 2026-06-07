@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Clock
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -22,10 +23,11 @@ class DiagnosticRecorder @Inject constructor(
     private val settingsRepository: SettingsRepository,
 ) : DiagnosticEventSink {
     private val store = DiagnosticLogStore(
-        logFile = File(context.filesDir, "diagnostics/pocketshell-diagnostics.log"),
+        logFile = File(context.filesDir, "diagnostics/pocketshell-diagnostics.jsonl"),
         exportDirectory = File(context.cacheDir, DIAGNOSTICS_EXPORT_CACHE_DIR),
     )
     private val clock: Clock = Clock.systemUTC()
+    private val sequence = AtomicLong(store.lastSequence())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val commands = Channel<RecorderCommand>(capacity = RECORDER_BUFFER_CAPACITY)
 
@@ -46,21 +48,25 @@ class DiagnosticRecorder @Inject constructor(
 
     override fun record(category: String, event: String, fields: Map<String, Any?>) {
         if (!settingsRepository.settings.value.diagnosticsRecordingEnabled) return
-        val line = DiagnosticLogFormatter.format(
-            timestamp = Instant.now(clock),
+        val diagnosticsEvent = DiagnosticsEvent(
+            sequence = sequence.incrementAndGet(),
+            wallClockTime = Instant.now(clock),
+            monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
             category = category,
-            event = event,
-            fields = fields,
+            name = event,
+            metadata = DiagnosticRedactor.redact(fields),
         )
+        val line = DiagnosticEventJson.encode(diagnosticsEvent)
         if (commands.trySend(RecorderCommand.Line(line)).isFailure) {
+            val overflow = DiagnosticsEvent(
+                sequence = sequence.incrementAndGet(),
+                wallClockTime = Instant.now(clock),
+                monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
+                category = "diagnostics",
+                name = "recorder_overflow",
+            )
             commands.trySend(
-                RecorderCommand.Line(
-                    DiagnosticLogFormatter.format(
-                        timestamp = Instant.now(clock),
-                        category = "diagnostics",
-                        event = "recorder_overflow",
-                    ),
-                ),
+                RecorderCommand.Line(DiagnosticEventJson.encode(overflow)),
             )
         }
     }
@@ -75,6 +81,13 @@ class DiagnosticRecorder @Inject constructor(
         flush()
         return withContext(Dispatchers.IO) {
             store.exportSnapshot(deviceLabel())
+        }
+    }
+
+    suspend fun readEvents(): List<DiagnosticsEvent> {
+        flush()
+        return withContext(Dispatchers.IO) {
+            store.readEvents()
         }
     }
 

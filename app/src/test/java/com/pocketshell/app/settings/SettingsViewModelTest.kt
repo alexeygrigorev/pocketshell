@@ -169,8 +169,8 @@ class SettingsViewModelTest {
     @Test
     fun `setDiagnosticsRecordingEnabled flows through to repository`() {
         val vm = newVm()
-        vm.setDiagnosticsRecordingEnabled(true)
-        assertEquals(true, repo.settings.value.diagnosticsRecordingEnabled)
+        vm.setDiagnosticsRecordingEnabled(false)
+        assertEquals(false, repo.settings.value.diagnosticsRecordingEnabled)
     }
 
     @Test

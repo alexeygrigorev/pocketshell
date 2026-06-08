@@ -75,6 +75,8 @@ internal class AndroidSpeechRecognitionProvider(
     private class AndroidRecognitionListener(
         private val listener: PromptComposerViewModel.SpeechRecognitionListener,
     ) : RecognitionListener {
+        private var lastPartialResult: String = ""
+
         override fun onReadyForSpeech(params: Bundle?) = Unit
         override fun onBeginningOfSpeech() = Unit
         override fun onRmsChanged(rmsdB: Float) = Unit
@@ -83,14 +85,29 @@ internal class AndroidSpeechRecognitionProvider(
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
         override fun onPartialResults(partialResults: Bundle?) {
-            bestResult(partialResults)?.let(listener::onPartial)
+            bestResult(partialResults)?.let {
+                lastPartialResult = it
+                listener.onPartial(it)
+            }
         }
 
         override fun onResults(results: Bundle?) {
-            listener.onFinal(bestResult(results).orEmpty())
+            val text = bestResult(results) ?: lastPartialResult.takeIf { it.isNotBlank() }
+            if (text.isNullOrBlank()) {
+                listener.onError(PromptComposerViewModel.ANDROID_SPEECH_NO_TEXT_MESSAGE)
+            } else {
+                listener.onFinal(text)
+            }
         }
 
         override fun onError(error: Int) {
+            if (
+                error.isAndroidNoTextError() &&
+                lastPartialResult.isNotBlank()
+            ) {
+                listener.onFinal(lastPartialResult)
+                return
+            }
             listener.onError(errorMessage(error))
         }
 
@@ -102,7 +119,7 @@ internal class AndroidSpeechRecognitionProvider(
         private fun errorMessage(error: Int): String = when (error) {
             SpeechRecognizer.ERROR_NO_MATCH,
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE
+                PromptComposerViewModel.ANDROID_SPEECH_NO_TEXT_MESSAGE
             SpeechRecognizer.ERROR_NETWORK,
             SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
                 "Android speech recognizer network error. Try again or choose Whisper in settings."
@@ -116,5 +133,9 @@ internal class AndroidSpeechRecognitionProvider(
                 PromptComposerViewModel.ANDROID_SPEECH_FAILED_MESSAGE
             else -> PromptComposerViewModel.ANDROID_SPEECH_FAILED_MESSAGE
         }
+
+        private fun Int.isAndroidNoTextError(): Boolean =
+            this == SpeechRecognizer.ERROR_NO_MATCH ||
+                this == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
     }
 }

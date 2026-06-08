@@ -1333,9 +1333,9 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     private fun finishAndroidSpeechRecognition(rawText: String) {
-        val text = rawText.trim()
+        val text = rawText.trim().ifEmpty { liveSpeechLastTranscript.trim() }
         if (text.isEmpty()) {
-            failAndroidSpeechRecognition(NO_SPEECH_DETECTED_MESSAGE)
+            failAndroidSpeechRecognition(ANDROID_SPEECH_NO_TEXT_MESSAGE)
             return
         }
 
@@ -1371,6 +1371,10 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     private fun failAndroidSpeechRecognition(message: String) {
+        if (message.isAndroidNoTextFailure() && liveSpeechLastTranscript.isNotBlank()) {
+            finishAndroidSpeechRecognition(liveSpeechLastTranscript)
+            return
+        }
         pendingSendOnTranscribeSuccess = false
         pendingSendWithEnter = false
         clearAndroidSpeechSession()
@@ -1381,7 +1385,7 @@ public class PromptComposerViewModel @Inject constructor(
                 hasDetectedSpeech = false,
                 recordingLocked = false,
                 liveTranscript = null,
-                error = message.ifBlank { ANDROID_SPEECH_FAILED_MESSAGE },
+                error = androidSpeechFailureMessage(message),
             )
         }
         DiagnosticEvents.record(
@@ -1426,6 +1430,17 @@ public class PromptComposerViewModel @Inject constructor(
         liveSpeechBaseDraft = ""
         liveSpeechLastTranscript = ""
         savedStateHandle[KEY_WAS_RECORDING] = false
+    }
+
+    private fun String.isAndroidNoTextFailure(): Boolean =
+        isBlank() ||
+            this == NO_SPEECH_DETECTED_MESSAGE ||
+            this == ANDROID_SPEECH_NO_TEXT_MESSAGE
+
+    private fun androidSpeechFailureMessage(message: String): String = when {
+        message.isBlank() -> ANDROID_SPEECH_FAILED_MESSAGE
+        message == NO_SPEECH_DETECTED_MESSAGE -> ANDROID_SPEECH_NO_TEXT_MESSAGE
+        else -> message
     }
 
     /**
@@ -2208,6 +2223,9 @@ public class PromptComposerViewModel @Inject constructor(
 
         public const val ANDROID_SPEECH_UNAVAILABLE_MESSAGE: String =
             "Android speech recognition is not available on this device. Choose Whisper or install/enable a system speech service."
+
+        public const val ANDROID_SPEECH_NO_TEXT_MESSAGE: String =
+            "Android speech recognizer did not return text. Try again or choose Whisper in settings."
 
         public const val ANDROID_SPEECH_FAILED_MESSAGE: String =
             "Android speech recognition failed. Try again or choose Whisper in settings."

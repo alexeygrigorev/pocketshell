@@ -907,6 +907,79 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun androidSpeechEmptyFinalUsesLastPartialTranscript() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onDraftChange("Run")
+        vm.onMicTap()
+        runCurrent()
+
+        speech.listener!!.onPartial("git status")
+        speech.listener!!.onFinal("   ")
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("Run git status", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.liveTranscript)
+        assertNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun androidSpeechNoMatchAfterPartialDispatchesQueuedSend() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sends = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job = launch { vm.sendRequests.collect { sends += it } }
+
+        vm.onDraftChange("Please")
+        vm.onMicTap()
+        runCurrent()
+        speech.listener!!.onPartial("summarize this")
+        vm.requestSend(withEnter = true)
+        runCurrent()
+
+        speech.listener!!.onError(PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE)
+        advanceUntilIdle()
+
+        assertEquals(listOf(PromptComposerViewModel.SendRequest("Please summarize this", true)), sends)
+        assertEquals("", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.error)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun androidSpeechEmptyFinalWithoutPartialShowsAndroidSpecificRetryCopy() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        speech.listener!!.onFinal("   ")
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(PromptComposerViewModel.ANDROID_SPEECH_NO_TEXT_MESSAGE, vm.uiState.value.error)
+        assertNull(vm.uiState.value.liveTranscript)
+    }
+
+    @Test
     fun androidSpeechCancelRestoresPreDictationDraftAndIgnoresLateCallbacks() = runTest {
         val speech = FakeSpeechRecognitionProvider()
         val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)

@@ -1074,6 +1074,54 @@ class InlineDictationViewModelTest {
     }
 
     @Test
+    fun androidSpeechEmptyFinalUsesLastPartialTranscript() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val received = mutableListOf<String>()
+        val collector = launch { received += vm.transcriptions.first() }
+
+        vm.onMicTap()
+        runCurrent()
+        speech.listener!!.onPartial(" git status ")
+        speech.listener!!.onFinal("   ")
+        advanceUntilIdle()
+
+        assertEquals(listOf("git status"), received)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertNull(vm.uiState.value.error)
+        collector.join()
+    }
+
+    @Test
+    fun androidSpeechNoMatchAfterPartialEmitsLastPartialTranscript() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val received = mutableListOf<String>()
+        val collector = launch { received += vm.transcriptions.first() }
+
+        vm.onMicTap()
+        runCurrent()
+        speech.listener!!.onPartial("pwd")
+        speech.listener!!.onError(InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE)
+        advanceUntilIdle()
+
+        assertEquals(listOf("pwd"), received)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertNull(vm.uiState.value.error)
+        collector.join()
+    }
+
+    @Test
     fun androidSpeechUnavailableShowsErrorWithoutStartingMic() = runTest {
         val speech = FakeSpeechRecognitionProvider(available = false)
         val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
@@ -1115,7 +1163,7 @@ class InlineDictationViewModelTest {
 
         assertTrue(received.isEmpty())
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
-        assertEquals(InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE, vm.uiState.value.error)
+        assertEquals(PromptComposerViewModel.ANDROID_SPEECH_NO_TEXT_MESSAGE, vm.uiState.value.error)
         collector.cancel()
     }
 

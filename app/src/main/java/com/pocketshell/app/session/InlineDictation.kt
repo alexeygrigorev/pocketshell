@@ -183,6 +183,7 @@ public class InlineDictationViewModel @Inject constructor(
     private var transcribeJob: Job? = null
     private var speechRecognitionSession: PromptComposerViewModel.SpeechRecognitionSession? = null
     private var speechRecognitionGeneration: Long = 0L
+    private var liveSpeechLastTranscript: String = ""
     private var activeProvider: VoiceTranscriptionProvider? = null
 
     // Test seam — defaults to wall-clock, tests substitute a virtual clock
@@ -306,7 +307,9 @@ public class InlineDictationViewModel @Inject constructor(
         val generation = ++speechRecognitionGeneration
         val listener = object : PromptComposerViewModel.SpeechRecognitionListener {
             override fun onPartial(text: String) {
-                if (isCurrentAndroidSpeechRecognition(generation) && text.isNotBlank()) {
+                val trimmed = text.trim()
+                if (isCurrentAndroidSpeechRecognition(generation) && trimmed.isNotBlank()) {
+                    liveSpeechLastTranscript = trimmed
                     _uiState.update {
                         if (it.recording == RecordingState.Recording) {
                             it.copy(amplitude = 0.35f, error = null)
@@ -703,9 +706,9 @@ public class InlineDictationViewModel @Inject constructor(
     }
 
     private fun finishAndroidSpeechRecognition(rawText: String) {
-        val text = rawText.trim()
+        val text = rawText.trim().ifEmpty { liveSpeechLastTranscript.trim() }
         if (text.isEmpty()) {
-            failAndroidSpeechRecognition(NO_SPEECH_DETECTED_MESSAGE)
+            failAndroidSpeechRecognition(PromptComposerViewModel.ANDROID_SPEECH_NO_TEXT_MESSAGE)
             return
         }
 
@@ -727,12 +730,16 @@ public class InlineDictationViewModel @Inject constructor(
     }
 
     private fun failAndroidSpeechRecognition(message: String) {
+        if (message.isAndroidNoTextFailure() && liveSpeechLastTranscript.isNotBlank()) {
+            finishAndroidSpeechRecognition(liveSpeechLastTranscript)
+            return
+        }
         clearAndroidSpeechSession()
         _uiState.update {
             it.copy(
                 recording = RecordingState.Idle,
                 amplitude = 0f,
-                error = message.ifBlank { PromptComposerViewModel.ANDROID_SPEECH_FAILED_MESSAGE },
+                error = androidSpeechFailureMessage(message),
             )
         }
         DiagnosticEvents.record(
@@ -762,6 +769,18 @@ public class InlineDictationViewModel @Inject constructor(
         speechRecognitionGeneration++
         runCatching { session?.cancel() }
         activeProvider = null
+        liveSpeechLastTranscript = ""
+    }
+
+    private fun String.isAndroidNoTextFailure(): Boolean =
+        isBlank() ||
+            this == NO_SPEECH_DETECTED_MESSAGE ||
+            this == PromptComposerViewModel.ANDROID_SPEECH_NO_TEXT_MESSAGE
+
+    private fun androidSpeechFailureMessage(message: String): String = when {
+        message.isBlank() -> PromptComposerViewModel.ANDROID_SPEECH_FAILED_MESSAGE
+        message == NO_SPEECH_DETECTED_MESSAGE -> PromptComposerViewModel.ANDROID_SPEECH_NO_TEXT_MESSAGE
+        else -> message
     }
 
     /** Clear the inline error banner. */

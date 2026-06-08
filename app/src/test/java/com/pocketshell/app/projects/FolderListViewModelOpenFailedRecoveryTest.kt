@@ -11,6 +11,7 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -23,6 +24,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
@@ -248,6 +250,53 @@ class FolderListViewModelOpenFailedRecoveryTest {
         }
     }
 
+    @Test
+    fun refreshSessionsShowsLoadingFeedbackWhileReloadIsInFlight() = runTest {
+        val refreshResult = CompletableDeferred<FolderListResult>()
+        val gateway = SuspendedRefreshGateway(
+            refreshResult = refreshResult,
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+            assertEquals(setOf("alpha"), readySessionNames(vm))
+            assertFalse((vm.state.value as FolderListUiState.Ready).isRefreshing)
+
+            vm.refreshSessions()
+            runCurrent()
+
+            val refreshingState = vm.state.value as FolderListUiState.Ready
+            assertEquals(
+                "manual Refresh sessions should keep the existing rows visible while reloading",
+                setOf("alpha"),
+                refreshingState.flatSessions.map { it.sessionName }.toSet(),
+            )
+            assertTrue("manual refresh should mark the ready snapshot as refreshing", refreshingState.isRefreshing)
+            val runningStatus = vm.actionStatus.value
+            when (runningStatus) {
+                is FolderActionStatus.Running -> assertEquals("Refreshing sessions", runningStatus.label)
+                else -> fail("expected refresh running banner, got $runningStatus")
+            }
+
+            refreshResult.complete(
+                FolderListResult.Sessions(rows = listOf(sessionRow("alpha"), sessionRow("beta"))),
+            )
+            runCurrent()
+
+            val refreshedState = vm.state.value as FolderListUiState.Ready
+            assertFalse(refreshedState.isRefreshing)
+            assertEquals(setOf("alpha", "beta"), refreshedState.flatSessions.map { it.sessionName }.toSet())
+            val actionStatus = vm.actionStatus.value
+            when (actionStatus) {
+                is FolderActionStatus.Succeeded -> assertEquals("Sessions refreshed", actionStatus.message)
+                else -> fail("expected refresh success banner, got $actionStatus")
+            }
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
     private fun bind(vm: FolderListViewModel) {
         vm.bind(
             hostId = HOST.id,
@@ -316,6 +365,58 @@ class FolderListViewModelOpenFailedRecoveryTest {
             val result = results[index.coerceAtMost(results.lastIndex)]
             if (index < results.lastIndex) index++
             return result
+        }
+
+        override suspend fun createSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+            cwd: String,
+            startCommand: String?,
+        ): Result<String> = error("not used")
+
+        override suspend fun createEmptyProject(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            parentPath: String,
+            folderName: String,
+        ): Result<String> = error("not used")
+
+        override suspend fun importFile(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            folderPath: String,
+            payload: FolderImportPayload,
+        ): Result<String> = error("not used")
+
+        override suspend fun killSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+        ): Result<Unit> = error("not used")
+    }
+
+    private inner class SuspendedRefreshGateway(
+        private val refreshResult: CompletableDeferred<FolderListResult>,
+    ) : FolderListGateway {
+        private var callCount = 0
+
+        override suspend fun listSessionsWithFolder(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            watchedRoots: List<ProjectRootEntity>,
+        ): FolderListResult {
+            callCount += 1
+            return if (callCount == 1) {
+                FolderListResult.Sessions(rows = listOf(sessionRow("alpha")))
+            } else {
+                refreshResult.await()
+            }
         }
 
         override suspend fun createSession(

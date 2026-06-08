@@ -288,9 +288,11 @@ fun FolderListScreen(
             // longer repeats the host name in a second band.
             val headerGroups = (state as? FolderListUiState.Ready)
                 ?.let { FlatSessionGroups.from(it.flatSessions) }
+            val headerRefreshInFlight = (state as? FolderListUiState.Ready)?.isRefreshing == true
             FolderListAppBar(
                 hostName = hostName,
                 headerGroups = headerGroups,
+                isRefreshing = headerRefreshInFlight,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
                 onRefreshSessions = viewModel::refreshSessions,
@@ -642,6 +644,7 @@ internal fun knownSessionNames(state: FolderListUiState): Set<String> =
 private fun FolderListAppBar(
     hostName: String,
     headerGroups: FlatSessionGroups?,
+    isRefreshing: Boolean,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
     onRefreshSessions: () -> Unit,
@@ -693,6 +696,7 @@ private fun FolderListAppBar(
             FolderListOverflowMenu(
                 onBrowseRepos = onBrowseRepos,
                 onRefreshSessions = onRefreshSessions,
+                isRefreshing = isRefreshing,
                 onOpenAssistant = onOpenAssistant,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
@@ -715,6 +719,7 @@ private fun FolderListAppBar(
 private fun FolderListOverflowMenu(
     onBrowseRepos: () -> Unit,
     onRefreshSessions: () -> Unit,
+    isRefreshing: Boolean,
     onOpenAssistant: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
@@ -736,10 +741,11 @@ private fun FolderListOverflowMenu(
                 testTag = FOLDER_LIST_BROWSE_REPOS_TAG,
             ),
             KebabItem(
-                label = "Refresh sessions",
+                label = if (isRefreshing) "Refreshing sessions" else "Refresh sessions",
                 onClick = onRefreshSessions,
-                contentDescription = "Refresh sessions",
+                contentDescription = if (isRefreshing) "Refreshing sessions" else "Refresh sessions",
                 testTag = FOLDER_LIST_REFRESH_SESSIONS_TAG,
+                enabled = !isRefreshing,
             ),
             KebabItem(
                 label = "Usage",

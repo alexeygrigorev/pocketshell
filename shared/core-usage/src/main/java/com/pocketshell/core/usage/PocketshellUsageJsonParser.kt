@@ -228,6 +228,10 @@ private val CODEX_COMPATIBLE_PROVIDERS = setOf(
     "chatgpt",
 )
 
+private const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE =
+    "Claude usage authentication needs setup on this host. " +
+        "Open Claude Code on the host and complete sign-in, then refresh usage."
+
 private fun String.isCodexCompatibleProvider(): Boolean =
     lowercase().replace(' ', '_') in CODEX_COMPATIBLE_PROVIDERS
 
@@ -242,7 +246,7 @@ private fun actionableProviderError(provider: String, error: String?): String? {
                     lower.contains("run claude") ||
                     lower.contains("authentication " + "failed")
             ) ->
-            "Usage data unavailable"
+            CLAUDE_USAGE_AUTH_SETUP_MESSAGE
         provider.equals("claude", ignoreCase = true) &&
             (
                 lower.contains("http error 401") ||
@@ -250,7 +254,7 @@ private fun actionableProviderError(provider: String, error: String?): String? {
                     lower == "no-credentials" ||
                     lower == "no credentials"
             ) ->
-            "Usage data unavailable: $text"
+            CLAUDE_USAGE_AUTH_SETUP_MESSAGE
         provider.equals("codex", ignoreCase = true) &&
             (
                 lower == "no auth token" ||

@@ -247,7 +247,8 @@ class UsageFormatTest {
         assertEquals("Usage data unavailable", statusLabel(record))
         assertEquals("Usage data unavailable", usageProviderStateDescription(record))
         assertEquals(
-            "Usage data unavailable: HTTP Error 401: Unauthorized",
+            "Usage authentication needs setup on this host. " +
+                "Sign in with the provider CLI on the host, then refresh usage.",
             usageTelemetryMessageForDisplay(record.lastError),
         )
         listOf(
@@ -258,6 +259,7 @@ class UsageFormatTest {
             assertEquals(false, text.contains("claude " + "/login", ignoreCase = true))
             assertEquals(false, text.contains("authentication " + "failed", ignoreCase = true))
             assertEquals(false, text.contains("provider " + "blocked", ignoreCase = true))
+            assertEquals(false, text.contains("HTTP Error 401", ignoreCase = true))
         }
     }
 
@@ -266,7 +268,16 @@ class UsageFormatTest {
         val stale = "Claude Code authentication " + "failed on this host. Run `claude " +
             "/login` in the host shell."
 
-        assertEquals("Usage data unavailable", usageTelemetryMessageForDisplay(stale))
+        assertEquals(CLAUDE_USAGE_AUTH_SETUP_MESSAGE, usageTelemetryMessageForDisplay(stale))
+    }
+
+    @Test
+    fun staleGeneric401TelemetryCopy_isMappedToAuthSetup() {
+        assertEquals(
+            "Usage authentication needs setup on this host. " +
+                "Sign in with the provider CLI on the host, then refresh usage.",
+            usageTelemetryMessageForDisplay("Usage data unavailable: HTTP Error 401: Unauthorized"),
+        )
     }
 
     @Test

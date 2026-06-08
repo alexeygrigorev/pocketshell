@@ -15,6 +15,7 @@ import com.pocketshell.app.R
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageThresholdState
+import java.time.Instant
 
 public interface UsageNotifier {
     public fun onSnapshotsChanged(snapshots: Map<Long, UsageSnapshot>)
@@ -63,6 +64,7 @@ private data class UsageNotificationKey(
     val provider: String,
     val state: UsageThresholdState,
     val windowName: String?,
+    val resetAt: Instant?,
 )
 
 internal fun usageNotificationEvent(
@@ -91,13 +93,16 @@ private fun usageNotificationKey(
     hostId: Long,
     record: UsageProviderRecord,
     state: UsageThresholdState,
-): UsageNotificationKey =
-    UsageNotificationKey(
+): UsageNotificationKey {
+    val window = record.mostConstrainedWindow
+    return UsageNotificationKey(
         hostId = hostId,
         provider = record.provider.lowercase(),
         state = state,
-        windowName = record.mostConstrainedWindow?.name,
+        windowName = window?.name,
+        resetAt = window?.resetAt,
     )
+}
 
 private fun exceededQuotaLabel(record: UsageProviderRecord): String {
     val reason = record.blockReason.orEmpty().lowercase()

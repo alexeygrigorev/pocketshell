@@ -68,6 +68,10 @@ _CODEX_COMPATIBLE_PROVIDERS = {
     "openai_codex",
     "chatgpt",
 }
+_CLAUDE_USAGE_AUTH_SETUP_MESSAGE = (
+    "Claude usage authentication needs setup on this host. "
+    "Open Claude Code on the host and complete sign-in, then refresh usage."
+)
 
 
 def _resolve_quse_binary() -> Optional[str]:
@@ -278,13 +282,13 @@ def _actionable_error(provider: str, error: Any) -> Optional[str]:
         or "run claude" in lower
         or "authentication " + "failed" in lower
     ):
-        return "Usage data unavailable"
+        return _CLAUDE_USAGE_AUTH_SETUP_MESSAGE
     if provider == "claude" and (
         "http error 401" in lower
         or "unauthorized" in lower
         or lower in {"no-credentials", "no credentials"}
     ):
-        return f"Usage data unavailable: {text}"
+        return _CLAUDE_USAGE_AUTH_SETUP_MESSAGE
     if provider == "codex" and lower in {"no auth token", "no-auth-token", "no credentials"}:
         return (
             "Codex authentication is missing on this host. "

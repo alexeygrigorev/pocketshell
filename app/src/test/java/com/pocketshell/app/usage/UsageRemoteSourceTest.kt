@@ -130,12 +130,10 @@ class UsageRemoteSourceTest {
         val record = (result as UsageFetchResult.Success).records.single()
         assertEquals("claude", record.provider)
         assertEquals(UsageStatus.Error, record.status)
-        assertEquals(
-            "Usage data unavailable: HTTP Error 401: Unauthorized",
-            record.lastError,
-        )
+        assertEquals(CLAUDE_USAGE_AUTH_SETUP_MESSAGE, record.lastError)
         assertTrue(record.lastError?.contains("claude " + "/login") == false)
         assertTrue(record.lastError?.contains("authentication " + "failed", ignoreCase = true) == false)
+        assertTrue(record.lastError?.contains("HTTP Error 401", ignoreCase = true) == false)
     }
 
     @Test

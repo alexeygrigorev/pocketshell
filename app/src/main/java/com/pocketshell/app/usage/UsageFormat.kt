@@ -22,6 +22,12 @@ internal fun statusLabel(record: UsageProviderRecord): String = when {
 
 internal const val USAGE_DATA_UNAVAILABLE: String = "Usage data unavailable"
 internal const val REFRESH_USAGE_FAILED: String = "Refresh usage failed"
+internal const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE: String =
+    "Claude usage authentication needs setup on this host. " +
+        "Open Claude Code on the host and complete sign-in, then refresh usage."
+private const val PROVIDER_USAGE_AUTH_SETUP_MESSAGE: String =
+    "Usage authentication needs setup on this host. " +
+        "Sign in with the provider CLI on the host, then refresh usage."
 
 internal fun usageProviderStateDescription(
     record: UsageProviderRecord,
@@ -37,7 +43,8 @@ internal fun usageTelemetryMessageForDisplay(message: String?): String? {
     val trimmed = message?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val lower = trimmed.lowercase(Locale.US)
     return when {
-        lower.startsWith(USAGE_DATA_UNAVAILABLE.lowercase(Locale.US)) ||
+        lower.startsWith(CLAUDE_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) ||
+            lower.startsWith(PROVIDER_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) ||
             lower.startsWith(REFRESH_USAGE_FAILED.lowercase(Locale.US)) -> trimmed
         lower.contains("claude") &&
             (
@@ -46,11 +53,12 @@ internal fun usageTelemetryMessageForDisplay(message: String?): String? {
                     lower.contains("run `claude") ||
                     lower.contains("run claude") ||
                     lower.contains("login")
-            ) -> USAGE_DATA_UNAVAILABLE
+            ) -> CLAUDE_USAGE_AUTH_SETUP_MESSAGE
         lower.contains("http error 401") ||
             lower.contains("unauthorized") ||
             lower == "no-credentials" ||
-            lower == "no credentials" -> "$USAGE_DATA_UNAVAILABLE: $trimmed"
+            lower == "no credentials" -> PROVIDER_USAGE_AUTH_SETUP_MESSAGE
+        lower.startsWith(USAGE_DATA_UNAVAILABLE.lowercase(Locale.US)) -> trimmed
         else -> trimmed
     }
 }

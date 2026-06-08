@@ -291,11 +291,13 @@ class PocketshellUsageJsonParserTest {
 
         assertEquals(UsageStatus.Error, record.status)
         assertEquals(
-            "Usage data unavailable: HTTP Error 401: Unauthorized",
+            "Claude usage authentication needs setup on this host. " +
+                "Open Claude Code on the host and complete sign-in, then refresh usage.",
             record.lastError,
         )
         assertTrue(record.lastError?.contains("claude " + "/login") == false)
         assertTrue(record.lastError?.contains("authentication " + "failed", ignoreCase = true) == false)
+        assertTrue(record.lastError?.contains("HTTP Error 401", ignoreCase = true) == false)
     }
 
     @Test
@@ -311,7 +313,11 @@ class PocketshellUsageJsonParserTest {
         ).single()
 
         assertEquals(UsageStatus.Error, record.status)
-        assertEquals("Usage data unavailable", record.lastError)
+        assertEquals(
+            "Claude usage authentication needs setup on this host. " +
+                "Open Claude Code on the host and complete sign-in, then refresh usage.",
+            record.lastError,
+        )
         assertTrue(record.lastError?.contains("claude " + "/login") == false)
         assertTrue(record.lastError?.contains("authentication " + "failed", ignoreCase = true) == false)
         assertTrue(record.lastError?.contains("provider " + "blocked", ignoreCase = true) == false)

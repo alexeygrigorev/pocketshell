@@ -27,7 +27,12 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from pocketshell.cli import cli, main
-from pocketshell.usage import _actionable_error, normalize_usage_record, usage_command
+from pocketshell.usage import (
+    _CLAUDE_USAGE_AUTH_SETUP_MESSAGE,
+    _actionable_error,
+    normalize_usage_record,
+    usage_command,
+)
 
 
 def _fake_completed(
@@ -158,9 +163,10 @@ def test_usage_json_normalizes_codex_detail_windows_and_epoch_resets() -> None:
         "reset_at": "2026-06-11T00:27:18Z",
         "window": "7d",
     }
-    assert lines[1]["error"] == "Usage data unavailable: HTTP Error 401: Unauthorized"
+    assert lines[1]["error"] == _CLAUDE_USAGE_AUTH_SETUP_MESSAGE
     assert "claude " + "/login" not in lines[1]["error"]
     assert "authentication " + "failed" not in lines[1]["error"].lower()
+    assert "HTTP Error 401" not in lines[1]["error"]
 
 
 def test_claude_stale_auth_telemetry_error_is_usage_unavailable() -> None:
@@ -170,7 +176,7 @@ def test_claude_stale_auth_telemetry_error_is_usage_unavailable() -> None:
         + "/login` in the host shell."
     )
 
-    assert _actionable_error("claude", stale_error) == "Usage data unavailable"
+    assert _actionable_error("claude", stale_error) == _CLAUDE_USAGE_AUTH_SETUP_MESSAGE
 
 
 def test_usage_json_patches_codex_resets_from_source_when_quse_dropped_them() -> None:

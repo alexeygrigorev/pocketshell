@@ -32,6 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Light-weight unit test confirming [SettingsViewModel] is a thin
@@ -95,13 +96,14 @@ class SettingsViewModelTest {
     private fun newVm(
         vault: PromptComposerViewModel.ApiKeyVault = FakeVault(),
         assistantStore: AssistantConfigStore = FakeAssistantStore(),
+        diagnosticRecorder: DiagnosticRecorder = DiagnosticRecorder(context, repo),
         releaseChecker: ReleaseChecker = FakeReleaseChecker(ReleaseCheckResult.UpToDate),
     ): SettingsViewModel =
         SettingsViewModel(
             repo,
             vault,
             assistantStore,
-            DiagnosticRecorder(context, repo),
+            diagnosticRecorder,
             releaseChecker,
             hostDao,
             newUsageScheduler(),
@@ -112,6 +114,8 @@ class SettingsViewModelTest {
         context = ApplicationProvider.getApplicationContext()
         context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
             .edit().clear().commit()
+        File(context.filesDir, "diagnostics").deleteRecursively()
+        File(context.cacheDir, "diagnostics-export").deleteRecursively()
         repo = SettingsRepository(context)
         db = Room.inMemoryDatabaseBuilder(
             context,
@@ -191,6 +195,21 @@ class SettingsViewModelTest {
         val vm = newVm()
         vm.setDiagnosticsRecordingEnabled(false)
         assertEquals(false, repo.settings.value.diagnosticsRecordingEnabled)
+    }
+
+    @Test
+    fun `startFreshDiagnosticsCapture enables recording clears old events and marks capture start`() = runTest {
+        val recorder = DiagnosticRecorder(context, repo)
+        val vm = newVm(diagnosticRecorder = recorder)
+        recorder.record("connection", "stale_connect")
+        repo.setDiagnosticsRecordingEnabled(false)
+
+        vm.startFreshDiagnosticsCapture()
+
+        assertEquals(true, repo.settings.value.diagnosticsRecordingEnabled)
+        val events = recorder.readEvents()
+        assertEquals(listOf("capture_started"), events.map { it.name })
+        assertEquals(listOf("diagnostics"), events.map { it.category })
     }
 
     @Test

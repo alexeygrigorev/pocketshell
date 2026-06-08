@@ -229,6 +229,15 @@ class SettingsViewModel @Inject constructor(
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) =
         repository.setDiagnosticsRecordingEnabled(enabled)
 
+    fun startFreshDiagnosticsCapture() {
+        viewModelScope.launch {
+            repository.setDiagnosticsRecordingEnabled(true)
+            diagnosticRecorder.clear()
+            diagnosticRecorder.record("diagnostics", "capture_started")
+            _diagnosticsShareState.value = DiagnosticsShareState.Idle
+        }
+    }
+
     fun shareDiagnosticsLog() {
         if (_diagnosticsShareState.value is DiagnosticsShareState.Preparing) return
         _diagnosticsShareState.value = DiagnosticsShareState.Preparing

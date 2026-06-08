@@ -252,6 +252,7 @@ fun SettingsScreen(
                     recordingEnabled = settings.diagnosticsRecordingEnabled,
                     shareState = diagnosticsShareState,
                     onRecordingChange = viewModel::setDiagnosticsRecordingEnabled,
+                    onStartFreshCapture = viewModel::startFreshDiagnosticsCapture,
                     onShareLog = viewModel::shareDiagnosticsLog,
                     onClearLog = viewModel::clearDiagnosticsLog,
                     onOpenCrashReports = onOpenCrashReports,
@@ -1660,6 +1661,7 @@ private fun DiagnosticsSection(
     recordingEnabled: Boolean,
     shareState: DiagnosticsShareState,
     onRecordingChange: (Boolean) -> Unit,
+    onStartFreshCapture: () -> Unit,
     onShareLog: () -> Unit,
     onClearLog: () -> Unit,
     onOpenCrashReports: () -> Unit,
@@ -1699,6 +1701,11 @@ private fun DiagnosticsSection(
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
+            ListRow(
+                title = "Start fresh diagnostics capture",
+                onClick = onStartFreshCapture,
+                modifier = Modifier.testTag(DIAGNOSTICS_START_CAPTURE_TAG),
+            )
             ListRow(
                 title = if (shareState is DiagnosticsShareState.Preparing) {
                     "Preparing diagnostics JSONL..."
@@ -1959,6 +1966,7 @@ internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"
 internal const val DEFAULT_HOST_EMPTY_TAG = "settings:startup:default-host:empty"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
 internal const val DIAGNOSTICS_RECORDING_SWITCH_TAG = "settings:diagnostics:recording-switch"
+internal const val DIAGNOSTICS_START_CAPTURE_TAG = "settings:diagnostics:start-capture"
 internal const val DIAGNOSTICS_SHARE_LOG_TAG = "settings:diagnostics:share-log"
 internal const val DIAGNOSTICS_CLEAR_LOG_TAG = "settings:diagnostics:clear-log"
 internal const val USAGE_OPEN_TAG = "settings:usage:open"

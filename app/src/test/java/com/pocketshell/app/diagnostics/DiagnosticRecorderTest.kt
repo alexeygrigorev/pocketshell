@@ -13,6 +13,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.time.Instant
 import org.json.JSONObject
 
 @RunWith(RobolectricTestRunner::class)
@@ -104,6 +105,34 @@ class DiagnosticRecorderTest {
 
         assertEquals(listOf(3L, 4L), events.map { it.sequence })
         assertTrue(events.all { it.category == "connection" })
+    }
+
+    @Test
+    fun `log store trims oldest events when ring buffer event limit is exceeded`() {
+        val store = DiagnosticLogStore(
+            logFile = File(context.filesDir, "diagnostics/ring-test.jsonl"),
+            exportDirectory = File(context.cacheDir, DIAGNOSTICS_EXPORT_CACHE_DIR),
+            maxBytes = 0L,
+            maxEvents = 3,
+        )
+
+        (1L..5L).forEach { sequence ->
+            store.appendLine(
+                DiagnosticEventJson.encode(
+                    DiagnosticsEvent(
+                        sequence = sequence,
+                        wallClockTime = Instant.EPOCH.plusSeconds(sequence),
+                        monotonicTimestampNanos = sequence,
+                        category = "action",
+                        name = "tap_$sequence",
+                    ),
+                ),
+            )
+        }
+
+        val events = store.readEvents()
+        assertEquals(listOf(3L, 4L, 5L), events.map { it.sequence })
+        assertEquals(listOf("tap_3", "tap_4", "tap_5"), events.map { it.name })
     }
 
     @Test

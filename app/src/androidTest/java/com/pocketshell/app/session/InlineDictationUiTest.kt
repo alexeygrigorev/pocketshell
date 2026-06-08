@@ -172,8 +172,13 @@ class InlineDictationUiTest {
     }
 
     @Test
-    fun rawSshKeyboardOpenAccessoryShowsHotkeysOnly() {
+    fun rawSshKeyboardOpenAccessoryKeepsStagedAttachmentRemovable() {
         val keyTaps = mutableListOf<String>()
+        val attachment = PromptComposerViewModel.StagedAttachment(
+            remotePath = "~/.pocketshell/attachments/raw-host/shot.png",
+            displayName = "shot.png",
+        )
+        var staged by mutableStateOf(listOf(attachment))
         compose.setContent {
             PocketShellTheme {
                 RawSessionBottomControls(
@@ -186,9 +191,23 @@ class InlineDictationUiTest {
                     onShowKeyboardTap = {},
                     onAddSnippetTap = null,
                     onProjectNavigationTap = {},
+                    stagedAttachments = staged,
+                    onRemoveStagedAttachment = { remotePath ->
+                        staged = staged.filterNot { it.remotePath == remotePath }
+                    },
                 )
             }
         }
+
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertDoesNotExist()
 
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("Ctrl-C").assertIsDisplayed()

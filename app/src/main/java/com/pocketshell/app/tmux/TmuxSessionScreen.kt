@@ -5135,7 +5135,21 @@ internal fun TmuxTerminalBottomControls(
         showConversation = showConversation,
     )
     when (chromeMode) {
-        TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> Unit
+        TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> {
+            if (stagedAttachments.isNotEmpty()) {
+                Column(
+                    modifier = modifier
+                        .fillMaxWidth()
+                        .background(color = PocketShellColors.Surface),
+                ) {
+                    AttachmentTileGrid(
+                        attachments = stagedAttachments,
+                        onRemove = onRemoveStagedAttachment,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
         TmuxTerminalKeyboardChromeMode.HiddenImeControls,
         TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> {
             Column(
@@ -5144,10 +5158,7 @@ internal fun TmuxTerminalBottomControls(
                     .heightIn(min = SessionBottomControlsMinHeight)
                     .background(color = PocketShellColors.Surface),
             ) {
-                if (
-                    stagedAttachments.isNotEmpty() &&
-                    chromeMode == TmuxTerminalKeyboardChromeMode.HiddenImeControls
-                ) {
+                if (stagedAttachments.isNotEmpty()) {
                     AttachmentTileGrid(
                         attachments = stagedAttachments,
                         onRemove = onRemoveStagedAttachment,

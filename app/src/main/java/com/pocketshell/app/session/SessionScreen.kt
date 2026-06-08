@@ -1616,7 +1616,7 @@ internal fun RawSessionBottomControls(
             .heightIn(min = SessionBottomControlsMinHeight)
             .background(color = PocketShellColors.Surface),
     ) {
-        if (stagedAttachments.isNotEmpty() && !showHotkeyAccessory) {
+        if (stagedAttachments.isNotEmpty()) {
             AttachmentTileGrid(
                 attachments = stagedAttachments,
                 onRemove = onRemoveStagedAttachment,

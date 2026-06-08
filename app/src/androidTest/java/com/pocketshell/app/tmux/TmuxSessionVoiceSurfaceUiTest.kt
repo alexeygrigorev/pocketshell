@@ -63,12 +63,13 @@ class TmuxSessionVoiceSurfaceUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun tmuxKeyboardOpenAccessoryShowsHotkeysOnly() {
+    fun tmuxKeyboardOpenAccessoryKeepsStagedAttachmentRemovable() {
         val keyTaps = mutableListOf<String>()
         val attachment = PromptComposerViewModel.StagedAttachment(
             remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
             displayName = "shot.png",
         )
+        var staged by mutableStateOf(listOf(attachment))
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
@@ -84,10 +85,23 @@ class TmuxSessionVoiceSurfaceUiTest {
                     onEnterTap = {},
                     onShowKeyboardTap = {},
                     onAddSnippetTap = {},
-                    stagedAttachments = listOf(attachment),
+                    stagedAttachments = staged,
+                    onRemoveStagedAttachment = { remotePath ->
+                        staged = staged.filterNot { it.remotePath == remotePath }
+                    },
                 )
             }
         }
+
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertDoesNotExist()
 
         compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertIsDisplayed()
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
@@ -103,8 +117,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath)).assertDoesNotExist()
         compose.onNodeWithText("show keyboard").assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("Prompt").assertDoesNotExist()
@@ -147,6 +159,49 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("Command").assertDoesNotExist()
         compose.onNodeWithText("Ready").assertDoesNotExist()
         compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
+    }
+
+    @Test
+    fun tmuxConversationImeOpenRendersOnlyStagedAttachmentStripWhenNeeded() {
+        val attachment = PromptComposerViewModel.StagedAttachment(
+            remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
+            displayName = "shot.png",
+        )
+        var staged by mutableStateOf(listOf(attachment))
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = true,
+                    showConversation = true,
+                    sessionLive = true,
+                    isAgentPane = true,
+                    keyBarExpanded = false,
+                    onKeyBarExpandedChange = {},
+                    onKey = {},
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    stagedAttachments = staged,
+                    onRemoveStagedAttachment = { remotePath ->
+                        staged = staged.filterNot { it.remotePath == remotePath }
+                    },
+                    modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
+                )
+            }
+        }
+
+        compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertDoesNotExist()
     }
 
     @Test

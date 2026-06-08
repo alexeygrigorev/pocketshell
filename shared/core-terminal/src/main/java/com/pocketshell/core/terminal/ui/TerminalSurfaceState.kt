@@ -89,7 +89,7 @@ enum class TerminalRawInputPolicy {
  * @see rememberTerminalSurfaceState
  */
 @Stable
-class TerminalSurfaceState internal constructor(
+class TerminalSurfaceState(
     private val externalProducerDispatcher: CoroutineDispatcher,
 ) {
 

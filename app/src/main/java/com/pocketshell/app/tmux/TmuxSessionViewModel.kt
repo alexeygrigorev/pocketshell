@@ -221,6 +221,15 @@ public class TmuxSessionViewModel @Inject constructor(
         tmuxClientFactoryOverride = factory
     }
 
+    private var terminalSurfaceStateFactory: () -> TerminalSurfaceState = { TerminalSurfaceState() }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setTerminalSurfaceStateFactoryForTest(factory: () -> TerminalSurfaceState) {
+        terminalSurfaceStateFactory = factory
+    }
+
+    private fun newTerminalSurfaceState(): TerminalSurfaceState = terminalSurfaceStateFactory()
+
     private val _panes: MutableStateFlow<List<TmuxPaneState>> =
         MutableStateFlow(emptyList())
 
@@ -1499,7 +1508,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 .filter { it.sessionName == target.sessionName }
                 .sortedWith(compareBy({ it.windowIndex ?: Int.MAX_VALUE }, { it.windowId }, { it.paneIndex }, { it.paneId }))
             for (pane in parsed) {
-                val state = TerminalSurfaceState()
+                val state = newTerminalSurfaceState()
                 val row = TmuxPaneState(
                     paneId = pane.paneId,
                     windowId = pane.windowId,
@@ -4536,7 +4545,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     inCopyMode = p.inCopyMode,
                 )
             } else {
-                val state = TerminalSurfaceState()
+                val state = newTerminalSurfaceState()
                 // Wire the pane-filtered output flow into the new state's
                 // emulator. The producer is launched in bridgeScope so it
                 // outlives recomposition; cancelling the scope (via
@@ -4946,7 +4955,7 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
 
-        val replacementState = TerminalSurfaceState()
+        val replacementState = newTerminalSurfaceState()
         val client = clientRef
         if (client != null && !client.disconnected.value) {
             attachTerminalProducerForPane(
@@ -5001,7 +5010,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "tmux-terminal-surface-recreate pane=$paneId status=${_connectionStatus.value}",
         )
 
-        val replacementState = TerminalSurfaceState()
+        val replacementState = newTerminalSurfaceState()
         val client = clientRef
         if (client != null && !client.disconnected.value) {
             attachTerminalProducerForPane(

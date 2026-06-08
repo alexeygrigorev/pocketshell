@@ -51,6 +51,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
@@ -3107,6 +3108,9 @@ class TmuxSessionViewModelTest {
             registry = registry,
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        vm.setTerminalSurfaceStateFactoryForTest {
+            TerminalSurfaceState(StandardTestDispatcher(testScheduler))
+        }
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
         val client = FakeTmuxClient(paneOutputExtraBufferCapacity = 0).apply {
             decoupleOutputForFromEvents = true
@@ -3163,22 +3167,19 @@ class TmuxSessionViewModelTest {
                         ByteArray(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1),
                     ),
                 )
+                advanceUntilIdle()
+                shadowOf(Looper.getMainLooper()).idle()
+                runCurrent()
 
-                val overflow = withTimeoutOrNull(5_000) {
-                    while (
-                        !vm.panes.value.single().surfaceError ||
-                        diagnostics.eventsNamed("terminal_output_overflow").isEmpty()
-                    ) {
-                        shadowOf(Looper.getMainLooper()).idle()
-                        runCurrent()
-                        delay(10)
-                    }
-                    diagnostics.eventsNamed("terminal_output_overflow").single()
-                }
+                val overflow = diagnostics.eventsNamed("terminal_output_overflow").singleOrNull()
 
                 assertNotNull(
                     "seed-gate live buffer overflow should become a local pane surface error",
                     overflow,
+                )
+                assertTrue(
+                    "seed-gate live buffer overflow should mark the pane surface as errored",
+                    vm.panes.value.single().surfaceError,
                 )
                 val overflowEvent = overflow!!
                 val connectionFailureStatuses = emittedConnectionStatuses.filter { status ->

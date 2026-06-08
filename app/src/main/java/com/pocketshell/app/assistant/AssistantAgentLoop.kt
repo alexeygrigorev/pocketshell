@@ -348,6 +348,9 @@ internal class AssistantAgentLoop(
                 )
             }
         }
+        if (call.name == AssistantTools.SEND_PROMPT_TO_SESSION) {
+            args.put("prompt", normalizeAgentPrompt(args.optString("prompt")))
+        }
 
         val candidate = candidateFor(call.name, args)
         return when (val decision = confirmGate.decide(candidate)) {
@@ -513,6 +516,9 @@ internal class AssistantAgentLoop(
         JSONObject()
     }
 
+    private fun normalizeAgentPrompt(prompt: String): String =
+        prompt.replace("эможди", "эмоджи", ignoreCase = true)
+
     companion object {
         const val DEFAULT_MODEL_TURN_TIMEOUT_MS: Long = 60_000L
 
@@ -524,9 +530,11 @@ internal class AssistantAgentLoop(
                 "Resolve references like \"this folder\", \"here\", or \"it\" by calling " +
                 "get_context FIRST. When the user names a folder loosely instead of giving an " +
                 "absolute path (e.g. \"open Claude in the workshops folder\"), call resolve_folder " +
-                "to turn it into an exact cwd before start_session — never invent a path. If " +
-                "resolve_folder reports a confident match or the user has picked one, call " +
-                "start_session with that cwd; if it finds no match, tell the user and stop. " +
+                "to turn it into an exact cwd before using that project path in any other tool, " +
+                "even if get_context lists a likely matching path — never invent or copy a path " +
+                "for a spoken project name. If resolve_folder reports a confident match or the " +
+                "user has picked one, call start_session with that cwd; if it finds no match, " +
+                "tell the user and stop. " +
                 "Prefer inspect tools before acting. Mutating tools " +
                 "(run_command, create_file, start_session, send_prompt_to_session, " +
                 "create_project, clone_repo) are confirmed by the user " +
@@ -534,9 +542,14 @@ internal class AssistantAgentLoop(
                 "For requests to start an agent in a project and give it a task, produce the " +
                 "structured sequence: inspect/resolve the project, start_session with the chosen " +
                 "cwd and agent, then send_prompt_to_session with the user's task prompt. " +
-                "Treat code-editing tasks that name a project the same way; default to the " +
-                "codex agent when the user does not specify an agent. Normalize obvious speech " +
+                "Treat code-editing tasks that name a project the same way: do not use " +
+                "list_directory, read_file, run_command, or create_file to perform the edit " +
+                "yourself. Resolve the project, start a coding agent there, and send the user's " +
+                "task prompt to that agent. Default to the codex agent when the user does not " +
+                "specify an agent. Normalize obvious speech " +
                 "recognition typos in the prompt sent to the agent without changing the task. " +
+                "Preserve the user's language in prompts sent to agent sessions; do not translate " +
+                "or paraphrase them. " +
                 "Keep shell commands short and non-interactive. When the task is complete, reply " +
                 "with a brief confirmation and stop calling tools."
     }

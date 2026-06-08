@@ -82,7 +82,8 @@ internal object AssistantTools {
                 "match (use its cwd in start_session), an ambiguous result (the user is asked which " +
                 "one and the chosen cwd is returned to you — then call start_session with it), or no " +
                 "match (tell the user it wasn't found and list the nearest folders). Never invent a " +
-                "cwd; always resolve it through this tool first.",
+                "cwd; always resolve it through this tool first. If get_context happens to show a " +
+                "matching path for a spoken project name, still call this tool before acting.",
             parametersJsonSchema = """
                 {"type":"object","properties":{
                   "host":{"type":"string","description":"Saved host name."},
@@ -173,7 +174,8 @@ internal object AssistantTools {
             description = "Send a task prompt to an agent session after it has been started or opened. " +
                 "Use this for action sequences like: resolve a project, start a Codex session in it, " +
                 "then send the user's requested task prompt to that session. MUTATING: the user " +
-                "confirms the exact target session and prompt before it runs.",
+                "confirms the exact target session and prompt before it runs. Preserve the user's " +
+                "language in the prompt; normalize obvious dictation typos but do not translate it.",
             parametersJsonSchema = """
                 {"type":"object","properties":{
                   "session_name":{"type":"string","description":"Target tmux session name returned by start_session or listed by list_sessions."},
@@ -198,7 +200,9 @@ internal object AssistantTools {
             description = "Run a single shell command in the active terminal (also handles " +
                 "\"cd to ...\"). MUTATING: the user confirms the exact command before it runs. " +
                 "Dangerous commands (sudo, rm -rf, shutdown, dd, mkfs, writes to raw block " +
-                "devices) are blocked.",
+                "devices) are blocked. Do not use run_command to perform code-editing tasks in a " +
+                "named project; resolve the project, start an agent session, and send the task " +
+                "prompt to that session instead.",
             parametersJsonSchema = """
                 {"type":"object","properties":{
                   "command":{"type":"string","description":"The exact shell command to run."}

@@ -35,7 +35,7 @@ public enum class AssistantProvider {
  * @property apiKey provider API key.
  * @property baseUrl API base URL (no trailing `/messages` etc. — the client
  *   appends the path). For Anthropic: `https://api.anthropic.com/v1`.
- *   For ZAI: `https://api.z.ai/api/anthropic`. For OpenAI:
+ *   For ZAI: `https://api.z.ai/api/anthropic/v1`. For OpenAI:
  *   `https://api.openai.com/v1`.
  * @property model model id, e.g. `gpt-4o`, `claude-3-5-sonnet-latest`,
  *   `glm-4.6`.
@@ -108,7 +108,7 @@ public data class AssistantSettings(
         public const val DEFAULT_ANTHROPIC_BASE_URL: String = "https://api.anthropic.com/v1"
         public const val DEFAULT_ANTHROPIC_MODEL: String = "claude-3-5-sonnet-latest"
 
-        public const val DEFAULT_ZAI_BASE_URL: String = "https://api.z.ai/api/anthropic"
+        public const val DEFAULT_ZAI_BASE_URL: String = "https://api.z.ai/api/anthropic/v1"
         public const val DEFAULT_ZAI_MODEL: String = "glm-4.6"
     }
 }

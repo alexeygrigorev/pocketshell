@@ -156,7 +156,7 @@ class AnthropicLlmClientTest {
 
     @Test
     fun base_url_injection_targets_zai_host() = runBlocking {
-        // Same client impl, ZAI-style base URL pointed at the mock host.
+        // Same client impl, Anthropic-compatible base URL pointed at the mock host.
         server.enqueue(
             MockResponse().setBody(
                 """{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}""",
@@ -169,6 +169,22 @@ class AnthropicLlmClientTest {
         val recorded = server.takeRequest()
         assertEquals("/api/anthropic/messages", recorded.path)
         assertEquals("glm-4.6", JSONObject(recorded.body.readUtf8()).getString("model"))
+    }
+
+    @Test
+    fun zai_anthropic_root_targets_live_v1_messages_path() {
+        assertEquals(
+            "https://api.z.ai/api/anthropic/v1/messages",
+            anthropicMessagesUrl("https://api.z.ai/api/anthropic"),
+        )
+    }
+
+    @Test
+    fun zai_anthropic_v1_base_targets_messages_path_directly() {
+        assertEquals(
+            "https://api.z.ai/api/anthropic/v1/messages",
+            anthropicMessagesUrl("https://api.z.ai/api/anthropic/v1"),
+        )
     }
 
     @Test

@@ -792,7 +792,7 @@ protocol detail. Put keys and optional overrides in the repo root `.env`:
 ```bash
 ZAI_API_KEY=...
 ZAI_MODEL=glm-4.6
-ZAI_BASE_URL=https://api.z.ai/api/anthropic
+ZAI_BASE_URL=https://api.z.ai/api/anthropic/v1
 ```
 
 The same scenario also covers the Anthropic-compatible configuration slot used
@@ -803,9 +803,12 @@ ZAI Anthropic-compatible Messages endpoint:
 
 ```bash
 ANTHROPIC_API_KEY=...
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic/v1
 ANTHROPIC_MODEL=glm-4.6
 ```
+
+For compatibility with Z.AI's Claude Code examples, the client also accepts
+`https://api.z.ai/api/anthropic` and targets `/v1/messages` internally.
 
 OpenAI coverage uses the OpenAI wire client and defaults from
 `AssistantSettings`:
@@ -822,7 +825,7 @@ Scenario catalog:
 |---|---|---|
 | `openAi_llmZoomcampEmojiSequence_callsExpectedTools` | OpenAI when `OPENAI_API_KEY` is present | exact user request `убери все эможди в ллм зумкампе` resolves to `llm-zoomcamp`, starts `codex`, and sends normalized prompt `убери все эмоджи` |
 | `zai_llmZoomcampEmojiSequence_callsExpectedTools` | ZAI when `ZAI_API_KEY` or `ANTHROPIC_API_KEY` is present | exact user request `убери все эможди в ллм зумкампе` resolves to `llm-zoomcamp`, starts `codex`, and sends normalized prompt `убери все эмоджи` |
-| `zai_llmZoomcampEmojiSequence_revisesAfterCorrection` | ZAI when `ZAI_API_KEY` or `ANTHROPIC_API_KEY` is present | first `start_session` candidate is corrected, then the model emits a revised `start_session` followed by `send_prompt_to_session` |
+| `zai_llmZoomcampEmojiSequence_revisesAfterCorrection` | ZAI when `ZAI_API_KEY` or `ANTHROPIC_API_KEY` is present | first `send_prompt_to_session` candidate is corrected in a continued dialogue, then the model emits and executes a revised `send_prompt_to_session` for the same `llm-zoomcamp` session |
 
 The assertions inspect model tool calls and executed fake actions, not prose:
 tool names, ordering, and important arguments are checked. The model must look

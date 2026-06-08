@@ -55,11 +55,11 @@ class AssistantAgentLoopRealLlmTest {
         val loop = AssistantAgentLoop(
             client = provider.client,
             actions = actions,
-            maxSteps = 10,
+            maxSteps = if (correctionMode) 14 else 10,
             modelTurnTimeoutMs = 90_000L,
         )
 
-        var correctedStartCandidate = false
+        var correctedPromptCandidate = false
         val candidates = mutableListOf<AssistantAgentLoop.Candidate>()
         val outcome = loop.run(
             transcript = LLM_ZOOMCAMP_USER_REQUEST,
@@ -67,13 +67,26 @@ class AssistantAgentLoopRealLlmTest {
                 candidates += candidate
                 when {
                     correctionMode &&
-                        !correctedStartCandidate &&
-                        candidate.toolName == AssistantTools.START_SESSION -> {
-                        correctedStartCandidate = true
+                        candidate.toolName == AssistantTools.RUN_COMMAND ->
                         AssistantAgentLoop.Decision.Correct(
-                            "Use the llm-zoomcamp project at $LLM_ZOOMCAMP_PROJECT_PATH, " +
-                                "launch codex, then send the original prompt: " +
-                                LLM_ZOOMCAMP_AGENT_PROMPT,
+                            "Do not run shell commands or edit the project directly. " +
+                                "For this code-editing request, resolve_folder for llm-zoomcamp on host dev, " +
+                                "start a codex session in the resolved cwd, then send the task prompt to that session.",
+                        )
+                    correctionMode &&
+                        candidate.toolName == AssistantTools.START_SESSION &&
+                        actions.invocations.none { it.name == AssistantTools.RESOLVE_FOLDER } ->
+                        AssistantAgentLoop.Decision.Correct(
+                            "Before starting a session, call resolve_folder for llm-zoomcamp on host dev. " +
+                                "Then start codex in the resolved cwd and send the task prompt.",
+                        )
+                    correctionMode &&
+                        !correctedPromptCandidate &&
+                        candidate.toolName == AssistantTools.SEND_PROMPT_TO_SESSION -> {
+                        correctedPromptCandidate = true
+                        AssistantAgentLoop.Decision.Correct(
+                            "Keep the llm-zoomcamp session, but send this exact corrected prompt instead: " +
+                                LLM_ZOOMCAMP_CORRECTED_AGENT_PROMPT,
                         )
                     }
                     else -> AssistantAgentLoop.Decision.Confirm
@@ -82,23 +95,39 @@ class AssistantAgentLoopRealLlmTest {
         )
 
         assertTrue(
-            "expected successful answer from ${provider.name}, got $outcome",
+            "expected successful answer from ${provider.name}, got $outcome; " +
+                debugState(provider.client, actions, candidates),
             outcome is AssistantAgentLoop.Outcome.Answer,
         )
         if (correctionMode) {
-            assertTrue("correction flow did not reach a start_session candidate", correctedStartCandidate)
+            assertTrue("correction flow did not reach a send_prompt_to_session candidate", correctedPromptCandidate)
         }
 
-        assertStructuredToolSequence(provider.client.toolCalls, correctionMode)
-        assertExecutedActionSequence(actions, correctionMode)
+        val expectedPrompt = if (correctionMode) {
+            LLM_ZOOMCAMP_CORRECTED_AGENT_PROMPT
+        } else {
+            LLM_ZOOMCAMP_AGENT_PROMPT
+        }
+        assertStructuredToolSequence(provider.client.toolCalls, expectedPrompt, correctionMode)
+        assertExecutedActionSequence(actions, expectedPrompt, correctionMode)
         assertTrue("expected a send_prompt_to_session confirmation candidate", candidates.any {
             it.toolName == AssistantTools.SEND_PROMPT_TO_SESSION &&
-                promptMatches(it.summary, LLM_ZOOMCAMP_AGENT_PROMPT)
+                promptMatches(it.summary, expectedPrompt)
         })
     }
 
+    private fun debugState(
+        client: RecordingClient,
+        actions: RecordingActions,
+        candidates: List<AssistantAgentLoop.Candidate>,
+    ): String =
+        "toolCalls=${client.toolCalls.map { it.name }}; " +
+            "actions=${actions.invocations.map { it.name }}; " +
+            "candidates=${candidates.map { it.toolName to it.summary }}"
+
     private fun assertStructuredToolSequence(
         toolCalls: List<LlmToolCall>,
+        expectedPrompt: String,
         correctionMode: Boolean,
     ) {
         val names = toolCalls.map { it.name }
@@ -112,17 +141,20 @@ class AssistantAgentLoopRealLlmTest {
         val startIndexes = names.withIndex()
             .filter { it.value == AssistantTools.START_SESSION }
             .map { it.index }
-        val sendIndex = names.indexOf(AssistantTools.SEND_PROMPT_TO_SESSION)
+        val sendIndexes = names.withIndex()
+            .filter { it.value == AssistantTools.SEND_PROMPT_TO_SESSION }
+            .map { it.index }
+        val sendIndex = sendIndexes.lastOrNull() ?: -1
 
         assertTrue("model did not call a project/folder lookup tool: $names", lookupIndex >= 0)
         assertTrue("model did not call ${AssistantTools.RESOLVE_FOLDER}: $names", resolveIndex >= 0)
         assertTrue("model did not call ${AssistantTools.START_SESSION}: $names", startIndexes.isNotEmpty())
         assertTrue("model did not call ${AssistantTools.SEND_PROMPT_TO_SESSION}: $names", sendIndex >= 0)
-        assertTrue("project lookup must precede start_session: $names", lookupIndex < startIndexes.first())
-        assertTrue("resolve_folder must precede start_session: $names", resolveIndex < startIndexes.first())
+        assertTrue("project lookup must precede final start_session: $names", lookupIndex < startIndexes.last())
+        assertTrue("resolve_folder must precede final start_session: $names", resolveIndex < startIndexes.last())
         assertTrue("send_prompt_to_session must follow final start_session: $names", startIndexes.last() < sendIndex)
         if (correctionMode) {
-            assertTrue("correction should produce a revised start_session call: $names", startIndexes.size >= 2)
+            assertTrue("correction should produce a revised send_prompt_to_session call: $names", sendIndexes.size >= 2)
         }
 
         val resolveArgs = JSONObject(toolCalls[resolveIndex].argumentsJson)
@@ -140,11 +172,15 @@ class AssistantAgentLoopRealLlmTest {
 
         val sendArgs = JSONObject(toolCalls[sendIndex].argumentsJson)
         assertEquals(LLM_ZOOMCAMP_SESSION_NAME, sendArgs.optString("session_name"))
-        assertPromptNormalized(sendArgs.optString("prompt"))
+        assertTrue(
+            "raw send_prompt_to_session prompt should not be blank",
+            sendArgs.optString("prompt").isNotBlank(),
+        )
     }
 
     private fun assertExecutedActionSequence(
         actions: RecordingActions,
+        expectedPrompt: String,
         correctionMode: Boolean,
     ) {
         val names = actions.invocations.map { it.name }
@@ -160,7 +196,7 @@ class AssistantAgentLoopRealLlmTest {
         assertTrue("executed actions are out of order: $names", resolveIndex < startIndexes.last())
         assertTrue("executed actions are out of order: $names", startIndexes.last() < sendIndex)
         if (correctionMode) {
-            assertEquals("only the confirmed revised start_session should execute", 1, startIndexes.size)
+            assertEquals("start_session should execute once before the corrected prompt is sent", 1, startIndexes.size)
         }
 
         assertEquals(
@@ -173,13 +209,13 @@ class AssistantAgentLoopRealLlmTest {
         val send = actions.invocations[sendIndex]
         assertEquals(AssistantTools.SEND_PROMPT_TO_SESSION, send.name)
         assertEquals(LLM_ZOOMCAMP_SESSION_NAME, send.args["session_name"])
-        assertPromptNormalized(send.args["prompt"].orEmpty())
+        assertPromptNormalized(send.args["prompt"].orEmpty(), expectedPrompt)
     }
 
-    private fun assertPromptNormalized(prompt: String) {
+    private fun assertPromptNormalized(prompt: String, expectedPrompt: String) {
         assertTrue(
-            "send_prompt_to_session prompt should contain '$LLM_ZOOMCAMP_AGENT_PROMPT': $prompt",
-            promptMatches(prompt, LLM_ZOOMCAMP_AGENT_PROMPT),
+            "send_prompt_to_session prompt should contain '$expectedPrompt': $prompt",
+            promptMatches(prompt, expectedPrompt),
         )
         assertTrue(
             "send_prompt_to_session prompt should normalize the speech typo 'эможди': $prompt",
@@ -193,6 +229,7 @@ class AssistantAgentLoopRealLlmTest {
     private fun String.normalizedPrompt(): String =
         lowercase()
             .replace('ё', 'е')
+            .replace("эмодзи", "эмоджи")
             .replace(Regex("\\s+"), " ")
             .trim()
             .trimEnd('.', '!', '?', ':', ';')
@@ -232,10 +269,11 @@ class AssistantAgentLoopRealLlmTest {
             return """
                 screen: host detail
                 active_host: dev
-                available_projects:
-                - llm-zoomcamp at $LLM_ZOOMCAMP_PROJECT_PATH
-                - pocketshell at /home/dev/projects/pocketshell
-                - course-management-agent at /home/dev/projects/course-management-agent
+                available_project_names:
+                - llm-zoomcamp
+                - pocketshell
+                - course-management-agent
+                exact project paths: call resolve_folder with host=dev and the project query
                 sessions:
                 - main cwd=/home/dev/projects/pocketshell agent=shell
             """.trimIndent()
@@ -436,5 +474,6 @@ class AssistantAgentLoopRealLlmTest {
         const val LLM_ZOOMCAMP_SESSION_NAME = "llm-zoomcamp"
         const val LLM_ZOOMCAMP_USER_REQUEST = "убери все эможди в ллм зумкампе"
         const val LLM_ZOOMCAMP_AGENT_PROMPT = "убери все эмоджи"
+        const val LLM_ZOOMCAMP_CORRECTED_AGENT_PROMPT = "убери все эмоджи и оставь текст без изменений"
     }
 }

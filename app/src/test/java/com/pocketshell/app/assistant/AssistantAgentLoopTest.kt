@@ -234,6 +234,39 @@ class AssistantAgentLoopTest {
     }
 
     @Test
+    fun sendPrompt_normalizesKnownSpeechTypoBeforeConfirmAndExecute() = runTest {
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(
+                        AssistantTools.SEND_PROMPT_TO_SESSION,
+                        """{"session_name":"llm-zoomcamp","prompt":"убери все эможди в ллм зумкампе"}""",
+                    ),
+                    answer("Sent."),
+                ),
+            ),
+        )
+        val actions = RecordingActions()
+        val candidates = mutableListOf<String>()
+        val loop = AssistantAgentLoop(client, actions)
+
+        val outcome = loop.run("send prompt") { candidate ->
+            candidates += candidate.summary
+            AssistantAgentLoop.Decision.Confirm
+        }
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
+        assertEquals(
+            listOf("Send prompt to llm-zoomcamp: убери все эмоджи в ллм зумкампе"),
+            candidates,
+        )
+        assertEquals(
+            listOf("send_prompt_to_session(llm-zoomcamp,убери все эмоджи в ллм зумкампе)"),
+            actions.calls,
+        )
+    }
+
+    @Test
     fun correctionStopsLaterToolCallsFromSameModelTurn_untilModelReplans() = runTest {
         val client = ScriptedClient(
             ArrayDeque(

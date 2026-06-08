@@ -119,7 +119,7 @@ class AssistantLlmClientFactoryTest {
         )
         val zai = AssistantLlmClientFactory.defaultClientBuilder(
             AssistantProvider.Zai,
-            AssistantProviderConfig("k".toCharArray(), "https://api.z.ai/api/anthropic", "glm-4.6"),
+            AssistantProviderConfig("k".toCharArray(), AssistantSettings.DEFAULT_ZAI_BASE_URL, "glm-4.6"),
         )
         assertTrue(openAi is OpenAiLlmClient)
         assertTrue(anthropic is AnthropicLlmClient)

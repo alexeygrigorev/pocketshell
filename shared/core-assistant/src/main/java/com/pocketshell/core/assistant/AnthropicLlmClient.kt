@@ -2,6 +2,7 @@ package com.pocketshell.core.assistant
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -19,7 +20,7 @@ import java.util.concurrent.TimeUnit
  * The same wire implementation serves both real Anthropic and ZAI. ZAI is
  * product-configured as its own provider, then routed here because its API
  * exposes the Anthropic-compatible Messages protocol at
- * `https://api.z.ai/api/anthropic` with `glm-*` models.
+ * `https://api.z.ai/api/anthropic/v1` with `glm-*` models.
  *
  * Wire mapping:
  *  - System messages → top-level `system` string (Anthropic does not accept
@@ -63,7 +64,7 @@ public class AnthropicLlmClient(
         // plaintext key only materialises for the duration of this call.
         val keyHeader = StringBuilder().append(apiKey).toString()
         val request = Request.Builder()
-            .url(baseUrl.trimEnd('/') + "/messages")
+            .url(anthropicMessagesUrl(baseUrl))
             .addHeader("x-api-key", keyHeader)
             .addHeader("anthropic-version", ANTHROPIC_VERSION)
             .post(payload)
@@ -249,6 +250,20 @@ public fun parseAnthropicResponse(body: String): Result<LlmResponse> {
             stopReason = stopReason,
         ),
     )
+}
+
+internal fun anthropicMessagesUrl(baseUrl: String): String {
+    val trimmed = baseUrl.trimEnd('/')
+    return if (trimmed.isZaiAnthropicRoot()) {
+        "$trimmed/v1/messages"
+    } else {
+        "$trimmed/messages"
+    }
+}
+
+private fun String.isZaiAnthropicRoot(): Boolean {
+    val url = toHttpUrlOrNull() ?: return false
+    return url.host == "api.z.ai" && url.encodedPath.trimEnd('/') == "/api/anthropic"
 }
 
 private fun textContentBlocks(text: String?): JSONArray =

@@ -35,12 +35,12 @@ data class PortForwardPanelState(
     val tunnels: List<TunnelInfo> = emptyList(),
     val error: String? = null,
     // Issue #492/#602: "Show hidden/noisy ports" — when false (default), the
-    // discovery table hides local/remote ports in 1000..9999. When true, every
-    // discovered port is shown.
+    // discovery table shows local/remote ports in the user-useful 1000..10000
+    // range. When true, every discovered port is shown.
     val showAllPorts: Boolean = false,
     // Issue #492: number of discovered ports hidden by the default filter,
-    // i.e. how many extra rows "Show all ports" would reveal. Drives the
-    // checkbox label's "(N hidden)" hint. Always reflects the latest scan
+    // i.e. how many extra rows "Show hidden/noisy ports" would reveal. Drives
+    // the checkbox label's "(N hidden)" hint. Always reflects the latest scan
     // regardless of the current showAllPorts value.
     val hiddenPortCount: Int = 0,
 )
@@ -71,7 +71,7 @@ class PortForwardPanelViewModel @Inject constructor(
     // flows. Panel disposal only detaches those observers; explicit
     // toggle-off or the service Stop action tears the forwarding down.
     private val forwardingController: ForwardingController,
-    // Issue #492: persists the "Show all ports" checkbox across panel
+    // Issue #492: persists the "Show hidden/noisy ports" checkbox across panel
     // navigation and app restarts. Global (not per-host) — see store doc.
     private val showAllPortsStore: ShowAllPortsStore,
 ) : ViewModel() {
@@ -81,16 +81,16 @@ class PortForwardPanelViewModel @Inject constructor(
 
     /**
      * Issue #492: the most recent raw discovery result, kept so toggling
-     * "Show all ports" can re-filter the table without a new SSH scan. Null
-     * until the first discovery completes; reset to null when the panel is
-     * left or a different host is loaded.
+     * "Show hidden/noisy ports" can re-filter the table without a new SSH
+     * scan. Null until the first discovery completes; reset to null when the
+     * panel is left or a different host is loaded.
      */
     private var lastDiscoveredPorts: List<RemotePort> = emptyList()
 
     /**
      * Issue #492: the remote->local remappings snapshot used to build the
-     * last discovery table, kept so a "Show all ports" re-filter rebuilds the
-     * rows with the same local-port mapping it scanned with.
+     * last discovery table, kept so a "Show hidden/noisy ports" re-filter
+     * rebuilds the rows with the same local-port mapping it scanned with.
      */
     private var currentRemappings: Map<Int, Int> = emptyMap()
 
@@ -282,8 +282,9 @@ class PortForwardPanelViewModel @Inject constructor(
     }
 
     /**
-     * Issue #492: toggle the "Show all ports" checkbox. Persists the choice
-     * and re-filters the currently discovered ports without a new SSH scan.
+     * Issue #492: toggle the "Show hidden/noisy ports" checkbox. Persists the
+     * choice and re-filters the currently discovered ports without a new SSH
+     * scan.
      *
      * Only the discovery (auto-forward off) table is re-filtered: when
      * auto-forward is active the rows are the user's chosen tunnels, not a
@@ -598,7 +599,8 @@ class PortForwardPanelViewModel @Inject constructor(
                     !_state.value.autoForwardEnabled
                 ) {
                     // Issue #492: cache the raw scan + remappings so toggling
-                    // "Show all ports" can re-filter without a new SSH scan.
+                    // "Show hidden/noisy ports" can re-filter without a new
+                    // SSH scan.
                     lastDiscoveredPorts = rawPorts
                     currentRemappings = remappings
                     _state.value = _state.value.copy(
@@ -650,9 +652,9 @@ private fun List<RemotePort>.toAvailableTunnels(
     showAll: Boolean = false,
 ): List<TunnelInfo> =
     // Issue #456/#492/#602: de-dupe per remote port and, by default, hide the
-    // noisy 1000..9999 band so the table stays readable. Filtering happens
-    // after applying remappings because either side of a local/remote mapping
-    // can be noisy.
+    // user-useful 1000..10000 band and hide low/system plus high/noisy rows so
+    // the table stays readable. Filtering happens after applying remappings
+    // because either side of a local/remote mapping can be noisy.
     InterestingPortFilter.filter(this, showAll = true)
         .map { remotePort ->
             TunnelInfo(

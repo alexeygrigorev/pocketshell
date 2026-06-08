@@ -7,12 +7,14 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Issue #492: persists the port-forward table's "Show all ports" checkbox.
+ * Issue #492: persists the port-forward table's "Show hidden/noisy ports"
+ * checkbox.
  *
- * By default the table hides noisy local/remote ports in
- * [InterestingPortFilter.HIDDEN_NOISY_RANGE] (`1000..9999`). Ticking "Show all
- * ports" reveals those rows. The user's choice should survive panel navigation
- * and app restarts, so it is persisted here.
+ * By default the table shows local/remote ports in
+ * [InterestingPortFilter.DEFAULT_VISIBLE_RANGE] (`1000..10000`) and hides rows
+ * outside that user-useful band. Ticking "Show hidden/noisy ports" reveals
+ * those rows. The user's choice should survive panel navigation and app
+ * restarts, so it is persisted here.
  *
  * ## Global, not per-host
  *
@@ -46,7 +48,7 @@ class ShowAllPortsStore @Inject constructor(
     fun isShowAll(): Boolean =
         runCatching { prefs.getBoolean(KEY_SHOW_ALL, false) }.getOrDefault(false)
 
-    /** Persist the "Show all ports" choice. A synchronous `apply()` suffices. */
+    /** Persist the "Show hidden/noisy ports" choice. A synchronous `apply()` suffices. */
     fun setShowAll(showAll: Boolean) {
         prefs.edit().putBoolean(KEY_SHOW_ALL, showAll).apply()
     }

@@ -184,11 +184,12 @@ fun PortForwardPanelScreen(
                 state.tunnels
             }
 
-            // Issue #602: the table hides noisy ports in 1000..9999 by
-            // default. Keep that true even when auto-forward is active so a
-            // foreground forwarding session with many app/dev ports does not
-            // recreate the noisy dogfood screen. The tunnels keep running;
-            // this only filters the rows rendered in the panel.
+            // Issue #602: the table shows the user-useful 1000..10000 range by
+            // default and hides low/system plus high/noisy rows. Keep that true
+            // even when auto-forward is active so a foreground forwarding
+            // session with many noisy ports does not recreate the dogfood
+            // screen. The tunnels keep running; this only filters the rows
+            // rendered in the panel.
             ShowAllPortsRow(
                 checked = state.showAllPorts,
                 hiddenCount = hiddenPortCount,
@@ -374,9 +375,9 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
 
 /**
  * Issue #492/#602: hidden/noisy ports checkbox. Unchecked = the default
- * filtered table (hides local/remote ports in 1000..9999). Checked = every
- * discovered port including the hidden/noisy ports. The label surfaces the
- * hidden-row count so the user knows the table is filtered.
+ * filtered table (shows local/remote ports in 1000..10000). Checked = every
+ * discovered port including hidden/noisy rows outside that range. The label
+ * surfaces the hidden-row count so the user knows the table is filtered.
  */
 @Composable
 private fun ShowAllPortsRow(

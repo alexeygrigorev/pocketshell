@@ -33,12 +33,13 @@ import org.junit.runner.RunWith
 /**
  * Issue #492 screenshot test — renders the port-forward discovery table with a
  * deterministic fake host whose `ss -tlnp` output mixes:
- *  - noisy ports in 1000..9999 (2222 / 3000 / 8080) hidden by default, and
- *  - system/high ports (22 / 443 / 11434 / 49152) shown by default.
+ *  - user-useful ports in 1000..10000 (2222 / 3000 / 8080) shown by default,
+ *    and
+ *  - low/system plus high ports (22 / 443 / 11434 / 49152) hidden by default.
  *
  * Two artifacts prove the acceptance criteria:
- *  - `show-all-ports-default.png` — the default filtered table ("Show all
- *    ports" unchecked with the hidden noisy-port count).
+ *  - `show-all-ports-default.png` — the default filtered table ("Show
+ *    hidden/noisy ports" unchecked with the hidden noisy-port count).
  *  - `show-all-ports-checked.png` — after clicking the checkbox, the full
  *    table including the previously hidden/noisy ports.
  */
@@ -113,18 +114,18 @@ class ShowAllPortsScreenshotTest {
         compose.waitUntil(timeoutMillis = 15_000) {
             val state = viewModel.state.value
             state.connectionState == PortForwardConnectionState.Connected &&
-                state.tunnels.map { it.remotePort } == listOf(22, 443, 11434, 49152)
+                state.tunnels.map { it.remotePort } == listOf(2222, 3000, 8080)
         }
         compose.waitForIdle()
         SystemClock.sleep(300)
         captureFullDevice(File(ensureArtifactDir(), "show-all-ports-default.png"))
 
-        // Tick "Show all ports" and capture the full table.
+        // Tick "Show hidden/noisy ports" and capture the full table.
         compose.onNodeWithTag(SHOW_ALL_PORTS_TEST_TAG).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             viewModel.state.value.showAllPorts &&
                 viewModel.state.value.tunnels.map { it.remotePort } ==
-                listOf(22, 443, 11434, 49152, 2222, 3000, 8080)
+                listOf(2222, 3000, 8080, 22, 443, 11434, 49152)
         }
         compose.waitForIdle()
         SystemClock.sleep(300)
@@ -161,8 +162,8 @@ class ShowAllPortsScreenshotTest {
     }
 
     private companion object {
-        // Noisy ports in 1000..9999 are hidden by default. System and high
-        // ports stay visible unless the user enables the full table.
+        // Ports in 1000..10000 are visible by default. Low/system and high
+        // ports stay hidden unless the user enables the full table.
         val NOISY_SS_OUTPUT: String = """
             0.0.0.0:22 users:(("sshd",pid=1,fd=3))
             0.0.0.0:443 users:(("nginx",pid=2,fd=3))

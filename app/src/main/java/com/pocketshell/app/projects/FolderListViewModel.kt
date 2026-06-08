@@ -1045,9 +1045,9 @@ class FolderListViewModel internal constructor(
                 lastHistoryProjectFoldersByRoot = result.historyProjectFoldersByRoot
                 lastResolvedWatchedRootPaths = result.resolvedWatchedRootPaths
                 // Issue #456/#602: filter discovery to interesting ports
-                // (de-dupe and hide noisy 1000..9999 rows by default) so the
-                // host card's "N ports" count and the panel agree and the
-                // card never reflects an ~80-port dump.
+                // (de-dupe and show the user-useful 1000..10000 range by
+                // default) so the host card's "N ports" count and the panel
+                // agree and the card never reflects an ~80-port dump.
                 lastDiscoveredPorts = InterestingPortFilter.filter(result.discoveredPorts).map { port ->
                     HostDiscoveredPort(
                         remotePort = port.port,

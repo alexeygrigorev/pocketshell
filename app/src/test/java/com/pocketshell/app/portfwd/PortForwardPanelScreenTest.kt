@@ -65,27 +65,28 @@ class PortForwardPanelScreenTest {
     }
 
     @Test
-    fun `visibleTunnelRows hides noisy local or remote ports by default`() {
+    fun `visibleTunnelRows hides rows outside useful local or remote port range by default`() {
         val tunnels = listOf(
             forwardingTunnel(remotePort = 22),
             forwardingTunnel(remotePort = 80),
             forwardingTunnel(remotePort = 443),
             forwardingTunnel(remotePort = 3000),
             forwardingTunnel(remotePort = 8080),
+            forwardingTunnel(remotePort = 10000),
             forwardingTunnel(remotePort = 11434),
             forwardingTunnel(remotePort = 49152),
-            forwardingTunnel(remotePort = 11435, localPort = 9000),
+            forwardingTunnel(remotePort = 9000, localPort = 11435),
         )
 
         assertEquals(
-            listOf(22, 80, 443, 11434, 49152),
+            listOf(3000, 8080, 10000),
             visibleTunnelRows(tunnels, showAllPorts = false).map { it.remotePort },
         )
-        assertEquals(3, hiddenTunnelRowCount(tunnels))
+        assertEquals(6, hiddenTunnelRowCount(tunnels))
     }
 
     @Test
-    fun `visibleTunnelRows reveals low forwarded ports in show-all mode`() {
+    fun `visibleTunnelRows reveals hidden forwarded ports in show-all mode`() {
         val tunnels = listOf(
             forwardingTunnel(remotePort = 8080),
             forwardingTunnel(remotePort = 49152),
@@ -93,11 +94,11 @@ class PortForwardPanelScreenTest {
             forwardingTunnel(remotePort = 443),
             forwardingTunnel(remotePort = 11434),
             forwardingTunnel(remotePort = 3000),
-            forwardingTunnel(remotePort = 11435, localPort = 9000),
+            forwardingTunnel(remotePort = 9000, localPort = 11435),
         )
 
         assertEquals(
-            listOf(22, 443, 11434, 49152, 3000, 8080, 11435),
+            listOf(3000, 8080, 22, 443, 9000, 11434, 49152),
             visibleTunnelRows(tunnels, showAllPorts = true).map { it.remotePort },
         )
     }

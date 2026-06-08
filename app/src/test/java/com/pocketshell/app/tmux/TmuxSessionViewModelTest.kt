@@ -3081,7 +3081,9 @@ class TmuxSessionViewModelTest {
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
-        val client = FakeTmuxClient()
+        val client = FakeTmuxClient().apply {
+            decoupleOutputForFromEvents = true
+        }
         try {
             vm.replaceClientForTest(
                 hostId = 7L,
@@ -3106,6 +3108,17 @@ class TmuxSessionViewModelTest {
                 ),
             )
             runCurrent()
+            val paneOutputSubscribersReady = withTimeoutOrNull(5_000) {
+                client.emittedPaneOutputs.subscriptionCount.first { subscriberCount ->
+                    // Terminal producer, output-activity observer, and port detector.
+                    subscriberCount >= 3
+                }
+                true
+            } ?: false
+            assertTrue(
+                "test must wait until pane-output collectors are subscribed",
+                paneOutputSubscribersReady,
+            )
 
             val emittedConnectionStatuses =
                 mutableListOf<TmuxSessionViewModel.ConnectionStatus>()
@@ -3117,26 +3130,30 @@ class TmuxSessionViewModelTest {
             runCurrent()
 
             try {
-                client.emittedEvents.emit(
+                client.emittedPaneOutputs.emit(
                     ControlEvent.Output(
                         "%0",
                         ByteArray(SshTerminalBridge.MAX_SEED_GATE_LIVE_BUFFER_BYTES + 1),
                     ),
                 )
 
-                val surfaced = withTimeoutOrNull(5_000) {
-                    while (!vm.panes.value.single().surfaceError) {
+                val overflow = withTimeoutOrNull(5_000) {
+                    while (
+                        !vm.panes.value.single().surfaceError ||
+                        diagnostics.eventsNamed("terminal_output_overflow").isEmpty()
+                    ) {
                         shadowOf(Looper.getMainLooper()).idle()
                         runCurrent()
                         delay(10)
                     }
-                    true
-                } ?: false
+                    diagnostics.eventsNamed("terminal_output_overflow").single()
+                }
 
-                assertTrue(
+                assertNotNull(
                     "seed-gate live buffer overflow should become a local pane surface error",
-                    surfaced,
+                    overflow,
                 )
+                val overflowEvent = overflow!!
                 val connectionFailureStatuses = emittedConnectionStatuses.filter { status ->
                     status is TmuxSessionViewModel.ConnectionStatus.Connecting ||
                         status is TmuxSessionViewModel.ConnectionStatus.Reconnecting ||
@@ -3166,9 +3183,8 @@ class TmuxSessionViewModelTest {
                     client.disconnectedSignal.value,
                 )
 
-                val overflow = diagnostics.eventsNamed("terminal_output_overflow").single()
-                assertEquals("seed_gate_live_buffer", overflow.fields["source"])
-                assertEquals("%0", overflow.fields["pane"])
+                assertEquals("seed_gate_live_buffer", overflowEvent.fields["source"])
+                assertEquals("%0", overflowEvent.fields["pane"])
                 assertTrue(
                     "local overflow must not be logged as passive SSH/tmux EOF",
                     diagnostics.eventsNamed("passive_disconnect").isEmpty(),

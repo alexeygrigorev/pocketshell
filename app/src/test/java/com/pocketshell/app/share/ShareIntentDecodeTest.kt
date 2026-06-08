@@ -95,6 +95,23 @@ class ShareIntentDecodeTest {
     }
 
     @Test
+    fun singleSendTextPlainStreamStagesTxtAsFileItem() {
+        val uri = Uri.parse("content://reports/crash-report.txt")
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_TITLE, "crash-report.txt")
+        }
+
+        val items = decodeShareIntent(intent, context.contentResolver)
+
+        assertEquals(1, items.size)
+        val item = items.single() as ShareableItem.UriItem
+        assertEquals(uri, item.uri)
+        assertEquals("crash-report.txt", item.displayName)
+    }
+
+    @Test
     fun singleSendTextStagesOneTextItem() {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"

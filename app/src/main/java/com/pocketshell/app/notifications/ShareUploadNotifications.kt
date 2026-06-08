@@ -16,10 +16,9 @@ import com.pocketshell.app.R
  * from a `ShareActivity` once a transfer resolves.
  *
  * Failure notifications surface a specific, human-readable error
- * string (set by the caller) and are non-tappable — there is nothing
- * actionable to route to in the first cut. Success is intentionally
- * silent outside the in-app result surface: the user initiated the
- * share and does not need a post-upload Android notification.
+ * string (set by the caller). Success is intentionally silent outside
+ * the in-app result surface: the user initiated the share and does not
+ * need a post-upload Android notification.
  */
 object ShareUploadNotifications {
     private const val CHANNEL_ID: String = "share_upload_result"

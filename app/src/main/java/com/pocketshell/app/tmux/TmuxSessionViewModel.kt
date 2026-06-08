@@ -2896,7 +2896,28 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun isStaleChannelSymptom(cause: Throwable?): Boolean =
-        isChannelOpenFailure(cause) || isTmuxCommandTimeout(cause)
+        isChannelOpenFailure(cause) || isTmuxCommandTimeout(cause) || isTmuxEofWriteFailure(cause)
+
+    private fun isTmuxEofWriteFailure(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (
+                message != null &&
+                message.contains("failed to write tmux command", ignoreCase = true) &&
+                (
+                    message.contains("EOF", ignoreCase = true) ||
+                        message.contains("closed", ignoreCase = true) ||
+                        message.contains("broken pipe", ignoreCase = true)
+                    )
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
 
     private fun isTmuxCommandTimeout(cause: Throwable?): Boolean {
         var current: Throwable? = cause
@@ -6433,6 +6454,14 @@ public class TmuxSessionViewModel @Inject constructor(
             markAgentTailUnavailable(paneId, detection)
         }
         return job
+    }
+
+    internal suspend fun startAgentConversationForPaneForTest(
+        paneId: String,
+        session: SshSession,
+        detection: AgentDetection,
+    ) {
+        startAgentConversationForPane(session, paneId, detection)
     }
 
     /**

@@ -5821,6 +5821,26 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun disconnectedSshWhenAgentTailStartsMarksConversationUnavailableWithoutCrashing() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+
+        vm.startAgentConversationForPaneForTest(
+            paneId = "%0",
+            session = FakeSshSession(
+                tailFailure = SshException("SSH session is not connected"),
+            ),
+            detection = detection,
+        )
+        advanceUntilIdle()
+
+        val state = vm.agentConversations.value["%0"]
+        assertEquals(AgentConversationSyncStatus.LogUnavailable, state?.syncStatus)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
     fun retryAgentLogTailForPaneRestartsOneTailAndKeepsTmuxConnected() = runTest {
         val vm = newVm()
         val detection = newClaudeDetection()
@@ -10153,6 +10173,7 @@ class TmuxSessionViewModelTest {
         private val wcOutput: String = "0\n",
         private val initialEventsOutput: String = "",
         private val agentLogLines: List<String>? = null,
+        private val tailFailure: Throwable? = null,
         private val detectionOutput: String = "",
         private val processOutput: String = "",
         // Issue #448: ports the `ss -tlnp` confirm scan reports as
@@ -10218,6 +10239,7 @@ class TmuxSessionViewModelTest {
 
         override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job {
             tailCalls += 1
+            tailFailure?.let { throw it }
             return tailJob
         }
 
@@ -10228,6 +10250,7 @@ class TmuxSessionViewModelTest {
         ): kotlinx.coroutines.Job {
             tailFromLineCalls += path to fromLineExclusive
             tailCalls += 1
+            tailFailure?.let { throw it }
             return tailJob
         }
 

@@ -575,11 +575,32 @@ class ShareViewModelTest {
 
     @Test
     @Config(sdk = [28])
-    fun startUploadFailureStillPostsAndroidNotification() = runTest {
+    fun startUploadFailureInForegroundDoesNotPostDuplicateAndroidNotification() = runTest {
         val vm = newVm(ActiveTmuxClients())
         val host = seededHost(id = 36L, name = "hetzner")
         val fake = FakeUploader(failNames = setOf("bad.png")).also { vm.uploader = it }
         vm.setItem(uriItem("bad.png"))
+        val manager = context.getSystemService(NotificationManager::class.java)
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals("Permission denied", failed.message)
+        assertTrue(
+            "foreground share flow already shows the failure surface; no duplicate notification expected",
+            manager.activeNotifications.isEmpty(),
+        )
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun startUploadFailureInBackgroundPostsAndroidNotificationWithoutFakeActions() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 36L, name = "hetzner")
+        val fake = FakeUploader(failNames = setOf("bad.png")).also { vm.uploader = it }
+        vm.setItem(uriItem("bad.png"))
+        vm.setShareFlowForeground(false)
         val manager = context.getSystemService(NotificationManager::class.java)
 
         vm.startUpload(host)
@@ -596,6 +617,10 @@ class ShareViewModelTest {
         assertEquals(
             "Permission denied",
             posted?.notification?.extras?.getCharSequence("android.text")?.toString(),
+        )
+        assertTrue(
+            "background notification must not advertise actions that cannot restore the original share payload",
+            posted?.notification?.actions.isNullOrEmpty(),
         )
     }
 
@@ -991,6 +1016,65 @@ class ShareViewModelTest {
     }
 
     @Test
+    @Config(sdk = [28])
+    fun stageIntoSessionMaterializesTextShareAsTxtAttachmentAndEmitsLaunch() {
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
+            try {
+                val registry = ActiveTmuxClients()
+                val vm = newVm(registry)
+                val host = seededHost(id = 53L, name = "gpu-box")
+                registry.register(
+                    hostId = host.id,
+                    hostName = host.name,
+                    hostname = host.hostname,
+                    port = host.port,
+                    username = host.username,
+                    keyPath = "/tmp/key",
+                    client = FakeTmuxClient(),
+                )
+                val fakeSession = FakeStagingSshSession()
+                vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
+                vm.setItem(
+                    ShareableItem.TextItem(
+                        text = "Exception summary: SshException\nTop frame: RealSshSession.ensureConnected",
+                        displayName = "crash-report",
+                    ),
+                )
+
+                val session = ActiveSessionTarget(
+                    sessionName = "scratch",
+                    cwd = "/home/alexey/git/live",
+                    label = "scratch",
+                    focused = true,
+                )
+
+                vm.stageIntoSession(host, session)
+                val launch = kotlinx.coroutines.withTimeout(5_000L) {
+                    vm.sessionLaunch.first()
+                }
+
+                assertEquals(host.id, launch.hostId)
+                val staged = launch.attachmentPaths.single()
+                assertTrue(
+                    "text crash reports must stage as a .txt attachment, got '$staged'",
+                    staged.endsWith(".txt"),
+                )
+                assertTrue(
+                    "the staged text bytes must be uploaded",
+                    fakeSession.uploadedFileBytes.single().decodeToString()
+                        .contains("SshException"),
+                )
+                assertTrue("the staging session must be closed", fakeSession.closed)
+            } finally {
+                kotlinx.coroutines.Dispatchers.setMain(
+                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
+                )
+            }
+        }
+    }
+
+    @Test
     fun stageIntoSessionWithNoLiveClientSurfacesFailure() = runTest {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
@@ -1016,6 +1100,7 @@ class ShareViewModelTest {
     private class FakeStagingSshSession : com.pocketshell.core.ssh.SshSession {
         val execCommands = mutableListOf<String>()
         val uploadedRemotePaths = mutableListOf<String>()
+        val uploadedFileBytes = mutableListOf<ByteArray>()
         var closed: Boolean = false
 
         override val isConnected: Boolean get() = !closed
@@ -1040,6 +1125,7 @@ class ShareViewModelTest {
 
         override suspend fun uploadFile(file: java.io.File, remotePath: String): String {
             uploadedRemotePaths += remotePath
+            uploadedFileBytes += file.readBytes()
             return remotePath
         }
 

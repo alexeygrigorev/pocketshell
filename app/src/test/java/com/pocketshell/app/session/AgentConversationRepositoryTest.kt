@@ -63,6 +63,33 @@ class AgentConversationRepositoryTest {
         assertFalse(session.execCommands.single().contains("tail -n"))
     }
 
+    @Test
+    fun tailEventsFromLineReturnsNullWhenSshTailStartThrowsDisconnected() = runTest {
+        val session = FakeSshSession(
+            tailFailure = SshException("SSH session is not connected"),
+        )
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/alexey/.claude/projects/pocketshell/session.jsonl",
+            sessionId = "session",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val job = AgentConversationRepository().tailEventsFromLine(
+            session = session,
+            detection = detection,
+            fromLineExclusive = 42L,
+        ) {
+            error("no events should be emitted when tail cannot start")
+        }
+
+        assertEquals(null, job)
+        assertEquals(
+            listOf("/home/alexey/.claude/projects/pocketshell/session.jsonl" to 42L),
+            session.tailFromLineCalls,
+        )
+    }
+
     // ----------------------------------------------------------------
     // Issue #460: the Conversation tab dropped the user's own messages.
     // Both the parsed feed AND the bounded-distinct reconciliation must
@@ -887,6 +914,7 @@ class AgentConversationRepositoryTest {
         private val hostWideProcessOutput: String = "",
         private val wcOutput: String = "0\n",
         private val tailLines: List<String> = emptyList(),
+        private val tailFailure: Throwable? = null,
         private val agentLogOutput: String = "",
         private val jsonlTailOutput: String = "",
     ) : SshSession {
@@ -918,6 +946,7 @@ class AgentConversationRepositoryTest {
 
         override fun tail(path: String, onLine: (String) -> Unit): Job {
             tailCalls += 1
+            tailFailure?.let { throw it }
             tailLines.forEach(onLine)
             return Job()
         }
@@ -925,6 +954,7 @@ class AgentConversationRepositoryTest {
         override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job {
             tailFromLineCalls += path to fromLineExclusive
             tailCalls += 1
+            tailFailure?.let { throw it }
             tailLines.forEach(onLine)
             return Job()
         }

@@ -22,6 +22,7 @@ import com.pocketshell.core.terminal.input.BracketedPaste
 import com.pocketshell.core.tmux.TmuxClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -92,6 +93,8 @@ internal class ShareViewModel @Inject constructor(
 
     private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
     val uploadState: StateFlow<UploadState> = _uploadState.asStateFlow()
+
+    private val _shareFlowForeground = MutableStateFlow(true)
 
     /** Two-option text dispatch: the activity sets this once before [setItem]. */
     private val _dispatchChoice = MutableStateFlow<TextDispatchChoice?>(null)
@@ -214,6 +217,10 @@ internal class ShareViewModel @Inject constructor(
 
     /** Single-item staging convenience used by tests and callers. */
     fun setItem(item: ShareableItem) = setItems(listOf(item))
+
+    fun setShareFlowForeground(foreground: Boolean) {
+        _shareFlowForeground.value = foreground
+    }
 
     fun chooseSaveAsFile() {
         _dispatchChoice.value = TextDispatchChoice.SaveAsFile
@@ -347,7 +354,7 @@ internal class ShareViewModel @Inject constructor(
             val message = "No active session on ${host.name} — save to inbox instead"
             android.util.Log.w(LOG_TAG, "share into session aborted: $message")
             _uploadState.value = UploadState.Failed(host.name, message)
-            ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+            notifyShareFailure(host.name, message)
             return
         }
         _targetSelection.value = null
@@ -365,7 +372,7 @@ internal class ShareViewModel @Inject constructor(
                 val message = "No SSH key for host ${host.name}"
                 android.util.Log.w(LOG_TAG, "share into session aborted: $message")
                 _uploadState.value = UploadState.Failed(host.name, message)
-                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                notifyShareFailure(host.name, message)
                 return@launch
             }
 
@@ -381,7 +388,7 @@ internal class ShareViewModel @Inject constructor(
                 val message = error.message ?: "Could not connect to ${host.name}"
                 android.util.Log.w(LOG_TAG, "share into session connect failed: $message", error)
                 _uploadState.value = UploadState.Failed(host.name, message)
-                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                notifyShareFailure(host.name, message)
                 return@launch
             }
 
@@ -390,17 +397,18 @@ internal class ShareViewModel @Inject constructor(
             // remote directory the user would see attaching from inside the
             // session — the #544 mechanic, no parallel upload location.
             val scopeKey = "host-${host.id}-${session.sessionName}"
-            val stager = PromptAttachmentStager(
-                resolver = applicationContext.contentResolver,
-                cacheDir = applicationContext.cacheDir,
-            )
-            val uris: List<Uri> = payload.mapNotNull { it as? ShareableItem.UriItem }.map { it.uri }
-            val result = if (uris.isEmpty()) {
-                Result.failure(
-                    IllegalStateException("Only file shares can be staged into a session"),
-                )
-            } else {
-                sshSession.use { live -> stager.stage(live, scopeKey, uris) }
+            val result = sshSession.use { live ->
+                runCatching {
+                    val stagedInput = materializeSessionStagingUris(payload)
+                    try {
+                        PromptAttachmentStager(
+                            resolver = applicationContext.contentResolver,
+                            cacheDir = applicationContext.cacheDir,
+                        ).stage(live, scopeKey, stagedInput.uris).getOrThrow()
+                    } finally {
+                        stagedInput.deleteTempFiles()
+                    }
+                }
             }
 
             result.fold(
@@ -415,7 +423,7 @@ internal class ShareViewModel @Inject constructor(
                         )
                         val message = "No files were staged into ${session.sessionName}"
                         _uploadState.value = UploadState.Failed(host.name, message)
-                        ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                        notifyShareFailure(host.name, message)
                         return@fold
                     }
                     android.util.Log.i(
@@ -456,7 +464,7 @@ internal class ShareViewModel @Inject constructor(
                     val message = error.message ?: "Could not stage into ${session.sessionName}"
                     android.util.Log.w(LOG_TAG, "share into session staging failed: $message", error)
                     _uploadState.value = UploadState.Failed(host.name, message)
-                    ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                    notifyShareFailure(host.name, message)
                 },
             )
         }
@@ -563,7 +571,7 @@ internal class ShareViewModel @Inject constructor(
                 android.util.Log.w(LOG_TAG, "share upload aborted: $message")
                 _uploadState.value =
                     UploadState.Failed(host.name, message, totalCount = payload.size)
-                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                notifyShareFailure(host.name, message)
                 return@launch
             }
 
@@ -666,7 +674,7 @@ internal class ShareViewModel @Inject constructor(
                     successCount = 0,
                     failedNames = failedNames,
                 )
-                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                notifyShareFailure(host.name, message)
             }
             else -> {
                 DiagnosticEvents.record(
@@ -693,7 +701,7 @@ internal class ShareViewModel @Inject constructor(
                     successCount = successCount,
                     failedNames = failedNames,
                 )
-                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                notifyShareFailure(host.name, message)
             }
         }
     }
@@ -755,7 +763,7 @@ internal class ShareViewModel @Inject constructor(
             val message = "No active session on ${host.name} — save to inbox instead"
             android.util.Log.w(LOG_TAG, "share paste aborted: $message")
             _uploadState.value = UploadState.Failed(host.name, message)
-            ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+            notifyShareFailure(host.name, message)
             return
         }
         _uploadState.value = UploadState.Running(host.name)
@@ -790,10 +798,52 @@ internal class ShareViewModel @Inject constructor(
                     val message = error.message ?: "Paste failed"
                     android.util.Log.w(LOG_TAG, "share paste failed: $message", error)
                     _uploadState.value = UploadState.Failed(host.name, message)
-                    ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+                    notifyShareFailure(host.name, message)
                 },
             )
         }
+    }
+
+    private fun notifyShareFailure(hostName: String, message: String) {
+        if (_shareFlowForeground.value) return
+        ShareUploadNotifications.showFailure(applicationContext, hostName, message)
+    }
+
+    private data class SessionStagingInput(
+        val uris: List<Uri>,
+        val tempFiles: List<File>,
+    ) {
+        fun deleteTempFiles() {
+            tempFiles.forEach { it.delete() }
+        }
+    }
+
+    private fun materializeSessionStagingUris(payload: List<ShareableItem>): SessionStagingInput {
+        val uris = mutableListOf<Uri>()
+        val tempFiles = mutableListOf<File>()
+        for (item in payload) {
+            when (item) {
+                is ShareableItem.UriItem -> uris += item.uri
+                is ShareableItem.FileItem -> uris += Uri.fromFile(item.file)
+                is ShareableItem.TextItem -> {
+                    val file = materializeTextShare(item)
+                    tempFiles += file
+                    uris += Uri.fromFile(file)
+                }
+            }
+        }
+        return SessionStagingInput(uris = uris, tempFiles = tempFiles)
+    }
+
+    private fun materializeTextShare(item: ShareableItem.TextItem): File {
+        val dir = File(applicationContext.cacheDir, "share-session-text").also { it.mkdirs() }
+        val sanitised = FilenameSanitiser.sanitise(
+            item.displayName,
+            defaultExtension = item.fallbackExtension ?: "txt",
+        ).render()
+        val file = File(dir, "${System.nanoTime()}-$sanitised")
+        file.writeText(item.text, Charsets.UTF_8)
+        return file
     }
 
     /**

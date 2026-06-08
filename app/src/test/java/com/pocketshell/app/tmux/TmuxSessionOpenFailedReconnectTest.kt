@@ -214,6 +214,72 @@ class TmuxSessionOpenFailedReconnectTest {
         assertEquals(listOf("%1"), vm.panes.value.map { it.paneId })
     }
 
+    @Test
+    fun reconnectRecoversFromListPanesEofWriteByEvictingPoisonedTransport() = runTest {
+        val poisonedSession = AlwaysConnectedSession(id = "poisoned")
+        val healthySession = AlwaysConnectedSession(id = "healthy")
+        val connector = TwoSessionConnector(poisonedSession, healthySession)
+        val registry = ActiveTmuxClients()
+        val vm = TestNewVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+        )
+
+        vm.setAutoReconnectDelaysForTest(emptyList())
+
+        val recoveredClient = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            if (session === poisonedSession) {
+                FakeTmuxClient().apply {
+                    closeAndThrowOnCommandPrefix = "list-panes"
+                    closeAndThrowException = TmuxClientException(
+                        "failed to write tmux command `list-panes`: Getting data on EOF'ed stream",
+                    )
+                }
+            } else {
+                assertEquals("work", sessionName)
+                recoveredClient
+            }
+        }
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+
+        val failed = vm.connectionStatus.value
+        assertTrue(
+            "first connect should surface the list-panes EOF write, got $failed",
+            failed is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            "the failure message should mention EOF, was " +
+                (failed as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            failed.message.contains("EOF", ignoreCase = true),
+        )
+        assertTrue("Reconnect must remain available after list-panes EOF", vm.canReconnect.value)
+        assertTrue("poisoned lease should be closed when EOF write is classified stale", poisonedSession.closed)
+
+        assertTrue(vm.reconnect())
+        advanceUntilIdle()
+
+        assertEquals(
+            "Reconnect must open a fresh transport after stale list-panes EOF",
+            2,
+            connector.connectCount,
+        )
+        val recovered = vm.connectionStatus.value
+        assertTrue("Reconnect must recover to Connected, got $recovered", recovered is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(listOf("%1"), vm.panes.value.map { it.paneId })
+    }
+
     private fun FakeTmuxClient.withSinglePaneRow(
         sessionName: String,
         paneId: String,

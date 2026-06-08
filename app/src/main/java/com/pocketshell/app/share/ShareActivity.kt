@@ -77,6 +77,16 @@ class ShareActivity : FragmentActivity() {
         watchSessionLaunch()
     }
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.setShareFlowForeground(true)
+    }
+
+    override fun onStop() {
+        viewModel.setShareFlowForeground(false)
+        super.onStop()
+    }
+
     private fun watchSessionLaunch() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {

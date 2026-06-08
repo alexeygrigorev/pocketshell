@@ -143,6 +143,11 @@ class TerminalSurfaceStateInputRoutingTest {
 
         try {
             val chunks = issue576FragmentedAnsiBurstChunks()
+            val emittedBytes = chunks.sumOf { it.size }
+            assertTrue(
+                "test fixture drift: issue #576 burst must stay high-volume, bytes=$emittedBytes",
+                emittedBytes >= ISSUE_576_BURST_MIN_BYTES,
+            )
             val sender = launch {
                 chunks.forEach { chunk -> stdout.emit(chunk) }
             }
@@ -470,5 +475,6 @@ class TerminalSurfaceStateInputRoutingTest {
 
     private companion object {
         private const val ISSUE_576_DONE_MARKER = "ISSUE576-DONE"
+        private const val ISSUE_576_BURST_MIN_BYTES = 250_000
     }
 }

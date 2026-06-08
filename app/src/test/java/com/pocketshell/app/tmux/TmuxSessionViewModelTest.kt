@@ -2761,6 +2761,7 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun codexScaleTmuxOutputFloodKeepsTerminalAndConnectionStateConsistent() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -2824,8 +2825,21 @@ class TmuxSessionViewModelTest {
                 "Codex-scale output flood must not mark the local terminal surface as failed",
                 vm.panes.value.single().surfaceError,
             )
+            assertTrue(
+                "Codex-scale output flood must not be logged as terminal overflow",
+                diagnostics.eventsNamed("terminal_output_overflow").isEmpty(),
+            )
+            assertTrue(
+                "Codex-scale output flood must not be logged as passive SSH/tmux EOF",
+                diagnostics.eventsNamed("passive_disconnect").isEmpty(),
+            )
+            assertTrue(
+                "Codex-scale output flood must not start reconnect diagnostics",
+                diagnostics.eventsNamed("reconnect_start").isEmpty(),
+            )
         } finally {
             outputCollector.cancel()
+            diagnostics.close()
         }
     }
 

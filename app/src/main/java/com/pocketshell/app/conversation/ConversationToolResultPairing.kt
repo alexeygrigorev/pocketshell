@@ -25,12 +25,12 @@ internal fun List<ConversationEvent>.toolResultPairing(): ToolResultPairing {
     val callIdsByResultId = linkedMapOf<String, String>()
 
     for (result in filterIsInstance<ConversationEvent.ToolResult>()) {
-        val toolCallId = result.toolCallId ?: continue
-        if (eventsById[toolCallId] is ConversationEvent.ToolCall) {
-            if (resultsByCallId.putIfAbsent(toolCallId, result) == null) {
-                pairedResultIds += result.id
-                callIdsByResultId[result.id] = toolCallId
-            }
+        val toolCallId = result.toolCallId
+            ?.let { eventsById.matchingToolCallId(it) }
+            ?: continue
+        if (resultsByCallId.putIfAbsent(toolCallId, result) == null) {
+            pairedResultIds += result.id
+            callIdsByResultId[result.id] = toolCallId
         }
     }
 
@@ -120,7 +120,19 @@ internal fun filterConversationRows(
 
 private fun ConversationEvent.ToolResult.hasExplicitVisibleParentToolCall(
     eventsById: Map<String, ConversationEvent>,
-): Boolean = toolCallId?.let { eventsById[it] is ConversationEvent.ToolCall } == true
+): Boolean = toolCallId?.let { eventsById.matchingToolCallId(it) } != null
+
+private fun Map<String, ConversationEvent>.matchingToolCallId(toolCallId: String): String? {
+    if (this[toolCallId] is ConversationEvent.ToolCall) return toolCallId
+
+    // Codex transcript events namespace call rows as "call:<call_id>" while
+    // output rows retain the raw call_id. Treat that as an explicit link so
+    // non-adjacent outputs still fold into the matching call row.
+    val codexCallId = "call:$toolCallId"
+    if (this[codexCallId] is ConversationEvent.ToolCall) return codexCallId
+
+    return null
+}
 
 private fun ConversationEvent.conversationTimelineSearchText(): String = when (this) {
     is ConversationEvent.Message -> text

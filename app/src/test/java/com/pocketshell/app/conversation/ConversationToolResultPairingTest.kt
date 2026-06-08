@@ -78,6 +78,31 @@ class ConversationToolResultPairingTest {
         assertFalse(pairing.resultsByCallId.containsKey("call-1"))
     }
 
+    @Test
+    fun codexPrefixedToolCallIdPairsNonAdjacentResult() {
+        val events = listOf(
+            toolCall("call:call_1"),
+            ConversationEvent.SystemNote(
+                id = "reasoning-1",
+                agent = AgentKind.Codex,
+                tag = "reasoning",
+                content = "Need shell output before answering.",
+            ),
+            toolResult("result:call_1", toolCallId = "call_1", output = "codex-output"),
+        )
+
+        val pairing = events.toolResultPairing()
+        val filtered = filterConversationRows(events, query = "")
+        val searched = filterConversationRows(events, query = "codex-output")
+
+        assertEquals("result:call_1", pairing.resultsByCallId["call:call_1"]?.id)
+        assertEquals(setOf("result:call_1"), pairing.pairedResultIds)
+        assertEquals(listOf("call:call_1", "reasoning-1"), filtered.events.map { it.id })
+        assertEquals(listOf("call:call_1"), searched.events.map { it.id })
+        assertEquals(setOf("call:call_1"), searched.searchExpandedToolCallIds)
+        assertFalse("call:call_1" in runningToolCallIds(events, pairing))
+    }
+
     private fun toolCall(id: String): ConversationEvent.ToolCall =
         ConversationEvent.ToolCall(
             id = id,

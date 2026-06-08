@@ -179,16 +179,6 @@ public fun SessionScreen(
      * Issue #583: open a remote directory path tapped in Conversation text.
      */
     onBrowseFiles: (startDir: String) -> Unit = {},
-    /**
-     * Issue #116 (usage-panel Fix B): the most-concerning
-     * [com.pocketshell.core.usage.UsageProviderRecord] for this
-     * session's host as reported by [com.pocketshell.app.usage.UsageScheduler].
-     * `null` when no record warrants a chip — the badge composable
-     * still short-circuits on `null` so passing it through is safe.
-     * MainActivity computes the lookup from the scheduler's snapshot
-     * map for the active session's `hostId`.
-     */
-    @Suppress("UNUSED_PARAMETER") usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
     promptComposerViewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #176: pulled in via Hilt so the Settings → Conversation →

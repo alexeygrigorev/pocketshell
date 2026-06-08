@@ -260,7 +260,7 @@ class UsageSchedulerTest {
      * Issue #116: `updateSnapshots` merges externally-produced
      * snapshots (e.g. the pull-to-refresh path on `UsageViewModel`)
      * into the scheduler's flow so cross-surface badges (the host
-     * list strip + the in-session chip) stay in sync without waiting
+     * list strip and Usage panel state) stay in sync without waiting
      * for the next polling tick.
      */
     @Test

@@ -174,7 +174,7 @@ open class UsageViewModel internal constructor(
     private val fetcher: HostUsageFetcher,
     // Issue #116 (usage-panel Fix B): the scheduler is the single
     // source of truth for the per-host usage snapshots that the host
-    // list strip + per-card badge + in-session chip all read. The view
+    // list strip + per-card badge all read. The view
     // model's pull-to-refresh path now feeds the scheduler too so the
     // badges in those surfaces update when the user taps refresh on
     // the Usage screen (AC #4: "both update on pull-to-refresh on
@@ -214,8 +214,8 @@ open class UsageViewModel internal constructor(
      * so rapid pull-to-refresh taps don't stack overlapping probes.
      *
      * Issue #116 also fans the same per-host result into
-     * [UsageScheduler] (when injected) so the host-list strip and the
-     * in-session chips stay in sync with what's on the usage panel.
+     * [UsageScheduler] (when injected) so the host-list strip stays in
+     * sync with what's on the usage panel.
      */
     fun refresh() {
         refreshSerial += 1L

@@ -80,7 +80,6 @@ import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageScreen
 import com.pocketshell.app.usage.UsageViewModel
-import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -374,9 +373,7 @@ class MainActivity : FragmentActivity() {
                     AppNavigator(
                         sessionViewModel = sessionViewModel,
                         tmuxSessionViewModel = tmuxSessionViewModel,
-                        usageScheduler = usageScheduler,
                         startDirectoryAutocomplete = startDirectoryAutocomplete,
-                        usageWarnPercent = settings.usageWarnThresholdPercent.toDouble(),
                         hostDetailViewMode = settings.hostDetailViewMode,
                         requestedDestination = requestedDestination,
                         pendingImportPayload = pendingImportPayload,
@@ -527,9 +524,7 @@ private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
 private fun AppNavigator(
     sessionViewModel: SessionViewModel,
     tmuxSessionViewModel: TmuxSessionViewModel,
-    usageScheduler: UsageScheduler,
     startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource,
-    usageWarnPercent: Double,
     hostDetailViewMode: HostDetailViewMode,
     requestedDestination: AppDestination,
     pendingImportPayload: String? = null,
@@ -553,20 +548,6 @@ private fun AppNavigator(
     onInitialComposerAttachmentsConsumed: () -> Unit = {},
     restoredTmuxDestination: AppDestination.TmuxSession? = null,
 ) {
-    // Issue #116: per-host worst-case usage record map, derived from
-    // the scheduler's snapshot flow. Navigation surfaces look up the
-    // active host id in this map for compact quota affordances.
-    //
-    // Issue #214: the worst-case derivation now consults the user-
-    // configurable warn threshold so quota affordances respect the
-    // same "approaching limit" point as the cross-host strip + Settings
-    // surface.
-    val usageSnapshots by usageScheduler.snapshots.collectAsState()
-    val usageBadgesByHost = remember(usageSnapshots, usageWarnPercent) {
-        usageSnapshots.mapNotNull { (id, snap) ->
-            snap.worstBadgeRecord(warnPercent = usageWarnPercent)?.let { id to it }
-        }.toMap()
-    }
     // Issue #129: the activity scrapes the import payload out of a
     // `pocketshell://import?...` deep link before composition starts
     // and stores it here. We hand it to the host-list view model the
@@ -904,9 +885,6 @@ private fun AppNavigator(
                     ),
                 )
             },
-            // Issue #116: active-host usage context. Look up by [HostEntity.id];
-            // absence means the scheduler has no recent warning record.
-            usageBadgeProvider = usageBadgesByHost[dest.hostId],
         )
 
         is AppDestination.PortForwardPanel -> PortForwardPanelScreen(
@@ -1339,8 +1317,6 @@ private fun AppNavigator(
                     ),
                 )
             },
-            // Issue #116: same per-host chip as the plain-SSH route.
-            usageBadgeProvider = usageBadgesByHost[dest.hostId],
             // Issue #177: seed the restored composer draft into the agent
             // composer so a fast-resumed session comes back with the
             // user's half-typed message, and report draft edits up so the

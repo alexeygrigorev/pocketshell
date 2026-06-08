@@ -269,14 +269,6 @@ public fun TmuxSessionScreen(
      * session/window via the hand-rolled back-stack.
      */
     onBrowseFiles: (startDir: String) -> Unit = {},
-    /**
-     * Issue #116 (usage-panel Fix B): same per-host worst-case
-     * [com.pocketshell.core.usage.UsageProviderRecord] surface as
-     * [com.pocketshell.app.session.SessionScreen], but for the
-     * `tmux -CC` route. MainActivity passes the lookup for the active
-     * host id; `null` when no chip should render.
-     */
-    @Suppress("UNUSED_PARAMETER") usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
     // Issue #177 / #459: composer-draft persistence for fast resume.
     // Historically these seeded + reported the bespoke in-pane
     // Conversation composer's draft. Issue #459 collapsed the Conversation

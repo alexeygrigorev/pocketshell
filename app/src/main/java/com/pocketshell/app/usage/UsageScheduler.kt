@@ -463,8 +463,8 @@ public sealed interface UsageSnapshot {
 /**
  * Pick the worst-case [UsageProviderRecord] for a host's
  * [UsageSnapshot] — the record that should drive the in-app blocked /
- * near-limit badge surfaced on the host card and the session screens
- * (issue #116, usage-panel Fix B).
+ * near-limit badge surfaced on the host card (issue #116, usage-panel
+ * Fix B).
  *
  * Rules, ordered by severity:
  * - [UsageSnapshot.Records] — return the most-constrained record:

@@ -6,13 +6,19 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -20,20 +26,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -182,6 +196,78 @@ class ComposerPartialExpandE2eTest {
         )
     }
 
+    @Test
+    fun sendButtonRemainsAboveImeWhenDraftFocused() {
+        var capturedSheetValue: SheetValue? = null
+        val sendModes = mutableListOf<Boolean>()
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+                    ComposerHarness(
+                        onDismiss = {},
+                        sheetState = sheetState,
+                        onSheetValueChanged = { capturedSheetValue = it },
+                        onSend = { withEnter -> sendModes += withEnter },
+                    )
+                }
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            capturedSheetValue != null && capturedSheetValue != SheetValue.Hidden
+        }
+
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performClick()
+            .performTextInput("printf issue615")
+
+        compose.activity.runOnUiThread {
+            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
+                .show(WindowInsetsCompat.Type.ime())
+        }
+        val imeShown = waitForInputMethodVisible(
+            scenario = compose.activityRule.scenario,
+            expected = true,
+            timeoutMs = 30_000L,
+        )
+        assumeTrue(
+            "IME not available on this emulator; cannot validate issue #615 geometry",
+            imeShown,
+        )
+
+        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
+        compose.waitForIdle()
+
+        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val imeTop = readDecorHeightPx() - readImeBottomPx()
+
+        assertTrue(
+            "Send button must stay above the IME. sendBottom=${sendBounds.bottom} imeTop=$imeTop",
+            sendBounds.bottom <= imeTop + 2f,
+        )
+
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.runOnIdle {
+            assertEquals(listOf(true), sendModes)
+        }
+
+        compose.activity.runOnUiThread {
+            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
+                .hide(WindowInsetsCompat.Type.ime())
+        }
+    }
+
     /**
      * Production-shape harness that mirrors the call site in
      * `TmuxSessionScreen` / `SessionScreen`: a `ModalBottomSheet` with the
@@ -194,19 +280,41 @@ class ComposerPartialExpandE2eTest {
         onDismiss: () -> Unit,
         sheetState: SheetState,
         onSheetValueChanged: (SheetValue) -> Unit,
+        onSend: (Boolean) -> Unit = {},
     ) {
         var draft by remember { mutableStateOf("") }
+        var isImeVisible by remember { mutableStateOf(false) }
         // Surface the current sheet value out to the test on every
         // recomposition so the test's `waitUntil` can read the latest
         // value without polling via reflection.
         onSheetValueChanged(sheetState.currentValue)
+        LaunchedEffect(isImeVisible, sheetState.currentValue) {
+            if (shouldAutoExpandPromptComposerForIme(
+                    isImeVisible = isImeVisible,
+                    currentValue = sheetState.currentValue,
+                    expandedForIme = false,
+                )
+            ) {
+                runCatching { sheetState.expand() }
+            }
+        }
 
         ModalBottomSheet(
             onDismissRequest = onDismiss,
             sheetState = sheetState,
             containerColor = PocketShellColors.Surface,
             contentColor = PocketShellColors.Text,
+            contentWindowInsets = {
+                WindowInsets.safeDrawing.only(
+                    WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
+                )
+            },
         ) {
+            val sheetDensity = LocalDensity.current
+            val contentImeVisible = WindowInsets.ime.getBottom(sheetDensity) > 0
+            LaunchedEffect(contentImeVisible) {
+                isImeVisible = contentImeVisible
+            }
             // Mirrors the production wiring in `PromptComposerSheet`:
             // the SheetContent fills 65% of available height so that
             // Material 3 populates the `PartiallyExpanded` anchor —
@@ -214,7 +322,7 @@ class ComposerPartialExpandE2eTest {
             // half-screen and M3 collapses straight to `Expanded`,
             // which is exactly the legacy behaviour issue #234 fixes.
             SheetContent(
-                modifier = Modifier.fillMaxHeight(0.65f),
+                modifier = Modifier.fillMaxHeight(promptComposerSheetHeightFraction(contentImeVisible)),
                 state = PromptComposerViewModel.UiState(
                     draft = draft,
                     recording = PromptComposerViewModel.RecordingState.Idle,
@@ -224,9 +332,26 @@ class ComposerPartialExpandE2eTest {
                 onClose = onDismiss,
                 onDraftChange = { draft = it },
                 onMicTap = {},
-                onSend = {},
+                onSend = onSend,
             )
         }
+    }
+
+    private fun readImeBottomPx(): Int {
+        var result = 0
+        compose.activityRule.scenario.onActivity { activity ->
+            val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)
+            result = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
+        }
+        return result
+    }
+
+    private fun readDecorHeightPx(): Int {
+        var result = 0
+        compose.activityRule.scenario.onActivity { activity ->
+            result = activity.window.decorView.height
+        }
+        return result
     }
 
     private fun captureFullDevice(name: String) {

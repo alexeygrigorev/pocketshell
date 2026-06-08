@@ -33,8 +33,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
@@ -189,8 +192,7 @@ public fun PromptComposerSheet(
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
     val context = LocalContext.current
-    val density = LocalDensity.current
-    val isImeVisible = WindowInsets.ime.getBottom(density) > 0
+    var isImeVisible by remember { mutableStateOf(false) }
 
     var showApiKeyDialog by remember { mutableStateOf(false) }
     // Issue #17: tracks whether the Snippets bottom sheet is currently
@@ -337,7 +339,28 @@ public fun PromptComposerSheet(
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
         modifier = modifier,
+        // Issue #615: the primary Send action must remain visible while the
+        // draft field owns focus and the IME is open. `ModalBottomSheet`
+        // applies its `contentWindowInsets` before our content, so letting the
+        // default bottom/IME inset path run can consume the IME before
+        // `SheetContent`'s sticky controls row sees it. Keep the sheet's
+        // top/horizontal safe-area behavior, but leave bottom IME/navigation
+        // handling to `SheetContent` where the action row is anchored.
+        contentWindowInsets = {
+            WindowInsets.safeDrawing.only(
+                WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
+            )
+        },
     ) {
+        // Read IME visibility from inside the ModalBottomSheet content window.
+        // The sheet is hosted in its own dialog window; observing from the
+        // parent terminal composition can miss the keyboard that was raised by
+        // the draft field inside this sheet.
+        val sheetDensity = LocalDensity.current
+        val contentImeVisible = WindowInsets.ime.getBottom(sheetDensity) > 0
+        LaunchedEffect(contentImeVisible) {
+            isImeVisible = contentImeVisible
+        }
         // Issue #234: force the sheet content to be tall enough that
         // Material 3 actually populates the `PartiallyExpanded` anchor.
         //
@@ -367,7 +390,7 @@ public fun PromptComposerSheet(
         // action row above the keyboard, but the extra measured height keeps
         // the draft/status area from being crushed into a tiny strip.
         SheetContent(
-            modifier = Modifier.fillMaxHeight(promptComposerSheetHeightFraction(isImeVisible)),
+            modifier = Modifier.fillMaxHeight(promptComposerSheetHeightFraction(contentImeVisible)),
             state = state,
             onClose = dismissComposer,
             onDraftChange = viewModel::onDraftChange,

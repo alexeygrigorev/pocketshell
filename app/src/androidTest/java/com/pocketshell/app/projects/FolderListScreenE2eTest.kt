@@ -1500,11 +1500,10 @@ class FolderListScreenE2eTest {
         )
     }
 
-    // #455: the compact tree icon buttons (overflow kebab + accent `+`)
-    // shrank to a 36dp hit box so the folder name keeps its width. 36dp is
-    // the design-system minimum for tree icon buttons (§4/§6.1); secondary
-    // actions live in the long-press / overflow sheet, not as 48dp pills.
-    private fun assertAccessibleTouchTarget(tag: String, minDp: Float = 36f) {
+    // #597: tree overflow buttons keep a stable 48dp tap target. Long labels
+    // must ellipsize in the weighted title area rather than shrinking or
+    // pushing the trailing action target out of the row.
+    private fun assertAccessibleTouchTarget(tag: String, minDp: Float = 48f) {
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(tag))
         val node = compose.onNodeWithTag(tag, useUnmergedTree = true)

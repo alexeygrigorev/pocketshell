@@ -2167,7 +2167,7 @@ private fun CompactTreeIconButton(
     modifier: Modifier = Modifier,
     testTag: String? = null,
     accent: Boolean = false,
-    size: Dp = 36.dp,
+    size: Dp = PocketShellDensity.tapTargetMin,
 ) {
     val background = if (accent) {
         PocketShellColors.AccentSoft
@@ -2176,11 +2176,9 @@ private fun CompactTreeIconButton(
     }
     val foreground = if (accent) PocketShellColors.Accent else PocketShellColors.TextSecondary
     // Inner pill scales with the hit box but stays ~4 dp smaller so the
-    // tap target meets the design-system minimum (§6.1) while reading as a
-    // compact glyph. These tree icon buttons keep the deliberate #455 36 dp
-    // hit box so the folder name column keeps its readable width; the larger
-    // 48 dp a11y floor is reserved for the full-width interactive rows and the
-    // view toggle (#478).
+    // trailing action keeps a 48 dp touch target while reading as compact
+    // chrome. The weighted title/count block owns truncation, so long project
+    // labels ellipsize there instead of pushing this action off-row (#597).
     val pillSize = (size.value - 4f).coerceAtLeast(24f).dp
     Box(
         modifier = modifier

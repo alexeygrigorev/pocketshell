@@ -429,6 +429,12 @@ class FolderListStopSessionTest {
 
         assertActionTargetVisibleInsideRow(rowTag = rowTag, triggerTag = triggerTag)
         assertNodeVisibleInsideRow(rowTag = rowTag, nodeTag = badgeTag)
+        captureViewport(
+            when (mode) {
+                HostDetailViewMode.Tree -> "issue597-tree-long-session-actions-visible.png"
+                HostDetailViewMode.Flat -> "issue597-flat-long-session-actions-visible.png"
+            },
+        )
 
         compose.onNodeWithTag(triggerTag).performClick()
         compose.onNodeWithTag(openItemTag).assertExists()
@@ -487,7 +493,7 @@ class FolderListStopSessionTest {
     private fun outDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
-        return File(mediaRoot, "additional_test_output/issue518-stop-session").apply {
+        return File(mediaRoot, "additional_test_output/issue518-597-598-600-session-menu").apply {
             if (!exists()) mkdirs()
         }
     }

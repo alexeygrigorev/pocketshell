@@ -8,7 +8,7 @@ class FileViewerErrorMessageTest {
     @Test
     fun `missing file message includes exact resolved attachment path`() {
         val resolved =
-            "~/.pocketshell/attachments/host-1-git-course-management-platform/" +
+            "/home/alexey/.pocketshell/attachments/host-1-git-course-management-platform/" +
                 "20260607-115723-01-Screenshot_20260607-115718.png"
 
         assertEquals(

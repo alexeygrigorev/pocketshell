@@ -120,7 +120,11 @@ class FileViewerViewModel @Inject constructor(
     }
 
     private fun load(request: Request) {
-        val resolved = RemotePathResolver.resolve(request.path, request.cwd)
+        val resolved = RemotePathResolver.resolve(
+            input = request.path,
+            cwd = request.cwd,
+            remoteHome = conventionalRemoteHome(request.username),
+        )
         loadJob?.cancel()
         _state.value = FileViewerUiState.Loading(displayPath = resolved)
         loadJob = viewModelScope.launch {
@@ -128,12 +132,17 @@ class FileViewerViewModel @Inject constructor(
         }
     }
 
-    private suspend fun fetch(request: Request, resolved: String): FileViewerUiState {
+    private suspend fun fetch(request: Request, fallbackResolved: String): FileViewerUiState {
         val session = connect(request)
             ?: return FileViewerUiState.CannotPreview(
-                displayPath = resolved,
+                displayPath = fallbackResolved,
                 message = "Couldn't reach ${request.username}@${request.hostname}.",
             )
+        val resolved = RemotePathResolver.resolve(
+            input = request.path,
+            cwd = request.cwd,
+            remoteHome = remoteHomeDirectory(session) ?: conventionalRemoteHome(request.username),
+        )
         return try {
             val bytes = session.downloadFile(resolved, MAX_PREVIEW_BYTES)
             when (FileTypeDetector.detect(resolved, bytes)) {
@@ -229,6 +238,24 @@ class FileViewerViewModel @Inject constructor(
             knownHosts = KnownHostsPolicy.AcceptAll,
         ).getOrNull()
 
+    private suspend fun remoteHomeDirectory(session: SshSession): String? {
+        val result = try {
+            session.exec("printf '%s\\n' \"\$HOME\"")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        return result
+            ?.takeIf { it.exitCode == 0 }
+            ?.stdout
+            ?.lineSequence()
+            ?.firstOrNull { it.isNotBlank() }
+            ?.trim()
+            ?.let { it.trimEnd('/').ifEmpty { "/" } }
+            ?.takeIf { it.startsWith("/") }
+    }
+
     override fun onCleared() {
         super.onCleared()
         loadJob?.cancel()
@@ -321,6 +348,15 @@ class FileViewerViewModel @Inject constructor(
         internal fun audioExceedsCap(sizeBytes: Long): Boolean = sizeBytes > MAX_AUDIO_BYTES
 
         internal const val CACHE_SUBDIR = "file-viewer"
+
+        internal fun conventionalRemoteHome(username: String): String? {
+            val user = username.trim()
+            return when {
+                user.isEmpty() -> null
+                user == "root" -> "/root"
+                else -> "/home/$user"
+            }
+        }
 
         /**
          * Turn a remote path into a collision-resistant, filesystem-safe

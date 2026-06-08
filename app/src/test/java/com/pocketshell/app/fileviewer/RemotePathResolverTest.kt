@@ -25,20 +25,33 @@ class RemotePathResolverTest {
     }
 
     @Test
-    fun `tilde path passes through unchanged`() {
+    fun `tilde path passes through unchanged without remote home`() {
         assertEquals("~/notes.txt", RemotePathResolver.resolve("~/notes.txt", "/home/me/proj"))
         assertEquals("~", RemotePathResolver.resolve("~", "/home/me/proj"))
     }
 
     @Test
-    fun `pocketshell attachment path stays home rooted instead of cwd relative`() {
+    fun `tilde path expands to normalized absolute remote home path`() {
+        assertEquals(
+            "/srv/users/me/notes.txt",
+            RemotePathResolver.resolve("~/work/../notes.txt", "/home/me/proj", "/srv/users/me"),
+        )
+        assertEquals(
+            "/srv/users/me",
+            RemotePathResolver.resolve("~", "/home/me/proj", "/srv/users/me/"),
+        )
+    }
+
+    @Test
+    fun `pocketshell attachment path expands under home instead of cwd relative`() {
         val attachment =
             "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
                 "20260606-153324-01-Screenshot_20260606-153310.png"
 
         assertEquals(
-            attachment,
-            RemotePathResolver.resolve(attachment, "/home/alexey/git/pocketshell"),
+            "/home/alexey/.pocketshell/attachments/host-1-git-pocketshell-c/" +
+                "20260606-153324-01-Screenshot_20260606-153310.png",
+            RemotePathResolver.resolve(attachment, "/home/alexey/git/pocketshell", "/home/alexey"),
         )
     }
 
@@ -49,10 +62,12 @@ class RemotePathResolverTest {
                 "20260607-115723-01-Screenshot_20260607-115718.png"
 
         assertEquals(
-            attachment,
+            "/home/alexey/.pocketshell/attachments/host-1-git-course-management-platform/" +
+                "20260607-115723-01-Screenshot_20260607-115718.png",
             RemotePathResolver.resolve(
                 attachment,
                 "/home/alexey/git/course-management-platform/platform",
+                "/home/alexey",
             ),
         )
     }
@@ -84,6 +99,14 @@ class RemotePathResolverTest {
     @Test
     fun `relative path joins onto a tilde cwd`() {
         assertEquals("~/proj/a.txt", RemotePathResolver.resolve("a.txt", "~/proj"))
+    }
+
+    @Test
+    fun `relative path joins onto expanded tilde cwd when remote home is known`() {
+        assertEquals(
+            "/home/me/proj/a.txt",
+            RemotePathResolver.resolve("a.txt", "~/proj", "/home/me"),
+        )
     }
 
     @Test
@@ -134,5 +157,13 @@ class RemotePathResolverTest {
     @Test
     fun `tilde path keeps tilde but collapses dotdot segments`() {
         assertEquals("~/b.txt", RemotePathResolver.resolve("~/a/../b.txt", "/home/me"))
+    }
+
+    @Test
+    fun `tilde path expands and collapses dotdot segments when remote home is known`() {
+        assertEquals(
+            "/home/me/b.txt",
+            RemotePathResolver.resolve("~/a/../b.txt", "/home/me", "/home/me"),
+        )
     }
 }

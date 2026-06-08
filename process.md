@@ -124,6 +124,9 @@ CI policy after push:
   activity if other independent backlog work is available. Continue issue
   triage, launch non-overlapping implementers/reviewers, review completed
   worktrees, or prepare the next local verification gate.
+- If a pipeline is merely running, the orchestrator's default next action is to
+  keep the backlog moving locally. Only release cuts, red CI investigation, or a
+  direct dependency on that exact pipeline justify blocking on it.
 - If CI fails despite the local gate, treat it as a process miss: identify which
   local check would have caught it, add or document that check, then send the
   fix through the implementer/reviewer loop.

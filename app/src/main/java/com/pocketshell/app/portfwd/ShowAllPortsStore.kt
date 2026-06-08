@@ -9,10 +9,10 @@ import javax.inject.Singleton
 /**
  * Issue #492: persists the port-forward table's "Show all ports" checkbox.
  *
- * By default the table shows only the high-port range
- * ([InterestingPortFilter.DEFAULT_RANGE], `10000+`). Ticking "Show all
- * ports" reveals the low noisy ports below `10000`. The user's choice should
- * survive panel navigation and app restarts, so it is persisted here.
+ * By default the table hides noisy local/remote ports in
+ * [InterestingPortFilter.HIDDEN_NOISY_RANGE] (`1000..9999`). Ticking "Show all
+ * ports" reveals those rows. The user's choice should survive panel navigation
+ * and app restarts, so it is persisted here.
  *
  * ## Global, not per-host
  *

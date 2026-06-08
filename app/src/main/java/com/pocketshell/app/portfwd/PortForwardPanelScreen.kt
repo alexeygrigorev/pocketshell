@@ -184,11 +184,11 @@ fun PortForwardPanelScreen(
                 state.tunnels
             }
 
-            // Issue #602: the table hides low noisy ports below 10000 by
+            // Issue #602: the table hides noisy ports in 1000..9999 by
             // default. Keep that true even when auto-forward is active so a
-            // foreground forwarding session with many system/app ports does
-            // not recreate the noisy 20+ row dogfood screen. The tunnels keep
-            // running; this only filters the rows rendered in the panel.
+            // foreground forwarding session with many app/dev ports does not
+            // recreate the noisy dogfood screen. The tunnels keep running;
+            // this only filters the rows rendered in the panel.
             ShowAllPortsRow(
                 checked = state.showAllPorts,
                 hiddenCount = hiddenPortCount,
@@ -281,15 +281,19 @@ internal fun visibleTunnelRows(tunnels: List<TunnelInfo>, showAllPorts: Boolean)
     if (showAllPorts) {
         tunnels.sortedWith(
             compareBy<TunnelInfo> {
-                if (InterestingPortFilter.isInRange(it.remotePort)) 0 else 1
+                if (it.isVisibleByDefault()) 0 else 1
             }.thenBy { it.remotePort },
         )
     } else {
-        tunnels.filter { InterestingPortFilter.isInRange(it.remotePort) }
+        tunnels.filter { it.isVisibleByDefault() }
     }
 
 internal fun hiddenTunnelRowCount(tunnels: List<TunnelInfo>): Int =
-    tunnels.count { !InterestingPortFilter.isInRange(it.remotePort) }
+    tunnels.count { !it.isVisibleByDefault() }
+
+private fun TunnelInfo.isVisibleByDefault(): Boolean =
+    InterestingPortFilter.isVisibleByDefault(remotePort) &&
+        InterestingPortFilter.isVisibleByDefault(localPort)
 
 internal fun shouldClearPendingForwardAutoOpen(state: PortForwardPanelState, remotePort: Int): Boolean =
     state.connectionState == PortForwardConnectionState.Error ||
@@ -370,9 +374,9 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
 
 /**
  * Issue #492/#602: hidden/noisy ports checkbox. Unchecked = the default
- * filtered table (only ports 10000+). Checked = every discovered port
- * including the hidden low/noisy ports. The label surfaces the hidden-row count
- * so the user knows the table is filtered.
+ * filtered table (hides local/remote ports in 1000..9999). Checked = every
+ * discovered port including the hidden/noisy ports. The label surfaces the
+ * hidden-row count so the user knows the table is filtered.
  */
 @Composable
 private fun ShowAllPortsRow(
@@ -607,9 +611,9 @@ private fun HiddenPortsState(hiddenCount: Int, modifier: Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Text(
             if (hiddenCount == 1) {
-                "1 low port hidden."
+                "1 noisy port hidden."
             } else {
-                "$hiddenCount low ports hidden."
+                "$hiddenCount noisy ports hidden."
             },
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyDense,

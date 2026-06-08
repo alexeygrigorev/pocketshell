@@ -34,9 +34,9 @@ data class PortForwardPanelState(
     val connectionState: PortForwardConnectionState = PortForwardConnectionState.Idle,
     val tunnels: List<TunnelInfo> = emptyList(),
     val error: String? = null,
-    // Issue #492: "Show all ports" — when false (default), the discovery
-    // table only shows ports in InterestingPortFilter.DEFAULT_RANGE
-    // (10000+). When true, every discovered port is shown.
+    // Issue #492/#602: "Show hidden/noisy ports" — when false (default), the
+    // discovery table hides local/remote ports in 1000..9999. When true, every
+    // discovered port is shown.
     val showAllPorts: Boolean = false,
     // Issue #492: number of discovered ports hidden by the default filter,
     // i.e. how many extra rows "Show all ports" would reveal. Drives the
@@ -298,7 +298,7 @@ class PortForwardPanelViewModel @Inject constructor(
             "port_forward_show_all_toggle",
             "enabled" to showAll,
             "cachedPortCount" to lastDiscoveredPorts.size,
-            "hiddenPortCount" to InterestingPortFilter.hiddenCount(lastDiscoveredPorts),
+            "hiddenPortCount" to hiddenAvailableTunnelCount(lastDiscoveredPorts, currentRemappings),
         )
         _state.value = if (!_state.value.autoForwardEnabled && lastDiscoveredPorts.isNotEmpty()) {
             val remappings = currentRemappings
@@ -604,7 +604,7 @@ class PortForwardPanelViewModel @Inject constructor(
                     _state.value = _state.value.copy(
                         connectionState = PortForwardConnectionState.Connected,
                         tunnels = discovered,
-                        hiddenPortCount = InterestingPortFilter.hiddenCount(rawPorts),
+                        hiddenPortCount = hiddenAvailableTunnelCount(rawPorts, remappings),
                         error = null,
                     )
                 }
@@ -649,19 +649,37 @@ private fun List<RemotePort>.toAvailableTunnels(
     remappings: Map<Int, Int>,
     showAll: Boolean = false,
 ): List<TunnelInfo> =
-    // Issue #456/#492: de-dupe per port and, by default, keep only the useful
-    // high-port range (`10000+`) so the panel table is readable instead of
-    // an ~80-row dump. When [showAll] is true the low noisy ports are included
-    // too. The filter already orders in-range-first and
-    // de-duplicates, so we keep its order rather than re-sorting by port number.
-    InterestingPortFilter.filter(this, showAll).map { remotePort ->
-        TunnelInfo(
-            remotePort = remotePort.port,
-            localPort = remappings[remotePort.port] ?: remotePort.port,
-            process = remotePort.processName,
-            status = TunnelInfo.Status.AVAILABLE,
-        )
-    }
+    // Issue #456/#492/#602: de-dupe per remote port and, by default, hide the
+    // noisy 1000..9999 band so the table stays readable. Filtering happens
+    // after applying remappings because either side of a local/remote mapping
+    // can be noisy.
+    InterestingPortFilter.filter(this, showAll = true)
+        .map { remotePort ->
+            TunnelInfo(
+                remotePort = remotePort.port,
+                localPort = remappings[remotePort.port] ?: remotePort.port,
+                process = remotePort.processName,
+                status = TunnelInfo.Status.AVAILABLE,
+            )
+        }
+        .let { tunnels ->
+            val sorted = tunnels.sortedWith(
+                compareBy<TunnelInfo> { if (it.isVisibleByDefault()) 0 else 1 }
+                    .thenBy { it.remotePort },
+            )
+            if (showAll) sorted else sorted.filter { it.isVisibleByDefault() }
+        }
+
+private fun hiddenAvailableTunnelCount(
+    ports: List<RemotePort>,
+    remappings: Map<Int, Int>,
+): Int =
+    ports.toAvailableTunnels(remappings, showAll = true)
+        .count { !it.isVisibleByDefault() }
+
+private fun TunnelInfo.isVisibleByDefault(): Boolean =
+    InterestingPortFilter.isVisibleByDefault(remotePort) &&
+        InterestingPortFilter.isVisibleByDefault(localPort)
 
 private infix fun CharArray?.contentEquals(other: CharArray?): Boolean =
     when {

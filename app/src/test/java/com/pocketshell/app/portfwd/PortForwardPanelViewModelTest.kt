@@ -218,12 +218,10 @@ class PortForwardPanelViewModelTest {
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
         // Issue #456/#602: the same high app port shows up once per bound
         // address family (`0.0.0.0:11434` and `[::]:11434`). Discovery must
-        // collapse them to a single row, and low ports must be dropped as
-        // noise rather than surfaced.
+        // collapse them to a single row, and noisy 1000..9999 ports must be
+        // hidden unless explicitly requested.
         val session = FakeSshSession(
             ssOutput = """
-                0.0.0.0:22 users:(("sshd",pid=1,fd=3))
-                :::22 users:(("sshd",pid=1,fd=4))
                 0.0.0.0:3000 users:(("node",pid=42,fd=3))
                 0.0.0.0:11434 users:(("ollama",pid=42,fd=3))
                 :::11434 users:(("ollama",pid=42,fd=4))
@@ -246,10 +244,10 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
-    fun discoveryHidesOutOfRangePortsByDefaultAndShowAllRevealsThem() = runTest {
-        // #602: low ports below 10000 are hidden by default; 10000+ ports are
-        // visible. Toggling "Show all ports" reveals every discovered port
-        // without a new SSH scan.
+    fun discoveryHidesNoisyPortsByDefaultAndShowAllRevealsThem() = runTest {
+        // #602: noisy ports in 1000..9999 are hidden by default while
+        // privileged service ports and 10000+ ports stay visible. Toggling
+        // "Show all ports" reveals every discovered port without a new SSH scan.
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
         val session = FakeSshSession(
             ssOutput = """
@@ -270,17 +268,17 @@ class PortForwardPanelViewModelTest {
         viewModel.load(hostId, "/tmp/key", discoverPorts = true)
         runCurrent()
 
-        // Default: only high in-range ports, and the hidden count is surfaced.
+        // Default: system/service + high ports, with the hidden noisy count surfaced.
         assertFalse(viewModel.state.value.showAllPorts)
-        assertEquals(listOf(11434, 49152), viewModel.state.value.tunnels.map { it.remotePort })
-        assertEquals(4, viewModel.state.value.hiddenPortCount)
+        assertEquals(listOf(22, 443, 11434, 49152), viewModel.state.value.tunnels.map { it.remotePort })
+        assertEquals(2, viewModel.state.value.hiddenPortCount)
 
-        // Show all: every discovered port, in-range first, no extra connect.
+        // Show all: every discovered port, default-visible first, no extra connect.
         viewModel.setShowAllPorts(true)
         runCurrent()
         assertTrue(viewModel.state.value.showAllPorts)
         assertEquals(
-            listOf(11434, 49152, 22, 443, 3000, 8080),
+            listOf(22, 443, 11434, 49152, 3000, 8080),
             viewModel.state.value.tunnels.map { it.remotePort },
         )
         assertEquals(1, connector.hosts.size)
@@ -289,9 +287,44 @@ class PortForwardPanelViewModelTest {
         viewModel.setShowAllPorts(false)
         runCurrent()
         assertFalse(viewModel.state.value.showAllPorts)
-        assertEquals(listOf(11434, 49152), viewModel.state.value.tunnels.map { it.remotePort })
+        assertEquals(listOf(22, 443, 11434, 49152), viewModel.state.value.tunnels.map { it.remotePort })
 
         viewModel.setAutoForwardEnabled(false)
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun discoveryHidesRowsWithNoisyLocalRemappedPortsByDefault() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
+        db.portRemappingDao().insert(
+            com.pocketshell.core.storage.entity.PortRemappingEntity(
+                hostId = hostId,
+                remotePort = 11_434,
+                localPort = 9_000,
+            ),
+        )
+        val session = FakeSshSession(
+            ssOutput = """
+                0.0.0.0:443 users:(("nginx",pid=2,fd=3))
+                0.0.0.0:11434 users:(("ollama",pid=44,fd=3))
+            """.trimIndent(),
+        )
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+        viewModel.load(hostId, "/tmp/key", discoverPorts = true)
+        runCurrent()
+
+        assertEquals(listOf(443), viewModel.state.value.tunnels.map { it.remotePort })
+        assertEquals(1, viewModel.state.value.hiddenPortCount)
+
+        viewModel.setShowAllPorts(true)
+        runCurrent()
+
+        val tunnels = viewModel.state.value.tunnels
+        assertEquals(listOf(443, 11_434), tunnels.map { it.remotePort })
+        assertEquals(9_000, tunnels.single { it.remotePort == 11_434 }.localPort)
+
         viewModel.leavePanel()
         runCurrent()
     }

@@ -67,4 +67,13 @@ class FolderListPortForwardingSummaryTest {
         assertEquals(false, empty.discoveryLoading)
         assertEquals(0, empty.discoveredCount)
     }
+
+    @Test
+    fun `loading state exposes port forwarding entry before async discovery returns`() {
+        val state = FolderListUiState.Loading()
+
+        assertEquals(true, state.portForwarding.entryAvailable)
+        assertEquals(true, state.portForwarding.discoveryLoading)
+        assertEquals(0, state.portForwarding.discoveredCount)
+    }
 }

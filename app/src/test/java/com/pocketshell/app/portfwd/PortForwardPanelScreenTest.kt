@@ -65,17 +65,20 @@ class PortForwardPanelScreenTest {
     }
 
     @Test
-    fun `visibleTunnelRows hides low forwarded ports by default`() {
+    fun `visibleTunnelRows hides noisy local or remote ports by default`() {
         val tunnels = listOf(
             forwardingTunnel(remotePort = 22),
+            forwardingTunnel(remotePort = 80),
+            forwardingTunnel(remotePort = 443),
             forwardingTunnel(remotePort = 3000),
             forwardingTunnel(remotePort = 8080),
             forwardingTunnel(remotePort = 11434),
             forwardingTunnel(remotePort = 49152),
+            forwardingTunnel(remotePort = 11435, localPort = 9000),
         )
 
         assertEquals(
-            listOf(11434, 49152),
+            listOf(22, 80, 443, 11434, 49152),
             visibleTunnelRows(tunnels, showAllPorts = false).map { it.remotePort },
         )
         assertEquals(3, hiddenTunnelRowCount(tunnels))
@@ -87,12 +90,14 @@ class PortForwardPanelScreenTest {
             forwardingTunnel(remotePort = 8080),
             forwardingTunnel(remotePort = 49152),
             forwardingTunnel(remotePort = 22),
+            forwardingTunnel(remotePort = 443),
             forwardingTunnel(remotePort = 11434),
             forwardingTunnel(remotePort = 3000),
+            forwardingTunnel(remotePort = 11435, localPort = 9000),
         )
 
         assertEquals(
-            listOf(11434, 49152, 22, 3000, 8080),
+            listOf(22, 443, 11434, 49152, 3000, 8080, 11435),
             visibleTunnelRows(tunnels, showAllPorts = true).map { it.remotePort },
         )
     }
@@ -161,10 +166,20 @@ class PortForwardPanelScreenTest {
         assertEquals(false, shouldClearPendingForwardAutoOpen(state, remotePort = 5173))
     }
 
-    private fun forwardingTunnel(remotePort: Int): TunnelInfo =
+    @Test
+    fun `shouldClearPendingForwardAutoOpen keeps waiting before requested tunnel is ready`() {
+        val state = PortForwardPanelState(
+            connectionState = PortForwardConnectionState.Connecting,
+            tunnels = emptyList(),
+        )
+
+        assertEquals(false, shouldClearPendingForwardAutoOpen(state, remotePort = 5173))
+    }
+
+    private fun forwardingTunnel(remotePort: Int, localPort: Int = remotePort): TunnelInfo =
         TunnelInfo(
             remotePort = remotePort,
-            localPort = remotePort,
+            localPort = localPort,
             process = "server",
             status = TunnelInfo.Status.FORWARDING,
         )

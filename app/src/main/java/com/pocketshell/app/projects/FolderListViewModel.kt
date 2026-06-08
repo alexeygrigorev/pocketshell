@@ -167,7 +167,10 @@ data class FolderSessionWindowEntry(
 
 sealed interface FolderListUiState {
     data class Loading(
-        val portForwarding: HostPortForwardingSummary = HostPortForwardingSummary(),
+        val portForwarding: HostPortForwardingSummary = HostPortForwardingSummary(
+            entryAvailable = true,
+            discoveryLoading = true,
+        ),
     ) : FolderListUiState
 
     data class Ready(
@@ -1020,10 +1023,10 @@ class FolderListViewModel internal constructor(
                 lastScannedProjectFoldersByRoot = result.projectFoldersByRoot
                 lastHistoryProjectFoldersByRoot = result.historyProjectFoldersByRoot
                 lastResolvedWatchedRootPaths = result.resolvedWatchedRootPaths
-                // Issue #456: filter discovery to interesting ports (drop
-                // system/noise 22/53/80, de-dupe, surface 1000-9999 / 49xxx
-                // first) so the host card's "N ports" count and the panel
-                // agree and the card never reflects an ~80-port dump.
+                // Issue #456/#602: filter discovery to interesting ports
+                // (de-dupe and hide noisy 1000..9999 rows by default) so the
+                // host card's "N ports" count and the panel agree and the
+                // card never reflects an ~80-port dump.
                 lastDiscoveredPorts = InterestingPortFilter.filter(result.discoveredPorts).map { port ->
                     HostDiscoveredPort(
                         remotePort = port.port,

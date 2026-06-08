@@ -9,21 +9,22 @@ import org.junit.Test
 class InterestingPortFilterTest {
 
     @Test
-    fun `high app ports are in the default range`() {
-        for (port in listOf(10_000, 11_434, 49_152, 49_999, 65_535)) {
-            assertTrue("$port should be in range", InterestingPortFilter.isInRange(port))
+    fun `system and high app ports are visible by default`() {
+        for (port in listOf(1, 22, 80, 443, 10_000, 11_434, 49_152, 49_999, 65_535)) {
+            assertTrue("$port should be visible", InterestingPortFilter.isVisibleByDefault(port))
         }
     }
 
     @Test
-    fun `low ports below 10000 are out of the default range`() {
-        for (port in listOf(22, 53, 80, 443, 999, 1000, 3000, 5432, 8080, 9999)) {
-            assertFalse("$port should be out of range", InterestingPortFilter.isInRange(port))
+    fun `noisy ports from 1000 through 9999 are hidden by default`() {
+        for (port in listOf(1000, 2222, 3000, 5173, 5432, 8080, 9999)) {
+            assertTrue("$port should be noisy", InterestingPortFilter.isNoisy(port))
+            assertFalse("$port should be hidden", InterestingPortFilter.isVisibleByDefault(port))
         }
     }
 
     @Test
-    fun `default filter keeps only high in-range ports`() {
+    fun `default filter hides only noisy 1000 through 9999 ports`() {
         val filtered = InterestingPortFilter.filter(
             listOf(
                 RemotePort(22, "sshd"),
@@ -33,11 +34,11 @@ class InterestingPortFilterTest {
                 RemotePort(49_152, "app"),
             ),
         )
-        assertEquals(listOf(11_434, 49_152), filtered.map { it.port })
+        assertEquals(listOf(22, 80, 11_434, 49_152), filtered.map { it.port })
     }
 
     @Test
-    fun `show-all filter reveals the out-of-range ports`() {
+    fun `show-all filter reveals the noisy ports`() {
         val ports = listOf(
             RemotePort(22, "sshd"),
             RemotePort(80, "nginx"),
@@ -46,12 +47,12 @@ class InterestingPortFilterTest {
             RemotePort(49_152, "app"),
         )
         val all = InterestingPortFilter.filter(ports, showAll = true)
-        // In-range ports sort first, then low hidden ports ascending.
-        assertEquals(listOf(11_434, 49_152, 22, 80, 3000), all.map { it.port })
+        // Default-visible ports sort first, then hidden/noisy ports ascending.
+        assertEquals(listOf(22, 80, 11_434, 49_152, 3000), all.map { it.port })
     }
 
     @Test
-    fun `default filter surfaces high in-range ports before low ports when show-all`() {
+    fun `show-all filter surfaces default-visible ports before noisy ports`() {
         val filtered = InterestingPortFilter.filter(
             listOf(
                 RemotePort(11_434, "ollama"),
@@ -85,7 +86,7 @@ class InterestingPortFilterTest {
     }
 
     @Test
-    fun `show-all de-duplicates out-of-range ports too`() {
+    fun `show-all de-duplicates hidden noisy ports too`() {
         val filtered = InterestingPortFilter.filter(
             listOf(
                 RemotePort(49_152, ""),
@@ -99,7 +100,7 @@ class InterestingPortFilterTest {
     }
 
     @Test
-    fun `count reflects the de-duplicated in-range ports by default`() {
+    fun `count reflects the de-duplicated default-visible ports by default`() {
         val ports = listOf(
             RemotePort(22, "sshd"),
             RemotePort(22, "sshd"),
@@ -110,10 +111,10 @@ class InterestingPortFilterTest {
             RemotePort(8080, "python"),
             RemotePort(49_152, "app"),
         )
-        // Low ports hidden, duplicate 3000 collapsed -> only 49152 visible.
-        assertEquals(1, InterestingPortFilter.count(ports))
+        // Noisy ports hidden, duplicate 3000 collapsed.
+        assertEquals(4, InterestingPortFilter.count(ports))
         assertEquals(
-            listOf(49_152),
+            listOf(22, 53, 80, 49_152),
             InterestingPortFilter.filter(ports).map { it.port },
         )
         // Show-all counts every de-duplicated port -> 22, 53, 80, 3000, 8080, 49152.
@@ -130,14 +131,15 @@ class InterestingPortFilterTest {
             RemotePort(8080, "python"),
             RemotePort(49_152, "app"),
         )
-        // De-duplicated: 22, 80, 3000, 8080, 49152. In-range: 49152.
-        // Hidden: 22, 80, 3000, 8080 = 4.
-        assertEquals(4, InterestingPortFilter.hiddenCount(ports))
+        // De-duplicated: 22, 80, 3000, 8080, 49152. Hidden: 3000, 8080 = 2.
+        assertEquals(2, InterestingPortFilter.hiddenCount(ports))
     }
 
     @Test
-    fun `hiddenCount is zero when every port is in range`() {
+    fun `hiddenCount is zero when every port is default-visible`() {
         val ports = listOf(
+            RemotePort(80, "nginx"),
+            RemotePort(443, "nginx"),
             RemotePort(10_001, "x"),
             RemotePort(10_000, "y"),
             RemotePort(49_152, "app"),
@@ -146,10 +148,10 @@ class InterestingPortFilterTest {
     }
 
     @Test
-    fun `realistic noisy host collapses to a short readable in-range list by default`() {
+    fun `realistic noisy host hides local dev ports by default`() {
         // Mirrors the maintainer's report: system + docker/test 222x noise
-        // plus low local dev servers, plus high app ports. The default
-        // user-facing result hides everything below 10000.
+        // plus local dev servers, plus high app ports. The default user-facing
+        // result hides 1000..9999 while preserving system ports.
         val noisy = listOf(
             RemotePort(22, "sshd"),
             RemotePort(22, "sshd"),
@@ -165,11 +167,11 @@ class InterestingPortFilterTest {
         )
         val filtered = InterestingPortFilter.filter(noisy)
         assertEquals(
-            listOf(11_434, 49_152),
+            listOf(22, 53, 80, 11_434, 49_152),
             filtered.map { it.port },
         )
-        assertEquals(2, InterestingPortFilter.count(noisy))
-        // 22, 53, 80, 2222, 2224, 2226, 3000, 8080 are the de-duplicated hidden ports.
-        assertEquals(8, InterestingPortFilter.hiddenCount(noisy))
+        assertEquals(5, InterestingPortFilter.count(noisy))
+        // 2222, 2224, 2226, 3000, 8080 are the de-duplicated hidden ports.
+        assertEquals(5, InterestingPortFilter.hiddenCount(noisy))
     }
 }

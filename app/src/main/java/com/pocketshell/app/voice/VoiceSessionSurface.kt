@@ -346,37 +346,52 @@ private fun ScrollableChipStrip(
  * Non-scrolling sticky cluster of primary chips, rendered after the
  * scrollable [ScrollableChipStrip] in [BottomChipControls].
  *
- * The cluster pins `Enter` (#568), `show keyboard` (#131), and the picker chip to
- * the right edge of the bottom toolbar regardless of how many static command chips
- * [ScrollableChipStrip] is asked to render. The right-thumb ergonomics
+ * The cluster pins optional agent commands (#462), `Enter` (#568),
+ * `show keyboard` (#131), and the picker chip to the right edge of the
+ * bottom toolbar regardless of how many static command chips [ScrollableChipStrip]
+ * is asked to render. The right-thumb ergonomics
  * goal of design-system §9 only holds if these primary affordances are
  * actually visible without horizontal-scrolling — see the
  * KDoc on [ScrollableChipStrip] for the round-1 regression that motivated
  * splitting them out.
  *
- * Order inside the cluster (left → right): `Enter` → `show keyboard` → picker.
- * All chips are optional; the cluster collapses to zero width when no callbacks
- * are supplied (currently the cluster is always non-empty on the tmux + raw-SSH
- * routes, but the optional API keeps the helper composable for callers that wire
- * fewer affordances).
+ * Order inside the cluster (left → right): `/ commands` → `Enter` →
+ * `show keyboard` → picker. All chips are optional; the cluster collapses to
+ * zero width when no callbacks are supplied (currently the cluster is always
+ * non-empty on the tmux + raw-SSH routes, but the optional API keeps the helper
+ * composable for callers that wire fewer affordances).
  */
 @Composable
 private fun PrimaryChipCluster(
+    onAgentCommandsTap: (() -> Unit)?,
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
     enterLabel: String = ENTER_CHIP_LABEL,
+    agentCommandsLabel: String = AGENT_COMMANDS_CHIP_LABEL,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     modifier: Modifier = Modifier,
 ) {
-    if (onEnterTap == null && onShowKeyboardTap == null && onAddSnippetTap == null) return
+    if (
+        onAgentCommandsTap == null &&
+        onEnterTap == null &&
+        onShowKeyboardTap == null &&
+        onAddSnippetTap == null
+    ) return
     Row(
         modifier = modifier
             .padding(top = 8.dp, bottom = 8.dp, end = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (onAgentCommandsTap != null) {
+            CommandChip(
+                label = agentCommandsLabel,
+                onClick = onAgentCommandsTap,
+                modifier = Modifier.testTag(SESSION_AGENT_COMMANDS_CHIP_TAG),
+            )
+        }
         if (onEnterTap != null) {
             CommandChip(
                 label = enterLabel,
@@ -413,9 +428,10 @@ private fun PrimaryChipCluster(
  *
  * 1. [ScrollableChipStrip] (`weight(1f)`) — scrollable, holds the
  *    low-frequency static command chips plus optional `dirs`.
- * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `Enter`, `show keyboard`,
- *    and the picker chip pinned to the right side of the chip area so they sit
- *    inside the right-thumb arc on a Pixel-class viewport regardless of
+ * 2. [PrimaryChipCluster] (sticky, non-scrolling) — agent commands (when
+ *    provided), `Enter`, `show keyboard`, and the picker chip pinned to the
+ *    right side of the chip area so they sit inside the right-thumb arc on a
+ *    Pixel-class viewport regardless of
  *    how many static chips precede them.
  * 3. Optional composer launcher (sticky, non-scrolling) — raw SSH still keeps
  *    the prompt composer affordance; tmux terminal chrome omits it per #283.
@@ -438,10 +454,12 @@ internal fun BottomChipControls(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
+    onAgentCommandsTap: (() -> Unit)? = null,
     onEnterTap: (() -> Unit)? = null,
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
     enterLabel: String = ENTER_CHIP_LABEL,
+    agentCommandsLabel: String = AGENT_COMMANDS_CHIP_LABEL,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
@@ -469,12 +487,16 @@ internal fun BottomChipControls(
             modifier = Modifier.weight(1f),
         )
         PrimaryChipCluster(
+            onAgentCommandsTap = onAgentCommandsTap?.let { callback ->
+                if (inputEnabled) callback else ({})
+            },
             onEnterTap = onEnterTap?.let { callback ->
                 if (inputEnabled) callback else ({})
             },
             onShowKeyboardTap = onShowKeyboardTap,
             onAddSnippetTap = onAddSnippetTap,
             enterLabel = enterLabel,
+            agentCommandsLabel = agentCommandsLabel,
             addSnippetLabel = addSnippetLabel,
             addSnippetIcon = addSnippetIcon,
         )
@@ -544,6 +566,8 @@ internal val DefaultSessionChips: List<String> = listOf(
 
 internal const val SHOW_KEYBOARD_CHIP_LABEL: String = "show keyboard"
 internal const val ENTER_CHIP_LABEL: String = "Enter"
+internal const val AGENT_COMMANDS_CHIP_LABEL: String = "/ commands"
+internal const val SESSION_AGENT_COMMANDS_CHIP_TAG: String = "session:agent-commands"
 
 // Issue #454: the saved-snippet picker chip. The old `+ snippet` / `+ prompt`
 // / `+ command` labels were unclear — the leading `+` read as "add a NEW

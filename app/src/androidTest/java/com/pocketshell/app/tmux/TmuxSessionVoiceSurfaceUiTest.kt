@@ -36,6 +36,7 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
+import com.pocketshell.app.voice.SESSION_AGENT_COMMANDS_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -428,17 +429,16 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun agentBottomChipBandIsJustTheComposerLauncher() {
-        // Issue #454/#610: the agent-pane band is decluttered to JUST the
-        // Prompt Composer launcher.
-        // The former "/ commands" bottom chip is gone — the dedicated "/"
-        // command-palette button in the session header (issue #462) is the
-        // single, obvious entry to that palette, so the bottom chip was a
-        // redundant duplicate. The former `Ctrl-C x2` / `Ctrl-D x2` chips
+    fun agentBottomChipBandShowsAgentCommandsAndComposerLauncher() {
+        // Issue #454/#610/#462: the agent-pane band carries the primary
+        // palette affordance plus the Prompt Composer launcher. Slash commands
+        // are a sticky primary control, not a scrollable chip; the former
+        // `Ctrl-C x2` / `Ctrl-D x2` chips
         // already moved into the palette (session-control rows), and there is
         // no snippet chip on agent panes (the composer's `{}` inserts prompts).
         // `AgentExitChips` is now empty.
         var dictateTaps = 0
+        var commandTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
@@ -446,6 +446,7 @@ class TmuxSessionVoiceSurfaceUiTest {
                     chips = AgentExitChips,
                     onChipTap = { chipTaps += it },
                     onDictateTap = { dictateTaps++ },
+                    onAgentCommandsTap = { commandTaps++ },
                     onShowKeyboardTap = null,
                     onAddSnippetTap = null,
                     addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
@@ -455,10 +456,12 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
+        compose.onNodeWithTag(SESSION_AGENT_COMMANDS_CHIP_TAG).assertIsDisplayed().performClick()
+        assertEquals(1, commandTaps)
+        compose.onNodeWithText(AgentCommandsChip).assertIsDisplayed()
+
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
-        // The "/ commands" bottom chip is gone (it lives in the header now).
-        compose.onNodeWithText(AgentCommandsChip).assertDoesNotExist()
         // The interrupt/EOF chips are no longer in the band (they live in the palette).
         compose.onNodeWithText(CtrlC2Chip).assertDoesNotExist()
         compose.onNodeWithText(CtrlD2Chip).assertDoesNotExist()
@@ -466,9 +469,9 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText(ADD_PROMPT_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("git status").assertDoesNotExist()
-        captureViewportArtifact("agent-composer-launcher-only-bottom-strip.png")
+        captureViewportArtifact("agent-command-and-composer-bottom-strip.png")
 
-        // No band chips at all — only the composer launcher is interactive.
+        // No scrollable band chips — only sticky primary controls are interactive.
         assertEquals(emptyList<String>(), chipTaps)
     }
 

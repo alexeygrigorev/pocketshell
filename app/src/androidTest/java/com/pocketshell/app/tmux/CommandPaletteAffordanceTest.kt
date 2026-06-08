@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
@@ -27,6 +28,7 @@ import com.pocketshell.app.agentcommands.AgentCommandSheet
 import com.pocketshell.app.agentcommands.agentCommandArgumentFieldTag
 import com.pocketshell.app.agentcommands.agentCommandRowTag
 import com.pocketshell.app.agentcommands.agentCommandSendChipTag
+import com.pocketshell.app.voice.SESSION_AGENT_COMMANDS_CHIP_TAG
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -40,18 +42,18 @@ import org.junit.runner.RunWith
 
 /**
  * Issue #462: the agent command palette ('/goal', '/compact', '/clear', …)
- * must be reachable in ≤1 obvious tap from an agent terminal screen — a clear
- * dedicated button in the session chrome, NOT buried among the bottom chip row.
+ * must be reachable in ≤1 obvious tap from an agent terminal screen without
+ * adding another action to the top chrome.
  *
  * The full [TmuxSessionScreen] needs Hilt + a live tmux client, so these tests
- * exercise the exact composables the screen renders: the dedicated "/"
- * [CommandPaletteButton] inside [ConsolidatedTopChrome], and the existing #436
- * [AgentCommandSheet] it opens. We verify:
+ * exercise the exact composables the screen renders: [ConsolidatedTopChrome],
+ * [CompactBreadcrumb], [TmuxTerminalBottomControls], and the existing #436
+ * [AgentCommandSheet]. We verify:
  *
- *  1. The "/" affordance is visible in the agent-session header.
- *  2. One tap opens the palette (the #436 sheet), and a parameterized command
- *     row routes the composed command text back to the caller.
- *  3. The affordance is absent for a plain (non-agent) shell header.
+ *  1. The old top-chrome "/" affordance is absent in full and compact chrome.
+ *  2. One bottom-control tap opens the palette and routes command text back.
+ *  3. The IME-open tmux keybar exposes the same one-tap palette access.
+ *  4. Plain shell wiring does not render the agent affordance.
  *
  * A screenshot of the header + open palette is written for reviewer/maintainer
  * eyeball evidence.
@@ -64,7 +66,7 @@ class CommandPaletteAffordanceTest {
 
     @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
     @Test
-    fun commandPaletteButtonOpensSheetAndSendsParameterizedCommand() {
+    fun agentBottomCommandControlOpensSheetAndSendsParameterizedCommand() {
         var sheetOpen = false
         var sent: AgentCommand? = null
         compose.setContent {
@@ -84,8 +86,26 @@ class CommandPaletteAffordanceTest {
                         selectedTabIndex = 1,
                         onBack = {},
                         onMore = {},
-                        showCommandPalette = true,
-                        onCommandPalette = {
+                    )
+                    CompactBreadcrumb(
+                        sessionName = "agent-main",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    TmuxTerminalBottomControls(
+                        isImeVisible = false,
+                        showConversation = false,
+                        sessionLive = true,
+                        isAgentPane = true,
+                        keyBarExpanded = false,
+                        onKeyBarExpandedChange = {},
+                        onKey = {},
+                        onChipTap = {},
+                        onDictateTap = {},
+                        onEnterTap = {},
+                        onShowKeyboardTap = {},
+                        onAddSnippetTap = null,
+                        onAgentCommandsTap = {
                             sheetOpen = true
                             open = true
                         },
@@ -101,13 +121,13 @@ class CommandPaletteAffordanceTest {
             }
         }
 
-        // 1. The dedicated "/" affordance is visible in the header.
-        compose.onNodeWithTag(TMUX_COMMAND_PALETTE_BUTTON_TAG).assertIsDisplayed()
+        // 1. The old dedicated "/" affordance is absent from both top chromes.
+        compose.onNodeWithTag(TMUX_COMMAND_PALETTE_BUTTON_TAG).assertDoesNotExist()
 
-        // 2. One obvious tap opens the existing #436 palette.
-        compose.onNodeWithTag(TMUX_COMMAND_PALETTE_BUTTON_TAG).performClick()
+        // 2. One obvious bottom-control tap opens the existing #436 palette.
+        compose.onNodeWithTag(SESSION_AGENT_COMMANDS_CHIP_TAG).assertIsDisplayed().performClick()
         compose.waitForIdle()
-        assertTrue("Tapping the palette button should open the sheet", sheetOpen)
+        assertTrue("Tapping the bottom palette control should open the sheet", sheetOpen)
         compose.onNodeWithTag(AGENT_COMMAND_SHEET_TAG).assertIsDisplayed()
 
         captureFullDevice(File(artifactDir(), "command-palette-open-viewport.png"))
@@ -121,8 +141,50 @@ class CommandPaletteAffordanceTest {
         assertEquals("/goal ship command templates", sent?.command)
     }
 
+    @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
     @Test
-    fun commandPaletteButtonAbsentForPlainShellHeader() {
+    fun agentImeKeybarCommandControlOpensSheet() {
+        var sheetOpen = false
+        compose.setContent {
+            PocketShellTheme {
+                var open by remember { mutableStateOf(false) }
+                TmuxTerminalBottomControls(
+                    isImeVisible = true,
+                    showConversation = false,
+                    sessionLive = true,
+                    isAgentPane = true,
+                    keyBarExpanded = false,
+                    onKeyBarExpandedChange = {},
+                    onKey = {},
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = null,
+                    onAgentCommandsTap = {
+                        sheetOpen = true
+                        open = true
+                    },
+                )
+                if (open) {
+                    AgentCommandSheet(
+                        agent = AgentKind.ClaudeCode,
+                        onDismiss = { open = false },
+                        onCommandSend = {},
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertIsDisplayed()
+        compose.onNodeWithText(TmuxAgentCommandsKeyLabel).assertIsDisplayed().performClick()
+        compose.waitForIdle()
+        assertTrue("Tapping the IME keybar palette control should open the sheet", sheetOpen)
+        compose.onNodeWithTag(AGENT_COMMAND_SHEET_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun commandPaletteAffordanceAbsentForPlainShellControls() {
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -136,12 +198,27 @@ class CommandPaletteAffordanceTest {
                         sessionName = "scratch",
                         onBack = {},
                         onMore = {},
-                        showCommandPalette = false,
+                    )
+                    TmuxTerminalBottomControls(
+                        isImeVisible = false,
+                        showConversation = false,
+                        sessionLive = true,
+                        isAgentPane = false,
+                        keyBarExpanded = false,
+                        onKeyBarExpandedChange = {},
+                        onKey = {},
+                        onChipTap = {},
+                        onDictateTap = {},
+                        onEnterTap = {},
+                        onShowKeyboardTap = {},
+                        onAddSnippetTap = {},
                     )
                 }
             }
         }
         compose.onNodeWithTag(TMUX_COMMAND_PALETTE_BUTTON_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_AGENT_COMMANDS_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithText(AgentCommandsChip).assertDoesNotExist()
     }
 
     private fun artifactDir(): File {

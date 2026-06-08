@@ -143,6 +143,7 @@ import com.pocketshell.app.snippets.snippetDispatchText
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
+import com.pocketshell.app.voice.AGENT_COMMANDS_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.SessionBottomControlsMinHeight
@@ -169,7 +170,6 @@ import com.pocketshell.uikit.model.ConnectionStatus as UiConnectionStatus
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -847,14 +847,6 @@ public fun TmuxSessionScreen(
                                 onBack = onBack,
                                 onMore = { moreExpanded = true },
                                 moreMenu = { AnchoredTmuxMoreMenu() },
-                                // Issue #462: a dedicated, always-visible "/"
-                                // command-palette button in the session header.
-                                // Shown whenever the visible pane is (or was
-                                // just) an agent pane — resilient to transient
-                                // detection misses via `paletteAgent`. One tap
-                                // opens the existing #436 [AgentCommandSheet].
-                                showCommandPalette = paletteAgent != null,
-                                onCommandPalette = { showAgentCommands = true },
                                 // Issue #463: the tappable project crumb +
                                 // sibling-session dropdown. Refresh the warm
                                 // sibling list on open, and route a selection
@@ -922,10 +914,6 @@ public fun TmuxSessionScreen(
                             onBack = onBack,
                             onMore = { moreExpanded = true },
                             moreMenu = { AnchoredTmuxMoreMenu() },
-                            // Issue #462: keep the "/ commands" palette reachable
-                            // while the keyboard is up too.
-                            showCommandPalette = paletteAgent != null,
-                            onCommandPalette = { showAgentCommands = true },
                             connectionStatus = status.toUiStatus(),
                             forwardingState = sessionForwardingState,
                             onOpenPortForwarding = onOpenPortForwarding,
@@ -1219,14 +1207,12 @@ public fun TmuxSessionScreen(
                         viewModel.onKeyBarModifierState(binding.label, state)
                     },
                     onChipTap = { chip ->
-                        // Issue #454: the agent band no longer carries the
-                        // "/ commands" chip (the dedicated "/" header button
-                        // from issue #462 is the single palette entry now), so
-                        // the only chips reaching this handler are shell-pane
+                        // Agent slash commands are opened through the primary
+                        // bottom-control affordance, not the scrollable chip
+                        // list, so chips reaching this handler are shell-pane
                         // quick-run commands ([DefaultSessionChips]). Each
-                        // runs literally in the focused pane — mirrors
-                        // `SessionViewModel.onChipTap`, appending a CR that
-                        // the tmux input bridge translates into named `Enter`.
+                        // runs literally in the focused pane, appending a CR
+                        // that the tmux input bridge translates into Enter.
                         viewModel.writeInputToPane(
                             pane.paneId,
                             (chip + "\r").toByteArray(Charsets.UTF_8),
@@ -1258,6 +1244,9 @@ public fun TmuxSessionScreen(
                     // Issue #454: shell panes keep the saved-snippet picker.
                     onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
                         { showSnippetPicker = true }
+                    } else null,
+                    onAgentCommandsTap = if (paletteAgent != null) {
+                        { showAgentCommands = true }
                     } else null,
                     modifier = bottomControlsModifier,
                 )
@@ -2451,8 +2440,9 @@ internal const val TMUX_COMPACT_CHROME_BACK_BUTTON_TAG = "tmux:chrome:compact:ba
 internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG =
     "tmux:chrome:compact:more"
 
-// Issue #462: the dedicated "/" agent command-palette button rendered in the
-// session header chrome (and the IME-up compact breadcrumb) for agent panes.
+// Issue #462 regression sentinel: the old top-chrome command-palette button
+// must not render in either the full or compact tmux chrome. Kept so tests can
+// assert the previous affordance is gone from the header edge.
 internal const val TMUX_COMMAND_PALETTE_BUTTON_TAG = "tmux:chrome:command-palette"
 
 // Issue #601/#603 design slice: active port-forwarding state is surfaced as
@@ -4095,6 +4085,7 @@ private fun DropdownMenuSectionHeader(text: String) {
  *   remaining width.
  * - optional inline Terminal/Conversation pill when an agent or locked
  *   conversation is available.
+ * - optional active port-forwarding status.
  * - 48dp more affordance (kebab), which owns the dropdown anchor.
  *
  * The host segment is intentionally not surfaced — the host name is
@@ -4117,13 +4108,6 @@ internal fun ConsolidatedTopChrome(
     selectedTabIndex: Int = 0,
     onTabSelected: (Int) -> Unit = {},
     pulseConversationTab: Boolean = false,
-    // Issue #462: when true, a dedicated "/" command-palette button renders
-    // in the header (between the tabs and the kebab). It is the obvious,
-    // always-reachable entry point to the agent slash-command palette
-    // ([AgentCommandSheet]) for agent sessions — one tap, not buried in the
-    // bottom chip row. [onCommandPalette] fires on tap.
-    showCommandPalette: Boolean = false,
-    onCommandPalette: () -> Unit = {},
     // Issue #463: the in-session project switcher. When [projectLabel] is
     // non-null a tappable project/folder crumb renders at the leading edge
     // of the title slot. It shows a ▾ chevron and opens [projectSwitcher]'s
@@ -4227,11 +4211,6 @@ internal fun ConsolidatedTopChrome(
                 )
             }
             Spacer(modifier = Modifier.width(4.dp))
-        }
-
-        // Issue #462: the dedicated "/ commands" palette entry point.
-        if (showCommandPalette) {
-            CommandPaletteButton(onClick = onCommandPalette)
         }
 
         SessionForwardingChromeButton(
@@ -4386,50 +4365,6 @@ private fun ProjectSwitcherCrumb(
 }
 
 /**
- * Issue #462: the dedicated "/" command-palette button shown in the session
- * header for agent panes. This is the obvious, always-reachable entry point
- * the maintainer asked for — a clear glyph in the session chrome, not a chip
- * buried in the bottom Esc/Tab/Ctrl band. One tap opens the existing #436
- * [AgentCommandSheet] (`/goal`, `/compact`, `/clear`, …).
- *
- * Rendered as an accent-tinted 48dp touch target with a monospace `/` glyph
- * and a `contentDescription` so it is discoverable by sighted users and
- * accessibility tooling alike. Tagged [TMUX_COMMAND_PALETTE_BUTTON_TAG] so the
- * affordance can be asserted/clicked from instrumentation.
- */
-@Composable
-private fun CommandPaletteButton(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .size(40.dp)
-            .background(
-                color = PocketShellColors.Accent.copy(alpha = 0.16f),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.Accent.copy(alpha = 0.55f),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-            )
-            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
-            .testTag(TMUX_COMMAND_PALETTE_BUTTON_TAG)
-            .semantics { contentDescription = "Agent commands" },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "/",
-            color = PocketShellColors.Accent,
-            fontFamily = JetBrainsMonoFamily,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-        )
-    }
-}
-
-/**
  * Issue #189: the inline Terminal / Conversation toggle inside
  * [ConsolidatedTopChrome]. Visually a slim segmented pill — both labels
  * inside one bordered, rounded container — so the user reads it as a
@@ -4552,11 +4487,6 @@ internal fun CompactBreadcrumb(
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
     moreMenu: @Composable () -> Unit = {},
-    // Issue #462: the "/" command-palette button stays reachable even in the
-    // IME-up compact chrome so the user never has to drop the keyboard to find
-    // it. Same resilient gating as the full chrome.
-    showCommandPalette: Boolean = false,
-    onCommandPalette: () -> Unit = {},
     // Issues #177 / #249: even in the IME-up compact chrome the user must
     // be able to tell the session is not live before they dictate into it.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
@@ -4601,12 +4531,6 @@ internal fun CompactBreadcrumb(
         )
         ConnectionStatusPill(connectionStatus)
         Spacer(modifier = Modifier.width(4.dp))
-        // Issue #462: the dedicated "/ commands" palette entry point, kept
-        // reachable in the IME-up compact chrome too.
-        if (showCommandPalette) {
-            CommandPaletteButton(onClick = onCommandPalette)
-            Spacer(modifier = Modifier.width(4.dp))
-        }
         SessionForwardingChromeButton(
             state = forwardingState,
             onClick = onOpenPortForwarding,
@@ -5117,6 +5041,7 @@ private fun TmuxTerminalBottomControlsWithComposerAttachments(
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
+    onAgentCommandsTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val promptComposerState by promptComposerViewModel.uiState.collectAsState()
@@ -5135,6 +5060,7 @@ private fun TmuxTerminalBottomControlsWithComposerAttachments(
         onEnterTap = onEnterTap,
         onShowKeyboardTap = onShowKeyboardTap,
         onAddSnippetTap = onAddSnippetTap,
+        onAgentCommandsTap = onAgentCommandsTap,
         stagedAttachments = promptComposerState.attachments,
         onRemoveStagedAttachment = promptComposerViewModel::removeAttachment,
         modifier = modifier,
@@ -5157,6 +5083,7 @@ internal fun TmuxTerminalBottomControls(
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
+    onAgentCommandsTap: (() -> Unit)? = null,
     stagedAttachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
     onRemoveStagedAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -5198,13 +5125,17 @@ internal fun TmuxTerminalBottomControls(
                 }
                 if (chromeMode == TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys) {
                     KeyBar(
-                        keys = tmuxKeyBarLayout(keyBarExpanded),
+                        keys = tmuxKeyBarLayout(
+                            expanded = keyBarExpanded,
+                            includeAgentCommands = onAgentCommandsTap != null,
+                        ),
                         onKey = if (sessionLive) {
                             { binding ->
                                 // Issue #458: the `⋯` / `×` slot toggles the
                                 // expander locally; it is never a keystroke.
                                 // All other taps route to the pane.
                                 when (binding.label) {
+                                    TmuxAgentCommandsKeyLabel -> onAgentCommandsTap?.invoke()
                                     TmuxKeyBarExpandLabel -> {
                                         DiagnosticEvents.record(
                                             "action",
@@ -5238,9 +5169,11 @@ internal fun TmuxTerminalBottomControls(
                         chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                         onChipTap = onChipTap,
                         onDictateTap = onDictateTap,
+                        onAgentCommandsTap = onAgentCommandsTap,
                         onEnterTap = if (!showConversation) onEnterTap else null,
                         onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
                         onAddSnippetTap = onAddSnippetTap,
+                        agentCommandsLabel = AgentCommandsChip,
                         addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
                         addSnippetIcon = SnippetsChipIcon,
                         // Project navigation on tmux panes is a separate
@@ -5280,6 +5213,7 @@ internal fun tmuxTerminalKeyboardChromeMode(
  * accent treatment by the bar itself.
  */
 internal const val TmuxCtrlModifierLabel: String = "Ctrl"
+internal const val TmuxAgentCommandsKeyLabel: String = "/"
 
 /**
  * Tmux key bar — curated default + an expandable long tail (issue #458).
@@ -5329,25 +5263,33 @@ internal val TmuxKeyBarLayoutExpanded: List<KeyBinding> = listOf(
 )
 
 /** Pick the curated or full key-bar layout based on the expander state. */
-internal fun tmuxKeyBarLayout(expanded: Boolean): List<KeyBinding> =
-    if (expanded) TmuxKeyBarLayoutExpanded else TmuxKeyBarLayoutCompact
+internal fun tmuxKeyBarLayout(
+    expanded: Boolean,
+    includeAgentCommands: Boolean = false,
+): List<KeyBinding> {
+    val base = if (expanded) TmuxKeyBarLayoutExpanded else TmuxKeyBarLayoutCompact
+    return if (includeAgentCommands) {
+        listOf(KeyBinding(label = TmuxAgentCommandsKeyLabel, kind = KeyKind.Regular)) + base
+    } else {
+        base
+    }
+}
 
 internal const val CtrlC2Chip: String = "Ctrl-C x2"
 internal const val CtrlD2Chip: String = "Ctrl-D x2"
 
 // Issue #436 (Slice A): the agent slash-command quick-send palette
-// ([AgentCommandSheet]). Opened from the dedicated "/" command-palette button
-// in the session header (issue #462) — the single, discoverable entry point.
-// The label is kept as a stable identifier for that palette button + tests.
-internal const val AgentCommandsChip: String = "/ commands"
+// ([AgentCommandSheet]). Reopened issue #462 moves this affordance back to the
+// bottom input/control area so the top-right tmux kebab remains the only
+// screen-level overflow at that edge.
+internal const val AgentCommandsChip: String = AGENT_COMMANDS_CHIP_LABEL
 
-// Issue #454: the agent-pane bottom band is decluttered to just the mic FAB
-// (plus the Terminal-only "show keyboard" chip). The former "/ commands"
-// bottom chip was redundant once issue #462 added the dedicated "/" palette
-// button to the session header — same target ([AgentCommandSheet]), one obvious
-// place. `AgentExitChips` is now empty so the agent band carries no scrollable
-// chips. The former `Ctrl-C x2` / `Ctrl-D x2` interrupt/EOF chips already moved
-// into the "/ commands" palette as session-control rows (see [AgentCommandSheet]
-// `onControlSend`). `CtrlC2Chip` / `CtrlD2Chip` are kept as the literal labels
-// the palette controls map to, but no longer appear in the band.
+// Issue #454: the agent-pane bottom band is decluttered to the composer
+// launcher plus primary controls. Slash commands are no longer part of the
+// scrollable chip list; issue #462 renders them as a primary bottom-control
+// affordance near Enter/show-keyboard/keybar. The former `Ctrl-C x2` /
+// `Ctrl-D x2` interrupt/EOF chips already moved into the "/ commands" palette
+// as session-control rows (see [AgentCommandSheet] `onControlSend`).
+// `CtrlC2Chip` / `CtrlD2Chip` are kept as the literal labels the palette
+// controls map to, but no longer appear in the band.
 internal val AgentExitChips: List<String> = emptyList()

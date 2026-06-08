@@ -63,6 +63,10 @@ class TmuxSessionVoiceSurfaceUiTest {
     @Test
     fun tmuxKeyboardOpenAccessoryShowsHotkeysOnly() {
         val keyTaps = mutableListOf<String>()
+        val attachment = PromptComposerViewModel.StagedAttachment(
+            remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
+            displayName = "shot.png",
+        )
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
@@ -78,6 +82,7 @@ class TmuxSessionVoiceSurfaceUiTest {
                     onEnterTap = {},
                     onShowKeyboardTap = {},
                     onAddSnippetTap = {},
+                    stagedAttachments = listOf(attachment),
                 )
             }
         }
@@ -91,6 +96,8 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath)).assertDoesNotExist()
         compose.onNodeWithText("show keyboard").assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("Prompt").assertDoesNotExist()

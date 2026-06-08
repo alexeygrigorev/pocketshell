@@ -1628,13 +1628,14 @@ internal fun RawSessionBottomControls(
     onRemoveStagedAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val showHotkeyAccessory = isImeVisible && !showConversation
     Column(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = SessionBottomControlsMinHeight)
             .background(color = PocketShellColors.Surface),
     ) {
-        if (stagedAttachments.isNotEmpty()) {
+        if (stagedAttachments.isNotEmpty() && !showHotkeyAccessory) {
             AttachmentTileGrid(
                 attachments = stagedAttachments,
                 onRemove = onRemoveStagedAttachment,
@@ -1644,7 +1645,7 @@ internal fun RawSessionBottomControls(
         // Raw SSH mirrors the tmux route: terminal key rows are Terminal-only.
         // Conversation always sends through the unified composer surface, even if
         // the IME is visible from an earlier terminal interaction.
-        if (isImeVisible && !showConversation) {
+        if (showHotkeyAccessory) {
             KeyBar(
                 keys = SessionTerminalKeyBarLayout,
                 onKey = if (sessionLive) onKey else { _ -> },

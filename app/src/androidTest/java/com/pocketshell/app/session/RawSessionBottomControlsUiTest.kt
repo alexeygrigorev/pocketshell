@@ -9,6 +9,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
+import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.composerAttachmentChipTestTag
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -67,6 +70,10 @@ class RawSessionBottomControlsUiTest {
     fun keyboardOpenAccessoryShowsRawHotkeysOnlyIncludingEnter() {
         val keyTaps = mutableListOf<String>()
         var keyboardTaps = 0
+        val attachment = PromptComposerViewModel.StagedAttachment(
+            remotePath = "~/.pocketshell/attachments/raw-host/shot.png",
+            displayName = "shot.png",
+        )
 
         compose.setContent {
             PocketShellTheme {
@@ -80,6 +87,7 @@ class RawSessionBottomControlsUiTest {
                     onShowKeyboardTap = { keyboardTaps++ },
                     onAddSnippetTap = {},
                     onProjectNavigationTap = {},
+                    stagedAttachments = listOf(attachment),
                 )
             }
         }
@@ -97,6 +105,8 @@ class RawSessionBottomControlsUiTest {
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath)).assertDoesNotExist()
         compose.onNodeWithText("show keyboard").assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("Prompt").assertDoesNotExist()

@@ -5141,20 +5141,21 @@ internal fun TmuxTerminalBottomControls(
     onRemoveStagedAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val showHotkeyAccessory = isImeVisible && !showConversation
     Column(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = SessionBottomControlsMinHeight)
             .background(color = PocketShellColors.Surface),
     ) {
-        if (stagedAttachments.isNotEmpty()) {
+        if (stagedAttachments.isNotEmpty() && !showHotkeyAccessory) {
             AttachmentTileGrid(
                 attachments = stagedAttachments,
                 onRemove = onRemoveStagedAttachment,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
-        if (isImeVisible && !showConversation) {
+        if (showHotkeyAccessory) {
             KeyBar(
                 keys = tmuxKeyBarLayout(keyBarExpanded),
                 onKey = if (sessionLive) {

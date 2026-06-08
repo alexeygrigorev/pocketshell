@@ -5687,10 +5687,22 @@ public class TmuxSessionViewModel @Inject constructor(
         detection: AgentDetection,
         refreshGuard: RuntimeRefreshGuard? = null,
     ) {
-        val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
-        val initialEvents = runCatching {
+        val lineCount = recoverAgentConversationStartupRead(
+            paneId = paneId,
+            detection = detection,
+            operation = "line_count",
+            fallback = 0L,
+        ) {
+            agentRepository.lineCount(session, detection)
+        }
+        val initialEvents = recoverAgentConversationStartupRead(
+            paneId = paneId,
+            detection = detection,
+            operation = "initial_read",
+            fallback = emptyList(),
+        ) {
             agentRepository.readInitialEvents(session, detection)
-        }.getOrDefault(emptyList())
+        }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
         markAgentTailLive(paneId, detection, initialEvents)
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
@@ -5748,10 +5760,22 @@ public class TmuxSessionViewModel @Inject constructor(
         restored: AgentConversationUiState,
         refreshGuard: RuntimeRefreshGuard,
     ) {
-        val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
-        val initialEvents = runCatching {
+        val lineCount = recoverAgentConversationStartupRead(
+            paneId = paneId,
+            detection = detection,
+            operation = "restore_line_count",
+            fallback = 0L,
+        ) {
+            agentRepository.lineCount(session, detection)
+        }
+        val initialEvents = recoverAgentConversationStartupRead(
+            paneId = paneId,
+            detection = detection,
+            operation = "restore_initial_read",
+            fallback = restored.events,
+        ) {
             agentRepository.readInitialEvents(session, detection)
-        }.getOrDefault(restored.events)
+        }
         if (!isCurrentRuntime(refreshGuard)) return
         markRestoredAgentTailLive(paneId, detection, initialEvents)
         val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
@@ -6232,6 +6256,13 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun markAgentTailUnavailable(paneId: String, detection: AgentDetection) {
+        recordAgentConversationTailStatus(
+            paneId = paneId,
+            detection = detection,
+            status = AgentConversationSyncStatus.LogUnavailable,
+            cause = null,
+            reason = "tail_start_unavailable",
+        )
         markAgentConversationSyncStatus(
             paneId = paneId,
             detection = detection,
@@ -6265,6 +6296,49 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
         return retryDetection
+    }
+
+    private suspend fun <T> recoverAgentConversationStartupRead(
+        paneId: String,
+        detection: AgentDetection,
+        operation: String,
+        fallback: T,
+        block: suspend () -> T,
+    ): T {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Exception) {
+            recordAgentConversationTailStatus(
+                paneId = paneId,
+                detection = detection,
+                status = AgentConversationSyncStatus.LogUnavailable,
+                cause = t,
+                reason = operation,
+            )
+            fallback
+        }
+    }
+
+    private fun recordAgentConversationTailStatus(
+        paneId: String,
+        detection: AgentDetection,
+        status: AgentConversationSyncStatus,
+        cause: Throwable?,
+        reason: String,
+    ) {
+        DiagnosticEvents.record(
+            "recoverable",
+            "tmux_agent_conversation_tail_status",
+            "pane" to paneId,
+            "agent" to detection.agent.name,
+            "source" to detection.sourcePath,
+            "status" to status.name,
+            "reason" to reason,
+            "cause" to cause?.javaClass?.simpleName,
+            "message" to cause?.message,
+        )
     }
 
     private fun markRestoredAgentTailLive(

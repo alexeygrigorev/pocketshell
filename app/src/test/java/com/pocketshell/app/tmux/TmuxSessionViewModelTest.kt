@@ -37,6 +37,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -5913,22 +5914,56 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun disconnectedSshWhenAgentTailStartsMarksConversationUnavailableWithoutCrashing() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         val detection = newClaudeDetection()
 
-        vm.startAgentConversationForPaneForTest(
-            paneId = "%0",
-            session = FakeSshSession(
-                tailFailure = SshException("SSH session is not connected"),
-            ),
-            detection = detection,
-        )
-        advanceUntilIdle()
+        try {
+            vm.startAgentConversationForPaneForTest(
+                paneId = "%0",
+                session = FakeSshSession(
+                    tailFailure = SshException("SSH session is not connected"),
+                ),
+                detection = detection,
+            )
+            advanceUntilIdle()
 
-        val state = vm.agentConversations.value["%0"]
-        assertEquals(AgentConversationSyncStatus.LogUnavailable, state?.syncStatus)
-        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            val state = vm.agentConversations.value["%0"]
+            assertEquals(AgentConversationSyncStatus.LogUnavailable, state?.syncStatus)
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            val event = diagnostics.eventsNamed("tmux_agent_conversation_tail_status").single()
+            assertEquals("recoverable", event.category)
+            assertEquals("%0", event.fields["pane"])
+            assertEquals("tail_start_unavailable", event.fields["reason"])
+            assertEquals(AgentConversationSyncStatus.LogUnavailable.name, event.fields["status"])
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
+    fun cancelledAgentConversationStartupReadIsNotSwallowed() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+
+        try {
+            vm.startAgentConversationForPaneForTest(
+                paneId = "%0",
+                session = FakeSshSession(
+                    execFailure = CancellationException("cancelled during line count"),
+                ),
+                detection = detection,
+            )
+            assertTrue("startup cancellation must propagate", false)
+        } catch (e: CancellationException) {
+            assertEquals("cancelled during line count", e.message)
+        }
+        assertTrue(
+            "cancelled startup must not leave a phantom conversation row",
+            vm.agentConversations.value.isEmpty(),
+        )
     }
 
     @Test
@@ -10264,6 +10299,7 @@ class TmuxSessionViewModelTest {
         private val wcOutput: String = "0\n",
         private val initialEventsOutput: String = "",
         private val agentLogLines: List<String>? = null,
+        private val execFailure: Throwable? = null,
         private val tailFailure: Throwable? = null,
         private val detectionOutput: String = "",
         private val processOutput: String = "",
@@ -10284,6 +10320,7 @@ class TmuxSessionViewModelTest {
         override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
             execCommands += command
             execGate?.await()
+            execFailure?.let { throw it }
             val stdout = when {
                 command.contains("ss -tlnp") ->
                     ssListeningPorts.joinToString("\n") { "0.0.0.0:$it users:((\"server\",pid=1,fd=3))" }

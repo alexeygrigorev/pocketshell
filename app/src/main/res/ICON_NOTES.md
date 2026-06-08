@@ -46,7 +46,7 @@ not launcher assets:
   pocket-terminal mark. The cyan (`#22D3EE`) frame/title bar/cursor
   carries the brand color; the white prompt chevron preserves contrast
   inside the small Android icon mask.
-- Artwork is constrained to a conservative inner 48dp × 50dp
-  adaptive-icon safe zone so OEM masks, Pixel Launcher folder previews,
-  and circular crops leave visible breathing room instead of clipping
-  the terminal frame.
+- Artwork is constrained to a conservative inner 44dp x 50dp
+  adaptive-icon safe zone. The right-side detail from the first D/1 vector
+  pass was removed because real Pixel Launcher folder previews made it read
+  like the icon was clipped by the circular mask.

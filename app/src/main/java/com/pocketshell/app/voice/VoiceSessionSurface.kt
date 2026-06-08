@@ -649,9 +649,9 @@ internal const val SESSION_MIC_FAB_TAG: String = SESSION_COMPOSER_LAUNCHER_TAG
 /**
  * Issue #612: D/1-derived composer launcher mark. It keeps the selected
  * pocket-terminal silhouette from the launcher icon, then adds a compact
- * prompt/open-corner cue so the bottom FAB still reads as "open composer"
+ * prompt/cursor cue so the bottom control still reads as "open composer"
  * rather than dictation. Microphone glyphs stay reserved for real recording
- * controls. The path stays inside 5..19 of the 24dp viewport so circular
+ * controls. The path stays inside 6..18 of the 24dp viewport so circular
  * button masks and dense toolbar previews leave visible breathing room.
  */
 internal val ComposerLauncherIcon: ImageVector = ImageVector.Builder(
@@ -668,25 +668,25 @@ private fun ImageVector.Builder.addComposerLauncherPath(fill: SolidColor): Image
     val builder = PathBuilder()
 
     // Pocket-terminal frame, built from filled bars for stable 24dp rendering.
-    builder.moveTo(6f, 5f)
+    builder.moveTo(6f, 5.4f)
     builder.lineToRelative(12f, 0f)
     builder.lineToRelative(0f, 1.8f)
     builder.lineToRelative(-12f, 0f)
     builder.close()
 
-    builder.moveTo(5f, 6f)
+    builder.moveTo(6f, 6.4f)
     builder.lineToRelative(1.8f, 0f)
-    builder.lineToRelative(0f, 12f)
+    builder.lineToRelative(0f, 11.2f)
     builder.lineToRelative(-1.8f, 0f)
     builder.close()
 
-    builder.moveTo(17.2f, 6f)
+    builder.moveTo(16.2f, 6.4f)
     builder.lineToRelative(1.8f, 0f)
-    builder.lineToRelative(0f, 12f)
+    builder.lineToRelative(0f, 11.2f)
     builder.lineToRelative(-1.8f, 0f)
     builder.close()
 
-    builder.moveTo(6f, 17.2f)
+    builder.moveTo(6f, 16.8f)
     builder.lineToRelative(12f, 0f)
     builder.lineToRelative(0f, 1.8f)
     builder.lineToRelative(-12f, 0f)
@@ -710,15 +710,6 @@ private fun ImageVector.Builder.addComposerLauncherPath(fill: SolidColor): Image
     builder.lineToRelative(3f, 0f)
     builder.lineToRelative(0f, 1.6f)
     builder.lineToRelative(-3f, 0f)
-    builder.close()
-
-    // Open-corner cue: enough to echo OpenInFull without becoming generic.
-    builder.moveTo(14.2f, 7.4f)
-    builder.lineToRelative(2.8f, 0f)
-    builder.lineToRelative(0f, 2.8f)
-    builder.lineToRelative(-1.2f, 0f)
-    builder.lineToRelative(0f, -1.6f)
-    builder.lineToRelative(-1.6f, 0f)
     builder.close()
 
     addPath(pathData = builder.nodes, fill = fill)

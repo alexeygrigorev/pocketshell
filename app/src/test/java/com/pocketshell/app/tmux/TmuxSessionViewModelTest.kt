@@ -1598,6 +1598,12 @@ class TmuxSessionViewModelTest {
             assertEquals(false, skip.fields["realValidatedIdentityChange"])
             assertEquals("same-handle", skip.fields["currentNetworkHandle"])
             assertEquals("VPN,WIFI", skip.fields["currentTransports"])
+            val trail = diagnostics.eventsNamed("cause_trail")
+                .single { it.fields["stage"] == "network_reconnect_decision" }
+            assertEquals("suppress", trail.fields["outcome"])
+            assertEquals("no_real_validated_handoff", trail.fields["cause"])
+            assertEquals("network_identity_unchanged", trail.fields["classification"])
+            assertEquals(7L, trail.fields["hostId"])
         } finally {
             diagnostics.close()
         }
@@ -1646,6 +1652,12 @@ class TmuxSessionViewModelTest {
             assertEquals(true, start.fields["realValidatedIdentityChange"])
             assertEquals("wifi", start.fields["previousValidatedNetworkHandle"])
             assertEquals("cell", start.fields["currentNetworkHandle"])
+            val trail = diagnostics.eventsNamed("cause_trail")
+                .single { it.fields["stage"] == "network_reconnect_decision" }
+            assertEquals("schedule_reconnect", trail.fields["outcome"])
+            assertEquals("proactive_network_handoff", trail.fields["cause"])
+            assertEquals("proactive_network_handoff", trail.fields["classification"])
+            assertEquals(7L, trail.fields["hostId"])
         } finally {
             diagnostics.close()
         }
@@ -9224,59 +9236,69 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun onAppForegroundedProbesStaleLiveRuntimeAndForcesFreshReconnect() = runTest {
-        val registry = ActiveTmuxClients()
-        val staleSession = FakeSshSession()
-        val freshSession = FakeSshSession()
-        val connector = QueueLeaseConnector(freshSession)
-        val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
-        val vm = newVm(
-            registry = registry,
-            sshLeaseManager = manager,
-        )
-        val staleClient = FakeTmuxClient().apply {
-            failBestEffortOnCommandPrefix = "display-message"
-            bestEffortException = TmuxClientException("tmux command timed out")
-        }
-        val freshClient = FakeTmuxClient().withSinglePane("work", "%1")
-        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
-        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
-            assertEquals("work", sessionName)
-            sessionsSeenByFactory += session
-            freshClient
-        }
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = staleClient,
-            session = staleSession,
-        )
-        runCurrent()
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val registry = ActiveTmuxClients()
+            val staleSession = FakeSshSession()
+            val freshSession = FakeSshSession()
+            val connector = QueueLeaseConnector(freshSession)
+            val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = manager,
+            )
+            val staleClient = FakeTmuxClient().apply {
+                failBestEffortOnCommandPrefix = "display-message"
+                bestEffortException = TmuxClientException("tmux command timed out")
+            }
+            val freshClient = FakeTmuxClient().withSinglePane("work", "%1")
+            val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+            vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+                assertEquals("work", sessionName)
+                sessionsSeenByFactory += session
+                freshClient
+            }
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = staleClient,
+                session = staleSession,
+            )
+            runCurrent()
 
-        vm.onAppForegrounded()
-        advanceUntilIdle()
+            vm.onAppForegrounded()
+            advanceUntilIdle()
 
-        assertTrue(
-            "foreground probe must close the stale tmux client through the reconnect teardown",
-            staleClient.closed,
-        )
-        assertTrue(
-            "foreground probe must close the stale SSH session instead of trusting isConnected",
-            staleSession.closed,
-        )
-        assertEquals(
-            "foreground probe failure must open a fresh SSH transport",
-            1,
-            connector.connectCount,
-        )
-        assertEquals(listOf(freshSession), sessionsSeenByFactory)
-        assertSame(freshClient, registry.clients.value[1L]?.client)
-        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
-        assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+            assertTrue(
+                "foreground probe must close the stale tmux client through the reconnect teardown",
+                staleClient.closed,
+            )
+            assertTrue(
+                "foreground probe must close the stale SSH session instead of trusting isConnected",
+                staleSession.closed,
+            )
+            assertEquals(
+                "foreground probe failure must open a fresh SSH transport",
+                1,
+                connector.connectCount,
+            )
+            assertEquals(listOf(freshSession), sessionsSeenByFactory)
+            assertSame(freshClient, registry.clients.value[1L]?.client)
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+            val probeTrail = diagnostics.eventsNamed("cause_trail")
+                .single { it.fields["stage"] == "tmux_probe_result" }
+            assertEquals("failed", probeTrail.fields["outcome"])
+            assertEquals("foreground_runtime_probe", probeTrail.fields["cause"])
+            assertEquals(1L, probeTrail.fields["hostId"])
+        } finally {
+            diagnostics.close()
+        }
     }
 
     /**

@@ -112,6 +112,7 @@ import com.pocketshell.app.composer.AttachmentTileGrid
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
@@ -384,6 +385,13 @@ public fun TmuxSessionScreen(
     // would render in a tight initial-connect-failure window where
     // `reconnect()` would silently no-op.
     val canReconnect by viewModel.canReconnect.collectAsState()
+    LaunchedEffect(status, canReconnect) {
+        recordTmuxReconnectUiStateRendered(
+            status = status,
+            hostId = hostId,
+            canReconnect = canReconnect,
+        )
+    }
 
     val pagerState = rememberPagerState(pageCount = { panes.size })
 
@@ -4775,6 +4783,33 @@ internal fun ConnectionStatus.toUiStatus(): com.pocketshell.uikit.model.Connecti
         is ConnectionStatus.Failed -> com.pocketshell.uikit.model.ConnectionStatus.Error
         ConnectionStatus.Idle -> com.pocketshell.uikit.model.ConnectionStatus.Idle
     }
+
+internal fun recordTmuxReconnectUiStateRendered(
+    status: ConnectionStatus,
+    hostId: Long,
+    canReconnect: Boolean,
+) {
+    when (status) {
+        is ConnectionStatus.Reconnecting -> ReconnectCauseTrail.record(
+            stage = "ui_reconnect_state",
+            outcome = "rendered",
+            cause = "connection_status_reconnecting",
+            "hostId" to hostId,
+            "attempt" to status.attempt,
+            "maxAttempts" to status.maxAttempts,
+            "retryDelayMs" to status.retryDelayMs,
+            "canReconnect" to canReconnect,
+        )
+        is ConnectionStatus.Failed -> ReconnectCauseTrail.record(
+            stage = "ui_reconnect_state",
+            outcome = "rendered",
+            cause = "connection_status_failed",
+            "hostId" to hostId,
+            "canReconnect" to canReconnect,
+        )
+        else -> Unit
+    }
+}
 
 /**
  * Issues #192 / #156: the per-window navigation strip — the primary

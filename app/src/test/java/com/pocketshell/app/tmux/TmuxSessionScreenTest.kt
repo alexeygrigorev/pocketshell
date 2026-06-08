@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.SessionTab
@@ -17,6 +18,38 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TmuxSessionScreenTest {
+    @Test
+    fun reconnectUiRenderingRecordsCauseTrail() {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            recordTmuxReconnectUiStateRendered(
+                status = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
+                    host = "alpha.example",
+                    port = 22,
+                    user = "alex",
+                    attempt = 2,
+                    maxAttempts = 3,
+                    retryDelayMs = 1_000L,
+                    reason = "network changed",
+                ),
+                hostId = 7L,
+                canReconnect = true,
+            )
+
+            val trail = diagnostics.eventsNamed("cause_trail").single()
+            assertEquals("ui_reconnect_state", trail.fields["stage"])
+            assertEquals("rendered", trail.fields["outcome"])
+            assertEquals("connection_status_reconnecting", trail.fields["cause"])
+            assertEquals(7L, trail.fields["hostId"])
+            assertEquals(2, trail.fields["attempt"])
+            assertEquals(3, trail.fields["maxAttempts"])
+            assertEquals(1_000L, trail.fields["retryDelayMs"])
+            assertEquals(true, trail.fields["canReconnect"])
+        } finally {
+            diagnostics.close()
+        }
+    }
+
     @Test
     fun toWindowSummariesKeepsFirstPaneOrderAndDeduplicatesWindows() {
         val panes = listOf(

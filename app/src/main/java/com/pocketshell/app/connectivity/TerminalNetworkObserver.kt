@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Log
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -94,6 +95,17 @@ class TerminalNetworkObserver @Inject constructor(
             "network",
             "validated_default_changed",
             *change.networkDiagnosticFields(),
+        )
+        ReconnectCauseTrail.record(
+            stage = "network_callback",
+            outcome = "validated_default_changed",
+            cause = reason,
+            "sequence" to change.sequence,
+            "previousNetworkHandle" to change.previous.networkHandle,
+            "currentNetworkHandle" to change.current.networkHandle,
+            "previousValidatedNetworkHandle" to change.previousValidated?.networkHandle,
+            "previousTransports" to change.previous.transportSetLogValue,
+            "currentTransports" to change.current.transportSetLogValue,
         )
         _changes.tryEmit(change)
         return change

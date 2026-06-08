@@ -26,6 +26,7 @@ import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
 import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
@@ -581,6 +582,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 sourceCandidate = "connect_attempt",
             ),
         )
+        ReconnectCauseTrail.record(
+            stage = "connect_attempt",
+            outcome = if (effectiveTrigger.isReconnectTrigger) "reconnect" else "connect",
+            cause = "connect_invoked",
+            trigger = effectiveTrigger.logValue,
+            "requestedTrigger" to trigger.logValue,
+            "attempt" to attempt,
+            "hostId" to hostId,
+            "generation" to generation,
+            "previousClientPresent" to (clientRef != null),
+            "willFastSwitch" to willFastSwitch,
+        )
         Log.i(
             ISSUE_145_RECONNECT_TAG,
             "tmux-connect-attempt count=$attempt trigger=${effectiveTrigger.logValue} " +
@@ -1116,6 +1129,16 @@ public class TmuxSessionViewModel @Inject constructor(
                 sourceCandidate = "background_teardown",
             ),
         )
+        ReconnectCauseTrail.record(
+            stage = "session_disconnect",
+            outcome = "background_teardown",
+            cause = "app_background_grace_elapsed",
+            trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+            "hostId" to target.hostId,
+            "generation" to (intent?.generation ?: connectGeneration),
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
+            "hasPendingReattach" to true,
+        )
         if (backgroundDetachJob?.isActive == true) return
         val preserveConnectingTarget = connectingTarget?.takeIf { connecting ->
             !sameSessionIdentity(connecting, target) &&
@@ -1233,6 +1256,14 @@ public class TmuxSessionViewModel @Inject constructor(
                     sourceCandidate = "foreground_reattach",
                 ),
             )
+            ReconnectCauseTrail.record(
+                stage = "foreground_reattach",
+                outcome = "connect_requested",
+                cause = "post_grace_foreground",
+                trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+                "hostId" to target.hostId,
+                "generation" to pending.generation,
+            )
             foregroundReattachForTest?.invoke() ?: connect(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -1258,6 +1289,15 @@ public class TmuxSessionViewModel @Inject constructor(
         val generation = connectGeneration
         val probeJob = viewModelScope.launch {
             val healthy = currentRuntimeControlChannelHealthy(client, session)
+            ReconnectCauseTrail.record(
+                stage = "tmux_probe_result",
+                outcome = if (healthy) "healthy" else "failed",
+                cause = "foreground_runtime_probe",
+                trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+                "hostId" to target.hostId,
+                "generation" to generation,
+                "clientHash" to System.identityHashCode(client),
+            )
             if (healthy) return@launch
             if (
                 !appActive ||
@@ -1267,6 +1307,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 activeTarget?.let { sameSessionIdentity(it, target) } != true ||
                 _connectionStatus.value !is ConnectionStatus.Connected
             ) {
+                ReconnectCauseTrail.record(
+                    stage = "tmux_probe_result",
+                    outcome = "failed_stale_skip",
+                    cause = "foreground_runtime_probe_stale",
+                    trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+                    "hostId" to target.hostId,
+                    "generation" to generation,
+                    "clientStillCurrent" to (clientRef === client),
+                    "sessionStillCurrent" to (sessionRef === session),
+                    "appActive" to appActive,
+                )
                 return@launch
             }
             Log.w(
@@ -1774,6 +1825,17 @@ public class TmuxSessionViewModel @Inject constructor(
                     sourceCandidate = "network_observer",
                 ),
             )
+            ReconnectCauseTrail.record(
+                stage = "network_reconnect_decision",
+                outcome = "suppress",
+                cause = "no_real_validated_handoff",
+                trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+                "sequence" to change.sequence,
+                "hostId" to target.hostId,
+                "generation" to connectGeneration,
+                "classification" to "network_identity_unchanged",
+                "deferredFromBackground" to change.deferredFromBackground,
+            )
             return
         }
         val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
@@ -1816,6 +1878,17 @@ public class TmuxSessionViewModel @Inject constructor(
                     sourceCandidate = "network_observer",
                 ),
             )
+            ReconnectCauseTrail.record(
+                stage = "network_reconnect_decision",
+                outcome = "suppress",
+                cause = "coalesced_with_lifecycle_reattach",
+                trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+                "sequence" to change.sequence,
+                "hostId" to target.hostId,
+                "generation" to lifecycleCoalesce.generation,
+                "classification" to "lifecycle_network_replay",
+                "deferredFromBackground" to change.deferredFromBackground,
+            )
             return
         }
         lifecycleReattachNetworkCoalesce = null
@@ -1851,6 +1924,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 sourceCandidate = "network_observer",
             ),
+        )
+        ReconnectCauseTrail.record(
+            stage = "network_reconnect_decision",
+            outcome = "schedule_reconnect",
+            cause = "proactive_network_handoff",
+            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "classification" to "proactive_network_handoff",
+            "deferredFromBackground" to change.deferredFromBackground,
+            "activeAttempt" to activeAttachMilestone?.attempt,
         )
         unregisterCurrentClient()
         scheduleAutoReconnect(
@@ -3211,6 +3296,19 @@ public class TmuxSessionViewModel @Inject constructor(
                         sourceCandidate = "passive_disconnect",
                     ),
                 )
+                ReconnectCauseTrail.record(
+                    stage = "session_disconnect",
+                    outcome = "passive_disconnect",
+                    cause = disconnectEvent.reason.logValue,
+                    trigger = TmuxConnectTrigger.AutoReconnect.logValue,
+                    "hostId" to target?.hostId,
+                    "generation" to connectGeneration,
+                    "attempt" to activeAttachMilestone?.attempt,
+                    "clientHash" to System.identityHashCode(client),
+                    "status" to _connectionStatus.value.javaClass.simpleName,
+                    "disconnectSource" to disconnectEvent.source,
+                    "disconnectIntent" to disconnectEvent.intent,
+                )
                 handlePassiveClientDisconnect(client, disconnectEvent)
             }
         }
@@ -3902,6 +4000,17 @@ public class TmuxSessionViewModel @Inject constructor(
                         sourceCandidate = "auto_reconnect",
                     ),
                 )
+                ReconnectCauseTrail.record(
+                    stage = "reconnect_attempt",
+                    outcome = "scheduled",
+                    cause = "auto_reconnect_loop",
+                    trigger = trigger.logValue,
+                    "attempt" to (index + 1),
+                    "maxAttempts" to delays.size,
+                    "retryDelayMs" to delayMs,
+                    "hostId" to target.hostId,
+                    "generation" to generation,
+                )
                 if (delayMs > 0) delay(delayMs)
                 if (!appActive) {
                     recordAutoReconnectDecision(
@@ -3950,6 +4059,18 @@ public class TmuxSessionViewModel @Inject constructor(
                         target = target,
                         sourceCandidate = "auto_reconnect",
                     ),
+                )
+                ReconnectCauseTrail.record(
+                    stage = "connect_attempt",
+                    outcome = "reconnect",
+                    cause = "auto_reconnect_loop",
+                    trigger = trigger.logValue,
+                    "attempt" to attempt,
+                    "retryAttempt" to (index + 1),
+                    "maxAttempts" to delays.size,
+                    "hostId" to target.hostId,
+                    "generation" to generation,
+                    "previousClientPresent" to (clientRef != null),
                 )
                 withContext(NonCancellable) {
                     closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
@@ -8654,6 +8775,19 @@ public enum class TmuxConnectTrigger(public val logValue: String) {
     AutoReconnect("auto-reconnect"),
     NetworkReconnect("network-reconnect"),
 }
+
+private val TmuxConnectTrigger.isReconnectTrigger: Boolean
+    get() = when (this) {
+        TmuxConnectTrigger.Reconnect,
+        TmuxConnectTrigger.AutoReconnect,
+        TmuxConnectTrigger.NetworkReconnect,
+        TmuxConnectTrigger.LifecycleReattach,
+        -> true
+        TmuxConnectTrigger.UserTap,
+        TmuxConnectTrigger.ColdRestore,
+        TmuxConnectTrigger.FastSwitch,
+        -> false
+    }
 
 public data class TmuxRestoreIntentSnapshot(
     val hostId: Long,

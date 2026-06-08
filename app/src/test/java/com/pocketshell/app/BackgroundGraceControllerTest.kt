@@ -93,6 +93,13 @@ class BackgroundGraceControllerTest {
             assertEquals(true, withinGraceForeground.fields["resumedWithinGrace"])
             assertEquals(true, withinGraceForeground.fields["withinGrace"])
             assertEquals("on_start", withinGraceForeground.fields["trigger"])
+            val withinGraceTrail = diagnostics.eventsNamed("cause_trail")
+                .filter { it.fields["stage"] == "background_grace" }
+            assertEquals(
+                listOf("start", "foreground_preserved"),
+                withinGraceTrail.map { it.fields["outcome"] },
+            )
+            assertEquals("within_grace", withinGraceTrail.last().fields["cause"])
             assertTrue(
                 "within-grace resume must not emit grace elapsed",
                 diagnostics.eventsNamed("background_grace_elapsed").isEmpty(),
@@ -111,6 +118,13 @@ class BackgroundGraceControllerTest {
             val postGraceForeground = diagnostics.eventsNamed("background_grace_foreground").last()
             assertEquals(false, postGraceForeground.fields["resumedWithinGrace"])
             assertEquals(false, postGraceForeground.fields["withinGrace"])
+            val allGraceTrail = diagnostics.eventsNamed("cause_trail")
+                .filter { it.fields["stage"] == "background_grace" }
+            assertEquals(
+                listOf("start", "foreground_preserved", "start", "elapsed_teardown", "foreground_reattach_needed"),
+                allGraceTrail.map { it.fields["outcome"] },
+            )
+            assertEquals("post_grace", allGraceTrail.last().fields["cause"])
         } finally {
             diagnostics.close()
         }

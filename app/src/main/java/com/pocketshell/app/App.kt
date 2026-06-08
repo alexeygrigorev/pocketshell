@@ -13,6 +13,7 @@ import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
+import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -290,6 +291,13 @@ class App : Application() {
         runtimeDiagnostics: TerminalRuntimeDiagnostics,
     ) {
         val hooks = activeTmuxClients.lifecycleHooksSnapshot()
+        recordTerminalNetworkCauseTrail(
+            outcome = if (hooks.isEmpty()) "no_hooks" else "dispatch",
+            change = change,
+            gateDiagnostics = gateDiagnostics,
+            runtimeDiagnostics = runtimeDiagnostics,
+            hookCount = hooks.size,
+        )
         if (hooks.isEmpty()) return
         Log.i(
             TERMINAL_NETWORK_TAG,
@@ -330,6 +338,12 @@ class App : Application() {
             "change_deferred",
             *networkEventFields(change, gateDiagnostics, runtimeDiagnostics),
         )
+        recordTerminalNetworkCauseTrail(
+            outcome = "defer",
+            change = change,
+            gateDiagnostics = gateDiagnostics,
+            runtimeDiagnostics = runtimeDiagnostics,
+        )
     }
 
     private fun logSuppressedTerminalNetworkChange(
@@ -347,6 +361,12 @@ class App : Application() {
             "network",
             "change_suppressed_within_grace",
             *networkEventFields(change, gateDiagnostics, runtimeDiagnostics),
+        )
+        recordTerminalNetworkCauseTrail(
+            outcome = "suppress",
+            change = change,
+            gateDiagnostics = gateDiagnostics,
+            runtimeDiagnostics = runtimeDiagnostics,
         )
     }
 
@@ -383,6 +403,13 @@ class App : Application() {
             "trigger" to "process_background",
             "withinGrace" to false,
         )
+        ReconnectCauseTrail.record(
+            stage = "background_teardown",
+            outcome = "dispatch",
+            cause = "background_grace_elapsed",
+            trigger = "process_background",
+            "hookCount" to hooks.size,
+        )
         for (hook in hooks) {
             tmuxLifecycleScope.launch {
                 runCatching { hook.onBackground() }
@@ -405,6 +432,13 @@ class App : Application() {
             "source" to "background_grace_foreground",
             "trigger" to "process_foreground",
         )
+        ReconnectCauseTrail.record(
+            stage = "foreground_reattach",
+            outcome = "dispatch",
+            cause = "post_grace_foreground",
+            trigger = "process_foreground",
+            "hookCount" to hooks.size,
+        )
         for (hook in hooks) {
             tmuxLifecycleScope.launch {
                 runCatching { hook.onForeground() }
@@ -426,6 +460,31 @@ private fun networkEventFields(
         addAll(runtimeDiagnostics.diagnosticFields())
         addAll(extraFields.toList())
     }.toTypedArray()
+
+private fun recordTerminalNetworkCauseTrail(
+    outcome: String,
+    change: TerminalNetworkChange,
+    gateDiagnostics: TerminalNetworkGateDiagnostics,
+    runtimeDiagnostics: TerminalRuntimeDiagnostics,
+    hookCount: Int? = null,
+) {
+    ReconnectCauseTrail.record(
+        stage = "network_gate",
+        outcome = outcome,
+        cause = gateDiagnostics.reason,
+        trigger = change.reason,
+        "sequence" to change.sequence,
+        "deferredFromBackground" to change.deferredFromBackground,
+        "gateDecision" to gateDiagnostics.decision,
+        "reconnectOutcome" to gateDiagnostics.decision.reconnectOutcome(),
+        "backgroundCycleId" to gateDiagnostics.backgroundCycleId,
+        "pendingNetworkClassification" to gateDiagnostics.pendingNetworkClassification,
+        "hasLiveTerminalRuntime" to runtimeDiagnostics.hasLiveTerminalRuntime,
+        "liveActiveTmuxClientCount" to runtimeDiagnostics.liveActiveTmuxClientCount,
+        "liveCachedRuntimeCount" to runtimeDiagnostics.liveCachedRuntimeCount,
+        "hookCount" to hookCount,
+    )
+}
 
 private data class TerminalRuntimeDiagnostics(
     val activeTmuxClientCount: Int,
@@ -842,6 +901,14 @@ internal class BackgroundGraceController(
             "source" to "process_lifecycle",
             "trigger" to "on_stop",
         )
+        ReconnectCauseTrail.record(
+            stage = "background_grace",
+            outcome = "start",
+            cause = "process_background",
+            trigger = "on_stop",
+            "graceMs" to graceMillis,
+            "backgroundCycleId" to backgroundCycleId,
+        )
         graceJob = scope.launch {
             delay(graceMillis)
             teardownFired = true
@@ -856,6 +923,15 @@ internal class BackgroundGraceController(
                 "backgroundCycleId" to backgroundCycleId,
                 "source" to "timer",
                 "trigger" to "grace_timeout",
+            )
+            ReconnectCauseTrail.record(
+                stage = "background_grace",
+                outcome = "elapsed_teardown",
+                cause = "grace_timeout",
+                trigger = "timer",
+                "elapsedMs" to elapsedMs,
+                "graceMs" to graceMillis,
+                "backgroundCycleId" to backgroundCycleId,
             )
             onGraceElapsed()
         }
@@ -873,6 +949,7 @@ internal class BackgroundGraceController(
             GRACE_LIFECYCLE_TAG,
             "grace-window-foreground resumedWithinGrace=$resumedWithinGrace elapsedMs=$elapsedMs",
         )
+        val diagnosticFields = foregroundDiagnosticFields(resumedWithinGrace)
         DiagnosticEvents.record(
             "app",
             "background_grace_foreground",
@@ -883,7 +960,18 @@ internal class BackgroundGraceController(
             "backgroundCycleId" to backgroundCycleId,
             "source" to "process_lifecycle",
             "trigger" to "on_start",
-            *foregroundDiagnosticFields(resumedWithinGrace).toTypedArray(),
+            *diagnosticFields.toTypedArray(),
+        )
+        ReconnectCauseTrail.record(
+            stage = "background_grace",
+            outcome = if (resumedWithinGrace) "foreground_preserved" else "foreground_reattach_needed",
+            cause = if (resumedWithinGrace) "within_grace" else "post_grace",
+            trigger = "on_start",
+            "withinGrace" to resumedWithinGrace,
+            "elapsedMs" to elapsedMs,
+            "graceMs" to graceMillis,
+            "backgroundCycleId" to backgroundCycleId,
+            *diagnosticFields.toTypedArray(),
         )
         scope.launch {
             if (!resumedWithinGrace) {

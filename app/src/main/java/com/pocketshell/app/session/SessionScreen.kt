@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -18,13 +19,14 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -96,14 +98,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.openUrlWithFallback
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.KeyBar
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.Tabs
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 internal const val SESSION_SCREEN_TAG = "session:screen"
@@ -539,13 +547,40 @@ private fun SessionMoreMenu(
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = onDismiss,
+            modifier = Modifier.background(PocketShellColors.SurfaceElev),
         ) {
-            DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = "Recurring jobs",
+                        color = PocketShellColors.Text,
+                        style = PocketShellType.bodyDense,
+                    )
+                },
+                onClick = onOpenJobs,
+                contentPadding = PaddingValues(
+                    horizontal = PocketShellDensity.rowPadH,
+                    vertical = PocketShellSpacing.xs,
+                ),
+            )
             // Issue #114 Fix A: in-session entry to the cross-host
             // Usage / quota panel. The panel is host-agnostic for now —
             // a per-host filter and "Open Usage from bootstrap" follow
             // in Fix B / Fix C.
-            DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = "Usage",
+                        color = PocketShellColors.Text,
+                        style = PocketShellType.bodyDense,
+                    )
+                },
+                onClick = onOpenUsage,
+                contentPadding = PaddingValues(
+                    horizontal = PocketShellDensity.rowPadH,
+                    vertical = PocketShellSpacing.xs,
+                ),
+            )
         }
     }
 }
@@ -1219,12 +1254,33 @@ private fun ToolCallSection(
 private fun StatusLine(text: String) {
     Text(
         text = text,
-        style = MaterialTheme.typography.bodySmall,
+        style = PocketShellType.bodyDense,
         color = PocketShellColors.TextSecondary,
         modifier = Modifier
             .fillMaxWidth()
             .background(color = PocketShellColors.Surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellSpacing.sm,
+            ),
+    )
+}
+
+@Composable
+private fun SessionStatusBlock(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellSpacing.sm,
+            ),
+        content = content,
     )
 }
 
@@ -1234,26 +1290,73 @@ private fun FailedConnectionRow(
     onReconnect: () -> Unit,
     canReconnect: Boolean,
 ) {
+    SessionStatusBlock(modifier = Modifier.testTag(SESSION_ERROR_TAG)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = message,
+                style = PocketShellType.bodyDense,
+                color = PocketShellColors.Red,
+                modifier = Modifier.weight(1f),
+            )
+            if (canReconnect) {
+                TextButton(
+                    onClick = onReconnect,
+                    modifier = Modifier
+                        .sizeIn(minHeight = PocketShellDensity.tapTargetMin)
+                        .testTag(SESSION_RECONNECT_TAG),
+                ) {
+                    Text("Reconnect", style = PocketShellType.bodyDense)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionProgressBand(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    SessionStatusBlock(modifier = modifier) {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(PocketShellSpacing.xs)
+                .testTag(SESSION_CONNECTING_PROGRESS_BAR_TAG),
+            color = PocketShellColors.Accent,
+            trackColor = PocketShellColors.SurfaceElev,
+        )
+        Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+        content()
+    }
+}
+
+@Composable
+private fun SessionProgressTitleRow(
+    text: String,
+    showCancel: Boolean = true,
+    onCancel: () -> Unit,
+) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .testTag(SESSION_ERROR_TAG),
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = message,
-            style = MaterialTheme.typography.bodySmall,
-            color = PocketShellColors.Red,
+            text = text,
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyMono,
             modifier = Modifier.weight(1f),
         )
-        if (canReconnect) {
+        if (showCancel) {
             TextButton(
-                onClick = onReconnect,
-                modifier = Modifier.testTag(SESSION_RECONNECT_TAG),
+                onClick = onCancel,
+                modifier = Modifier
+                    .sizeIn(minHeight = PocketShellDensity.tapTargetMin)
+                    .testTag(SESSION_CONNECTING_CANCEL_TAG),
             ) {
-                Text("Reconnect")
+                Text("Cancel", style = PocketShellType.bodyDense)
             }
         }
     }
@@ -1292,47 +1395,18 @@ internal fun ConnectingProgressOverlay(
         )
         showCancel = true
     }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .testTag(SESSION_CONNECTING_PROGRESS_TAG),
-    ) {
-        LinearProgressIndicator(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .testTag(SESSION_CONNECTING_PROGRESS_BAR_TAG),
-            color = PocketShellColors.Accent,
-            trackColor = PocketShellColors.SurfaceElev,
+    SessionProgressBand(modifier = Modifier.testTag(SESSION_CONNECTING_PROGRESS_TAG)) {
+        SessionProgressTitleRow(
+            text = "Connecting to $user@$host:$port…",
+            showCancel = showCancel,
+            onCancel = onCancel,
         )
-        Spacer(modifier = Modifier.height(6.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Connecting to $user@$host:$port…",
-                color = PocketShellColors.Text,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f),
-            )
-            if (showCancel) {
-                TextButton(
-                    onClick = onCancel,
-                    modifier = Modifier.testTag(SESSION_CONNECTING_CANCEL_TAG),
-                ) {
-                    Text("Cancel")
-                }
-            }
-        }
         if (showSlowHint) {
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
             Text(
                 text = "Still working, this may be slow…",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
+                style = PocketShellType.labelMono,
                 modifier = Modifier.testTag(SESSION_CONNECTING_SLOW_HINT_TAG),
             )
         }
@@ -1344,46 +1418,18 @@ private fun ReconnectingProgressRow(
     status: ConnectionStatus.Reconnecting,
     onCancel: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .testTag(SESSION_CONNECTING_PROGRESS_TAG),
-    ) {
-        LinearProgressIndicator(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .testTag(SESSION_CONNECTING_PROGRESS_BAR_TAG),
-            color = PocketShellColors.Accent,
-            trackColor = PocketShellColors.SurfaceElev,
+    SessionProgressBand(modifier = Modifier.testTag(SESSION_CONNECTING_PROGRESS_TAG)) {
+        SessionProgressTitleRow(
+            text = "Reconnecting to ${status.user}@${status.host}:${status.port} " +
+                "(${status.attempt}/${status.maxAttempts})…",
+            onCancel = onCancel,
         )
-        Spacer(modifier = Modifier.height(6.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Reconnecting to ${status.user}@${status.host}:${status.port} " +
-                    "(${status.attempt}/${status.maxAttempts})…",
-                color = PocketShellColors.Text,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(
-                onClick = onCancel,
-                modifier = Modifier.testTag(SESSION_CONNECTING_CANCEL_TAG),
-            ) {
-                Text("Cancel")
-            }
-        }
         if (status.retryDelayMs > 0) {
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
             Text(
                 text = "Retrying in ${status.retryDelayMs / 1_000}s",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
+                style = PocketShellType.labelMono,
                 modifier = Modifier.testTag(SESSION_CONNECTING_SLOW_HINT_TAG),
             )
         }
@@ -1496,21 +1542,22 @@ private fun ProjectNavigationSheet(
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
+        shape = MaterialTheme.shapes.large,
     ) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 620.dp)
-                .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(horizontal = PocketShellSpacing.lg),
+            contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(PocketShellDensity.sectionGap),
         ) {
             item {
                 Text(
                     text = "Project navigation",
                     color = PocketShellColors.Text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
                 )
             }
             state.feedback?.let { feedback ->
@@ -1518,22 +1565,37 @@ private fun ProjectNavigationSheet(
                     Text(
                         text = feedback,
                         color = PocketShellColors.Accent,
-                        fontSize = 12.sp,
+                        style = PocketShellType.bodyDense,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(PocketShellColors.AccentSoft)
-                            .padding(8.dp),
+                            .background(
+                                color = PocketShellColors.AccentSoft,
+                                shape = MaterialTheme.shapes.small,
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = PocketShellColors.AccentDim,
+                                shape = MaterialTheme.shapes.small,
+                            )
+                            .padding(
+                                horizontal = PocketShellDensity.rowPadH,
+                                vertical = PocketShellSpacing.sm,
+                            ),
                     )
                 }
             }
             item {
-                Text("Directories", color = PocketShellColors.Text, fontWeight = FontWeight.Medium)
+                SectionHeader(
+                    label = "Directories",
+                    count = state.items.size.takeIf { it > 0 },
+                    modifier = Modifier.padding(top = PocketShellSpacing.xs),
+                )
             }
             items(state.items, key = { "${it.kind}:${it.path}" }) { item ->
                 DirectoryShortcutRow(item = item, onClick = { onDirectoryTap(item.path) })
             }
             item {
-                Text("Add project root", color = PocketShellColors.Text, fontWeight = FontWeight.Medium)
+                SectionHeader(label = "Add project root")
                 OutlinedTextField(
                     value = rootPath,
                     onValueChange = { rootPath = it },
@@ -1549,11 +1611,11 @@ private fun ProjectNavigationSheet(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 TextButton(onClick = { onAddRoot(rootPath, rootLabel) }) {
-                    Text("Save root")
+                    Text("Save root", style = PocketShellType.bodyDense)
                 }
             }
             item {
-                Text("Root workflows", color = PocketShellColors.Text, fontWeight = FontWeight.Medium)
+                SectionHeader(label = "Root workflows")
                 OutlinedTextField(
                     value = selectedRoot,
                     onValueChange = { selectedRoot = it },
@@ -1569,7 +1631,7 @@ private fun ProjectNavigationSheet(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 TextButton(onClick = { onCreateFolder(selectedRoot, folderName) }) {
-                    Text("mkdir + cd")
+                    Text("mkdir + cd", style = PocketShellType.bodyDense)
                 }
                 OutlinedTextField(
                     value = repoUrl,
@@ -1588,7 +1650,7 @@ private fun ProjectNavigationSheet(
                 TextButton(
                     onClick = { onClone(selectedRoot, repoUrl, cloneFolder.takeIf { it.isNotBlank() }) },
                 ) {
-                    Text("git clone + cd")
+                    Text("git clone + cd", style = PocketShellType.bodyDense)
                 }
             }
         }
@@ -1657,21 +1719,29 @@ internal fun RawSessionBottomControls(
 
 @Composable
 private fun DirectoryShortcutRow(item: ProjectNavigationItem, onClick: () -> Unit) {
-    Row(
+    ListRow(
+        title = item.label,
+        subtitle = item.path,
+        trailing = {
+            Badge(
+                label = item.kind.name.lowercase(),
+                role = BadgeRole.Shell,
+                mono = false,
+            )
+        },
+        onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = PocketShellColors.Border)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(item.label, color = PocketShellColors.Text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            Text(item.path, color = PocketShellColors.TextSecondary, fontSize = 11.sp)
-        }
-        Text(item.kind.name.lowercase(), color = PocketShellColors.TextSecondary, fontSize = 11.sp)
-    }
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = MaterialTheme.shapes.medium,
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = MaterialTheme.shapes.medium,
+            ),
+    )
 }
 
 /**

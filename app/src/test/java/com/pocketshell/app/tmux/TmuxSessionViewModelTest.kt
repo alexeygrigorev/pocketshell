@@ -2858,67 +2858,121 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun slowTerminalOutputSideChannelDoesNotMisclassifyTmuxPaneAsDisconnected() = runTest {
+    fun codexLikeTmuxOutputWithSlowTerminalSideChannelRendersFinalMarkerWithoutReconnect() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         val client = FakeTmuxClient()
-        vm.attachClientForTest(client)
-        vm.applyParsedPanesForTest(
-            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "codex", paneIndex = 0)),
-        )
-        advanceUntilIdle()
-
-        val state = vm.panes.value.single().terminalState
-        val observedSideChannelChunks = AtomicInteger(0)
-        val slowSideChannelCollector = launch {
-            state.output.collect {
-                observedSideChannelChunks.incrementAndGet()
-                delay(60_000)
-            }
-        }
-        runCurrent()
-
         try {
-            val payloads = issue576BackpressureOutputChunks()
-            val sender = async {
-                payloads.forEach { bytes ->
-                    client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
-                }
-            }
-
-            val completed = withTimeoutOrNull(5_000) {
-                while (sender.isActive) {
-                    shadowOf(Looper.getMainLooper()).idle()
-                    runCurrent()
-                    delay(10)
-                }
-                sender.await()
-                true
-            } ?: false
-
-            assertTrue(
-                "slow terminal output side-channel collector must not stall tmux pane output",
-                completed,
+            vm.attachClientForTest(client)
+            vm.applyParsedPanesForTest(
+                listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "codex", paneIndex = 0)),
             )
             advanceUntilIdle()
+
+            val emittedConnectionStatuses =
+                mutableListOf<TmuxSessionViewModel.ConnectionStatus>()
+            val statusCollector = launch {
+                vm.connectionStatus.collect { status ->
+                    emittedConnectionStatuses += status
+                }
+            }
+            val state = vm.panes.value.single().terminalState
+            state.appendRemoteOutput("ISSUE576-SEED\r\n".toByteArray(Charsets.UTF_8))
             shadowOf(Looper.getMainLooper()).idle()
-            assertTrue(
-                "slow side-channel collector should prove the secondary output flow was subscribed",
-                observedSideChannelChunks.get() > 0,
-            )
-            assertTrue(
-                "terminal-side backpressure must not be diagnosed as a transport connection error",
-                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
-            )
-            assertFalse(
-                "terminal-side backpressure must not flip the tmux disconnected signal",
-                client.disconnectedSignal.value,
-            )
-            assertFalse(
-                "terminal-side backpressure must not mark the local terminal surface as failed",
-                vm.panes.value.single().surfaceError,
-            )
+            val observedSideChannelChunks = AtomicInteger(0)
+            val slowSideChannelCollector = launch {
+                state.output.collect {
+                    observedSideChannelChunks.incrementAndGet()
+                    delay(60_000)
+                }
+            }
+            runCurrent()
+
+            try {
+                val payloads = codexLikeIssue576BurstChunks()
+                val emittedBytes = payloads.sumOf { it.size }
+                assertTrue(
+                    "test fixture drift: Codex-like burst must stay high-volume, bytes=$emittedBytes",
+                    emittedBytes >= 250_000,
+                )
+                val sender = async {
+                    payloads.forEach { bytes ->
+                        client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
+                    }
+                }
+
+                val completed = withTimeoutOrNull(5_000) {
+                    while (sender.isActive) {
+                        shadowOf(Looper.getMainLooper()).idle()
+                        runCurrent()
+                        delay(10)
+                    }
+                    sender.await()
+                    true
+                } ?: false
+
+                assertTrue(
+                    "Codex-like tmux %output burst must not stall behind a slow terminal side-channel",
+                    completed,
+                )
+                advanceUntilIdle()
+                shadowOf(Looper.getMainLooper()).idle()
+                val transcript = renderedTranscriptFrom(state)
+                assertTrue(
+                    "integrated fake tmux -> TerminalSurfaceState -> SshTerminalBridge path must render " +
+                        "the final marker; tail=${transcript.takeLast(500)}",
+                    transcript.contains("ISSUE576-CODEX-LIKE-DONE"),
+                )
+                assertTrue(
+                    "slow side-channel collector should prove the secondary output flow was subscribed",
+                    observedSideChannelChunks.get() > 0,
+                )
+                val connectionFailureStatuses = emittedConnectionStatuses.filter { status ->
+                    status is TmuxSessionViewModel.ConnectionStatus.Connecting ||
+                        status is TmuxSessionViewModel.ConnectionStatus.Reconnecting ||
+                        status is TmuxSessionViewModel.ConnectionStatus.Failed
+                }
+                assertTrue(
+                    "terminal-side pressure must not emit reconnect/disconnect VM states; " +
+                        "observed=$emittedConnectionStatuses",
+                    connectionFailureStatuses.isEmpty(),
+                )
+                assertTrue(
+                    "terminal-side pressure must not be diagnosed as a transport connection error",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+                assertFalse(
+                    "terminal-side pressure must not flip the tmux disconnected signal",
+                    client.disconnectedSignal.value,
+                )
+                assertFalse(
+                    "terminal-side pressure must not mark the local terminal surface as failed",
+                    vm.panes.value.single().surfaceError,
+                )
+                assertEquals(
+                    "integrated terminal pressure must not enqueue tmux reconnect attempts",
+                    0,
+                    TMUX_CONNECT_ATTEMPTS.get(),
+                )
+                assertTrue(
+                    "under-threshold Codex-like output must not be logged as terminal overflow",
+                    diagnostics.eventsNamed("terminal_output_overflow").isEmpty(),
+                )
+                assertTrue(
+                    "under-threshold Codex-like output must not be logged as passive SSH/tmux EOF",
+                    diagnostics.eventsNamed("passive_disconnect").isEmpty(),
+                )
+                assertTrue(
+                    "under-threshold Codex-like output must not start reconnect diagnostics",
+                    diagnostics.eventsNamed("reconnect_start").isEmpty(),
+                )
+            } finally {
+                statusCollector.cancel()
+                slowSideChannelCollector.cancel()
+            }
         } finally {
-            slowSideChannelCollector.cancel()
+            diagnostics.close()
         }
     }
 
@@ -4124,6 +4178,14 @@ class TmuxSessionViewModelTest {
 
     private fun drainTerminalBridgeHandler() {
         shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    private fun renderedTranscriptFrom(state: TerminalSurfaceState): String {
+        val bridgeField = TerminalSurfaceState::class.java.getDeclaredField("bridge").apply {
+            isAccessible = true
+        }
+        val bridge = bridgeField.get(state) as? SshTerminalBridge ?: return ""
+        return bridge.emulator.screen.transcriptText
     }
 
     @Test

@@ -4,13 +4,13 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,8 +21,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,8 +49,16 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.terminal.ui.openUrlWithFallback
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /** Test tag for the #492/#602 hidden/noisy ports checkbox row. */
@@ -200,6 +206,7 @@ fun PortForwardPanelScreen(
                 ErrorBanner(error)
             }
 
+            SectionHeader(label = "Ports", count = displayedTunnels.size)
             PortTableHeader()
 
             when {
@@ -224,7 +231,7 @@ fun PortForwardPanelScreen(
                     } else {
                         LazyColumn(
                             modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(bottom = 12.dp),
+                            contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
                         ) {
                             items(displayedTunnels, key = { it.remotePort }) { tunnel ->
                                 // Discovery (auto-forward off) state:
@@ -245,7 +252,7 @@ fun PortForwardPanelScreen(
                 else -> {
                     LazyColumn(
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(bottom = 12.dp),
+                        contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
                     ) {
                         items(displayedTunnels, key = { it.remotePort }) { tunnel ->
                             PortForwardRow(
@@ -309,68 +316,35 @@ private fun PanelHeader(
     state: PortForwardConnectionState,
     onBack: () -> Unit,
 ) {
-    Row(
+    ScreenHeader(
+        title = title,
+        subtitle = subtitle.ifBlank { state.label },
         modifier = Modifier
-            .fillMaxWidth()
-            .height(64.dp)
             .background(PocketShellColors.Background)
-            .border(1.dp, PocketShellColors.BorderSoft)
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextButtonBox(label = "<", onClick = onBack)
-        Spacer(Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                color = PocketShellColors.Text,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            .border(1.dp, PocketShellColors.BorderSoft),
+        leading = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(state)
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = subtitle.ifBlank { state.label },
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyMono,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                TextButtonBox(label = "<", onClick = onBack)
+                Spacer(Modifier.width(PocketShellSpacing.sm))
+                StatusDot(status = state.toConnectionStatus())
             }
-        }
-    }
+        },
+    )
 }
 
 @Composable
 private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "Auto-forward",
-                color = PocketShellColors.Text,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = if (enabled) {
-                    "Foreground service keeps tunnels alive while active"
-                } else {
-                    "Off; discovery rows do not open local tunnels"
-                },
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.bodyDense,
-            )
-        }
-        Switch(checked = enabled, onCheckedChange = onEnabledChange)
-    }
+    ListRow(
+        title = "Auto-forward",
+        subtitle = if (enabled) {
+            "Foreground service keeps tunnels alive while active"
+        } else {
+            "Off; discovery rows do not open local tunnels"
+        },
+        trailing = {
+            Switch(checked = enabled, onCheckedChange = onEnabledChange)
+        },
+    )
 }
 
 /**
@@ -385,29 +359,23 @@ private fun ShowAllPortsRow(
     hiddenCount: Int,
     onCheckedChange: (Boolean) -> Unit,
 ) {
-    Row(
+    ListRow(
+        title = hiddenNoisyPortsToggleLabel(checked, hiddenCount),
         modifier = Modifier
-            .fillMaxWidth()
-            .clickable(role = Role.Checkbox) { onCheckedChange(!checked) }
             .testTag(SHOW_ALL_PORTS_TEST_TAG)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Checkbox(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = CheckboxDefaults.colors(
-                checkedColor = PocketShellColors.Accent,
-                uncheckedColor = PocketShellColors.TextSecondary,
-            ),
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = hiddenNoisyPortsToggleLabel(checked, hiddenCount),
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-        )
-    }
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .clickable(role = Role.Checkbox) { onCheckedChange(!checked) },
+        leading = {
+            Checkbox(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = CheckboxDefaults.colors(
+                    checkedColor = PocketShellColors.Accent,
+                    uncheckedColor = PocketShellColors.TextSecondary,
+                ),
+            )
+        },
+    )
 }
 
 internal fun hiddenNoisyPortsToggleLabel(checked: Boolean, hiddenCount: Int): String =
@@ -423,7 +391,10 @@ private fun PortTableHeader() {
         modifier = Modifier
             .fillMaxWidth()
             .background(PocketShellColors.Background)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         HeaderCell("Remote", 0.18f)
@@ -460,6 +431,13 @@ private fun PortForwardRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .defaultMinSize(
+                minHeight = if (rowClick != null) {
+                    PocketShellDensity.tapTargetMin
+                } else {
+                    PocketShellDensity.rowMinHeight
+                },
+            )
             .let { base ->
                 if (rowClick != null) {
                     base.clickable(role = Role.Button, onClick = rowClick)
@@ -467,7 +445,10 @@ private fun PortForwardRow(
                     base
                 }
             }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         BodyCell("${tunnel.remotePort}", 0.18f, monospace = true)
@@ -497,7 +478,7 @@ private fun PortForwardRow(
                 )
             }
         }
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(PocketShellSpacing.sm))
         TextButtonBox(label = if (forwarding) "Stop" else "Start", onClick = onToggle)
     }
 }
@@ -534,10 +515,17 @@ private fun RowScope.BodyCell(
 private fun TextButtonBox(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .defaultMinSize(
+                minWidth = PocketShellDensity.tapTargetMin,
+                minHeight = PocketShellDensity.tapTargetMin,
+            )
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .padding(
+                horizontal = PocketShellDensity.chipPadH,
+                vertical = PocketShellDensity.chipPadV,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -550,32 +538,21 @@ private fun TextButtonBox(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StatusDot(state: PortForwardConnectionState) {
-    val semantic = LocalPocketShellSemantic.current
-    val color: Color = when (state) {
-        PortForwardConnectionState.Idle -> semantic.statusIdle
-        PortForwardConnectionState.Connecting -> semantic.statusConnecting
-        PortForwardConnectionState.Connected -> semantic.statusActive
-        PortForwardConnectionState.Reconnecting -> semantic.statusConnecting
-        PortForwardConnectionState.Error -> semantic.statusError
-    }
-    Box(
-        modifier = Modifier
-            .size(8.dp)
-            .background(color, CircleShape),
-    )
-}
-
-@Composable
 private fun ErrorBanner(error: String) {
     Text(
         text = error,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .background(PocketShellColors.Red.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.Red.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            )
+            .background(PocketShellColors.Red.copy(alpha = 0.12f), PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.Red.copy(alpha = 0.55f), PocketShellShapes.small)
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
         color = PocketShellColors.Text,
         style = PocketShellType.bodyDense,
     )
@@ -586,7 +563,7 @@ private fun EmptyScanningState(modifier: Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(modifier = Modifier.size(32.dp))
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(PocketShellSpacing.sm))
             Text(
                 "Scanning ports...",
                 color = PocketShellColors.TextSecondary,
@@ -621,6 +598,15 @@ private fun HiddenPortsState(hiddenCount: Int, modifier: Modifier) {
         )
     }
 }
+
+private fun PortForwardConnectionState.toConnectionStatus(): ConnectionStatus =
+    when (this) {
+        PortForwardConnectionState.Idle -> ConnectionStatus.Idle
+        PortForwardConnectionState.Connecting -> ConnectionStatus.Connecting
+        PortForwardConnectionState.Connected -> ConnectionStatus.Connected
+        PortForwardConnectionState.Reconnecting -> ConnectionStatus.Connecting
+        PortForwardConnectionState.Error -> ConnectionStatus.Error
+    }
 
 private val PortForwardConnectionState.label: String
     get() = when (this) {

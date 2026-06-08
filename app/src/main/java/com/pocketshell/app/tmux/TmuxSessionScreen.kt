@@ -5150,66 +5150,102 @@ internal fun TmuxTerminalBottomControls(
     onRemoveStagedAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val showHotkeyAccessory = isImeVisible && !showConversation
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(min = SessionBottomControlsMinHeight)
-            .background(color = PocketShellColors.Surface),
-    ) {
-        if (stagedAttachments.isNotEmpty() && !showHotkeyAccessory) {
-            AttachmentTileGrid(
-                attachments = stagedAttachments,
-                onRemove = onRemoveStagedAttachment,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            )
-        }
-        if (showHotkeyAccessory) {
-            KeyBar(
-                keys = tmuxKeyBarLayout(keyBarExpanded),
-                onKey = if (sessionLive) {
-                    { binding ->
-                        // Issue #458: the `⋯` / `×` slot toggles the expander
-                        // locally; it is never a keystroke. All other taps route
-                        // to the pane.
-                        when (binding.label) {
-                            TmuxKeyBarExpandLabel -> {
-                                DiagnosticEvents.record("action", "hotkey_panel_show", "mode" to "tmux")
-                                onKeyBarExpandedChange(true)
-                            }
-                            TmuxKeyBarCollapseLabel -> {
-                                DiagnosticEvents.record("action", "hotkey_panel_hide", "mode" to "tmux")
-                                onKeyBarExpandedChange(false)
-                            }
-                            else -> onKey(binding)
-                        }
-                    }
-                } else {
-                    { _ -> }
-                },
-                modifierStates = modifierStates,
-                onModifierStateChange = onModifierStateChange,
-                modifier = Modifier
+    val chromeMode = tmuxTerminalKeyboardChromeMode(
+        isImeVisible = isImeVisible,
+        showConversation = showConversation,
+    )
+    when (chromeMode) {
+        TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> Unit
+        TmuxTerminalKeyboardChromeMode.HiddenImeControls,
+        TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> {
+            Column(
+                modifier = modifier
+                    .fillMaxWidth()
                     .heightIn(min = SessionBottomControlsMinHeight)
-                    .testTag(TMUX_KEY_BAR_TAG),
-            )
-        } else {
-            BottomChipControls(
-                chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
-                onChipTap = onChipTap,
-                onDictateTap = onDictateTap,
-                onEnterTap = if (!showConversation) onEnterTap else null,
-                onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
-                onAddSnippetTap = onAddSnippetTap,
-                addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                addSnippetIcon = SnippetsChipIcon,
-                // Project navigation on tmux panes is a separate follow-up — see
-                // #123 notes on per-pane cwd / project-root wiring.
-                onProjectNavigationTap = null,
-                inputEnabled = sessionLive,
-            )
+                    .background(color = PocketShellColors.Surface),
+            ) {
+                if (
+                    stagedAttachments.isNotEmpty() &&
+                    chromeMode == TmuxTerminalKeyboardChromeMode.HiddenImeControls
+                ) {
+                    AttachmentTileGrid(
+                        attachments = stagedAttachments,
+                        onRemove = onRemoveStagedAttachment,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+                if (chromeMode == TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys) {
+                    KeyBar(
+                        keys = tmuxKeyBarLayout(keyBarExpanded),
+                        onKey = if (sessionLive) {
+                            { binding ->
+                                // Issue #458: the `⋯` / `×` slot toggles the
+                                // expander locally; it is never a keystroke.
+                                // All other taps route to the pane.
+                                when (binding.label) {
+                                    TmuxKeyBarExpandLabel -> {
+                                        DiagnosticEvents.record(
+                                            "action",
+                                            "hotkey_panel_show",
+                                            "mode" to "tmux",
+                                        )
+                                        onKeyBarExpandedChange(true)
+                                    }
+                                    TmuxKeyBarCollapseLabel -> {
+                                        DiagnosticEvents.record(
+                                            "action",
+                                            "hotkey_panel_hide",
+                                            "mode" to "tmux",
+                                        )
+                                        onKeyBarExpandedChange(false)
+                                    }
+                                    else -> onKey(binding)
+                                }
+                            }
+                        } else {
+                            { _ -> }
+                        },
+                        modifierStates = modifierStates,
+                        onModifierStateChange = onModifierStateChange,
+                        modifier = Modifier
+                            .heightIn(min = SessionBottomControlsMinHeight)
+                            .testTag(TMUX_KEY_BAR_TAG),
+                    )
+                } else {
+                    BottomChipControls(
+                        chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
+                        onChipTap = onChipTap,
+                        onDictateTap = onDictateTap,
+                        onEnterTap = if (!showConversation) onEnterTap else null,
+                        onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
+                        onAddSnippetTap = onAddSnippetTap,
+                        addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+                        addSnippetIcon = SnippetsChipIcon,
+                        // Project navigation on tmux panes is a separate
+                        // follow-up — see #123 notes on per-pane cwd /
+                        // project-root wiring.
+                        onProjectNavigationTap = null,
+                        inputEnabled = sessionLive,
+                    )
+                }
+            }
         }
     }
+}
+
+internal enum class TmuxTerminalKeyboardChromeMode {
+    HiddenImeControls,
+    OpenImeTerminalHotkeys,
+    OpenImeConversationNoAccessory,
+}
+
+internal fun tmuxTerminalKeyboardChromeMode(
+    isImeVisible: Boolean,
+    showConversation: Boolean,
+): TmuxTerminalKeyboardChromeMode = when {
+    !isImeVisible -> TmuxTerminalKeyboardChromeMode.HiddenImeControls
+    showConversation -> TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory
+    else -> TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys
 }
 
 /**

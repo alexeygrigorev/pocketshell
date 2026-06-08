@@ -3,7 +3,9 @@ package com.pocketshell.app.tmux
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
@@ -87,8 +89,13 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
+        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertIsDisplayed()
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("^C").assertIsDisplayed()
+        compose.onNodeWithText(TmuxKeyBarEnterLabel)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
         compose.onNodeWithText("^D").assertIsDisplayed()
         compose.onNodeWithText("Tab").assertIsDisplayed()
 
@@ -105,7 +112,41 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("Ready").assertDoesNotExist()
         compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
 
-        assertEquals(listOf("Esc"), keyTaps)
+        assertEquals(listOf("Esc", TmuxKeyBarEnterLabel), keyTaps)
+    }
+
+    @Test
+    fun tmuxConversationImeOpenDoesNotRenderAccessoryStrip() {
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = true,
+                    showConversation = true,
+                    sessionLive = true,
+                    isAgentPane = true,
+                    keyBarExpanded = false,
+                    onKeyBarExpandedChange = {},
+                    onKey = {},
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
+                )
+            }
+        }
+
+        compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithText("show keyboard").assertDoesNotExist()
+        compose.onNodeWithText("Prompt").assertDoesNotExist()
+        compose.onNodeWithText("Command").assertDoesNotExist()
+        compose.onNodeWithText("Ready").assertDoesNotExist()
+        compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
     }
 
     @Test
@@ -644,4 +685,8 @@ class TmuxSessionVoiceSurfaceUiTest {
         val bottom: Int,
         val count: Int,
     )
+
+    private companion object {
+        const val CONVERSATION_IME_BOTTOM_CONTROLS_TAG = "tmux:test:conversation-ime-bottom-controls"
+    }
 }

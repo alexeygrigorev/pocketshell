@@ -53,6 +53,9 @@ class RootProjectAddSheetTest {
 
         compose.onNodeWithTag(ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG).performClick()
         compose.onNodeWithTag(ROOT_PROJECT_ADD_CLONE_TAG).performClick()
+        compose.onNodeWithTag(ROOT_PROJECT_ADD_ROOT_SESSION_TAG)
+            .assertIsDisplayed()
+            .performClick()
         compose.onNodeWithTag(
             rootProjectCandidateSourceTestTag("/home/alexey/git/llm-zoomcamp"),
             useUnmergedTree = true,
@@ -62,7 +65,12 @@ class RootProjectAddSheetTest {
             .performClick()
 
         assertEquals(
-            listOf("empty", "clone", "start:/home/alexey/git/llm-zoomcamp"),
+            listOf(
+                "empty",
+                "clone",
+                "start:/home/alexey/git",
+                "start:/home/alexey/git/llm-zoomcamp",
+            ),
             events,
         )
     }

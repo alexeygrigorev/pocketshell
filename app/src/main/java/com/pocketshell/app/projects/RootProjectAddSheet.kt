@@ -84,6 +84,13 @@ internal fun RootProjectAddSheetContent(
     val filtered = remember(candidates, query) {
         RootProjectFilter.filter(candidates, query)
     }
+    val rootSessionTarget = remember(root.path, root.label) {
+        RootProjectCandidate(
+            path = root.path,
+            label = root.label,
+            source = RootProjectSource.Scanned,
+        )
+    }
     val searchFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         searchFocus.requestFocus()
@@ -135,6 +142,10 @@ internal fun RootProjectAddSheetContent(
                 modifier = Modifier.weight(1f),
             )
         }
+        RootSessionRow(
+            root = root,
+            onClick = { onStartSession(rootSessionTarget) },
+        )
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
@@ -154,6 +165,34 @@ internal fun RootProjectAddSheetContent(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RootSessionRow(
+    root: FolderTreeRoot,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+            .testTag(ROOT_PROJECT_ADD_ROOT_SESSION_TAG),
+    ) {
+        ListRow(
+            title = "New session here",
+            subtitle = root.displayPath,
+            onClick = onClick,
+            trailing = {
+                Text(
+                    text = "+",
+                    color = PocketShellColors.Accent,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+        )
     }
 }
 
@@ -268,6 +307,7 @@ private fun RootProjectAddEmptyState(query: String) {
 const val ROOT_PROJECT_ADD_SHEET_TAG: String = "root-project-add:sheet"
 const val ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG: String = "root-project-add:empty-project"
 const val ROOT_PROJECT_ADD_CLONE_TAG: String = "root-project-add:clone"
+const val ROOT_PROJECT_ADD_ROOT_SESSION_TAG: String = "root-project-add:root-session"
 const val ROOT_PROJECT_ADD_SEARCH_TAG: String = "root-project-add:search"
 const val ROOT_PROJECT_ADD_LIST_TAG: String = "root-project-add:list"
 const val ROOT_PROJECT_ADD_EMPTY_TAG: String = "root-project-add:empty"

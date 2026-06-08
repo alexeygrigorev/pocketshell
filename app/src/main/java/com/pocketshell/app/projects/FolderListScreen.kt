@@ -467,7 +467,16 @@ fun FolderListScreen(
             onDismiss = { emptyProjectFolder = null },
             onCreate = { name ->
                 emptyProjectFolder = null
-                viewModel.createEmptyProject(parentPath = target.path, folderName = name)
+                viewModel.createEmptyProject(
+                    parentPath = target.path,
+                    folderName = name,
+                    onCreated = { path ->
+                        pickerFolder = PickerTarget(
+                            path = path,
+                            label = FolderListViewModel.defaultLabelForPath(path),
+                        )
+                    },
+                )
             },
         )
     }

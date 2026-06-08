@@ -744,7 +744,11 @@ class FolderListViewModel internal constructor(
         if (changed) emitReady()
     }
 
-    fun createEmptyProject(parentPath: String, folderName: String) {
+    fun createEmptyProject(
+        parentPath: String,
+        folderName: String,
+        onCreated: (String) -> Unit = {},
+    ) {
         val params = bound ?: return
         viewModelScope.launch {
             _actionStatus.value = FolderActionStatus.Running("Creating $folderName")
@@ -764,6 +768,7 @@ class FolderListViewModel internal constructor(
                     lastCreatedFolders = lastCreatedFolders + (canonicalisePath(path) to defaultLabelForPath(path))
                     emitReady()
                     _actionStatus.value = FolderActionStatus.Succeeded("Created $path")
+                    onCreated(path)
                     refresh()
                 },
                 onFailure = { error ->

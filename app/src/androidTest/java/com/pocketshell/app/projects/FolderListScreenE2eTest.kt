@@ -189,6 +189,68 @@ class FolderListScreenE2eTest {
     }
 
     @Test
+    fun emptyProjectContinuesIntoSessionTypePickerForCreatedFolder() {
+        val fakeGateway = FakeFolderListGateway(
+            rows = emptyList(),
+            projectFoldersByRoot = mapOf("~/tmp" to emptyList()),
+            resolvedWatchedRootPaths = mapOf("~/tmp" to "/home/u/tmp"),
+        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue-empty-project-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue-empty-project",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onOpenSettings = {},
+                    onOpenWorkspaceSettings = {},
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(folderTreeRootCreateTestTag("~/tmp"))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+        }
+
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderTreeRootCreateTestTag("~/tmp")))
+        compose.onNodeWithTag(folderTreeRootCreateTestTag("~/tmp")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(ROOT_PROJECT_ADD_SHEET_TAG)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        compose.onNodeWithTag(ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG).performClick()
+        compose.onNodeWithTag(EMPTY_PROJECT_NAME_TAG).performTextInput("cred-test")
+        compose.onNodeWithTag(EMPTY_PROJECT_CREATE_TAG).performClick()
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("in cred-test").assertExists()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_CWD_TAG).assertExists()
+        compose.onNodeWithText("~/tmp/cred-test").assertExists()
+    }
+
+    @Test
     fun folderListRendersGroupedSessionsAndPickerOpens() {
         val fakeGateway = FakeFolderListGateway(
             rows = listOf(

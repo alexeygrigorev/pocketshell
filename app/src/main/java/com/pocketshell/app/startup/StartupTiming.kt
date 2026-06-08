@@ -2,6 +2,7 @@ package com.pocketshell.app.startup
 
 import android.os.SystemClock
 import android.util.Log
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -18,11 +19,12 @@ internal object StartupTiming {
 
     fun mark(event: String, vararg fields: Pair<String, Any?>) {
         val now = SystemClock.elapsedRealtime()
+        val processElapsedMs = now - processStartElapsedMs
         Log.i(
             TAG,
             buildString {
                 append("event=").append(event)
-                append(" processElapsedMs=").append(now - processStartElapsedMs)
+                append(" processElapsedMs=").append(processElapsedMs)
                 append(" elapsedRealtimeMs=").append(now)
                 for ((key, value) in fields) {
                     append(' ')
@@ -31,6 +33,20 @@ internal object StartupTiming {
                     append(value.toLogValue())
                 }
             },
+        )
+        DiagnosticEvents.record(
+            "app",
+            "startup_timing",
+            *buildList<Pair<String, Any?>> {
+                addAll(
+                    listOf(
+                        "mark" to event,
+                        "processElapsedMs" to processElapsedMs,
+                        "elapsedRealtimeMs" to now,
+                    ),
+                )
+                addAll(fields)
+            }.toTypedArray(),
         )
     }
 

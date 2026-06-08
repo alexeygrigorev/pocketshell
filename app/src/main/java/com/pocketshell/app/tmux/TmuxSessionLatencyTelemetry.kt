@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.os.SystemClock
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 
 /**
  * Lightweight latency/event sink for the tmux terminal attach path.
@@ -22,17 +23,29 @@ public object TmuxSessionLatencyTelemetry {
         trigger: TmuxConnectTrigger? = null,
         detail: String = "",
     ) {
+        val elapsedRealtimeMs = SystemClock.elapsedRealtime()
         synchronized(lock) {
             events += Event(
                 name = name,
                 durationMs = durationMs,
-                elapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                elapsedRealtimeMs = elapsedRealtimeMs,
                 sessionName = sessionName,
                 paneId = paneId,
                 trigger = trigger?.logValue,
                 detail = detail,
             )
         }
+        DiagnosticEvents.record(
+            "connection",
+            "tmux_latency",
+            "operation" to name,
+            "durationMs" to durationMs,
+            "elapsedRealtimeMs" to elapsedRealtimeMs,
+            "session" to sessionName,
+            "paneId" to paneId,
+            "trigger" to trigger?.logValue,
+            "detail" to detail,
+        )
     }
 
     public fun snapshot(): List<Event> = synchronized(lock) { events.toList() }

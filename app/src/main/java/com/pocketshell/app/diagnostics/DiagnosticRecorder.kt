@@ -39,6 +39,7 @@ class DiagnosticRecorder @Inject constructor(
                     is RecorderCommand.Flush -> command.done.complete(Unit)
                     is RecorderCommand.Clear -> {
                         store.clear()
+                        sequence.set(0L)
                         command.done.complete(Unit)
                     }
                 }

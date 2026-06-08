@@ -153,6 +153,7 @@ class WalkthroughVisualScreenshotTest {
             ) {
                 hasTag(SETTINGS_LAZY_COLUMN_TAG)
             }
+            WalkthroughScreenshotArtifacts.capture("05-settings")
             compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
                 .performScrollToNode(hasTestTag(HOST_IMPORT_ROW_TAG))
             compose.onNodeWithTag(HOST_IMPORT_ROW_TAG, useUnmergedTree = true).performClick()

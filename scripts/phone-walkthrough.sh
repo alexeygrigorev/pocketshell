@@ -45,6 +45,7 @@ TERMINAL_LAB_SCREENSHOTS=(
   "04-backspace-repeat.png"
 )
 VISUAL_AUDIT_MAIN_TEST_CLASS="com.pocketshell.app.proof.WalkthroughVisualScreenshotTest"
+VISUAL_AUDIT_CONVERSATION_TEST_CLASS="com.pocketshell.app.proof.WalkthroughConversationScreenshotTest"
 VISUAL_AUDIT_COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVisualScreenshotTest"
 VISUAL_AUDIT_DEVICE_DIR="$DEVICE_OUTPUT_DIR/walkthrough-visual-pass"
 VISUAL_AUDIT_SCREENSHOTS=(
@@ -52,6 +53,8 @@ VISUAL_AUDIT_SCREENSHOTS=(
   "02-host-setup-folder-list.png"
   "03-terminal-session-input-controls.png"
   "04-snippets.png"
+  "05-settings.png"
+  "06-conversation-view.png"
   "05b-composer-idle-draft.png"
   "06-composer-recording.png"
   "07-composer-transcribing.png"
@@ -766,6 +769,7 @@ run_visual_audit() {
   CURRENT_SCENARIO="visual-audit"
   local scenario_start_ms scenario_end_ms scenario_elapsed_ms
   local main_status=0
+  local conversation_status=0
   local composer_status=0
   local device_artifact_dir="$DEVICE_ARTIFACT_ROOT/walkthrough-visual-pass"
   local screenshot_dir="$SCREENSHOT_ROOT/visual-audit"
@@ -781,7 +785,7 @@ run_visual_audit() {
     "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$VISUAL_AUDIT_DEVICE_DIR'"
   run_logged "13-clear-logcat" "$ADB" logcat -c
 
-  local main_start_ms main_end_ms composer_start_ms composer_end_ms
+  local main_start_ms main_end_ms conversation_start_ms conversation_end_ms composer_start_ms composer_end_ms
   main_start_ms="$(date +%s%3N)"
   run_instrumentation_with_retry \
     "14-run-visual-audit-main-instrumentation" \
@@ -793,42 +797,60 @@ run_visual_audit() {
   mkdir -p "$DEVICE_ARTIFACT_ROOT" "$screenshot_dir"
   run_logged "15-pull-visual-audit-main-artifacts" "$ADB" pull "$VISUAL_AUDIT_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
 
+  conversation_start_ms="$(date +%s%3N)"
+  run_instrumentation_with_retry \
+    "16-run-visual-audit-conversation-instrumentation" \
+    "$VISUAL_AUDIT_CONVERSATION_TEST_CLASS" \
+    "$VISUAL_AUDIT_DEVICE_DIR" ||
+    conversation_status=$?
+  conversation_end_ms="$(date +%s%3N)"
+
+  run_logged "17-pull-visual-audit-conversation-artifacts" "$ADB" pull "$VISUAL_AUDIT_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
+
   composer_start_ms="$(date +%s%3N)"
   run_instrumentation_with_retry \
-    "16-run-visual-audit-composer-instrumentation" \
+    "18-run-visual-audit-composer-instrumentation" \
     "$VISUAL_AUDIT_COMPOSER_TEST_CLASS" \
     "$VISUAL_AUDIT_DEVICE_DIR" ||
     composer_status=$?
   composer_end_ms="$(date +%s%3N)"
 
-  run_logged "17-pull-visual-audit-composer-artifacts" "$ADB" pull "$VISUAL_AUDIT_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
+  run_logged "19-pull-visual-audit-composer-artifacts" "$ADB" pull "$VISUAL_AUDIT_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
   if [[ -d "$device_artifact_dir" ]]; then
-    run_logged "18-visual-audit-artifact-file-info" file "$device_artifact_dir"/* || true
+    run_logged "20-visual-audit-artifact-file-info" file "$device_artifact_dir"/* || true
   fi
 
   cp "$LOG_DIR/14-run-visual-audit-main-instrumentation.log" "$LOG_DIR/visual-audit-main-instrumentation.txt"
-  cp "$LOG_DIR/16-run-visual-audit-composer-instrumentation.log" "$LOG_DIR/visual-audit-composer-instrumentation.txt"
+  cp "$LOG_DIR/16-run-visual-audit-conversation-instrumentation.log" "$LOG_DIR/visual-audit-conversation-instrumentation.txt"
+  cp "$LOG_DIR/18-run-visual-audit-composer-instrumentation.log" "$LOG_DIR/visual-audit-composer-instrumentation.txt"
   {
     printf 'main_instrumentation_ms=%s\n' "$((main_end_ms - main_start_ms))"
+    printf 'conversation_instrumentation_ms=%s\n' "$((conversation_end_ms - conversation_start_ms))"
     printf 'composer_instrumentation_ms=%s\n' "$((composer_end_ms - composer_start_ms))"
   } > "$timing_file"
   "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$LOG_DIR/logcat.txt" 2>&1 || true
-  rg -n 'WALKTHROUGH_SCREENSHOT|WalkthroughVisualScreenshotTest|PromptComposerVisualScreenshotTest' \
+  rg -n 'WALKTHROUGH_SCREENSHOT|WalkthroughVisualScreenshotTest|WalkthroughConversationScreenshotTest|PromptComposerVisualScreenshotTest' \
     "$LOG_DIR/logcat.txt" \
     "$LOG_DIR/visual-audit-main-instrumentation.txt" \
+    "$LOG_DIR/visual-audit-conversation-instrumentation.txt" \
     "$LOG_DIR/visual-audit-composer-instrumentation.txt" > "$LOG_DIR/visual-audit-filtered-log.txt" 2>&1 || true
   rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
     "$LOG_DIR/logcat.txt" \
     "$LOG_DIR/visual-audit-main-instrumentation.txt" \
+    "$LOG_DIR/visual-audit-conversation-instrumentation.txt" \
     "$LOG_DIR/visual-audit-composer-instrumentation.txt" > "$LOG_DIR/crash-diagnostics.txt" 2>&1 || true
 
   if [[ "$main_status" -ne 0 ]]; then
     fail "$VISUAL_AUDIT_MAIN_TEST_CLASS instrumentation command exited with $main_status"
   fi
+  if [[ "$conversation_status" -ne 0 ]]; then
+    fail "$VISUAL_AUDIT_CONVERSATION_TEST_CLASS instrumentation command exited with $conversation_status"
+  fi
   if [[ "$composer_status" -ne 0 ]]; then
     fail "$VISUAL_AUDIT_COMPOSER_TEST_CLASS instrumentation command exited with $composer_status"
   fi
   assert_instrumentation_success "$LOG_DIR/visual-audit-main-instrumentation.txt" "$VISUAL_AUDIT_MAIN_TEST_CLASS"
+  assert_instrumentation_success "$LOG_DIR/visual-audit-conversation-instrumentation.txt" "$VISUAL_AUDIT_CONVERSATION_TEST_CLASS"
   assert_instrumentation_success "$LOG_DIR/visual-audit-composer-instrumentation.txt" "$VISUAL_AUDIT_COMPOSER_TEST_CLASS"
 
   local missing=()
@@ -863,6 +885,7 @@ run_visual_audit() {
   printf 'logs:\n'
   printf '  %s\n' "$(relpath "$LOG_DIR/logcat.txt")"
   printf '  %s\n' "$(relpath "$LOG_DIR/visual-audit-main-instrumentation.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/visual-audit-conversation-instrumentation.txt")"
   printf '  %s\n' "$(relpath "$LOG_DIR/visual-audit-composer-instrumentation.txt")"
   printf '  %s\n' "$(relpath "$LOG_DIR/visual-audit-filtered-log.txt")"
   printf '  %s\n' "$(relpath "$LOG_DIR/docker.txt")"

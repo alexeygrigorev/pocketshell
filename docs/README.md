@@ -20,6 +20,7 @@ context; the README and current feature docs track released behavior.
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
 | [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
 | [walkthrough-visual-pass.md](walkthrough-visual-pass.md) | Real emulator screenshot capture workflow for visual review |
+| [screenshots/](screenshots/) | Curated README screenshot assets captured from the visual-audit workflow |
 | [tmux-socket-recovery.md](tmux-socket-recovery.md) | Default tmux socket split-brain detection, safe recovery, and automation namespace guardrails |
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
 | [../agents.md](../agents.md) | Orchestrator + sub-agent process (auto-loaded via [../CLAUDE.md](../CLAUDE.md)) |

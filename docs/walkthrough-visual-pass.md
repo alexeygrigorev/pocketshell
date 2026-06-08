@@ -41,10 +41,10 @@ The script intentionally runs the connected pass through explicit APK build,
 `adb install`, and `adb shell am instrument` steps instead of Gradle's
 `connectedDebugAndroidTest` runner. This keeps package installation outside the
 instrumentation window and avoids UTP reinstalling the app while screenshots
-are being captured. The live terminal and pure composer screenshot classes run
-as separate instrumentation phases, with an app/test force-stop settle before
-each phase, so a process restart in one phase cannot drop screenshots from the
-other.
+are being captured. The live terminal, conversation-pane, and pure composer
+screenshot classes run as separate instrumentation phases, with an app/test
+force-stop settle before each phase, so a process restart in one phase cannot
+drop screenshots from the other.
 
 On-device screenshots are staged under
 `/sdcard/Android/media/com.pocketshell.app/additional_test_output/walkthrough-visual-pass`
@@ -64,8 +64,11 @@ The connected screenshot pass captures:
 - `03-terminal-session-input-controls.png` - live terminal with bottom chips
   and key controls after a Docker-backed command.
 - `04-snippets.png` - snippet picker over the live session.
-- `05b-composer-idle-draft.png` - lab-rendered prompt composer with a typed
-  draft before send.
+- `05-settings.png` - settings screen showing terminal, conversation, tmux, and
+  background-grace controls.
+- `06-conversation-view.png` - production conversation pane with deterministic
+  sample agent turns and a tool call.
+- `05b-composer-idle-draft.png` - lab-rendered idle prompt composer.
 - `06-composer-recording.png` - composer recording state with waveform.
 - `07-composer-transcribing.png` - composer processing state.
 

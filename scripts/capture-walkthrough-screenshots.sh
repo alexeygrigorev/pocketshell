@@ -15,12 +15,17 @@ RUN_DIR="$LOG_ROOT/$RUN_ID"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
 DEVICE_SCREENSHOT_DIR="$DEVICE_OUTPUT_DIR/walkthrough-visual-pass"
 MAIN_TEST_CLASS="com.pocketshell.app.proof.WalkthroughVisualScreenshotTest"
+CONVERSATION_TEST_CLASS="com.pocketshell.app.proof.WalkthroughConversationScreenshotTest"
 COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVisualScreenshotTest"
 MAIN_SCREENSHOTS=(
   "01-host-list.png"
   "02-host-setup-folder-list.png"
   "03-terminal-session-input-controls.png"
   "04-snippets.png"
+  "05-settings.png"
+)
+CONVERSATION_SCREENSHOTS=(
+  "06-conversation-view.png"
 )
 COMPOSER_SCREENSHOTS=(
   "05b-composer-idle-draft.png"
@@ -337,9 +342,13 @@ run_instrumentation_class "12-run-main-walkthrough-visual-instrumentation" "$MAI
 pull_device_screenshots "13-collect-main-device-screenshots"
 assert_screenshots_exist "main walkthrough visual pass" "${MAIN_SCREENSHOTS[@]}"
 
-run_instrumentation_class "14-run-composer-visual-instrumentation" "$COMPOSER_TEST_CLASS"
-pull_device_screenshots "15-collect-composer-device-screenshots"
-assert_screenshots_exist "composer visual pass" "${MAIN_SCREENSHOTS[@]}" "${COMPOSER_SCREENSHOTS[@]}"
+run_instrumentation_class "14-run-conversation-visual-instrumentation" "$CONVERSATION_TEST_CLASS"
+pull_device_screenshots "15-collect-conversation-device-screenshots"
+assert_screenshots_exist "conversation visual pass" "${MAIN_SCREENSHOTS[@]}" "${CONVERSATION_SCREENSHOTS[@]}"
+
+run_instrumentation_class "16-run-composer-visual-instrumentation" "$COMPOSER_TEST_CLASS"
+pull_device_screenshots "17-collect-composer-device-screenshots"
+assert_screenshots_exist "composer visual pass" "${MAIN_SCREENSHOTS[@]}" "${CONVERSATION_SCREENSHOTS[@]}" "${COMPOSER_SCREENSHOTS[@]}"
 
 printf '\nPASS: walkthrough visual screenshots captured\n'
 printf 'Screenshots: %s/screenshots/walkthrough-visual-pass\n' "$RUN_DIR"

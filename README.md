@@ -29,28 +29,39 @@ teardown.
 
 ## Screenshots
 
-No real v0.3.27 README screenshot assets are committed in this checkout yet.
-The only committed PNG is
-`docs/mockups/feedback/folder-tree-target-20260604.png`, which is design
-feedback/reference material, not a current app screenshot. For that reason this
-README does **not** embed fabricated or mockup images.
-
-The release screenshot process exists and should be used before adding README
-images:
+Current README captures live under [docs/screenshots/](docs/screenshots/). They
+were produced from the visual-audit emulator workflow against the deterministic
+Docker SSH fixture:
 
 ```bash
 scripts/phone-walkthrough.sh visual-audit
 ```
 
-That writes reviewer screenshots under
-`build/phone-walkthrough/<run-id>/screenshots/visual-audit/` and raw device
-artifacts under
-`build/phone-walkthrough/<run-id>/device-artifacts/walkthrough-visual-pass/`.
-When real current captures are available, commit a curated, reasonably sized
-set under `docs/screenshots/` and embed the host list, tmux session,
-conversation view, composer, and settings screens here. See
-[docs/walkthrough-visual-pass.md](docs/walkthrough-visual-pass.md) and
-[docs/testing.md](docs/testing.md) for the capture workflow.
+Host list, terminal, settings, and composer are app captures. Conversation is a
+production conversation-pane render with deterministic sample agent events.
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/readme-host-list.png" alt="PocketShell host list" width="220"></td>
+    <td><img src="docs/screenshots/readme-terminal-session.png" alt="PocketShell tmux terminal session" width="220"></td>
+    <td><img src="docs/screenshots/readme-conversation-view.png" alt="PocketShell agent conversation view" width="220"></td>
+  </tr>
+  <tr>
+    <td align="center">Hosts</td>
+    <td align="center">tmux terminal</td>
+    <td align="center">Conversation</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/readme-prompt-composer.png" alt="PocketShell prompt composer" width="220"></td>
+    <td><img src="docs/screenshots/readme-settings.png" alt="PocketShell settings screen" width="220"></td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center">Prompt composer</td>
+    <td align="center">Settings</td>
+    <td></td>
+  </tr>
+</table>
 
 ## What Works Today
 

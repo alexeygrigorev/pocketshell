@@ -79,6 +79,24 @@ class ConversationToolResultPairingTest {
     }
 
     @Test
+    fun duplicateExplicitResultsKeepLaterOutputsStandalone() {
+        val events = listOf(
+            toolCall("call-1"),
+            toolResult("result-1", toolCallId = "call-1", output = "first-output"),
+            toolResult("result-2", toolCallId = "call-1", output = "second-output"),
+        )
+
+        val pairing = events.toolResultPairing()
+        val filtered = filterConversationRows(events, query = "")
+        val searched = filterConversationRows(events, query = "second-output")
+
+        assertEquals("result-1", pairing.resultsByCallId["call-1"]?.id)
+        assertEquals(setOf("result-1"), pairing.pairedResultIds)
+        assertEquals(listOf("call-1", "result-2"), filtered.events.map { it.id })
+        assertEquals(listOf("result-2"), searched.events.map { it.id })
+    }
+
+    @Test
     fun explicitMismatchedToolCallIdDoesNotFallBackToAdjacentCall() {
         val events = listOf(
             toolCall("call-1"),

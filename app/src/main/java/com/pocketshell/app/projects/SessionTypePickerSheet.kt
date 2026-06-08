@@ -125,6 +125,8 @@ internal fun SessionTypePickerContent(
     ) {
         Column(
             modifier = Modifier
+                .weight(1f, fill = true)
+                .verticalScroll(scrollState)
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.md),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
@@ -141,9 +143,9 @@ internal fun SessionTypePickerContent(
                 style = PocketShellType.bodyMono,
             )
 
-            // Start folder — pre-filled, editable. Keep this near the top of
-            // the sheet so autocomplete results remain visible while the IME
-            // is open instead of landing below the session-type controls.
+            // Start folder — pre-filled, editable. Keep this inside the
+            // scrollable sheet body so the autocomplete can request enough
+            // space above the IME while the action row remains pinned.
             Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
                 SectionHeader(label = "Start folder")
                 StartDirectoryAutocompleteField(
@@ -156,16 +158,7 @@ internal fun SessionTypePickerContent(
                     suggestionsMaxHeight = SESSION_TYPE_PICKER_SUGGESTIONS_MAX_HEIGHT,
                 )
             }
-        }
 
-        Column(
-            modifier = Modifier
-                .weight(1f, fill = true)
-                .verticalScroll(scrollState)
-                .padding(horizontal = PocketShellSpacing.lg)
-                .padding(bottom = PocketShellSpacing.md),
-            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
-        ) {
             // Segmented control: Shell vs Agent.
             Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
                 SectionHeader(label = "Session type")

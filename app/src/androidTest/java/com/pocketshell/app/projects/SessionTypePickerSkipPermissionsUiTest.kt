@@ -2,10 +2,12 @@ package com.pocketshell.app.projects
 
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.testTag
@@ -20,10 +22,16 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.proof.signals.waitForComposeLayoutStable
+import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.sessions.START_DIRECTORY_AUTOCOMPLETE_SUGGESTIONS_TAG
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
+import com.pocketshell.app.sessions.startDirectoryAutocompleteSuggestionTag
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -228,6 +236,106 @@ class SessionTypePickerSkipPermissionsUiTest {
         )
     }
 
+    @Test
+    fun folderSuggestionStaysAboveImeAndCanBeSelected() {
+        var lastChoice: SessionTypeChoice? = null
+        val firstSuggestion = "/srv/app"
+        compose.setContent {
+            PocketShellTheme {
+                val scope = rememberCoroutineScope()
+                val autocomplete = remember {
+                    StartDirectoryAutocompleteController(
+                        scope = scope,
+                        suggest = {
+                            listOf(
+                                firstSuggestion,
+                                "/srv/api",
+                                "/srv/app-web",
+                            )
+                        },
+                        debounceMs = 0,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag(ISSUE_613_PICKER_ROOT_TAG),
+                    contentAlignment = Alignment.BottomCenter,
+                ) {
+                    SessionTypePickerContent(
+                        folderPath = "/srv",
+                        folderLabel = "srv",
+                        onCancel = {},
+                        onCreate = { lastChoice = it },
+                        autocompleteController = autocomplete,
+                    )
+                }
+            }
+        }
+
+        try {
+            compose.onNodeWithTag(SESSION_TYPE_PICKER_CWD_TAG).performClick()
+            compose.activity.runOnUiThread {
+                val window = compose.activity.window
+                WindowInsetsControllerCompat(window, window.decorView)
+                    .show(WindowInsetsCompat.Type.ime())
+            }
+
+            val imeVisible = waitForInputMethodVisible(
+                scenario = compose.activityRule.scenario,
+                expected = true,
+                timeoutMs = 30_000L,
+            )
+            assertTrue(
+                "IME must be visible for the folder-suggestion keyboard regression test",
+                imeVisible,
+            )
+
+            compose.onNodeWithTag(SESSION_TYPE_PICKER_CWD_TAG)
+                .performTextInput("/a")
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(START_DIRECTORY_AUTOCOMPLETE_SUGGESTIONS_TAG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            val suggestionTag = startDirectoryAutocompleteSuggestionTag(firstSuggestion)
+            assertTrue(
+                "suggestion row should settle before IME visibility is checked",
+                waitForComposeLayoutStable(compose, suggestionTag),
+            )
+            compose.onNodeWithTag(suggestionTag).assertIsDisplayed()
+
+            val imeBottomInset = imeBottomInsetPx()
+            assertTrue(
+                "IME must report a positive bottom inset for the folder-suggestion overlap check",
+                imeBottomInset > 0,
+            )
+            val rootBounds = compose.onNodeWithTag(ISSUE_613_PICKER_ROOT_TAG)
+                .fetchSemanticsNode()
+                .boundsInRoot
+            val suggestionBounds = compose.onNodeWithTag(suggestionTag)
+                .fetchSemanticsNode()
+                .boundsInRoot
+            val keyboardTop = rootBounds.bottom - imeBottomInset
+            assertTrue(
+                "folder suggestion should stay above the IME " +
+                    "(suggestion bottom=${suggestionBounds.bottom}, keyboard top=$keyboardTop)",
+                suggestionBounds.bottom <= keyboardTop + 0.5f,
+            )
+
+            compose.onNodeWithTag(suggestionTag).performClick()
+            compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
+            compose.waitForIdle()
+            assertTrue(lastChoice?.startDirectory == firstSuggestion)
+        } finally {
+            compose.activity.runOnUiThread {
+                WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
+                    .hide(WindowInsetsCompat.Type.ime())
+            }
+        }
+    }
+
     // Screenshot capture is best-effort evidence: a content-only Compose
     // test has no real Activity window, so PixelCopy-backed
     // `captureToImage()` can fail on some emulator images. The load-bearing
@@ -245,6 +353,18 @@ class SessionTypePickerSkipPermissionsUiTest {
                 bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
             }
         }
+    }
+
+    private fun imeBottomInsetPx(): Int {
+        var bottom = 0
+        compose.activityRule.scenario.onActivity { activity ->
+            val decor = activity.window.decorView
+            bottom = ViewCompat.getRootWindowInsets(decor)
+                ?.getInsets(WindowInsetsCompat.Type.ime())
+                ?.bottom
+                ?: 0
+        }
+        return bottom
     }
 
     private companion object {

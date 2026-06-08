@@ -2,18 +2,22 @@ package com.pocketshell.app.sessions
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -186,6 +190,7 @@ fun rememberStartDirectoryAutocompleteController(
     return controller
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StartDirectoryAutocompleteField(
     value: String,
@@ -199,6 +204,12 @@ fun StartDirectoryAutocompleteField(
 ) {
     val autocompleteState by autocompleteController?.state?.collectAsState()
         ?: remember { MutableStateFlow(StartDirectoryAutocompleteUiState()) }.collectAsState()
+    val suggestionsBringIntoViewRequester = remember { BringIntoViewRequester() }
+    LaunchedEffect(autocompleteState.suggestions) {
+        if (autocompleteState.suggestions.isNotEmpty()) {
+            suggestionsBringIntoViewRequester.bringIntoView()
+        }
+    }
     Column(modifier = modifier) {
         OutlinedTextField(
             value = value,
@@ -229,6 +240,7 @@ fun StartDirectoryAutocompleteField(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewRequester(suggestionsBringIntoViewRequester)
                     .heightIn(max = suggestionsMaxHeight)
                     .verticalScroll(rememberScrollState())
                     .padding(top = 4.dp)

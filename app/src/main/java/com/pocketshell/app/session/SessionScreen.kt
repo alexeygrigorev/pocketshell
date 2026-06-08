@@ -14,7 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -47,7 +48,9 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +78,7 @@ import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.UnsentPromptBanner
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
@@ -270,7 +274,13 @@ public fun SessionScreen(
         }
     }
 
-    val isImeVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
+    val density = LocalDensity.current
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val navBarBottomPx = WindowInsets.navigationBars.getBottom(density)
+    val isImeVisible = imeBottomPx > 0
+    // Keep parity with tmux: pan the terminal column above the IME instead of
+    // measuring it into the shrunken keyboard-open height.
+    val imePanOffsetPx = imeKeyboardPanOffsetPx(imeBottomPx, navBarBottomPx)
 
     Box(
         modifier = modifier
@@ -281,7 +291,7 @@ public fun SessionScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .imePadding(),
+                .graphicsLayer { translationY = -imePanOffsetPx.toFloat() },
         ) {
             Breadcrumb(
                 crumbs = breadcrumbCrumbs(host, user),
@@ -388,6 +398,11 @@ public fun SessionScreen(
                 agentConversation.selectedTab == SessionTab.Conversation &&
                     agentConversation.detection != null
 
+            val bottomControlsModifier = if (isImeVisible) {
+                Modifier
+            } else {
+                Modifier.navigationBarsPadding()
+            }
             RawSessionBottomControls(
                 isImeVisible = isImeVisible,
                 showConversation = showConversation,
@@ -415,6 +430,7 @@ public fun SessionScreen(
                 onProjectNavigationTap = { showProjectNavigation = true },
                 stagedAttachments = promptComposerState.attachments,
                 onRemoveStagedAttachment = promptComposerViewModel::removeAttachment,
+                modifier = bottomControlsModifier,
             )
         }
 

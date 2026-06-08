@@ -113,6 +113,7 @@ import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
+import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
 import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
@@ -2212,27 +2213,6 @@ internal data class TmuxSessionTabState(
     val selectedIndex: Int,
     val showsConversationTab: Boolean,
 )
-
-/**
- * Issue #457 (Part 1): how far (in pixels) to pan the terminal column up so
- * its bottom rows + cursor + key bar stay visible above the soft keyboard,
- * WITHOUT resizing the terminal grid (which would trigger a tmux pane resize
- * and full reflow + redraw — the jank this slice removes).
- *
- * The IME bottom inset ([imeBottomPx]) is the obstruction that must be cleared
- * for the terminal accessory to remain usable. We intentionally do not subtract
- * [navBarBottomPx]: on devices that report IME and nav-bar insets separately,
- * subtracting the nav inset leaves most of the key bar under the keyboard.
- * Clamped at 0 so a hidden keyboard leaves the column un-panned.
- *
- * Pulled out as a pure function so the offset arithmetic is unit-testable
- * without a composition or a live IME.
- */
-internal fun imeKeyboardPanOffsetPx(
-    imeBottomPx: Int,
-    @Suppress("UNUSED_PARAMETER") navBarBottomPx: Int,
-): Int =
-    imeBottomPx.coerceAtLeast(0)
 
 internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,

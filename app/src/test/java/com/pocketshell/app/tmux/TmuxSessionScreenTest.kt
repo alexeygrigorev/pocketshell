@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
+import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.SessionTab

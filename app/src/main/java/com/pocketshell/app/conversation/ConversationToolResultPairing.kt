@@ -14,9 +14,9 @@ internal data class ToolResultPairing(
  * Explicit parser links win first. Some transcripts can still surface an
  * unlinked result immediately after its call, so the fallback pairs only the
  * visible adjacent shape `ToolCall` -> `ToolResult` when that result has no
- * visible explicit parent and the call does not already have a result. That is
- * deterministic and intentionally conservative: non-adjacent or many-to-one
- * ambiguities stay as standalone result rows.
+ * explicit parent id and the call does not already have a result. That is
+ * deterministic and intentionally conservative: non-adjacent, explicitly
+ * mismatched, or many-to-one ambiguities stay as standalone result rows.
  */
 internal fun List<ConversationEvent>.toolResultPairing(): ToolResultPairing {
     val eventsById = associateBy { it.id }
@@ -39,7 +39,7 @@ internal fun List<ConversationEvent>.toolResultPairing(): ToolResultPairing {
         val result = this[index + 1] as? ConversationEvent.ToolResult ?: continue
         if (call.id in resultsByCallId) continue
         if (result.id in pairedResultIds) continue
-        if (result.hasExplicitVisibleParentToolCall(eventsById)) continue
+        if (result.hasExplicitToolCallId()) continue
         resultsByCallId[call.id] = result
         pairedResultIds += result.id
         callIdsByResultId[result.id] = call.id
@@ -118,9 +118,8 @@ internal fun filterConversationRows(
     )
 }
 
-private fun ConversationEvent.ToolResult.hasExplicitVisibleParentToolCall(
-    eventsById: Map<String, ConversationEvent>,
-): Boolean = toolCallId?.let { eventsById.matchingToolCallId(it) } != null
+private fun ConversationEvent.ToolResult.hasExplicitToolCallId(): Boolean =
+    !toolCallId.isNullOrBlank()
 
 private fun Map<String, ConversationEvent>.matchingToolCallId(toolCallId: String): String? {
     if (this[toolCallId] is ConversationEvent.ToolCall) return toolCallId

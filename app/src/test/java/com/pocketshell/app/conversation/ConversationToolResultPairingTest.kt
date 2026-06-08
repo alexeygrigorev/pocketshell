@@ -79,6 +79,21 @@ class ConversationToolResultPairingTest {
     }
 
     @Test
+    fun explicitMismatchedToolCallIdDoesNotFallBackToAdjacentCall() {
+        val events = listOf(
+            toolCall("call-1"),
+            toolResult("result-1", toolCallId = "missing-call"),
+        )
+
+        val pairing = events.toolResultPairing()
+        val filtered = filterConversationRows(events, query = "")
+
+        assertTrue(pairing.resultsByCallId.isEmpty())
+        assertEquals(listOf("call-1", "result-1"), filtered.events.map { it.id })
+        assertTrue("call-1" in runningToolCallIds(events, pairing))
+    }
+
+    @Test
     fun codexPrefixedToolCallIdPairsNonAdjacentResult() {
         val events = listOf(
             toolCall("call:call_1"),

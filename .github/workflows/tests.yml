@@ -14,6 +14,7 @@ jobs:
   unit:
     name: Unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -39,10 +40,11 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Run JVM unit tests
-        run: ./gradlew test --stacktrace
+        timeout-minutes: 35
+        run: ./gradlew test --no-daemon --stacktrace
 
-      - name: Upload unit test reports
-        if: always()
+      - name: Upload unit test reports on failure
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: unit-test-reports
@@ -92,6 +94,7 @@ jobs:
   integration:
     name: Integration tests (Docker)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -122,10 +125,11 @@ jobs:
         run: docker info
 
       - name: Run integration tests
-        run: ./gradlew :app:integrationTest :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest --stacktrace
+        timeout-minutes: 45
+        run: ./gradlew :app:integrationTest :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest --no-daemon --stacktrace
 
-      - name: Upload integration test reports
-        if: always()
+      - name: Upload integration test reports on failure
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: integration-test-reports

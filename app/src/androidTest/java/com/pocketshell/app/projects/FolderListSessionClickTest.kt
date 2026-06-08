@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -24,6 +25,7 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellTheme
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -77,6 +79,54 @@ class FolderListSessionClickTest {
     @After
     fun closeDatabase() {
         db.close()
+    }
+
+    @Test
+    fun loadingStateCentersIndicatorAndHidesHostActions() {
+        val fakeGateway = StaticGateway(rows = emptyList(), stallListSessions = true)
+        val viewModel = constructViewModelOnMainThread(fakeGateway)
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "h",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue618",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(FOLDER_LIST_LOADING_TAG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+        }
+
+        compose.onNodeWithTag(FOLDER_LIST_LOADING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_LIST_LOADING_BODY_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(FOLDER_LIST_PORT_FORWARDING_TAG).assertDoesNotExist()
+
+        val panelBounds = compose.onNodeWithTag(FOLDER_LIST_LOADING_TAG)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val bodyBounds = compose.onNodeWithTag(FOLDER_LIST_LOADING_BODY_TAG)
+            .fetchSemanticsNode()
+            .boundsInRoot
+
+        assertCentersWithin(panelBounds, bodyBounds, tolerancePx = 2f)
     }
 
     @Test
@@ -445,12 +495,29 @@ class FolderListSessionClickTest {
         }
         return vm
     }
+
+    private fun assertCentersWithin(container: Rect, content: Rect, tolerancePx: Float) {
+        val containerCenterX = (container.left + container.right) / 2f
+        val containerCenterY = (container.top + container.bottom) / 2f
+        val contentCenterX = (content.left + content.right) / 2f
+        val contentCenterY = (content.top + content.bottom) / 2f
+        assertTrue(
+            "loading content should be horizontally centered: container=$container content=$content",
+            kotlin.math.abs(containerCenterX - contentCenterX) <= tolerancePx,
+        )
+        assertTrue(
+            "loading content should be vertically centered: container=$container content=$content",
+            kotlin.math.abs(containerCenterY - contentCenterY) <= tolerancePx,
+        )
+    }
 }
 
 private class StaticGateway(
     private val rows: List<FolderSessionRow>,
     private val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+    private val stallListSessions: Boolean = false,
 ) : FolderListGateway {
+    val callCount: AtomicInteger = AtomicInteger(0)
     var lastEmptyParent: String? = null
     var lastEmptyName: String? = null
 
@@ -459,10 +526,14 @@ private class StaticGateway(
         keyPath: String,
         passphrase: CharArray?,
         watchedRoots: List<ProjectRootEntity>,
-    ): FolderListResult = FolderListResult.Sessions(
-        rows = rows,
-        projectFoldersByRoot = projectFoldersByRoot,
-    )
+    ): FolderListResult {
+        callCount.incrementAndGet()
+        if (stallListSessions) awaitCancellation()
+        return FolderListResult.Sessions(
+            rows = rows,
+            projectFoldersByRoot = projectFoldersByRoot,
+        )
+    }
 
     override suspend fun createSession(
         host: HostEntity,
@@ -500,6 +571,3 @@ private class StaticGateway(
         sessionName: String,
     ): Result<Unit> = Result.success(Unit)
 }
-
-@Suppress("unused")
-private val unused: AtomicInteger = AtomicInteger(0)

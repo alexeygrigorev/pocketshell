@@ -302,23 +302,7 @@ fun FolderListScreen(
                 onOpenAssistant = { showAssistant = true },
             )
             when (val s = state) {
-                is FolderListUiState.Loading -> Column(modifier = Modifier.fillMaxSize()) {
-                    LoadingPanel(modifier = Modifier.weight(1f))
-                    Column(
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        NewSessionSummaryRow(onClick = onCreateTopLevelSession)
-                        if (s.portForwarding.shouldShowSummary) {
-                            PortForwardingSummaryRow(
-                                summary = s.portForwarding,
-                                onOpen = onOpenPortForwarding,
-                            )
-                        }
-                    }
-                }
+                is FolderListUiState.Loading -> LoadingPanel()
                 is FolderListUiState.Failed -> ErrorPanel(message = s.message, onRetry = viewModel::refresh)
                 is FolderListUiState.ConnectError -> ErrorPanel(
                     message = s.message.ifBlank { "Couldn't reach $hostName." },
@@ -889,20 +873,25 @@ private fun HostDetailAssistantPanel(
 
 @Composable
 private fun LoadingPanel(modifier: Modifier = Modifier.fillMaxSize()) {
-    Column(
+    Box(
         modifier = modifier
+            .fillMaxSize()
             .padding(horizontal = 20.dp)
             .testTag(FOLDER_LIST_LOADING_TAG),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
+        contentAlignment = Alignment.Center,
     ) {
-        CircularProgressIndicator(color = PocketShellColors.Accent)
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(
-            text = "Loading workspace tree",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
-        )
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.testTag(FOLDER_LIST_LOADING_BODY_TAG),
+        ) {
+            CircularProgressIndicator(color = PocketShellColors.Accent)
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Loading workspace tree",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 13.sp,
+            )
+        }
     }
 }
 
@@ -2531,6 +2520,7 @@ const val FOLDER_LIST_BOTTOM_SPACER_TAG: String = "folder-list:bottom-spacer"
 const val FOLDER_LIST_BACK_TAG: String = "folder-list:back"
 const val FOLDER_LIST_TITLE_TAG: String = "folder-list:title"
 const val FOLDER_LIST_LOADING_TAG: String = "folder-list:loading"
+const val FOLDER_LIST_LOADING_BODY_TAG: String = "folder-list:loading:body"
 const val FOLDER_LIST_ERROR_TAG: String = "folder-list:error"
 const val FOLDER_LIST_RETRY_TAG: String = "folder-list:retry"
 const val FOLDER_LIST_EMPTY_TAG: String = "folder-list:empty"

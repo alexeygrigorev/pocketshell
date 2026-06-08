@@ -101,10 +101,12 @@ reasonable to expect CI to pass.
 Minimum pre-push gate:
 
 - The implementer runs focused tests for every touched module and reports the
-  exact commands.
+  exact commands. A slice is not ready for review while the modules it touched
+  are still failing locally.
 - A verifier/reviewer agent independently inspects the diff and reruns the
   relevant local checks from the implementer's worktree before the orchestrator
-  integrates it.
+  integrates it. Treat this verifier as a required local gatekeeper before any
+  push to `main`, not as a post-push CI triage role.
 - The orchestrator runs a final local gate in the integration worktree after
   applying the reviewed patch. The gate must include `git diff --check`,
   compile for touched Android/Kotlin modules, and the focused unit/instrumented

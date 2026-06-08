@@ -276,7 +276,7 @@ public fun TmuxSessionScreen(
      * `tmux -CC` route. MainActivity passes the lookup for the active
      * host id; `null` when no chip should render.
      */
-    usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
+    @Suppress("UNUSED_PARAMETER") usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
     // Issue #177 / #459: composer-draft persistence for fast resume.
     // Historically these seeded + reported the bespoke in-pane
     // Conversation composer's draft. Issue #459 collapsed the Conversation
@@ -991,26 +991,6 @@ public fun TmuxSessionScreen(
                     canReconnect = canReconnect,
                 )
             }
-            // Issue #116 (usage-panel Fix B): in-session blocked /
-            // near-limit chip for the active host. Mirrors the
-            // status-area placement on [com.pocketshell.app.session.SessionScreen]
-            // so the user sees the same affordance regardless of
-            // whether the route is plain SSH or tmux -CC.
-            if (usageBadgeProvider != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(color = PocketShellColors.Surface)
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                        .testTag(TMUX_SESSION_USAGE_BADGE_TAG),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    com.pocketshell.app.usage.UsageSessionBlockedBadge(
-                        provider = usageBadgeProvider,
-                    )
-                }
-            }
-
             // Issue #192: the [WindowStrip] (rendered above with the top
             // chrome when windows.size > 1) is the primary window
             // switcher and the home of the kill / rename affordances.
@@ -2439,9 +2419,6 @@ internal const val TMUX_CONVERSATION_LIST_TAG =
  */
 internal const val TMUX_CONVERSATION_TAB_PULSE_TAG =
     "tmux:tabs:conversation-pulse"
-/** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
-internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
-
 internal fun sessionForwardingMenuStatusLabel(
     state: com.pocketshell.app.portfwd.SessionForwardingIndicatorState,
 ): String =

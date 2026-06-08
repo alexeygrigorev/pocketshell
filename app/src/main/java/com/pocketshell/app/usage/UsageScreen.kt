@@ -511,7 +511,7 @@ private fun UsageWindowRow(
             progress = (window.percent / 100.0).toFloat(),
             kind = progressKind(window.percent, record.isBlocked),
         )
-        UsageResetFoot(window = window, now = now, blockReason = record.blockReason)
+        UsageResetFoot(window = window, now = now, blockReason = blockReasonForWindow(record, window))
     }
 }
 
@@ -688,14 +688,14 @@ internal fun thresholdRowDescription(state: UsageThresholdState): String = when 
     UsageThresholdState.Ok -> "OK"
     UsageThresholdState.Approaching -> "Approaching limit"
     UsageThresholdState.Critical -> "Critical — close to limit"
-    UsageThresholdState.Exceeded -> "Exceeded — provider blocked"
+    UsageThresholdState.Exceeded -> exceededUsageDescription()
 }
 
 internal fun thresholdBannerSuffix(state: UsageThresholdState): String = when (state) {
     UsageThresholdState.Ok -> ""
     UsageThresholdState.Approaching -> "approaching limit"
     UsageThresholdState.Critical -> "critical"
-    UsageThresholdState.Exceeded -> "limit reached"
+    UsageThresholdState.Exceeded -> "quota exceeded"
 }
 
 private fun pillKind(record: UsageProviderRecord): PillKind = when {

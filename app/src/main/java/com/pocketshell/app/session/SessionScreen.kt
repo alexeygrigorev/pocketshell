@@ -116,7 +116,6 @@ internal const val SESSION_CONVERSATION_SEARCH_TAG = "session:conversation:searc
 internal const val SESSION_CONVERSATION_JUMP_TO_LATEST_TAG =
     "session:conversation:jump-to-latest"
 /** Issue #116: stable test tag for the in-session blocked / near-limit chip. */
-internal const val SESSION_USAGE_BADGE_TAG = "session:usage-badge"
 /**
  * Issue #165: stable test tags for the SSH-handshake progress overlay
  * on the raw-SSH session screen. Mirrors the
@@ -190,7 +189,7 @@ public fun SessionScreen(
      * MainActivity computes the lookup from the scheduler's snapshot
      * map for the active session's `hostId`.
      */
-    usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
+    @Suppress("UNUSED_PARAMETER") usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
     promptComposerViewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #176: pulled in via Hilt so the Settings → Conversation →
@@ -341,29 +340,6 @@ public fun SessionScreen(
                     canReconnect = canReconnect,
                 )
             }
-            // Issue #116 (usage-panel Fix B): in-session blocked /
-            // near-limit chip for the active host. Rendered in the
-            // status area so it sits above the terminal viewport
-            // without competing with the breadcrumb's `host > session
-            // > pane` chain. The badge composable already returns
-            // early when neither `isBlocked` nor `isNearLimit` is
-            // true, so passing a non-null provider that doesn't
-            // warrant a chip still renders nothing.
-            if (usageBadgeProvider != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(color = PocketShellColors.Surface)
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                        .testTag(SESSION_USAGE_BADGE_TAG),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    com.pocketshell.app.usage.UsageSessionBlockedBadge(
-                        provider = usageBadgeProvider,
-                    )
-                }
-            }
-
             // The terminal surface owns the rest of the vertical band. The
             // weight pushes the bottom strip (key bar / chips / FAB) right
             // up against either the IME or the system nav, whichever is

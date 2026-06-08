@@ -158,8 +158,9 @@ def test_usage_json_normalizes_codex_detail_windows_and_epoch_resets() -> None:
         "reset_at": "2026-06-11T00:27:18Z",
         "window": "7d",
     }
-    assert "claude /login" in lines[1]["error"]
-    assert "HTTP Error 401" not in lines[1]["error"]
+    assert lines[1]["error"] == "Usage data unavailable: HTTP Error 401: Unauthorized"
+    assert "claude /login" not in lines[1]["error"]
+    assert "authentication failed" not in lines[1]["error"].lower()
 
 
 def test_usage_json_patches_codex_resets_from_source_when_quse_dropped_them() -> None:

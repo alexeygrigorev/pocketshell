@@ -242,7 +242,7 @@ private fun actionableProviderError(provider: String, error: String?): String? {
                     lower == "no-credentials" ||
                     lower == "no credentials"
             ) ->
-            "Claude Code authentication failed on this host. Run `claude /login` in the host shell, then refresh usage."
+            "Usage data unavailable: $text"
         provider.equals("codex", ignoreCase = true) &&
             (
                 lower == "no auth token" ||

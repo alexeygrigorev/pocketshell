@@ -110,7 +110,7 @@ class UsageRemoteSourceTest {
     }
 
     @Test
-    fun fetchUsage_nonzeroClaudeErrorRecordStillRendersActionableAuthState() = runTest {
+    fun fetchUsage_nonzeroClaudeErrorRecordStillRendersUsageUnavailableState() = runTest {
         // #591: provider auth failures can be returned as a normalized JSON
         // record while the underlying provider probe exits non-zero. The app
         // must keep that row instead of classifying the host as skipped.
@@ -131,9 +131,11 @@ class UsageRemoteSourceTest {
         assertEquals("claude", record.provider)
         assertEquals(UsageStatus.Error, record.status)
         assertEquals(
-            "Claude Code authentication failed on this host. Run `claude /login` in the host shell, then refresh usage.",
+            "Usage data unavailable: HTTP Error 401: Unauthorized",
             record.lastError,
         )
+        assertTrue(record.lastError?.contains("claude /login") == false)
+        assertTrue(record.lastError?.contains("authentication failed", ignoreCase = true) == false)
     }
 
     @Test

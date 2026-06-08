@@ -95,7 +95,7 @@ class UsageThresholdTintScreenshotTest {
         compose.onAllNodesWithText("Codex").assertCountEquals(1)
         compose.onAllNodesWithText("Approaching limit").assertCountEquals(1)
         compose.onAllNodesWithText("Critical — close to limit").assertCountEquals(1)
-        compose.onAllNodesWithText("Exceeded — provider blocked").assertCountEquals(1)
+        compose.onAllNodesWithText("Quota exceeded").assertCountEquals(1)
         SystemClock.sleep(200)
 
         captureFullDevice(File(ensureArtifactDir(), "usage-threshold-tints-state-list.png"))

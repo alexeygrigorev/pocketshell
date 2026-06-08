@@ -188,6 +188,41 @@ class UsageFormatTest {
     }
 
     @Test
+    fun formatWindowFoot_sanitizesCodexWeeklyQuotaMessage() {
+        val window = UsageWindow("7d", 100.0, 100.0, "percent", null)
+
+        assertEquals(
+            "resets — · Weekly quota exceeded",
+            formatWindowFoot(
+                window = window,
+                now = Instant.parse("2026-06-04T12:00:00Z"),
+                blockReason = "codex quota exhausted (weekly window at 80%)",
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun blockReasonForWindow_scopesWeeklyReasonToLongTermWindowOnly() {
+        val record = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Blocked,
+            rawStatus = "quota_exhausted",
+            blockReason = "codex quota exhausted (weekly window at 80%)",
+            windows = listOf(
+                UsageWindow("5h", 12.0, 100.0, "percent", null),
+                UsageWindow("7d", 100.0, 100.0, "percent", Instant.parse("2026-06-15T10:00:00Z")),
+            ),
+        )
+
+        assertEquals(null, blockReasonForWindow(record, record.windows[0]))
+        assertEquals(
+            "codex quota exhausted (weekly window at 80%)",
+            blockReasonForWindow(record, record.windows[1]),
+        )
+    }
+
+    @Test
     fun statusLabel_promotesNearLimitToWarning() {
         val record = UsageProviderRecord(
             provider = "claude",
@@ -212,7 +247,11 @@ class UsageFormatTest {
         assertEquals(UsageThresholdState.Exceeded, record.thresholdState())
         assertEquals("Exceeded", statusLabel(record))
         assertEquals("EXCEEDED", thresholdBadgeLabel(record.thresholdState()))
-        assertEquals("Exceeded — provider blocked", thresholdRowDescription(record.thresholdState()))
+        assertEquals("Quota exceeded", thresholdRowDescription(record.thresholdState()))
+        assertEquals(
+            false,
+            thresholdRowDescription(record.thresholdState()).contains("provider " + "blocked", ignoreCase = true),
+        )
     }
 
     @Test

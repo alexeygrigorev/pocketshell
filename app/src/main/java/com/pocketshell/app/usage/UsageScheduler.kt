@@ -96,6 +96,7 @@ public class UsageScheduler @Inject constructor(
     private val hostDao: HostDao,
     private val sshKeyDao: SshKeyDao,
     private val remoteSource: UsageRemoteSource,
+    private val usageNotifier: UsageNotifier = UsageNotifier.Noop,
 ) {
     /**
      * Visible-for-testing seam: tests inject a fake fetch lambda so they
@@ -291,7 +292,7 @@ public class UsageScheduler @Inject constructor(
         if (updates.isEmpty()) return
         val merged = _snapshots.value.toMutableMap()
         merged.putAll(updates)
-        _snapshots.value = merged.toMap()
+        publishSnapshots(merged.toMap())
     }
 
     /**
@@ -336,7 +337,7 @@ public class UsageScheduler @Inject constructor(
         )
         if (pocketshellHosts.isEmpty()) {
             // Drop any stale snapshots for hosts that no longer have pocketshell.
-            if (_snapshots.value.isNotEmpty()) _snapshots.value = emptyMap()
+            if (_snapshots.value.isNotEmpty()) publishSnapshots(emptyMap())
             return
         }
         val next = _snapshots.value.toMutableMap()
@@ -348,7 +349,12 @@ public class UsageScheduler @Inject constructor(
                 next[host.id] = snapshot
             }
         }
-        _snapshots.value = next.toMap()
+        publishSnapshots(next.toMap())
+    }
+
+    private fun publishSnapshots(next: Map<Long, UsageSnapshot>) {
+        _snapshots.value = next
+        usageNotifier.onSnapshotsChanged(next)
     }
 
     private suspend fun fetchHostOverSsh(host: HostEntity): UsageSnapshot? {

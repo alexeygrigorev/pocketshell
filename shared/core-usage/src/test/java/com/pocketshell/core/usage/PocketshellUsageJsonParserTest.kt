@@ -280,7 +280,7 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
-    fun parse_claudeUnauthorizedMapsToActionableAuthError() {
+    fun parse_claudeUnauthorizedMapsToUsageDataUnavailable() {
         val record = parser.parse(
             """{"provider":"claude","status":"error",
               "short_term":{"percent_remaining":null,"reset_at":null},
@@ -291,9 +291,11 @@ class PocketshellUsageJsonParserTest {
 
         assertEquals(UsageStatus.Error, record.status)
         assertEquals(
-            "Claude Code authentication failed on this host. Run `claude /login` in the host shell, then refresh usage.",
+            "Usage data unavailable: HTTP Error 401: Unauthorized",
             record.lastError,
         )
+        assertTrue(record.lastError?.contains("claude /login") == false)
+        assertTrue(record.lastError?.contains("authentication failed", ignoreCase = true) == false)
     }
 
     @Test

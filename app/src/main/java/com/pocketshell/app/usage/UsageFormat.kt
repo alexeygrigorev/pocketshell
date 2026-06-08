@@ -32,7 +32,63 @@ internal fun formatWindowFoot(
     zoneId: ZoneId = ZoneId.systemDefault(),
 ): String {
     val reset = "resets ${formatResetRelative(now, window.resetAt, zoneId)}"
-    return listOfNotNull(reset, blockReason).joinToString(" · ")
+    return listOfNotNull(reset, blockReason?.let(::quotaMessageForDisplay)).joinToString(" · ")
+}
+
+internal fun blockReasonForWindow(record: UsageProviderRecord, window: UsageWindow): String? {
+    val reason = record.blockReason?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (record.windows.size <= 1) return reason
+    return when (quotaReasonScope(reason)) {
+        QuotaReasonScope.ShortTerm -> reason.takeIf { window.isShortTermUsageWindow() }
+        QuotaReasonScope.LongTerm -> reason.takeIf { window.isLongTermUsageWindow() }
+        QuotaReasonScope.Unknown -> reason.takeIf { window == record.mostConstrainedWindow }
+    }
+}
+
+internal fun quotaMessageForDisplay(reason: String): String {
+    val trimmed = reason.trim()
+    if (trimmed.isEmpty()) return trimmed
+    val lower = trimmed.lowercase(Locale.US)
+    return when {
+        quotaReasonScope(trimmed) == QuotaReasonScope.LongTerm &&
+            (lower.contains("codex") || lower.contains("quota")) ->
+            "Weekly quota exceeded"
+        lower.contains("quota") &&
+            (lower.contains("exhausted") || lower.contains("exceeded") || lower.contains("reached")) ->
+            "Quota exceeded"
+        else -> trimmed
+    }
+}
+
+internal fun exceededUsageDescription(): String = "Quota exceeded"
+
+private enum class QuotaReasonScope {
+    ShortTerm,
+    LongTerm,
+    Unknown,
+}
+
+private fun quotaReasonScope(reason: String): QuotaReasonScope {
+    val lower = reason.lowercase(Locale.US)
+    return when {
+        listOf("weekly", "week", "long_term", "long term", "7d", "seven_day", "seven day", "secondary")
+            .any { it in lower } -> QuotaReasonScope.LongTerm
+        listOf("short_term", "short term", "5h", "five_hour", "five hour", "primary")
+            .any { it in lower } -> QuotaReasonScope.ShortTerm
+        else -> QuotaReasonScope.Unknown
+    }
+}
+
+private fun UsageWindow.isLongTermUsageWindow(): Boolean {
+    val lower = name.lowercase(Locale.US)
+    return listOf("weekly", "week", "long_term", "long term", "7d", "seven_day", "seven day", "secondary")
+        .any { it in lower }
+}
+
+private fun UsageWindow.isShortTermUsageWindow(): Boolean {
+    val lower = name.lowercase(Locale.US)
+    return listOf("short_term", "short term", "5h", "five_hour", "five hour", "primary")
+        .any { it in lower }
 }
 
 /**

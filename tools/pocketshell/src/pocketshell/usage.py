@@ -277,10 +277,7 @@ def _actionable_error(provider: str, error: Any) -> Optional[str]:
         or "unauthorized" in lower
         or lower in {"no-credentials", "no credentials"}
     ):
-        return (
-            "Claude Code authentication failed on this host. "
-            "Run `claude /login` in the host shell, then refresh usage."
-        )
+        return f"Usage data unavailable: {text}"
     if provider == "codex" and lower in {"no auth token", "no-auth-token", "no credentials"}:
         return (
             "Codex authentication is missing on this host. "

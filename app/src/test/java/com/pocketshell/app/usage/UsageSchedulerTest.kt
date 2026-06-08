@@ -297,6 +297,37 @@ class UsageSchedulerTest {
     }
 
     @Test
+    fun updateSnapshots_publishesMergedSnapshotsToUsageNotifier() = runTest {
+        val notifier = RecordingUsageNotifier()
+        val scheduler = UsageScheduler(
+            db.hostDao(),
+            db.sshKeyDao(),
+            UsageRemoteSource(),
+            usageNotifier = notifier,
+        )
+        val record = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Ok,
+            windows = listOf(UsageWindow("7d", 80.0, 100.0, "percent", null)),
+            rawStatus = "ok",
+        )
+        scheduler.updateSnapshots(
+            mapOf(
+                99L to UsageSnapshot.Records(
+                    hostId = 99L,
+                    hostName = "usage-host",
+                    records = listOf(record),
+                    fetchedAt = Instant.now(),
+                    command = "pocketshell usage --json",
+                ),
+            ),
+        )
+
+        assertEquals(1, notifier.snapshots.size)
+        assertEquals(record, (notifier.snapshots.single()[99L] as UsageSnapshot.Records).records.single())
+    }
+
+    @Test
     fun setForegroundActive_togglesFlag() {
         val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
         assertEquals(false, scheduler.foregroundActive.value)
@@ -304,5 +335,13 @@ class UsageSchedulerTest {
         assertEquals(true, scheduler.foregroundActive.value)
         scheduler.setForegroundActive(false)
         assertEquals(false, scheduler.foregroundActive.value)
+    }
+
+    private class RecordingUsageNotifier : UsageNotifier {
+        val snapshots = mutableListOf<Map<Long, UsageSnapshot>>()
+
+        override fun onSnapshotsChanged(snapshots: Map<Long, UsageSnapshot>) {
+            this.snapshots += snapshots
+        }
     }
 }

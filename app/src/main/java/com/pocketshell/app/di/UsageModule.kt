@@ -1,11 +1,16 @@
 package com.pocketshell.app.di
 
+import android.content.Context
+import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.usage.DefaultUsageNotifier
 import com.pocketshell.app.usage.HostUsageFetcher
 import com.pocketshell.app.usage.SshHostUsageFetcher
+import com.pocketshell.app.usage.UsageNotifier
 import com.pocketshell.app.usage.UsageRemoteSource
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
@@ -48,4 +53,11 @@ object UsageProvidersModule {
     @Provides
     @Singleton
     fun provideUsageRemoteSource(): UsageRemoteSource = UsageRemoteSource()
+
+    @Provides
+    @Singleton
+    fun provideUsageNotifier(
+        @ApplicationContext context: Context,
+        settingsRepository: SettingsRepository,
+    ): UsageNotifier = DefaultUsageNotifier(context, settingsRepository)
 }

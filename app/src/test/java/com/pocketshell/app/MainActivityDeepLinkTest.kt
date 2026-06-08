@@ -210,6 +210,13 @@ class MainActivityDeepLinkTest {
     }
 
     @Test
+    fun initialDestinationFromIntent_routesUsageNotificationLaunch() {
+        val intent = Intent().putExtra(MainActivity.EXTRA_OPEN_USAGE, true)
+
+        assertEquals(AppDestination.Usage, initialDestinationFromIntent(intent))
+    }
+
+    @Test
     fun shareSessionDestinationFromIntent_nullWhenMissingRequiredExtras() {
         // Missing session name -> not a share-session launch.
         val intent = shareSessionIntent().apply {

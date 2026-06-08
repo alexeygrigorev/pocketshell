@@ -508,6 +508,7 @@ class MainActivity : FragmentActivity() {
         const val EXTRA_OPEN_SESSION_NAME: String = "pocketshell.extra.OPEN_SESSION_NAME"
         const val EXTRA_OPEN_SESSION_ATTACHMENTS: String =
             "pocketshell.extra.OPEN_SESSION_ATTACHMENTS"
+        const val EXTRA_OPEN_USAGE: String = "pocketshell.extra.OPEN_USAGE"
     }
 }
 
@@ -1451,6 +1452,9 @@ private fun TmuxRestoreIntentSnapshot.sameRestoreIdentity(
 internal fun initialDestinationFromIntent(intent: Intent?): AppDestination {
     if (intent?.getBooleanExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, false) == true) {
         return AppDestination.PortForwardChooser
+    }
+    if (intent?.getBooleanExtra(MainActivity.EXTRA_OPEN_USAGE, false) == true) {
+        return AppDestination.Usage
     }
     shareSessionDestinationFromIntent(intent)?.let { return it }
     return AppDestination.HostList

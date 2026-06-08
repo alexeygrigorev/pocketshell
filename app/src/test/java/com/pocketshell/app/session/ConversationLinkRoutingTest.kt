@@ -37,7 +37,7 @@ class ConversationLinkRoutingTest {
     }
 
     @Test
-    fun attachmentFileLinkStaysHomeRootedEvenWithCwd() {
+    fun attachmentFileLinkDropsCwdSoItStaysHomeRooted() {
         val attachment =
             "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
                 "20260606-155901-01-Screenshot_20260606-155849.png"
@@ -50,10 +50,55 @@ class ConversationLinkRoutingTest {
         assertEquals(
             ConversationLinkAction.OpenFile(
                 path = attachment,
-                cwd = "/home/alexey/git/pocketshell",
+                cwd = null,
             ),
             action,
         )
+    }
+
+    @Test
+    fun absoluteFileLinkDropsCwdSoItStaysServerRooted() {
+        val action = conversationLinkAction(
+            link = link("/home/alexey/.pocketshell/attachments/a.png", ConversationLinkKind.FILE),
+            cwd = "/home/alexey/git/pocketshell",
+        )
+
+        assertEquals(
+            ConversationLinkAction.OpenFile(
+                path = "/home/alexey/.pocketshell/attachments/a.png",
+                cwd = null,
+            ),
+            action,
+        )
+    }
+
+    @Test
+    fun localFileUriLinkDropsCwdSoItStaysServerRooted() {
+        val action = conversationLinkAction(
+            link = link(
+                "file:///home/alexey/.pocketshell/attachments/a%20b.png",
+                ConversationLinkKind.FILE,
+            ),
+            cwd = "/home/alexey/git/pocketshell",
+        )
+
+        assertEquals(
+            ConversationLinkAction.OpenFile(
+                path = "file:///home/alexey/.pocketshell/attachments/a%20b.png",
+                cwd = null,
+            ),
+            action,
+        )
+    }
+
+    @Test
+    fun terminalFileTapKeepsCwdOnlyForProjectRelativePath() {
+        val cwd = "/home/alexey/git/pocketshell"
+
+        assertEquals(cwd, cwdForDetectedFilePath("out/report.png", cwd))
+        assertEquals(null, cwdForDetectedFilePath("~/out/report.png", cwd))
+        assertEquals(null, cwdForDetectedFilePath("/home/alexey/out/report.png", cwd))
+        assertEquals(null, cwdForDetectedFilePath("file:///home/alexey/out/report.png", cwd))
     }
 
     @Test

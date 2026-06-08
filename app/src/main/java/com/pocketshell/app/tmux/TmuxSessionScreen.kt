@@ -122,6 +122,7 @@ import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.conversationLinkAction
 import com.pocketshell.app.session.conversationSyncStatusLabel
+import com.pocketshell.app.session.cwdForDetectedFilePath
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
@@ -1191,7 +1192,7 @@ public fun TmuxSessionScreen(
                                 // pane's cwd resolves project-relative paths
                                 // (`out/report.png`) server-side in the viewer.
                                 onFilePathTap = { path ->
-                                    val cwd = pane.cwd.takeIf { it.isNotBlank() }
+                                    val cwd = cwdForDetectedFilePath(path, pane.cwd)
                                     onOpenFile(path, cwd)
                                 },
                                 modifier = Modifier

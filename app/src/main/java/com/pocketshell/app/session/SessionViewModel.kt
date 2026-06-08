@@ -1321,8 +1321,13 @@ public class SessionViewModel @Inject constructor(
         if (!appActive) {
             activeTarget = target
             connectingTarget = null
+            pausedAutoReconnect = PausedAutoReconnect(
+                target = target,
+            )
             refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Failed(reason)
+            _connectionStatus.value = ConnectionStatus.Failed(
+                "$reason Auto reconnect paused while PocketShell is in the background.",
+            )
             return
         }
         if (autoReconnectJob?.isActive == true) return

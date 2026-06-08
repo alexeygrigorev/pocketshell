@@ -1532,6 +1532,55 @@ class SessionViewModelTest {
     }
 
     @Test
+    fun rawSshDisconnectWhileBackgroundedReconnectsOnForegroundReturn() = runTest {
+        val reconnectSession = FakeRawSshSession("reconnect")
+        val connector = QueueRawLeaseConnector(reconnectSession)
+        val vm = newVm(
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.onAppBackgrounded()
+
+        try {
+            vm.markRawShellDisconnectedForTest(
+                host = "alpha.example",
+                port = 2222,
+                user = "alex",
+                keyPath = "/tmp/test-key",
+            )
+            runCurrent()
+
+            assertEquals(
+                "disconnect while backgrounded must not reconnect before foreground",
+                0,
+                connector.connectCount,
+            )
+            val backgroundStatus = vm.connectionStatus.value
+            assertTrue(
+                "background disconnect should surface paused reconnect state, got $backgroundStatus",
+                backgroundStatus is SessionViewModel.ConnectionStatus.Failed,
+            )
+            assertTrue(
+                (backgroundStatus as SessionViewModel.ConnectionStatus.Failed).message,
+                backgroundStatus.message.contains("Auto reconnect paused while PocketShell is in the background."),
+            )
+
+            vm.onAppForegrounded()
+            waitUntil {
+                connector.connectCount == 1 &&
+                    vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected
+            }
+
+            assertEquals("foreground return must open one replacement raw SSH shell", 1, connector.connectCount)
+            assertEquals(1, reconnectSession.startedShells.size)
+            assertTrue("manual reconnect remains available after foreground recovery", vm.canReconnect.value)
+        } finally {
+            reconnectSession.startedShells.forEach { it.close() }
+            reconnectSession.close()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
     fun rawSshForegroundReturnResumesBackgroundPausedAutoReconnect() = runTest {
         val reconnectSession = FakeRawSshSession("reconnect")
         val connector = QueueRawLeaseConnector(reconnectSession)

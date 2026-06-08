@@ -264,6 +264,39 @@ UI, sends walkthrough shell commands through the prompt composer, verifies visib
 terminal transcript output for `ls`, `pwd`, and tmux, verifies the remote
 artifacts, and cleans up the remote temp directory and tmux session.
 
+### Short app-switch reconnect proof
+
+Issue #548/#450/#577/#392/#177 has a focused emulator harness for the reported
+"switch away for 5-10 seconds, return to reconnect/disconnect" path:
+
+```bash
+scripts/reconnect-app-switch.sh
+```
+
+The script starts or reuses the local AVD, starts the deterministic Docker
+`agents` SSH target, installs the debug app/test APKs, and runs only:
+
+```bash
+com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest#sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect
+```
+
+That connected test backgrounds the real `MainActivity` for six seconds under
+the production background grace window, foregrounds it, and asserts the tmux
+session stays connected with no visible `Connecting`, `Reconnecting`,
+`Disconnected`, `Tap Reconnect`, disconnect band, or reconnect/reattach
+diagnostic inside the short settle TTL. Artifacts land under
+`build/reconnect-app-switch/<run-id>/`, including terminal viewport PNGs,
+visible-terminal sidecars, timings, Docker logs, instrumentation output, and
+logcat.
+
+If an emulator and the Docker `agents` service are already running, the focused
+Gradle equivalent is:
+
+```bash
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest#sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect
+```
+
 ### Local phone walkthrough reproduction
 
 For fast visual feedback without installing an APK on a physical phone, run the

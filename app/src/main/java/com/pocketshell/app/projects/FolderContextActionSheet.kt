@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -31,6 +33,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -77,8 +80,10 @@ internal fun FolderContextActionContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .navigationBarsPadding()
+            .imePadding()
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
         Text(
             text = folderLabel,
@@ -91,7 +96,7 @@ internal fun FolderContextActionContent(
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyMono,
         )
-        Spacer(modifier = Modifier.height(2.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
         FolderContextRow("+ New session here", FOLDER_CONTEXT_NEW_SESSION_TAG, onNewSession)
         // Env files folds into the per-folder overflow sheet (#455); the
         // former inline `E` button is gone. Suppressed for roots (no .env).
@@ -102,7 +107,7 @@ internal fun FolderContextActionContent(
         // section header so it reads as one decision: which way to add a
         // project — reuse an existing folder, clone a repo, or start empty
         // (#517).
-        Spacer(modifier = Modifier.height(2.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
         SectionHeader(label = "Add a project")
         FolderContextRow(
             label = "Import into this folder",

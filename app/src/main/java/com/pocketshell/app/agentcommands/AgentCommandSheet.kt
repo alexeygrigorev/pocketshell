@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
@@ -38,16 +37,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pocketshell.core.agents.AgentKind
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Modal bottom sheet listing the agent slash-commands available for [agent]
@@ -157,8 +160,8 @@ internal fun AgentCommandSheetContent(
             // command rows are never drawn under the system nav bar or IME.
             .navigationBarsPadding()
             .imePadding()
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 18.dp)
+            .padding(horizontal = PocketShellSpacing.lg)
+            .padding(bottom = PocketShellSpacing.lg)
             .testTag(AGENT_COMMAND_SHEET_TAG),
     ) {
         Row(
@@ -170,20 +173,21 @@ internal fun AgentCommandSheetContent(
         ) {
             Text(
                 text = "${agent.displayName} commands",
-                fontSize = 16.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
             )
             Box(
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(PocketShellDensity.tapTargetMin)
                     .clickable(onClick = onClose),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = "×",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 20.sp,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.SemiBold,
                 )
             }
         }
@@ -193,14 +197,14 @@ internal fun AgentCommandSheetContent(
                 .fillMaxWidth()
                 .background(
                     color = PocketShellColors.SurfaceElev,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = PocketShellShapes.small,
                 )
                 .border(
                     width = 1.dp,
                     color = PocketShellColors.Border,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = PocketShellShapes.small,
                 )
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.md),
         ) {
             BasicTextField(
                 value = query,
@@ -208,10 +212,7 @@ internal fun AgentCommandSheetContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(AGENT_COMMAND_SEARCH_TAG),
-                textStyle = TextStyle(
-                    color = PocketShellColors.Text,
-                    fontSize = 14.sp,
-                ),
+                textStyle = PocketShellType.bodyDense.copy(color = PocketShellColors.Text),
                 cursorBrush = SolidColor(PocketShellColors.Accent),
                 singleLine = true,
                 decorationBox = { inner ->
@@ -219,7 +220,7 @@ internal fun AgentCommandSheetContent(
                         Text(
                             text = "Search commands...",
                             color = PocketShellColors.TextMuted,
-                            fontSize = 14.sp,
+                            style = PocketShellType.bodyDense,
                         )
                     }
                     inner()
@@ -227,7 +228,7 @@ internal fun AgentCommandSheetContent(
             )
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.md))
 
         if (commands.isEmpty()) {
             Box(
@@ -239,7 +240,7 @@ internal fun AgentCommandSheetContent(
                 Text(
                     text = "No matches for \"$query\"",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                 )
             }
         } else {
@@ -248,7 +249,7 @@ internal fun AgentCommandSheetContent(
                     .fillMaxWidth()
                     .heightIn(max = 480.dp),
                 contentPadding = PaddingValues(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
             ) {
                 items(commands, key = { it.command }) { command ->
                     val expanded = expandedCommand == command.command
@@ -279,10 +280,10 @@ internal fun AgentCommandSheetContent(
         }
 
         if (onControlSend != null && query.isEmpty()) {
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
             ) {
                 SessionControlAction.values().forEach { action ->
                     SessionControlChip(
@@ -309,65 +310,36 @@ private fun AgentCommandRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .clickable(role = Role.Button, onClick = onRowClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .testTag(agentCommandRowTag(command.command)),
+                shape = PocketShellShapes.small,
+            ),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = command.label,
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = command.command,
-                        color = PocketShellColors.Accent,
-                        fontFamily = JetBrainsMonoFamily,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = command.description,
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+        ListRow(
+            title = command.label,
+            subtitle = command.description,
+            modifier = Modifier.testTag(agentCommandRowTag(command.command)),
+            onClick = onRowClick,
+            trailing = {
+                Badge(label = command.command, role = BadgeRole.Agent, mono = false)
+                AgentCommandSendChip(
+                    command = command,
+                    label = if (command.argument == null) "Send" else "Fill",
+                    enabled = true,
+                    onClick = if (command.argument == null) onSend else onRowClick,
+                    tag = if (command.argument == null) {
+                        agentCommandSendChipTag(command.command)
+                    } else {
+                        agentCommandArgumentOpenChipTag(command.command)
+                    },
                 )
-            }
-            Spacer(modifier = Modifier.width(10.dp))
-            AgentCommandSendChip(
-                command = command,
-                label = if (command.argument == null) "Send" else "Fill",
-                enabled = true,
-                onClick = if (command.argument == null) onSend else onRowClick,
-                tag = if (command.argument == null) {
-                    agentCommandSendChipTag(command.command)
-                } else {
-                    agentCommandArgumentOpenChipTag(command.command)
-                },
-            )
-        }
+            },
+        )
 
         if (expanded && command.argument != null) {
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             AgentCommandArgumentEditor(
                 command = command,
                 value = argumentText,
@@ -396,15 +368,18 @@ private fun AgentCommandSendChip(
         modifier = modifier
             .background(
                 if (enabled) PocketShellColors.Accent else PocketShellColors.Surface,
-                RoundedCornerShape(8.dp),
+                PocketShellShapes.small,
             )
             .border(
                 width = 1.dp,
                 color = if (enabled) PocketShellColors.Accent else PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.small,
             )
             .then(if (enabled) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
-            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .padding(
+                horizontal = PocketShellDensity.chipPadH,
+                vertical = PocketShellDensity.chipPadV,
+            )
             .testTag(tag)
             .semantics { contentDescription = "Send ${command.command} to agent" },
         contentAlignment = Alignment.Center,
@@ -412,7 +387,7 @@ private fun AgentCommandSendChip(
         Text(
             text = label,
             color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
-            fontSize = 12.sp,
+            style = PocketShellType.labelMono,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -429,15 +404,15 @@ private fun AgentCommandArgumentEditor(
     val enabled = command.canDispatch(value)
     Column {
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-                .border(
-                    width = 1.dp,
-                    color = PocketShellColors.Border,
-                    shape = RoundedCornerShape(8.dp),
-                )
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(PocketShellColors.Surface, PocketShellShapes.small)
+                    .border(
+                        width = 1.dp,
+                        color = PocketShellColors.Border,
+                        shape = PocketShellShapes.small,
+                    )
+                    .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellDensity.chipPadH),
         ) {
             BasicTextField(
                 value = value,
@@ -445,10 +420,7 @@ private fun AgentCommandArgumentEditor(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(agentCommandArgumentFieldTag(command.command)),
-                textStyle = TextStyle(
-                    color = PocketShellColors.Text,
-                    fontSize = 14.sp,
-                ),
+                textStyle = PocketShellType.bodyDense.copy(color = PocketShellColors.Text),
                 cursorBrush = SolidColor(PocketShellColors.Accent),
                 singleLine = true,
                 decorationBox = { inner ->
@@ -456,7 +428,7 @@ private fun AgentCommandArgumentEditor(
                         Text(
                             text = command.argument?.placeholder.orEmpty(),
                             color = PocketShellColors.TextMuted,
-                            fontSize = 14.sp,
+                            style = PocketShellType.bodyDense,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -465,7 +437,7 @@ private fun AgentCommandArgumentEditor(
                 },
             )
         }
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.End,
@@ -474,17 +446,20 @@ private fun AgentCommandArgumentEditor(
             Box(
                 modifier = Modifier
                     .clickable(role = Role.Button, onClick = onCancel)
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                    .padding(
+                        horizontal = PocketShellDensity.chipPadH,
+                        vertical = PocketShellDensity.chipPadV,
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = "Cancel",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                 )
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
             AgentCommandSendChip(
                 command = command,
                 label = if (enabled) "Send" else "Required",
@@ -523,32 +498,22 @@ private fun SessionControlChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    Box(
         modifier = modifier
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp)
-            .testTag(sessionControlChipTag(action))
-            .semantics { contentDescription = "${action.label}: ${action.hint}" },
+                shape = PocketShellShapes.small,
+            ),
     ) {
-        Text(
-            text = action.label,
-            color = PocketShellColors.Text,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = action.hint,
-            color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        ListRow(
+            title = action.label,
+            subtitle = action.hint,
+            modifier = Modifier
+                .testTag(sessionControlChipTag(action))
+                .semantics { contentDescription = "${action.label}: ${action.hint}" },
+            onClick = onClick,
         )
     }
 }

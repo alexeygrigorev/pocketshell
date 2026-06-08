@@ -18,12 +18,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -54,9 +52,13 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SnippetEntity
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -224,8 +226,8 @@ internal fun SnippetPickerContent(
             // above the soft keyboard when it is raised.
             .navigationBarsPadding()
             .imePadding()
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 18.dp),
+            .padding(horizontal = PocketShellSpacing.lg)
+            .padding(bottom = PocketShellSpacing.lg),
     ) {
         // Header: title + close X.
         Row(
@@ -237,7 +239,7 @@ internal fun SnippetPickerContent(
         ) {
             Text(
                 text = "Snippets",
-                style = MaterialTheme.typography.titleMedium,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
             )
@@ -249,18 +251,19 @@ internal fun SnippetPickerContent(
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .clickable(onClick = onManageTap)
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                        .padding(horizontal = PocketShellSpacing.sm, vertical = PocketShellSpacing.xs),
                 )
                 Box(
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(PocketShellDensity.tapTargetMin)
                         .clickable(onClick = onClose),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = "×",
                         color = PocketShellColors.TextSecondary,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = PocketShellType.bodyDense,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
             }
@@ -273,14 +276,14 @@ internal fun SnippetPickerContent(
                 .fillMaxWidth()
                 .background(
                     color = PocketShellColors.SurfaceElev,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = PocketShellShapes.small,
                 )
                 .border(
                     width = 1.dp,
                     color = PocketShellColors.Border,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = PocketShellShapes.small,
                 )
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.md),
         ) {
             BasicTextField(
                 value = query,
@@ -302,7 +305,7 @@ internal fun SnippetPickerContent(
             )
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.md))
 
         if (totalCount == 0) {
             // Cold-start empty state. The "Manage" affordance in the
@@ -329,7 +332,7 @@ internal fun SnippetPickerContent(
                     .fillMaxWidth()
                     .heightIn(max = 480.dp),
                 contentPadding = PaddingValues(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
             ) {
                 items(snippets, key = { it.id }) { snippet ->
                     SnippetPickerRow(
@@ -407,7 +410,7 @@ private fun SnippetPickerRow(
                     .testTag(snippetBodyPreviewTag(snippet.id)),
             )
         }
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
         // Issue #187: explicit Send / Send + ↵ chip row, mirroring the
         // composer's action row (`PromptComposerSheet`) for affordance
         // consistency. The user no longer has to raise the IME just to
@@ -417,8 +420,12 @@ private fun SnippetPickerRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(
+                    start = PocketShellDensity.rowPadH,
+                    end = PocketShellDensity.rowPadH,
+                    bottom = PocketShellSpacing.md,
+                ),
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         ) {
             SnippetSendChip(
                 label = "Send",
@@ -473,14 +480,17 @@ private fun SnippetSendChip(
     }
     Box(
         modifier = modifier
-            .background(containerColor, RoundedCornerShape(8.dp))
+            .background(containerColor, PocketShellShapes.small)
             .border(
                 width = 1.dp,
                 color = borderColor,
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.small,
             )
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(
+                horizontal = PocketShellDensity.chipPadH,
+                vertical = PocketShellDensity.chipPadV,
+            )
             .testTag(testTagId)
             .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center,
@@ -629,38 +639,11 @@ internal fun snippetBodyPreviewTag(snippetId: Long): String =
  */
 @Composable
 internal fun KindTag(kind: SnippetKind) {
-    Box(
-        modifier = Modifier
-            .background(
-                color = if (kind == SnippetKind.Prompt) {
-                    PocketShellColors.AccentSoft
-                } else {
-                    PocketShellColors.Surface
-                },
-                shape = RoundedCornerShape(6.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = if (kind == SnippetKind.Prompt) {
-                    PocketShellColors.AccentDim
-                } else {
-                    PocketShellColors.BorderSoft
-                },
-                shape = RoundedCornerShape(6.dp),
-            )
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Text(
-            text = kind.label.lowercase(),
-            color = if (kind == SnippetKind.Prompt) {
-                PocketShellColors.Accent
-            } else {
-                PocketShellColors.TextSecondary
-            },
-            style = PocketShellType.labelMono,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
+    Badge(
+        label = kind.label.lowercase(),
+        role = if (kind == SnippetKind.Prompt) BadgeRole.Agent else BadgeRole.Shell,
+        mono = false,
+    )
 }
 
 @Composable
@@ -680,9 +663,10 @@ private fun EmptyPickerState(kindFilter: SnippetKind?, onManageTap: () -> Unit) 
                     "No ${kindFilter.label.lowercase()} snippets yet"
                 },
                 color = PocketShellColors.Text,
-                style = MaterialTheme.typography.titleMedium,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
             )
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
             Text(
                 text = if (kindFilter == null) {
                     "Tap Manage to add commands or prompt templates"
@@ -692,15 +676,18 @@ private fun EmptyPickerState(kindFilter: SnippetKind?, onManageTap: () -> Unit) 
                 color = PocketShellColors.TextSecondary,
                 style = PocketShellType.bodyDense,
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
             Box(
                 modifier = Modifier
                     .background(
                         color = PocketShellColors.Accent,
-                        shape = RoundedCornerShape(10.dp),
+                        shape = PocketShellShapes.small,
                     )
                     .clickable(onClick = onManageTap)
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                    .padding(
+                        horizontal = PocketShellSpacing.lg,
+                        vertical = PocketShellDensity.chipPadH,
+                    ),
             ) {
                 Text(
                     text = "Manage snippets",

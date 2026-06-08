@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -43,7 +42,11 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -122,9 +125,9 @@ internal fun SessionTypePickerContent(
     ) {
         Column(
             modifier = Modifier
-                .padding(horizontal = 20.dp)
-                .padding(top = 16.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.md),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
             Text(
                 text = "New session",
@@ -141,8 +144,8 @@ internal fun SessionTypePickerContent(
             // Start folder — pre-filled, editable. Keep this near the top of
             // the sheet so autocomplete results remain visible while the IME
             // is open instead of landing below the session-type controls.
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                SectionTitle("Start folder")
+            Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
+                SectionHeader(label = "Start folder")
                 StartDirectoryAutocompleteField(
                     value = startDirectory,
                     onValueChange = { startDirectory = it },
@@ -159,19 +162,19 @@ internal fun SessionTypePickerContent(
             modifier = Modifier
                 .weight(1f, fill = true)
                 .verticalScroll(scrollState)
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.md),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
             // Segmented control: Shell vs Agent.
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                SectionTitle("Session type")
+            Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
+                SectionHeader(label = "Session type")
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(PICKER_SEGMENT_HEIGHT)
-                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-                        .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+                        .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+                        .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
                         .selectableGroup(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -194,14 +197,14 @@ internal fun SessionTypePickerContent(
 
             // Conditional agent CLI sub-picker.
             if (sessionType == SessionType.Agent) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    SectionTitle("Agent CLI")
+                Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
+                    SectionHeader(label = "Agent CLI")
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(PICKER_SEGMENT_HEIGHT)
-                            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-                            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+                            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+                            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
                             .selectableGroup(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -253,7 +256,7 @@ internal fun SessionTypePickerContent(
                 .fillMaxWidth()
                 .background(PocketShellColors.Surface)
                 .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-                .padding(horizontal = 20.dp, vertical = 12.dp),
+                .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md),
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -289,16 +292,6 @@ internal fun SessionTypePickerContent(
 }
 
 @Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text = text,
-        color = PocketShellColors.TextMuted,
-        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.SemiBold,
-    )
-}
-
-@Composable
 private fun SegmentButton(
     label: String,
     selected: Boolean,
@@ -312,8 +305,8 @@ private fun SegmentButton(
         modifier = modifier
             .fillMaxWidth()
             .height(PICKER_SEGMENT_HEIGHT)
-            .padding(2.dp)
-            .background(bg, RoundedCornerShape(8.dp))
+            .padding(PocketShellSpacing.xs / 2)
+            .background(bg, PocketShellShapes.small)
             .clickable(role = Role.Tab, onClick = onClick)
             .testTag(testTag),
         contentAlignment = Alignment.Center,
@@ -334,35 +327,24 @@ private fun SkipPermissionsRow(
     checked: Boolean,
     onToggle: () -> Unit,
 ) {
-    Row(
+    ListRow(
+        title = "Skip permissions",
+        subtitle = "No per-action approval prompts.",
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Checkbox, onClick = onToggle)
             .testTag(SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Checkbox(
-            checked = checked,
-            onCheckedChange = { onToggle() },
-            colors = CheckboxDefaults.colors(
-                checkedColor = PocketShellColors.Accent,
-                uncheckedColor = PocketShellColors.TextSecondary,
-            ),
-        )
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "Skip permissions",
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.Medium,
+        leading = {
+            Checkbox(
+                checked = checked,
+                onCheckedChange = { onToggle() },
+                colors = CheckboxDefaults.colors(
+                    checkedColor = PocketShellColors.Accent,
+                    uncheckedColor = PocketShellColors.TextSecondary,
+                ),
             )
-            Text(
-                text = "No per-action approval prompts.",
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-            )
-        }
-    }
+        },
+        onClick = onToggle,
+    )
 }
 
 /** What the picker emits when the user confirms. */

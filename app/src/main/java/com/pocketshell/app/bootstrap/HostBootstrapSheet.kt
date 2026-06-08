@@ -13,13 +13,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
@@ -30,11 +29,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Coarse visual / behavioural state of the bootstrap sheet.
@@ -112,6 +119,7 @@ public fun HostBootstrapSheet(
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
+        shape = PocketShellShapes.large,
         modifier = modifier.testTag(HOST_BOOTSTRAP_SHEET_TAG),
     ) {
         when (state) {
@@ -155,11 +163,11 @@ private fun PromptContent(
             state = state,
             onInstallTool = onInstallTool,
         )
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
         if (state.hasActionableSetup()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
             ) {
                 SecondaryButton(
                     label = "Skip",
@@ -198,12 +206,17 @@ private fun SetupActions(
     val missingTools = report.missingTools
     if (!report.hasBootstrapSheetRows()) return
 
-    Spacer(modifier = Modifier.height(16.dp))
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
+    SectionHeader(
+        label = "Setup actions",
+        count = missingTools.size + report.versionMismatchedTools.size,
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
         missingTools.forEach { tool ->
             SetupActionRow(
                 title = tool.binaryName,
                 detail = installCommand(report.installer, tool),
+                statusLabel = "Missing",
                 actionLabel = "Install",
                 onClick = { onInstallTool(tool) },
             )
@@ -212,6 +225,7 @@ private fun SetupActions(
             SetupActionRow(
                 title = "pocketshell CLI update needed",
                 detail = versionMismatchDetail(report.installer, mismatch, report.installerPath),
+                statusLabel = "Update",
                 actionLabel = "Upgrade",
                 onClick = { onInstallTool(BootstrapTool.Pocketshell) },
             )
@@ -249,26 +263,25 @@ internal fun HostBootstrapReport.needsPocketshellDaemonAction(): Boolean {
 private fun SetupActionRow(
     title: String,
     detail: String,
+    statusLabel: String,
     actionLabel: String,
     onClick: () -> Unit,
 ) {
-    Row(
+    ListRow(
+        title = title,
+        subtitle = detail,
         modifier = Modifier
             .testTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + title)
-            .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.Border, RoundedCornerShape(8.dp))
-            .padding(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, color = PocketShellColors.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(text = detail, color = PocketShellColors.TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-        }
-        SecondaryButton(label = actionLabel, onClick = onClick)
-    }
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.Border, PocketShellShapes.small),
+        leading = {
+            StatusDot(status = ConnectionStatus.Error)
+        },
+        trailing = {
+            Badge(label = statusLabel, role = BadgeRole.Error, mono = false)
+            SecondaryButton(label = actionLabel, onClick = onClick)
+        },
+    )
 }
 
 @Composable
@@ -277,13 +290,25 @@ private fun SetupInfoRow(title: String, detail: String) {
         modifier = Modifier
             .testTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + title)
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.Border, RoundedCornerShape(8.dp))
-            .padding(10.dp),
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.Border, PocketShellShapes.small)
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
     ) {
-        Text(text = title, color = PocketShellColors.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(3.dp))
-        Text(text = detail, color = PocketShellColors.TextSecondary, fontSize = 11.sp)
+        Text(
+            text = title,
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
+        Text(
+            text = detail,
+            color = PocketShellColors.TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+        )
     }
 }
 
@@ -292,25 +317,23 @@ private fun InstallingContent(hostName: String) {
     SheetColumn {
         SheetTitle(text = "Setting up host…")
         SheetSubtitle(text = "$hostName · running installer and systemd commands. This can take a few seconds on a fresh host.")
-        Spacer(modifier = Modifier.height(20.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CircularProgressIndicator(
-                color = PocketShellColors.Accent,
-                strokeWidth = 2.dp,
-                modifier = Modifier
-                    .padding(start = 4.dp)
-                    .testTag(HOST_BOOTSTRAP_INSTALLING_TAG),
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                text = "working…",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 13.sp,
-            )
-        }
+        Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
+        ListRow(
+            title = "working…",
+            modifier = Modifier
+                .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+                .border(1.dp, PocketShellColors.Border, PocketShellShapes.small),
+            leading = {
+                StatusDot(status = ConnectionStatus.Connecting)
+            },
+            trailing = {
+                CircularProgressIndicator(
+                    color = PocketShellColors.Accent,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.testTag(HOST_BOOTSTRAP_INSTALLING_TAG),
+                )
+            },
+        )
     }
 }
 
@@ -323,7 +346,7 @@ private fun SuccessContent(
     SheetColumn {
         SheetTitle(text = "Host ready")
         SheetSubtitle(text = hostBootstrapSuccessSubtitle(hostName))
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
         // Issue #117 (usage Fix C): when pocketshell was just installed by
         // the bootstrap flow, surface a direct route to the usage panel. The
         // callback is supplied by the caller — when it is `null` the sheet
@@ -332,7 +355,7 @@ private fun SuccessContent(
         if (onOpenUsage != null) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
             ) {
                 SecondaryButton(
                     label = "Continue",
@@ -370,31 +393,30 @@ private fun FailedContent(hostName: String, message: String, onClose: () -> Unit
     SheetColumn {
         SheetTitle(text = "Install failed")
         SheetSubtitle(text = "$hostName · the package manager reported an error.")
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.md))
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 80.dp, max = 220.dp)
                 .background(
                     color = PocketShellColors.SurfaceElev,
-                    shape = RoundedCornerShape(8.dp),
+                    shape = PocketShellShapes.small,
                 )
                 .border(
                     width = 1.dp,
                     color = PocketShellColors.Border,
-                    shape = RoundedCornerShape(8.dp),
+                    shape = PocketShellShapes.small,
                 )
-                .padding(12.dp)
+                .padding(PocketShellDensity.rowPadH)
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(
                 text = message.ifBlank { "(no error message returned)" },
                 color = PocketShellColors.Text,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyMono,
             )
         }
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
         Row(modifier = Modifier.fillMaxWidth()) {
             Spacer(modifier = Modifier.weight(1f))
             // AlertDialog button styling, but reuse our SecondaryButton
@@ -489,7 +511,14 @@ private fun SheetColumn(content: @Composable () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 28.dp)),
+            .padding(
+                PaddingValues(
+                    start = PocketShellSpacing.lg + PocketShellSpacing.xs,
+                    end = PocketShellSpacing.lg + PocketShellSpacing.xs,
+                    top = PocketShellSpacing.sm,
+                    bottom = PocketShellSpacing.lg + PocketShellSpacing.md,
+                ),
+            ),
     ) {
         content()
     }
@@ -500,18 +529,18 @@ private fun SheetTitle(text: String) {
     Text(
         text = text,
         color = PocketShellColors.Text,
-        fontSize = 18.sp,
+        style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.SemiBold,
     )
 }
 
 @Composable
 private fun SheetSubtitle(text: String) {
-    Spacer(modifier = Modifier.height(8.dp))
+    Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
     Text(
         text = text,
         color = PocketShellColors.TextSecondary,
-        fontSize = 13.sp,
+        style = PocketShellType.bodyDense,
     )
 }
 
@@ -523,19 +552,19 @@ private fun PrimaryButton(
 ) {
     Box(
         modifier = modifier
-            .height(44.dp)
+            .height(PocketShellDensity.tapTargetMin)
             .clickable(role = Role.Button, onClick = onClick)
             .background(
                 color = PocketShellColors.Accent,
-                shape = RoundedCornerShape(10.dp),
+                shape = PocketShellShapes.small,
             )
-            .padding(horizontal = 18.dp),
+            .padding(horizontal = PocketShellSpacing.lg),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             color = PocketShellColors.OnAccent,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -549,24 +578,24 @@ private fun SecondaryButton(
 ) {
     Box(
         modifier = modifier
-            .height(44.dp)
+            .height(PocketShellDensity.tapTargetMin)
             .clickable(role = Role.Button, onClick = onClick)
             .background(
                 color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(10.dp),
+                shape = PocketShellShapes.small,
             )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.Border,
-                shape = RoundedCornerShape(10.dp),
+                shape = PocketShellShapes.small,
             )
-            .padding(horizontal = 18.dp),
+            .padding(horizontal = PocketShellSpacing.lg),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             color = PocketShellColors.Text,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }

@@ -2,7 +2,6 @@ package com.pocketshell.app.projects
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
@@ -31,12 +29,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.Badge
@@ -44,6 +40,7 @@ import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -102,8 +99,8 @@ internal fun RootProjectAddSheetContent(
             .navigationBarsPadding()
             .imePadding()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
         Text(
             text = root.label,
@@ -128,7 +125,7 @@ internal fun RootProjectAddSheetContent(
                 .focusRequester(searchFocus)
                 .testTag(ROOT_PROJECT_ADD_SEARCH_TAG),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
             RootQuickAction(
                 label = "Empty project",
                 testTag = ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG,
@@ -150,9 +147,9 @@ internal fun RootProjectAddSheetContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 360.dp)
-                .testTag(ROOT_PROJECT_ADD_LIST_TAG),
-            contentPadding = PaddingValues(bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            .testTag(ROOT_PROJECT_ADD_LIST_TAG),
+            contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
         ) {
             if (filtered.isEmpty()) {
                 item { RootProjectAddEmptyState(query = query) }
@@ -203,23 +200,24 @@ private fun RootQuickAction(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    Box(
         modifier = modifier
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp)
-            .testTag(testTag),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small),
     ) {
-        Text(
-            text = label,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f),
+        ListRow(
+            title = label,
+            modifier = Modifier.testTag(testTag),
+            onClick = onClick,
+            trailing = {
+                Text(
+                    text = "+",
+                    color = PocketShellColors.Accent,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
         )
-        Text(text = "+", color = PocketShellColors.Accent, style = PocketShellType.bodyDense, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -285,9 +283,9 @@ private fun RootProjectAddEmptyState(query: String) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
-            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.md)
             .testTag(ROOT_PROJECT_ADD_EMPTY_TAG),
     ) {
         Text(

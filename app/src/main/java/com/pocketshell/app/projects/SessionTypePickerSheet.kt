@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
@@ -116,7 +117,8 @@ internal fun SessionTypePickerContent(
             .navigationBarsPadding()
             .imePadding()
             .fillMaxHeight(SESSION_TYPE_PICKER_HEIGHT_FRACTION)
-            .heightIn(max = SESSION_TYPE_PICKER_MAX_HEIGHT),
+            .heightIn(max = SESSION_TYPE_PICKER_MAX_HEIGHT)
+            .testTag(SESSION_TYPE_PICKER_CONTENT_TAG),
     ) {
         Column(
             modifier = Modifier
@@ -155,7 +157,7 @@ internal fun SessionTypePickerContent(
 
         Column(
             modifier = Modifier
-                .weight(1f, fill = false)
+                .weight(1f, fill = true)
                 .verticalScroll(scrollState)
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 12.dp),
@@ -321,6 +323,8 @@ private fun SegmentButton(
             color = fg,
             style = PocketShellType.bodyDense,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -544,6 +548,7 @@ private val SESSION_TYPE_PICKER_SUGGESTIONS_MAX_HEIGHT = 96.dp
 
 // Test tags exposed for unit / connected tests.
 const val SESSION_TYPE_PICKER_SHEET_TAG: String = "session-type-picker:sheet"
+const val SESSION_TYPE_PICKER_CONTENT_TAG: String = "session-type-picker:content"
 const val SESSION_TYPE_PICKER_SHELL_TAG: String = "session-type-picker:shell"
 const val SESSION_TYPE_PICKER_AGENT_TAG: String = "session-type-picker:agent"
 const val SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG: String = "session-type-picker:agent:claude"

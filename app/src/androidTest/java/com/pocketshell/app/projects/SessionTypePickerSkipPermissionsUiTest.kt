@@ -137,6 +137,39 @@ class SessionTypePickerSkipPermissionsUiTest {
     }
 
     @Test
+    fun actionRowStaysPinnedBelowScrollablePickerContent() {
+        compose.setContent {
+            PocketShellTheme {
+                Box(
+                    modifier = Modifier
+                        .width(360.dp)
+                        .height(640.dp),
+                ) {
+                    SessionTypePickerContent(
+                        folderPath = "/home/alexey/git/ai-shipping-labs-workshops-raw",
+                        folderLabel = "ai-shipping-labs-workshops-raw",
+                        onCancel = {},
+                        onCreate = {},
+                    )
+                }
+            }
+        }
+
+        val contentBounds = compose.onNodeWithTag(SESSION_TYPE_PICKER_CONTENT_TAG)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val createBounds = compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val maxFooterInsetPx = with(compose.density) { 32.dp.toPx() }
+
+        assertTrue(
+            "Create action should stay pinned to the bottom action row",
+            contentBounds.bottom - createBounds.bottom <= maxFooterInsetPx,
+        )
+    }
+
+    @Test
     fun constrainedPickerKeepsCreateVisibleWhileFolderSuggestionsAreOpen() {
         compose.setContent {
             PocketShellTheme {

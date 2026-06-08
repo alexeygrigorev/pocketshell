@@ -24,6 +24,7 @@ import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
+import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
@@ -1671,6 +1672,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
                 "reason" to reason,
                 "cause" to "no_real_validated_handoff",
+                "classification" to "network_identity_unchanged",
+                "reconnect" to false,
+                "realValidatedIdentityChange" to false,
                 "sequence" to change.sequence,
                 "hostId" to target.hostId,
                 "host" to target.host,
@@ -1681,6 +1685,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "attempt" to activeAttachMilestone?.attempt,
                 "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
                 "deferredFromBackground" to change.deferredFromBackground,
+                *change.networkDiagnosticFields(),
                 *shortAppSwitchReconnectFields(
                     trigger = TmuxConnectTrigger.NetworkReconnect,
                     target = target,
@@ -1711,6 +1716,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
                 "reason" to reason,
                 "cause" to "coalesced_with_lifecycle_reattach",
+                "classification" to "lifecycle_network_replay",
+                "reconnect" to false,
+                "realValidatedIdentityChange" to realValidatedIdentityChange,
                 "sequence" to change.sequence,
                 "generation" to lifecycleCoalesce.generation,
                 "hostId" to target.hostId,
@@ -1719,6 +1727,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "user" to target.user,
                 "session" to target.sessionName,
                 "deferredFromBackground" to change.deferredFromBackground,
+                *change.networkDiagnosticFields(),
                 *shortAppSwitchReconnectFields(
                     trigger = TmuxConnectTrigger.NetworkReconnect,
                     target = target,
@@ -1740,6 +1749,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "source" to "network_observer",
             "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
             "reason" to reason,
+            "classification" to "proactive_network_handoff",
+            "reconnect" to true,
+            "realValidatedIdentityChange" to realValidatedIdentityChange,
             "sequence" to change.sequence,
             "hostId" to target.hostId,
             "host" to target.host,
@@ -1751,6 +1763,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
             "clientHash" to clientRef?.let { System.identityHashCode(it) },
             "deferredFromBackground" to change.deferredFromBackground,
+            *change.networkDiagnosticFields(),
             *shortAppSwitchReconnectFields(
                 trigger = TmuxConnectTrigger.NetworkReconnect,
                 target = target,
@@ -3085,6 +3098,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     "connection",
                     "passive_disconnect",
                     "source" to "tmux_client_disconnected",
+                    "classification" to "real_tmux_control_channel_closed",
                     "disconnectReason" to disconnectEvent.reason.logValue,
                     "disconnectSource" to disconnectEvent.source,
                     "disconnectIntent" to disconnectEvent.intent,
@@ -4762,6 +4776,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "droppedEvents" to overflow.droppedEvents,
             "status" to _connectionStatus.value.javaClass.simpleName,
             "source" to "pane_output_backlog",
+            "classification" to "local_terminal_renderer_backpressure",
+            "reconnect" to false,
+            "tmuxDisconnected" to clientRef?.disconnected?.value,
             "hostId" to activeTarget?.hostId,
             "host" to activeTarget?.host,
             "port" to activeTarget?.port,
@@ -4807,6 +4824,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "maxBytes" to overflow.maxBytes,
             "status" to _connectionStatus.value.javaClass.simpleName,
             "source" to "seed_gate_live_buffer",
+            "classification" to "local_terminal_renderer_backpressure",
+            "reconnect" to false,
+            "tmuxDisconnected" to clientRef?.disconnected?.value,
             "hostId" to activeTarget?.hostId,
             "host" to activeTarget?.host,
             "port" to activeTarget?.port,
@@ -4878,6 +4898,14 @@ public class TmuxSessionViewModel @Inject constructor(
             "stormThreshold" to SURFACE_RECOVERY_STORM_THRESHOLD,
             "thresholdMs" to SURFACE_RECOVERY_WINDOW_MS,
             "willEnterSurfaceError" to (recentFailures >= SURFACE_RECOVERY_STORM_THRESHOLD),
+            "classification" to "local_terminal_surface_failure",
+            "decision" to if (recentFailures >= SURFACE_RECOVERY_STORM_THRESHOLD) {
+                "surface_error"
+            } else {
+                "recreate_surface"
+            },
+            "reconnect" to false,
+            "tmuxDisconnected" to clientRef?.disconnected?.value,
             "hostId" to activeTarget?.hostId,
             "host" to activeTarget?.host,
             "port" to activeTarget?.port,

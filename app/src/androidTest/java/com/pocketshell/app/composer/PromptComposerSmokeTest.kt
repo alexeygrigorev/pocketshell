@@ -25,6 +25,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -306,6 +307,8 @@ class PromptComposerSmokeTest {
         compose.onNodeWithTag(composerAttachmentChipTestTag(image))
             .assertWidthIsEqualTo(ATTACHMENT_TILE_SIZE)
             .assertHeightIsEqualTo(ATTACHMENT_TILE_SIZE)
+        compose.onNodeWithTag(composerAttachmentTypeTileTestTag(first)).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentTypeTileTestTag(third)).assertIsDisplayed()
         compose.onNode(hasContentDescription("Attachment $longDisplayName")).assertExists()
         compose.onNodeWithTag(composerAttachmentRemoveTestTag(image))
             .assert(hasContentDescription("Remove 20260606-120000-02-screenshot.png"))
@@ -466,7 +469,8 @@ class PromptComposerSmokeTest {
 
     private fun writeTinyPreviewPng(name: String): Uri {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val file = File(context.cacheDir, name)
+        val dir = File(context.cacheDir, "share-target-tests").apply { mkdirs() }
+        val file = File(dir, name)
         val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         try {
             bitmap.eraseColor(android.graphics.Color.RED)
@@ -476,6 +480,10 @@ class PromptComposerSmokeTest {
         } finally {
             bitmap.recycle()
         }
-        return Uri.fromFile(file)
+        return FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.shareprovider",
+            file,
+        )
     }
 }

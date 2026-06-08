@@ -1368,16 +1368,24 @@ private fun AttachmentTile(
             .testTag(composerAttachmentChipTestTag(attachment.remotePath)),
     ) {
         if (thumbnail != null) {
-            Image(
-                bitmap = thumbnail!!,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag(composerAttachmentThumbnailTestTag(attachment.remotePath)),
+            ) {
+                Image(
+                    bitmap = thumbnail!!,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         } else {
             AttachmentTypeTile(
                 attachment = attachment,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag(composerAttachmentTypeTileTestTag(attachment.remotePath)),
             )
         }
 
@@ -1478,7 +1486,13 @@ private fun decodeAttachmentThumbnail(
 ): ImageBitmap? {
     return runCatching {
         BoundedImageDecoder.decodeStream(
-            openInputStream = { resolver.openInputStream(uri) },
+            openInputStream = {
+                if (uri.scheme == "file") {
+                    uri.path?.let { java.io.File(it).inputStream() }
+                } else {
+                    resolver.openInputStream(uri)
+                }
+            },
             maxPixels = ATTACHMENT_THUMBNAIL_MAX_PIXELS,
         )?.asImageBitmap()
     }.getOrNull()
@@ -2069,6 +2083,14 @@ internal fun composerAttachmentChipTestTag(remotePath: String): String =
 /** Historic per-tile `×` remove button tag, keyed by remote path. */
 internal fun composerAttachmentRemoveTestTag(remotePath: String): String =
     "prompt-composer-attachment-remove:$remotePath"
+
+/** Per-image tile thumbnail tag, keyed by remote path. */
+internal fun composerAttachmentThumbnailTestTag(remotePath: String): String =
+    "prompt-composer-attachment-thumbnail:$remotePath"
+
+/** Per non-image typed tile tag, keyed by remote path. */
+internal fun composerAttachmentTypeTileTestTag(remotePath: String): String =
+    "prompt-composer-attachment-type-tile:$remotePath"
 
 /** Issue #453: mockup placeholder text for the empty composer input. */
 internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"

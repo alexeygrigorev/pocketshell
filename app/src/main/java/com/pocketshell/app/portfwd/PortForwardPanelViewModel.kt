@@ -241,6 +241,7 @@ class PortForwardPanelViewModel @Inject constructor(
                 showAllPorts = showAllPortsStore.isShowAll(),
             )
             if (forwardingController.isHostActive(host.id)) {
+                pendingStartPort = prefillRemotePort
                 attachForwardingObservers(host.id)
                 _state.value = _state.value.copy(
                     autoForwardEnabled = true,
@@ -518,6 +519,7 @@ class PortForwardPanelViewModel @Inject constructor(
             launch {
                 forwardingController.flowOfHostTunnels(hostId).collect { tunnels ->
                     _state.value = _state.value.copy(tunnels = tunnels)
+                    startPendingPortFromSnapshot(hostId, tunnels)
                 }
             }
             launch {
@@ -531,6 +533,18 @@ class PortForwardPanelViewModel @Inject constructor(
                 forwardingController.flowOfHostError(hostId).collect { error ->
                     _state.value = _state.value.copy(error = error)
                 }
+            }
+        }
+    }
+
+    private fun startPendingPortFromSnapshot(hostId: Long, tunnels: List<TunnelInfo>) {
+        val remotePort = pendingStartPort ?: return
+        when (tunnels.firstOrNull { it.remotePort == remotePort }?.status) {
+            TunnelInfo.Status.FORWARDING,
+            TunnelInfo.Status.STOPPED -> pendingStartPort = null
+            else -> {
+                pendingStartPort = null
+                forwardingController.togglePort(hostId, remotePort)
             }
         }
     }

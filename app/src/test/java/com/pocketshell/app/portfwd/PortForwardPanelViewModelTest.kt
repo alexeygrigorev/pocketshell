@@ -433,6 +433,91 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
+    fun loadWithPrefillRemotePortStartsMissingPortWhenHostAlreadyActive() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val session = FakeSshSession(
+            ssOutput = """
+                127.0.0.1:3000 users:(("node",pid=42,fd=3))
+                127.0.0.1:8080 users:(("vite",pid=43,fd=3))
+            """.trimIndent(),
+        )
+        val connector = QueueConnector(listOf(Result.success(session)))
+        val forwardingController = newForwardingController(connector)
+        val firstPanel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+
+        firstPanel.load(hostId, "/tmp/key")
+        runCurrent()
+        firstPanel.setAutoForwardEnabled(true)
+        runCurrent()
+        firstPanel.leavePanel()
+        runCurrent()
+
+        val secondPanel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+        secondPanel.load(hostId, "/tmp/key", prefillRemotePort = 8080)
+        runCurrent()
+
+        assertEquals("active host prefill must reuse the existing SSH session", 1, connector.hosts.size)
+        assertEquals(
+            listOf(3000, 8080),
+            session.openedForwards.map { it.remotePort }.sorted(),
+        )
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            secondPanel.state.value.tunnels.single { it.remotePort == 8080 }.status,
+        )
+
+        secondPanel.setAutoForwardEnabled(false)
+        secondPanel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun loadWithPrefillRemotePortDoesNotToggleAlreadyForwardedActivePort() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(listOf(Result.success(session)))
+        val forwardingController = newForwardingController(connector)
+        val firstPanel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+
+        firstPanel.load(hostId, "/tmp/key")
+        runCurrent()
+        firstPanel.setAutoForwardEnabled(true)
+        runCurrent()
+        firstPanel.leavePanel()
+        runCurrent()
+
+        val secondPanel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+        secondPanel.load(hostId, "/tmp/key", prefillRemotePort = 3000)
+        runCurrent()
+
+        assertEquals(1, connector.hosts.size)
+        assertEquals(listOf(3000), session.openedForwards.map { it.remotePort })
+        assertTrue(session.openedForwards.single().isActive)
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            secondPanel.state.value.tunnels.single { it.remotePort == 3000 }.status,
+        )
+
+        secondPanel.setAutoForwardEnabled(false)
+        secondPanel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
     fun loadWithoutPrefillRunsDiscoveryAndLeavesForwardingOff() = runTest {
         // Guard: the manual add-forward flow is unaffected — a load
         // without a prefill port still discovers ports passively and

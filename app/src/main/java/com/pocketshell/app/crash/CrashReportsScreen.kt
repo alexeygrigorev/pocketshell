@@ -35,16 +35,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -119,8 +122,11 @@ fun CrashReportsScreen(
         } else {
             LazyColumn(
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(
+                    horizontal = PocketShellDensity.rowPadH,
+                    vertical = PocketShellSpacing.md,
+                ),
+                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
             ) {
                 item {
                     Text(
@@ -128,8 +134,12 @@ fun CrashReportsScreen(
                             "\"Share all\" zips every report and opens " +
                             "Android's share sheet.",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = PocketShellType.bodyDense,
                     )
+                }
+
+                item {
+                    SectionHeader(label = "Reports", count = reports.size)
                 }
 
                 items(reports, key = { it.id }) { report ->
@@ -187,7 +197,7 @@ private fun BulkActionsBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(PocketShellColors.Background)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = PocketShellDensity.rowPadH, vertical = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val label = when {
@@ -208,10 +218,10 @@ private fun BulkActionsBar(
             modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_TAG),
         )
         Spacer(modifier = Modifier.weight(1f))
-        Text(
-            text = "$reportCount report(s)",
-            color = PocketShellColors.TextMuted,
-            fontSize = 12.sp,
+        Badge(
+            label = "$reportCount report(s)",
+            role = BadgeRole.Idle,
+            mono = false,
         )
     }
 }
@@ -226,15 +236,14 @@ private fun ShareAllResultDialog(
         Text(
             text = title,
             color = PocketShellColors.Text,
-            fontSize = 16.sp,
+            style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
         )
         Spacer(modifier = Modifier.height(10.dp))
         Text(
             text = message,
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace,
+            style = PocketShellType.bodyMono,
         )
         Spacer(modifier = Modifier.height(14.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -253,7 +262,7 @@ private fun ConfirmDeleteAllDialog(
         Text(
             text = "Delete all reports?",
             color = PocketShellColors.Text,
-            fontSize = 16.sp,
+            style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
         )
         Spacer(modifier = Modifier.height(10.dp))
@@ -261,7 +270,7 @@ private fun ConfirmDeleteAllDialog(
             text = "This permanently removes $count report(s) from this device. " +
                 "Share them first if you want to keep a copy.",
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
         )
         Spacer(modifier = Modifier.height(14.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -373,23 +382,23 @@ private fun CrashReportDetail(
                 Text(
                     text = crashReportRowTitle(report),
                     color = PocketShellColors.Text,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
                     text = "id=${report.id}",
                     color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                 )
                 Text(
                     text = "context=${report.contextSummary}",
                     color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                 )
                 Text(
                     text = crashReportDetailMetadata(report),
                     color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                 )
             }
             ActionButton(label = "Share", onClick = onShare, enabled = true)
@@ -453,7 +462,7 @@ private fun AppBarTextButton(label: String, onClick: () -> Unit) {
         Text(
             text = label,
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -478,7 +487,7 @@ private fun ActionButton(
         Text(
             text = label,
             color = PocketShellColors.OnAccent,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }

@@ -40,6 +40,7 @@ import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
@@ -191,17 +192,6 @@ private fun CostsAppBar(onBack: () -> Unit) {
 }
 
 @Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text = text.uppercase(),
-        color = PocketShellColors.TextMuted,
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 8.dp),
-    )
-}
-
-@Composable
 private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier
@@ -224,7 +214,7 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 private fun TotalsSection(state: CostsUiState) {
     Column {
-        SectionLabel("Totals")
+        SectionHeader(label = "Totals")
         SectionCard {
             // ListRow paints its own dense vertical padding, so the rows stack
             // directly without the old inter-row spacers.
@@ -277,7 +267,7 @@ private fun TotalRow(label: String, value: String, testTag: String) {
 @Composable
 private fun BreakdownSection(state: CostsUiState) {
     Column {
-        SectionLabel("By feature")
+        SectionHeader(label = "By feature")
         SectionCard {
             if (state.featureBreakdown.isEmpty()) {
                 Text(
@@ -290,36 +280,20 @@ private fun BreakdownSection(state: CostsUiState) {
                         .testTag(COSTS_BREAKDOWN_EMPTY_TAG),
                 )
             } else {
-                state.featureBreakdown.forEachIndexed { index, row ->
-                    if (index > 0) Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .testTag(COSTS_BREAKDOWN_ROW_PREFIX + row.feature),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                state.featureBreakdown.forEach { row ->
+                    ListRow(
+                        title = CostFormat.featureLabel(row.provider, row.feature),
+                        subtitle = "Priced per ${CostFormat.unitLabel(row.provider, row.feature)}",
+                        trailing = {
                             Text(
-                                text = CostFormat.featureLabel(row.provider, row.feature),
+                                text = CostFormat.formatUsd(row.totalUsdMillicents),
                                 color = PocketShellColors.Text,
                                 style = PocketShellType.bodyDense,
                                 fontWeight = FontWeight.SemiBold,
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Priced per ${CostFormat.unitLabel(row.provider, row.feature)}",
-                                color = PocketShellColors.TextMuted,
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        }
-                        Text(
-                            text = CostFormat.formatUsd(row.totalUsdMillicents),
-                            color = PocketShellColors.Text,
-                            style = PocketShellType.bodyDense,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
+                        },
+                        modifier = Modifier.testTag(COSTS_BREAKDOWN_ROW_PREFIX + row.feature),
+                    )
                 }
             }
         }
@@ -338,8 +312,8 @@ private fun BreakdownSection(state: CostsUiState) {
 @Composable
 private fun ByDaySection(state: CostsUiState) {
     Column {
-        SectionLabel(
-            "By day" + if (state.totalCallCount > 0) {
+        SectionHeader(
+            label = "By day" + if (state.totalCallCount > 0) {
                 " (${state.totalCallCount} ${if (state.totalCallCount == 1) "request" else "requests"})"
             } else {
                 ""
@@ -422,7 +396,7 @@ private fun DayGroup(group: DailyCostGroup, today: java.time.LocalDate) {
 @Composable
 private fun ActionsSection(onExportCsv: () -> Unit, onClearLog: () -> Unit) {
     Column {
-        SectionLabel("Actions")
+        SectionHeader(label = "Actions")
         SectionCard {
             ActionRow(
                 label = "Export as CSV",

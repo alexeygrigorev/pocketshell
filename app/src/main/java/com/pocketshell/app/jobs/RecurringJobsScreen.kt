@@ -6,11 +6,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
@@ -21,19 +19,23 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 public data class RecurringJobsScreenState(
     val hostName: String,
@@ -70,36 +72,25 @@ public fun RecurringJobsScreen(
             onMore = onRefresh,
         )
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Scheduled",
-                    color = PocketShellColors.Text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = if (state.loading) "Syncing..." else "${state.jobs.size} jobs",
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 12.sp,
-                )
-            }
-            TextButton(onClick = { showCreate = true }) {
-                Text("+ Job")
-            }
-        }
+        ScreenHeader(
+            title = "Scheduled",
+            subtitle = if (state.loading) "Syncing..." else "${state.jobs.size} jobs",
+            trailing = {
+                TextButton(onClick = { showCreate = true }) {
+                    Text("+ Job")
+                }
+            },
+        )
 
         state.error?.let { error ->
             Text(
                 text = error,
                 color = PocketShellColors.Red,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(horizontal = 22.dp, vertical = 6.dp),
+                style = PocketShellType.bodyDense,
+                modifier = Modifier.padding(
+                    horizontal = PocketShellDensity.rowPadH + PocketShellSpacing.md,
+                    vertical = PocketShellDensity.chipPadV,
+                ),
             )
         }
 
@@ -107,8 +98,11 @@ public fun RecurringJobsScreen(
             Text(
                 text = "No scheduled jobs",
                 color = PocketShellColors.TextMuted,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(horizontal = 22.dp, vertical = 18.dp),
+                style = PocketShellType.bodyDense,
+                modifier = Modifier.padding(
+                    horizontal = PocketShellDensity.rowPadH + PocketShellSpacing.md,
+                    vertical = PocketShellSpacing.lg,
+                ),
             )
         }
 
@@ -172,8 +166,9 @@ public fun RecurringJobsScreen(
  *  - **subtitle** — the `session | every X | next Y` schedule, rendered on the
  *    [ListRow]'s `bodyMono` rung (the row's mono subtitle slot is exactly the
  *    schedule/path vocabulary).
- *  - **trailing** — a per-row [Kebab] carrying Edit / Remove (§4 decision 4:
- *    edit/remove move off inline buttons into the one overflow affordance).
+ *  - **trailing** — an enabled/paused [Badge] plus a per-row [Kebab] carrying
+ *    Edit / Remove (§4 decision 4: edit/remove move off inline buttons into the
+ *    one overflow affordance).
  */
 @Composable
 private fun RecurringJobRow(
@@ -184,9 +179,9 @@ private fun RecurringJobRow(
     ListRow(
         title = job.detail.ifBlank { "Job ${job.id}" },
         modifier = Modifier
-            .padding(horizontal = 12.dp, vertical = 5.dp)
-            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp)),
+            .padding(horizontal = PocketShellDensity.rowPadH, vertical = PocketShellSpacing.xs)
+            .background(PocketShellColors.Surface, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small),
         subtitle = "${job.sessionName} | every ${job.every} | next ${job.nextRun}",
         leading = {
             StatusDot(
@@ -198,6 +193,11 @@ private fun RecurringJobRow(
             )
         },
         trailing = {
+            Badge(
+                label = if (job.enabled) "Enabled" else "Paused",
+                role = if (job.enabled) BadgeRole.Active else BadgeRole.Idle,
+                mono = false,
+            )
             Kebab(
                 items = listOf(
                     KebabItem(label = "Edit", onClick = onEdit),

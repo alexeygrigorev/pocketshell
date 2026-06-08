@@ -35,9 +35,14 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -291,12 +296,18 @@ private fun RepoBrowserContent(
         }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellSpacing.md,
+            ),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         ) {
             if (state.repos.isEmpty()) {
                 item { EmptyState() }
             } else {
+                item {
+                    SectionHeader(label = "Repositories", count = state.repos.size)
+                }
                 items(state.repos, key = { it.fullName }) { repo ->
                     RepoCard(
                         repo = repo,
@@ -344,7 +355,7 @@ private fun EmptyState() {
             .fillMaxWidth()
             .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
             .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
-            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
             .testTag(REPO_BROWSER_EMPTY_TAG),
     ) {
         Text(
@@ -401,13 +412,11 @@ private fun RepoCard(
                 )
                 repo.cloned -> ActionPill(
                     label = "Open",
-                    fg = PocketShellColors.Accent,
-                    bg = PocketShellColors.AccentSoft,
+                    role = BadgeRole.Active,
                 )
                 else -> ActionPill(
                     label = "Clone",
-                    fg = PocketShellColors.Purple,
-                    bg = PocketShellColors.Purple.copy(alpha = 0.12f),
+                    role = BadgeRole.Agent,
                 )
             }
         },
@@ -415,19 +424,8 @@ private fun RepoCard(
 }
 
 @Composable
-private fun ActionPill(label: String, fg: androidx.compose.ui.graphics.Color, bg: androidx.compose.ui.graphics.Color) {
-    Box(
-        modifier = Modifier
-            .background(bg, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-    ) {
-        Text(
-            text = label,
-            color = fg,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
+private fun ActionPill(label: String, role: BadgeRole) {
+    Badge(label = label, role = role, mono = false)
 }
 
 // Test tags exposed for the unit / connected E2E suite.

@@ -36,11 +36,15 @@ import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.ProgressBar
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.time.Instant
 import java.time.ZoneId
@@ -91,58 +95,48 @@ private fun UsageHeader(
     onRefresh: () -> Unit,
     onOpenSettings: (() -> Unit)?,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Background)
-            .height(56.dp)
-            .padding(start = 4.dp, end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clickable(role = Role.Button, onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                style = MaterialTheme.typography.headlineSmall,
-            )
-        }
-        Text(
-            text = "Usage",
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 6.dp),
-        )
-        Kebab(
-            triggerTestTag = USAGE_OVERFLOW_TAG,
-            contentDescription = "Usage actions",
-            items = buildList {
-                add(
-                    KebabItem(
-                        label = "Refresh usage",
-                        onClick = onRefresh,
-                        testTag = USAGE_REFRESH_ACTION_TAG,
-                    ),
+    ScreenHeader(
+        title = "Usage",
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(PocketShellDensity.tapTargetMin)
+                    .clickable(role = Role.Button, onClick = onBack),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
                 )
-                if (onOpenSettings != null) {
+            }
+        },
+        trailing = {
+            Kebab(
+                triggerTestTag = USAGE_OVERFLOW_TAG,
+                contentDescription = "Usage actions",
+                items = buildList {
                     add(
                         KebabItem(
-                            label = "Usage settings",
-                            onClick = onOpenSettings,
-                            testTag = USAGE_SETTINGS_ACTION_TAG,
+                            label = "Refresh usage",
+                            onClick = onRefresh,
+                            testTag = USAGE_REFRESH_ACTION_TAG,
                         ),
                     )
-                }
-            },
-        )
-    }
+                    if (onOpenSettings != null) {
+                        add(
+                            KebabItem(
+                                label = "Usage settings",
+                                onClick = onOpenSettings,
+                                testTag = USAGE_SETTINGS_ACTION_TAG,
+                            ),
+                        )
+                    }
+                },
+            )
+        },
+    )
 }
 
 /**
@@ -167,45 +161,35 @@ fun UsageDashboardStrip(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp)
+            .padding(horizontal = PocketShellSpacing.md)
             .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
             .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = PocketShellSpacing.xs, vertical = PocketShellSpacing.xs),
     ) {
         rows.forEach { row ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                ProviderDot(kind = dotKindForThreshold(row.thresholdState))
-                Text(
-                    text = row.provider,
-                    color = PocketShellColors.Text,
-                    style = PocketShellType.bodyDense,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                )
-                // Issue #501: soonest reset, so a scan of the strip shows
-                // who has runway. Only rendered when the provider reports
-                // a reset time (the placeholder "—" would be noise here).
-                row.soonestReset?.let { reset ->
+            ListRow(
+                title = row.provider,
+                leading = { ProviderDot(kind = dotKindForThreshold(row.thresholdState)) },
+                trailing = {
+                    // Issue #501: soonest reset, so a scan of the strip shows
+                    // who has runway. Only rendered when the provider reports
+                    // a reset time (the placeholder "—" would be noise here).
+                    row.soonestReset?.let { reset ->
+                        Text(
+                            text = formatResetRelative(now, reset, zone),
+                            color = PocketShellColors.TextMuted,
+                            style = PocketShellType.labelMono,
+                            modifier = Modifier.padding(end = PocketShellSpacing.sm),
+                        )
+                    }
                     Text(
-                        text = formatResetRelative(now, reset, zone),
-                        color = PocketShellColors.TextMuted,
+                        text = row.percentLabel,
+                        color = thresholdTextColor(row.thresholdState),
                         style = PocketShellType.labelMono,
-                        modifier = Modifier.padding(end = 8.dp),
                     )
-                }
-                Text(
-                    text = row.percentLabel,
-                    color = thresholdTextColor(row.thresholdState),
-                    style = PocketShellType.labelMono,
-                )
-            }
+                },
+            )
         }
     }
 }
@@ -284,45 +268,41 @@ private fun UsageProviderStateRow(
 ) {
     val state = record.thresholdState(warnPercent = warnPercent)
     val percent = record.mostConstrainedWindow?.percent
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag(usageProviderStateRowTag(record.provider)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ProviderDot(kind = dotKindForThreshold(state))
-        Spacer(modifier = Modifier.width(8.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = record.displayName,
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = usageProviderStateDescription(record, state),
-                color = if (state.warrantsWarning || record.status == UsageStatus.Error) {
-                    thresholdAccentColor(
-                        if (state.warrantsWarning) state else UsageThresholdState.Critical,
+    val descriptionColor = if (state.warrantsWarning || record.status == UsageStatus.Error) {
+        thresholdAccentColor(
+            if (state.warrantsWarning) state else UsageThresholdState.Critical,
+        )
+    } else {
+        PocketShellColors.TextMuted
+    }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        ListRow(
+            title = record.displayName,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(usageProviderStateRowTag(record.provider)),
+            leading = { ProviderDot(kind = dotKindForThreshold(state)) },
+            trailing = {
+                if (percent != null) {
+                    Text(
+                        text = formatPercentUsed(percent),
+                        color = thresholdTextColor(state),
+                        style = PocketShellType.bodyMono,
+                        fontWeight = FontWeight.Medium,
                     )
-                } else {
-                    PocketShellColors.TextMuted
-                },
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Medium,
-            )
-        }
-        if (percent != null) {
-            Text(
-                text = formatPercentUsed(percent),
-                color = thresholdTextColor(state),
-                style = PocketShellType.bodyMono,
-                fontWeight = FontWeight.Medium,
-            )
-        }
+                }
+            },
+        )
+        Text(
+            text = usageProviderStateDescription(record, state),
+            color = descriptionColor,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(
+                start = PocketShellDensity.rowPadH + PocketShellSpacing.sm + PocketShellSpacing.md,
+                end = PocketShellDensity.rowPadH,
+            ),
+        )
     }
 }
 
@@ -370,11 +350,7 @@ fun UsageWarningBanner(
             .testTag(usageBannerTagFor(provider.provider)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .background(color = color, shape = RoundedCornerShape(4.dp)),
-        )
+        ProviderDot(kind = dotKindForThreshold(state))
         Spacer(modifier = Modifier.width(10.dp))
         Text(
             text = headline,
@@ -429,28 +405,11 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
             .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
             .padding(horizontal = 18.dp, vertical = 16.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                ProviderDot(kind = dotKind(record))
-                Text(
-                    text = record.displayName,
-                    color = PocketShellColors.Text,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 8.dp).weight(1f),
-                )
-            }
-            Pill(label = statusLabel(record), kind = pillKind(record))
-        }
+        ListRow(
+            title = record.displayName,
+            leading = { ProviderDot(kind = dotKind(record)) },
+            trailing = { Pill(label = statusLabel(record), kind = pillKind(record)) },
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -631,8 +590,8 @@ private fun ProviderDot(kind: DotKind) {
     }
     Box(
         modifier = Modifier
-            .size(8.dp)
-            .background(color = color, shape = RoundedCornerShape(4.dp)),
+            .size(PocketShellSpacing.sm)
+            .background(color = color, shape = RoundedCornerShape(PocketShellSpacing.xs)),
     )
 }
 

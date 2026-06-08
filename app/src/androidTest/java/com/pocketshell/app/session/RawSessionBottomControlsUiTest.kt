@@ -1,5 +1,7 @@
 package com.pocketshell.app.session
 
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -14,6 +16,7 @@ import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -27,6 +30,38 @@ class RawSessionBottomControlsUiTest {
 
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun keyboardOpenAccessoryKeepsUsableHeight() {
+        compose.setContent {
+            PocketShellTheme {
+                RawSessionBottomControls(
+                    isImeVisible = true,
+                    showConversation = false,
+                    sessionLive = true,
+                    onKey = {},
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    onProjectNavigationTap = {},
+                    modifier = Modifier.testTag(RAW_BOTTOM_CONTROLS_TAG),
+                )
+            }
+        }
+
+        val height = compose
+            .onNodeWithTag(RAW_BOTTOM_CONTROLS_TAG)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+            .height
+
+        assertTrue(
+            "IME accessory controls must keep a real tap target instead of collapsing to a thin strip",
+            height >= 56f,
+        )
+    }
 
     @Test
     fun keyboardOpenAccessoryShowsRawHotkeysOnlyIncludingEnter() {
@@ -119,5 +154,9 @@ class RawSessionBottomControlsUiTest {
             listOf("Esc", "Ctrl", "Ctrl-C", SessionKeyBarEnterLabel, "Ctrl-D", "Tab"),
             SessionTerminalKeyBarLayout.take(6).map { it.label },
         )
+    }
+
+    private companion object {
+        const val RAW_BOTTOM_CONTROLS_TAG = "raw:bottom-controls"
     }
 }

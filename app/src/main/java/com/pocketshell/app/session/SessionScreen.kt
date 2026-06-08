@@ -81,6 +81,7 @@ import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.AssistantStrip
+import com.pocketshell.app.voice.SessionBottomControlsMinHeight
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
 import com.pocketshell.core.terminal.selection.ConversationLink
@@ -1625,10 +1626,12 @@ internal fun RawSessionBottomControls(
     onProjectNavigationTap: () -> Unit,
     stagedAttachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
     onRemoveStagedAttachment: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = SessionBottomControlsMinHeight)
             .background(color = PocketShellColors.Surface),
     ) {
         if (stagedAttachments.isNotEmpty()) {

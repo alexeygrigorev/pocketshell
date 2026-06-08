@@ -1,6 +1,7 @@
 package com.pocketshell.app.composer
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -286,6 +287,38 @@ class PromptComposerSendNoKeyboardTest {
         compose.waitForIdle()
 
         assertEquals(prompt, sent)
+    }
+
+    @Test
+    fun constrainedSheetKeepsSendControlsVisibleForDraft() {
+        var state by mutableStateOf(
+            PromptComposerViewModel.UiState(
+                draft = "send must stay reachable above the IME",
+                error = "Attachment upload paused while the connection recovers.",
+                savedAudioPath = "/tmp/pocketshell/retry-later.wav",
+            ),
+        )
+
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = state,
+                    onClose = {},
+                    onDraftChange = { draft -> state = state.copy(draft = draft) },
+                    onMicTap = {},
+                    onSend = {},
+                    modifier = Modifier
+                        .width(320.dp)
+                        .height(260.dp),
+                )
+            }
+        }
+
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
     }
 
     /**

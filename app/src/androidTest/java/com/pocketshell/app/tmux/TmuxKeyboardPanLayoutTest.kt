@@ -126,6 +126,40 @@ class TmuxKeyboardPanLayoutTest {
         )
     }
 
+    @Test
+    fun tmuxImeAccessoryKeepsUsableHeight() {
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = true,
+                    showConversation = false,
+                    sessionLive = true,
+                    isAgentPane = false,
+                    keyBarExpanded = false,
+                    onKeyBarExpandedChange = {},
+                    onKey = {},
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    modifier = Modifier.testTag(TMUX_BOTTOM_CONTROLS_TAG),
+                )
+            }
+        }
+
+        val height = compose
+            .onNodeWithTag(TMUX_BOTTOM_CONTROLS_TAG)
+            .fetchSemanticsNode()
+            .boundsInRoot
+            .height
+
+        assertTrue(
+            "tmux IME accessory controls must not collapse to a thin strip",
+            height >= 56f,
+        )
+    }
+
     private fun terminalRegionHeight(): Float {
         val bounds = compose
             .onNodeWithTag(TERMINAL_REGION_TAG)
@@ -137,6 +171,7 @@ class TmuxKeyboardPanLayoutTest {
     private companion object {
         const val TERMINAL_REGION_TAG = "tmux:pan-test:terminal-region"
         const val KEYBAR_TAG = "tmux:pan-test:keybar"
+        const val TMUX_BOTTOM_CONTROLS_TAG = "tmux:pan-test:bottom-controls"
     }
 
     @androidx.compose.runtime.Composable

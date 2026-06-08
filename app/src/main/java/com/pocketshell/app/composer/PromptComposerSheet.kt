@@ -561,194 +561,199 @@ internal fun SheetContent(
             .background(PocketShellColors.Surface)
             .navigationBarsPadding()
             .imePadding()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp)
             .padding(bottom = 26.dp),
     ) {
-        // Header: title + close X. The Material 3 sheet draws its own
-        // grabber above this, so we don't redraw it.
-        Row(
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .weight(1f, fill = false)
+                .verticalScroll(rememberScrollState()),
         ) {
-            Text(
-                text = "Prompt Composer",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = PocketShellColors.Text,
-            )
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clickable(role = Role.Button, onClick = onClose)
-                    .testTag(COMPOSER_CLOSE_TAG)
-                    .semantics { contentDescription = "Close composer" },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "×",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 20.sp,
-                )
-            }
-        }
-
-        // Issue #453: the composer's primary surface is state-driven.
-        //  - Idle / Text-inserted: the editable input (`Compose prompt…`).
-        //  - Recording: an amplitude-driven waveform + mm:ss timer + Stop.
-        //  - Transcribing: a "Transcribing…" spinner row.
-        // The mockup collapses these into one panel whose height adjusts to
-        // the content, so we swap the surface in place rather than stacking
-        // extra rows.
-        when (state.recording) {
-            PromptComposerViewModel.RecordingState.Recording -> {
-                RecordingSurface(
-                    amplitude = state.amplitude,
-                    capturing = state.hasDetectedSpeech,
-                    elapsedLabel = formatElapsed(state.recordingElapsedMs),
-                    liveTranscript = state.liveTranscript,
-                    locked = state.recordingLocked,
-                    onCancel = onCancelRecording,
-                )
-            }
-
-            PromptComposerViewModel.RecordingState.Transcribing -> {
-                TranscribingSurface()
-            }
-
-            PromptComposerViewModel.RecordingState.Idle -> {
-                // The composer text area. Issue #196: shared with the
-                // agent-pane composer via [ComposerDraftField] so both
-                // surfaces have an identical surface-elev fill, accent
-                // cursor, and muted placeholder. Issue #453: placeholder is
-                // the mockup's "Compose prompt…". After a dictation lands
-                // (Auto-send off) the transcript fills this same editable
-                // field for the user to review before Send.
-                ComposerDraftField(
-                    value = draftFieldValue,
-                    onValueChange = { newValue ->
-                        // Mirror every edit into the ViewModel so the draft
-                        // (and SavedStateHandle) stay in lockstep with the
-                        // editor, then keep our local TextFieldValue as the
-                        // selection-bearing source of truth.
-                        draftFieldValue = newValue
-                        if (newValue.text != state.draft) {
-                            onDraftChange(newValue.text)
-                        }
-                    },
-                    placeholder = COMPOSER_PLACEHOLDER,
-                    fieldTag = COMPOSER_DRAFT_TAG,
-                    minHeight = 96.dp,
-                    maxHeight = 220.dp,
-                    focusRequester = draftFocusRequester,
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // Optional error / status banner above the mic row. Keeps the
-        // user informed about permission / API-key / Whisper failures
-        // without a Snackbar (the sheet doesn't host a scaffold).
-        state.error?.let { msg ->
-            Box(
+            // Header: title + close X. The Material 3 sheet draws its own
+            // grabber above this, so we don't redraw it.
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(
-                        color = PocketShellColors.AccentSoft,
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            ) {
-                Text(text = msg, color = PocketShellColors.Accent, fontSize = 12.sp)
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
-        attachmentUploading?.let { upload ->
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        color = PocketShellColors.SurfaceElev,
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .border(
-                        width = 1.dp,
-                        color = PocketShellColors.BorderSoft,
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .testTag(COMPOSER_ATTACHMENT_PROGRESS_TAG),
+                    .padding(bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = "Uploading ${upload.count} attachment${if (upload.count == 1) "" else "s"}...",
+                    text = "Prompt Composer",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
                     color = PocketShellColors.Text,
-                    fontSize = 12.sp,
                 )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clickable(role = Role.Button, onClick = onClose)
+                        .testTag(COMPOSER_CLOSE_TAG)
+                        .semantics { contentDescription = "Close composer" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "×",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 20.sp,
+                    )
+                }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
 
-        // Issue #180: "saved to <path>" confirmation. One-shot — the
-        // user taps it (or anything else) and the ViewModel clears the
-        // field. Lives between the error banner and the queue banner
-        // so the user sees the confirmation right next to the "save
-        // as audio" affordance that produced it.
-        state.savedAudioPath?.let { path ->
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onAcknowledgeSavedAudio)
-                    .background(
-                        color = PocketShellColors.SurfaceElev,
-                        shape = RoundedCornerShape(8.dp),
+            // Issue #453: the composer's primary surface is state-driven.
+            //  - Idle / Text-inserted: the editable input (`Compose prompt…`).
+            //  - Recording: an amplitude-driven waveform + mm:ss timer + Stop.
+            //  - Transcribing: a "Transcribing…" spinner row.
+            // The mockup collapses these into one panel whose height adjusts to
+            // the content, so we swap the surface in place rather than stacking
+            // extra rows.
+            when (state.recording) {
+                PromptComposerViewModel.RecordingState.Recording -> {
+                    RecordingSurface(
+                        amplitude = state.amplitude,
+                        capturing = state.hasDetectedSpeech,
+                        elapsedLabel = formatElapsed(state.recordingElapsedMs),
+                        liveTranscript = state.liveTranscript,
+                        locked = state.recordingLocked,
+                        onCancel = onCancelRecording,
                     )
-                    .border(
-                        width = 1.dp,
-                        color = PocketShellColors.BorderSoft,
-                        shape = RoundedCornerShape(8.dp),
+                }
+
+                PromptComposerViewModel.RecordingState.Transcribing -> {
+                    TranscribingSurface()
+                }
+
+                PromptComposerViewModel.RecordingState.Idle -> {
+                    // The composer text area. Issue #196: shared with the
+                    // agent-pane composer via [ComposerDraftField] so both
+                    // surfaces have an identical surface-elev fill, accent
+                    // cursor, and muted placeholder. Issue #453: placeholder is
+                    // the mockup's "Compose prompt…". After a dictation lands
+                    // (Auto-send off) the transcript fills this same editable
+                    // field for the user to review before Send.
+                    ComposerDraftField(
+                        value = draftFieldValue,
+                        onValueChange = { newValue ->
+                            // Mirror every edit into the ViewModel so the draft
+                            // (and SavedStateHandle) stay in lockstep with the
+                            // editor, then keep our local TextFieldValue as the
+                            // selection-bearing source of truth.
+                            draftFieldValue = newValue
+                            if (newValue.text != state.draft) {
+                                onDraftChange(newValue.text)
+                            }
+                        },
+                        placeholder = COMPOSER_PLACEHOLDER,
+                        fieldTag = COMPOSER_DRAFT_TAG,
+                        minHeight = 96.dp,
+                        maxHeight = 220.dp,
+                        focusRequester = draftFocusRequester,
                     )
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .testTag(COMPOSER_PENDING_SAVED_BANNER_TAG),
-            ) {
-                Text(
-                    text = "Audio saved to $path",
-                    color = PocketShellColors.Text,
-                    fontSize = 12.sp,
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Optional error / status banner above the mic row. Keeps the
+            // user informed about permission / API-key / Whisper failures
+            // without a Snackbar (the sheet doesn't host a scaffold).
+            state.error?.let { msg ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = PocketShellColors.AccentSoft,
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Text(text = msg, color = PocketShellColors.Accent, fontSize = 12.sp)
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            attachmentUploading?.let { upload ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = PocketShellColors.SurfaceElev,
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = PocketShellColors.BorderSoft,
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag(COMPOSER_ATTACHMENT_PROGRESS_TAG),
+                ) {
+                    Text(
+                        text = "Uploading ${upload.count} attachment${if (upload.count == 1) "" else "s"}...",
+                        color = PocketShellColors.Text,
+                        fontSize = 12.sp,
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            // Issue #180: "saved to <path>" confirmation. One-shot — the
+            // user taps it (or anything else) and the ViewModel clears the
+            // field. Lives between the error banner and the queue banner
+            // so the user sees the confirmation right next to the "save
+            // as audio" affordance that produced it.
+            state.savedAudioPath?.let { path ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onAcknowledgeSavedAudio)
+                        .background(
+                            color = PocketShellColors.SurfaceElev,
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = PocketShellColors.BorderSoft,
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag(COMPOSER_PENDING_SAVED_BANNER_TAG),
+                ) {
+                    Text(
+                        text = "Audio saved to $path",
+                        color = PocketShellColors.Text,
+                        fontSize = 12.sp,
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            // Issue #180: pending-transcription banner + expandable list.
+            // Renders only when at least one row is queued; sits above the
+            // mic row so the user notices it before re-recording.
+            if (pendingItems.isNotEmpty()) {
+                PendingTranscriptionsBanner(
+                    items = pendingItems,
+                    expanded = pendingListExpanded,
+                    onToggle = onTogglePendingList,
+                    onRetry = onRetryPending,
+                    onDiscard = onDiscardPending,
+                    onSaveAsAudio = onSavePendingAsAudio,
                 )
+                Spacer(modifier = Modifier.height(8.dp))
             }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
 
-        // Issue #180: pending-transcription banner + expandable list.
-        // Renders only when at least one row is queued; sits above the
-        // mic row so the user notices it before re-recording.
-        if (pendingItems.isNotEmpty()) {
-            PendingTranscriptionsBanner(
-                items = pendingItems,
-                expanded = pendingListExpanded,
-                onToggle = onTogglePendingList,
-                onRetry = onRetryPending,
-                onDiscard = onDiscardPending,
-                onSaveAsAudio = onSavePendingAsAudio,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
-        // Issue #566: staged attachments render as compact square tiles at
-        // the bottom of the composer (above the controls row), ChatGPT /
-        // Claude style. The draft text stays clean while composing; remote
-        // paths are folded into the outgoing prompt only at SEND.
-        if (state.attachments.isNotEmpty()) {
-            AttachmentTileGrid(
-                attachments = state.attachments,
-                onRemove = onRemoveAttachment,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
+            // Issue #566: staged attachments render as compact square tiles at
+            // the bottom of the composer (above the controls row), ChatGPT /
+            // Claude style. The draft text stays clean while composing; remote
+            // paths are folded into the outgoing prompt only at SEND.
+            if (state.attachments.isNotEmpty()) {
+                AttachmentTileGrid(
+                    attachments = state.attachments,
+                    onRemove = onRemoveAttachment,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
         }
 
         // Issue #453 / #508: the single decluttered controls row at the

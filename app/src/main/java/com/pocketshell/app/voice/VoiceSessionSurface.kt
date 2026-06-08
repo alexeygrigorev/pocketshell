@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -48,6 +49,7 @@ import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.MicGlyphIcon
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 
 /**
  * Shared voice-surface composables used by both
@@ -455,6 +457,7 @@ internal fun BottomChipControls(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = SessionBottomControlsMinHeight)
             .background(color = PocketShellColors.Surface)
             .border(width = 1.dp, color = PocketShellColors.Border),
         verticalAlignment = Alignment.CenterVertically,
@@ -489,6 +492,8 @@ internal fun BottomChipControls(
         }
     }
 }
+
+internal val SessionBottomControlsMinHeight = PocketShellDensity.tapTargetMin + 8.dp
 
 @Composable
 private fun ComposerLauncherButton(

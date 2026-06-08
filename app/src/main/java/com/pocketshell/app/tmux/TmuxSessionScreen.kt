@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
@@ -140,6 +141,7 @@ import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
+import com.pocketshell.app.voice.SessionBottomControlsMinHeight
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.AgentKind
@@ -5141,6 +5143,7 @@ internal fun TmuxTerminalBottomControls(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = SessionBottomControlsMinHeight)
             .background(color = PocketShellColors.Surface),
     ) {
         if (stagedAttachments.isNotEmpty()) {

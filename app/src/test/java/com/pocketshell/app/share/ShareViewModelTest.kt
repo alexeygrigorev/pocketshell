@@ -12,6 +12,7 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.tmux.CommandResponse
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -1094,6 +1095,64 @@ class ShareViewModelTest {
 
     @Test
     @Config(sdk = [28])
+    fun stageIntoSessionTimeoutSurfacesFailureAndClearsRunning() {
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
+            try {
+                val registry = ActiveTmuxClients()
+                val vm = newVm(registry, stageIntoSessionTimeoutMs = 50L)
+                val host = seededHost(id = 55L, name = "gpu-box")
+                registry.register(
+                    hostId = host.id,
+                    hostName = host.name,
+                    hostname = host.hostname,
+                    port = host.port,
+                    username = host.username,
+                    keyPath = "/tmp/key",
+                    client = FakeTmuxClient(),
+                )
+                val fakeSession = FakeStagingSshSession(blockUploads = true)
+                vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
+                vm.setItem(
+                    ShareableItem.TextItem(
+                        text = "staging should time out instead of spinning forever",
+                        displayName = "timeout-note",
+                    ),
+                )
+
+                vm.stageIntoSession(
+                    host,
+                    ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
+                )
+                kotlinx.coroutines.withTimeout(5_000L) {
+                    fakeSession.uploadStarted.await()
+                }
+
+                val failed = kotlinx.coroutines.withTimeout(5_000L) {
+                    vm.uploadState.first { it is UploadState.Failed }
+                } as UploadState.Failed
+
+                assertEquals("gpu-box", failed.hostName)
+                assertTrue(
+                    "timeout failure should explain the bounded staging failure, got: ${failed.message}",
+                    failed.message.contains("Timed out", ignoreCase = true) &&
+                        failed.message.contains("scratch"),
+                )
+                assertTrue(
+                    "the UI must leave Running after timeout",
+                    vm.uploadState.value is UploadState.Failed,
+                )
+                assertTrue("timed-out staging session must be closed", fakeSession.closed)
+            } finally {
+                kotlinx.coroutines.Dispatchers.setMain(
+                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
+                )
+            }
+        }
+    }
+
+    @Test
+    @Config(sdk = [28])
     fun stageIntoSessionFailureInBackgroundPostsAndroidNotificationWithoutFakeActions() = runTest {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
@@ -1131,10 +1190,13 @@ class ShareViewModelTest {
      * share-into-session staging round-trip: records exec commands +
      * uploaded paths, succeeds every `mkdir -p`, and reports connected.
      */
-    private class FakeStagingSshSession : com.pocketshell.core.ssh.SshSession {
+    private class FakeStagingSshSession(
+        private val blockUploads: Boolean = false,
+    ) : com.pocketshell.core.ssh.SshSession {
         val execCommands = mutableListOf<String>()
         val uploadedRemotePaths = mutableListOf<String>()
         val uploadedFileBytes = mutableListOf<ByteArray>()
+        val uploadStarted = CompletableDeferred<Unit>()
         var closed: Boolean = false
 
         override val isConnected: Boolean get() = !closed
@@ -1158,6 +1220,8 @@ class ShareViewModelTest {
             throw NotImplementedError("not needed for staging tests")
 
         override suspend fun uploadFile(file: java.io.File, remotePath: String): String {
+            uploadStarted.complete(Unit)
+            if (blockUploads) CompletableDeferred<Unit>().await()
             uploadedRemotePaths += remotePath
             uploadedFileBytes += file.readBytes()
             return remotePath
@@ -1169,6 +1233,8 @@ class ShareViewModelTest {
             name: String,
             remotePath: String,
         ): String {
+            uploadStarted.complete(Unit)
+            if (blockUploads) CompletableDeferred<Unit>().await()
             input.readBytes()
             uploadedRemotePaths += remotePath
             return remotePath
@@ -1244,13 +1310,17 @@ class ShareViewModelTest {
         return host
     }
 
-    private fun newVm(registry: ActiveTmuxClients): ShareViewModel {
+    private fun newVm(
+        registry: ActiveTmuxClients,
+        stageIntoSessionTimeoutMs: Long = 90_000L,
+    ): ShareViewModel {
         return ShareViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             activeTmuxClients = registry,
             projectRootDao = db.projectRootDao(),
+            stageIntoSessionTimeoutMs = stageIntoSessionTimeoutMs,
         )
     }
 

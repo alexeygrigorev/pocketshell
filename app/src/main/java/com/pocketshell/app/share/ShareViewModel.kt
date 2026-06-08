@@ -23,7 +23,12 @@ import com.pocketshell.core.tmux.TmuxClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -34,6 +39,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 /**
@@ -62,13 +69,30 @@ import javax.inject.Inject
  * obtain it.
  */
 @HiltViewModel
-internal class ShareViewModel @Inject constructor(
+internal class ShareViewModel internal constructor(
     @ApplicationContext private val applicationContext: Context,
     private val hostDao: HostDao,
     private val sshKeyDao: SshKeyDao,
     private val activeTmuxClients: ActiveTmuxClients,
     private val projectRootDao: ProjectRootDao,
+    private val stageIntoSessionTimeoutMs: Long = STAGE_INTO_SESSION_TIMEOUT_MS,
 ) : ViewModel() {
+
+    @Inject
+    constructor(
+        @ApplicationContext applicationContext: Context,
+        hostDao: HostDao,
+        sshKeyDao: SshKeyDao,
+        activeTmuxClients: ActiveTmuxClients,
+        projectRootDao: ProjectRootDao,
+    ) : this(
+        applicationContext = applicationContext,
+        hostDao = hostDao,
+        sshKeyDao = sshKeyDao,
+        activeTmuxClients = activeTmuxClients,
+        projectRootDao = projectRootDao,
+        stageIntoSessionTimeoutMs = STAGE_INTO_SESSION_TIMEOUT_MS,
+    )
 
     val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
@@ -376,40 +400,18 @@ internal class ShareViewModel @Inject constructor(
                 return@launch
             }
 
-            val connectResult = connectForStaging(host, keyEntity)
-            val sshSession = connectResult.getOrElse { error ->
-                DiagnosticEvents.record(
-                    "action",
-                    "share_stage_into_session_result",
-                    "status" to "failure",
-                    "hostId" to host.id,
-                    "cause" to error.javaClass.simpleName,
-                )
-                val message = error.message ?: "Could not connect to ${host.name}"
-                android.util.Log.w(LOG_TAG, "share into session connect failed: $message", error)
-                _uploadState.value = UploadState.Failed(host.name, message)
-                notifyShareFailure(host.name, message)
-                return@launch
-            }
-
             // Issue #560: scope key MUST match the in-session Attach path
             // (TmuxSessionViewModel) so the chip lands in the exact same
             // remote directory the user would see attaching from inside the
             // session — the #544 mechanic, no parallel upload location.
             val scopeKey = "host-${host.id}-${session.sessionName}"
-            val result = sshSession.use { live ->
-                runCatching {
-                    val stagedInput = materializeSessionStagingUris(payload)
-                    try {
-                        PromptAttachmentStager(
-                            resolver = applicationContext.contentResolver,
-                            cacheDir = applicationContext.cacheDir,
-                        ).stage(live, scopeKey, stagedInput.uris).getOrThrow()
-                    } finally {
-                        stagedInput.deleteTempFiles()
-                    }
-                }
-            }
+            val result = stageIntoSessionBounded(
+                host = host,
+                keyEntity = keyEntity,
+                scopeKey = scopeKey,
+                payload = payload,
+                sessionName = session.sessionName,
+            )
 
             result.fold(
                 onSuccess = { remotePaths ->
@@ -467,6 +469,59 @@ internal class ShareViewModel @Inject constructor(
                     notifyShareFailure(host.name, message)
                 },
             )
+        }
+    }
+
+    private suspend fun stageIntoSessionBounded(
+        host: HostEntity,
+        keyEntity: SshKeyEntity,
+        scopeKey: String,
+        payload: List<ShareableItem>,
+        sessionName: String,
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        val openedSession = AtomicReference<SshSession?>()
+        val deferred = async {
+            val sshSession = connectForStaging(host, keyEntity).getOrThrow()
+            openedSession.set(sshSession)
+            sshSession.use { live ->
+                val stagedInput = materializeSessionStagingUris(payload)
+                try {
+                    PromptAttachmentStager(
+                        resolver = applicationContext.contentResolver,
+                        cacheDir = applicationContext.cacheDir,
+                    ).stage(live, scopeKey, stagedInput.uris).getOrThrow()
+                } finally {
+                    stagedInput.deleteTempFiles()
+                }
+            }
+        }
+
+        try {
+            val remotePaths = withTimeoutOrNull(stageIntoSessionTimeoutMs) {
+                deferred.await()
+            }
+            if (remotePaths != null) {
+                Result.success(remotePaths)
+            } else {
+                android.util.Log.w(
+                    LOG_TAG,
+                    "share into session staging timed out after ${stageIntoSessionTimeoutMs}ms; " +
+                        "closing staging SSH session if it opened",
+                )
+                deferred.cancel()
+                withContext(NonCancellable) {
+                    runCatching { openedSession.getAndSet(null)?.close() }
+                }
+                Result.failure(ShareStageIntoSessionTimeoutException(sessionName, stageIntoSessionTimeoutMs))
+            }
+        } catch (cancelled: CancellationException) {
+            deferred.cancel()
+            withContext(NonCancellable) {
+                runCatching { openedSession.getAndSet(null)?.close() }
+            }
+            throw cancelled
+        } catch (t: Throwable) {
+            Result.failure(t)
         }
     }
 
@@ -922,6 +977,7 @@ internal class ShareViewModel @Inject constructor(
         /** "Short text" threshold from the issue spec. */
         const val TEXT_PASTE_BUDGET_BYTES: Int = 8 * 1024
         const val LOG_TAG: String = "PocketShellShare"
+        const val STAGE_INTO_SESSION_TIMEOUT_MS: Long = 90_000L
 
         /** Truncation cap for the paste preview surfaced in UploadState.Success. */
         const val PASTE_PREVIEW_LENGTH: Int = 80
@@ -1110,6 +1166,14 @@ internal data class ActiveSessionTarget(
     val cwd: String,
     val label: String,
     val focused: Boolean = false,
+)
+
+private class ShareStageIntoSessionTimeoutException(
+    sessionName: String,
+    timeoutMs: Long,
+) : Exception(
+    "Timed out after ${timeoutMs / 1_000}s staging attachments into $sessionName. " +
+        "Check the connection and try again, or save to inbox.",
 )
 
 /**

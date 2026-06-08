@@ -3,6 +3,7 @@ package com.pocketshell.core.ssh
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -14,6 +15,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
+import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.Session.Command
 import net.schmizz.sshj.transport.TransportException
 import java.io.BufferedReader
@@ -22,6 +24,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.util.concurrent.atomic.AtomicReference
 import java.util.logging.Level
 import java.util.logging.Logger
 
@@ -44,24 +47,64 @@ internal class RealSshSession(
     override val isConnected: Boolean
         get() = client.isConnected && client.isAuthenticated
 
-    override suspend fun exec(command: String): ExecResult = withContext(Dispatchers.IO) {
+    @OptIn(InternalCoroutinesApi::class)
+    override suspend fun exec(command: String): ExecResult {
+        val callerJob = currentCoroutineContext()[Job]
+        val sessionChannelRef = AtomicReference<Session?>()
+        val cmdRef = AtomicReference<Command?>()
+        val cancelHandle = callerJob?.invokeOnCompletion(onCancelling = true) { cause ->
+            if (cause != null) {
+                runCatching { cmdRef.get()?.close() }
+                runCatching { sessionChannelRef.get()?.close() }
+            }
+        }
+        return try {
+            withContext(Dispatchers.IO) {
+                execBlocking(command) { openedSession, openedCommand ->
+                    sessionChannelRef.set(openedSession)
+                    cmdRef.set(openedCommand)
+                }
+            }
+        } finally {
+            cancelHandle?.dispose()
+            runCatching { cmdRef.get()?.close() }
+            runCatching { sessionChannelRef.get()?.close() }
+        }
+    }
+
+    private fun execBlocking(
+        command: String,
+        onChannelOpened: (Session, Command?) -> Unit,
+    ): ExecResult {
         ensureConnected()
-        client.startSession().use { sessionChannel ->
-            val cmd: Command = try {
+        val sessionChannel = try {
+            client.startSession()
+        } catch (t: Throwable) {
+            throw SshException("Failed to open exec channel for `$command`: ${t.message}", t)
+        }
+        onChannelOpened(sessionChannel, null)
+        var cmd: Command? = null
+        return try {
+            cmd = try {
                 sessionChannel.exec(command)
             } catch (t: Throwable) {
                 throw SshException("Failed to start exec channel for `$command`: ${t.message}", t)
             }
+            onChannelOpened(sessionChannel, cmd)
+            val liveCommand = cmd!!
             // Read both streams to EOF before joining. sshj sets exitStatus
             // only after the remote side has closed its end of the channel.
-            val stdout = cmd.inputStream.readBytes().toString(Charsets.UTF_8)
-            val stderr = cmd.errorStream.readBytes().toString(Charsets.UTF_8)
-            cmd.join()
+            val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
+            val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
+            liveCommand.join()
             // sshj returns null exitStatus when the server didn't send one
             // (e.g. signal-killed). Map to -1 so the caller can still tell
             // it wasn't a clean 0.
-            val exitCode = cmd.exitStatus ?: -1
+            val exitCode = liveCommand.exitStatus ?: -1
             ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+        } finally {
+            runCatching { cmd?.close() }
+            runCatching { sessionChannel.close() }
         }
     }
 

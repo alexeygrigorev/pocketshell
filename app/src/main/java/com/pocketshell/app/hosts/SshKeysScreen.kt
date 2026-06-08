@@ -5,6 +5,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,7 +26,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +50,9 @@ import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -127,25 +133,25 @@ fun SshKeysManagementPane(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md),
+                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
             ) {
-                OutlinedButton(
+                SshKeyActionButton(
+                    label = "Import key",
                     onClick = { keyPickerLauncher.launch("*/*") },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Import key", color = PocketShellColors.Accent)
-                }
-                Button(
+                    primary = false,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(SSH_KEYS_IMPORT_ACTION_TAG),
+                )
+                SshKeyActionButton(
+                    label = "Generate",
                     onClick = { viewModel.generateKey(context) },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = PocketShellColors.Accent,
-                        contentColor = PocketShellColors.OnAccent,
-                    ),
-                ) {
-                    Text("Generate", fontWeight = FontWeight.SemiBold)
-                }
+                    primary = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(SSH_KEYS_GENERATE_ACTION_TAG),
+                )
             }
 
             error?.let { msg ->
@@ -236,6 +242,44 @@ fun SshKeysManagementPane(
 }
 
 @Composable
+private fun SshKeyActionButton(
+    label: String,
+    primary: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .sizeIn(minHeight = PocketShellDensity.tapTargetMin)
+            .background(
+                color = if (primary) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                shape = PocketShellShapes.small,
+            )
+            .then(
+                if (primary) {
+                    Modifier
+                } else {
+                    Modifier.border(
+                        width = 1.dp,
+                        color = PocketShellColors.BorderSoft,
+                        shape = PocketShellShapes.small,
+                    )
+                },
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = PocketShellDensity.chipPadH, vertical = PocketShellDensity.chipPadV),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (primary) PocketShellColors.OnAccent else PocketShellColors.Accent,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
 private fun KeyUnlockPanel(error: String?, inFlight: Boolean, onUnlock: () -> Unit) {
     Column(
         modifier = Modifier
@@ -284,6 +328,8 @@ private fun isKeyUnlockRequired(context: android.content.Context): Boolean {
 internal fun isSshKeyUnlockRequired(context: android.content.Context): Boolean = isKeyUnlockRequired(context)
 
 internal const val SSH_KEYS_UNLOCK_BUTTON_TAG = "ssh-keys-unlock-button"
+internal const val SSH_KEYS_IMPORT_ACTION_TAG = "ssh-keys-import-action"
+internal const val SSH_KEYS_GENERATE_ACTION_TAG = "ssh-keys-generate-action"
 
 internal class SshKeyUnlockInFlightGate {
     var isInFlight: Boolean = false
@@ -397,6 +443,7 @@ private fun KeyRow(
     ListRow(
         title = key.name,
         subtitle = subtitle,
+        modifier = Modifier.testTag(sshKeyRowTestTag(key.id)),
         leading = {
             Box(
                 modifier = Modifier
@@ -417,13 +464,24 @@ private fun KeyRow(
         },
         trailing = {
             Kebab(
+                contentDescription = "SSH key ${key.name} actions",
+                triggerTestTag = sshKeyActionsTestTag(key.id),
+                triggerSize = PocketShellDensity.tapTargetMin,
                 items = listOf(
                     KebabItem(
                         label = "Delete",
                         onClick = onDeleteRequest,
+                        testTag = sshKeyDeleteActionTestTag(key.id),
+                        contentDescription = "Delete SSH key ${key.name}",
                     ),
                 ),
             )
         },
     )
 }
+
+internal fun sshKeyRowTestTag(id: Long): String = "ssh-keys:row:$id"
+
+internal fun sshKeyActionsTestTag(id: Long): String = "ssh-keys:row:$id:actions"
+
+internal fun sshKeyDeleteActionTestTag(id: Long): String = "ssh-keys:row:$id:delete"

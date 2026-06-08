@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -49,6 +50,7 @@ fun SegmentedToggle(
     onSelected: (Int) -> Unit,
     modifier: Modifier = Modifier,
     segmentTag: (index: Int) -> String? = { null },
+    fillSegments: Boolean = false,
 ) {
     val trackShape = RoundedCornerShape(10.dp)
     Row(
@@ -64,7 +66,7 @@ fun SegmentedToggle(
             val selected = index == selectedIndex
             val tag = segmentTag(index)
             Box(
-                modifier = Modifier
+                modifier = (if (fillSegments) Modifier.weight(1f) else Modifier)
                     .background(
                         color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
                         shape = RoundedCornerShape(8.dp),
@@ -79,6 +81,8 @@ fun SegmentedToggle(
                     color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
                     fontSize = 12.sp,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }

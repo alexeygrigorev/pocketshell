@@ -40,17 +40,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 
 /**
  * Snippet library management screen — full CRUD for the snippets of a
@@ -478,70 +481,19 @@ private fun SnippetLibraryTabs(
     onSelect: (SnippetLibraryTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier
-            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        SnippetLibraryTabButton(
-            tab = SnippetLibraryTab.Prompts,
-            selected = selectedTab == SnippetLibraryTab.Prompts,
-            onClick = { onSelect(SnippetLibraryTab.Prompts) },
-            modifier = Modifier.weight(1f),
-        )
-        SnippetLibraryTabButton(
-            tab = SnippetLibraryTab.Commands,
-            selected = selectedTab == SnippetLibraryTab.Commands,
-            onClick = { onSelect(SnippetLibraryTab.Commands) },
-            modifier = Modifier.weight(1f),
-        )
-        SnippetLibraryTabButton(
-            tab = SnippetLibraryTab.Macros,
-            selected = selectedTab == SnippetLibraryTab.Macros,
-            onClick = { onSelect(SnippetLibraryTab.Macros) },
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
-
-@Composable
-private fun SnippetLibraryTabButton(
-    tab: SnippetLibraryTab,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .background(
-                color = if (selected) PocketShellColors.AccentSoft else PocketShellColors.Surface,
-                shape = RoundedCornerShape(8.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = if (selected) PocketShellColors.AccentDim else PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(8.dp),
-            )
-            .clickable(onClick = onClick)
-            .testTag(snippetLibraryTabTag(tab))
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = tab.label,
-            color = if (selected) PocketShellColors.Accent else PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
+    val tabs = listOf(
+        SnippetLibraryTab.Prompts,
+        SnippetLibraryTab.Commands,
+        SnippetLibraryTab.Macros,
+    )
+    SegmentedToggle(
+        labels = tabs.map { it.label },
+        selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0),
+        onSelected = { index -> onSelect(tabs[index]) },
+        modifier = modifier,
+        segmentTag = { index -> snippetLibraryTabTag(tabs[index]) },
+        fillSegments = true,
+    )
 }
 
 internal fun snippetKindTabTag(kind: SnippetKind): String =
@@ -610,13 +562,32 @@ private fun SnippetRow(
     ListRow(
         title = snippet.displayLabel(),
         subtitle = subtitle,
+        modifier = Modifier.testTag(snippetRowTestTag(snippet.id)),
         trailing = {
-            KindTag(kind)
+            SnippetKindBadge(kind)
             Kebab(
+                contentDescription = "Snippet ${snippet.displayLabel()} actions",
+                triggerTestTag = snippetActionsTestTag(snippet.id),
+                triggerSize = PocketShellDensity.tapTargetMin,
                 items = listOf(
-                    KebabItem(label = "Edit", onClick = onEdit),
-                    KebabItem(label = "Rename", onClick = onRename),
-                    KebabItem(label = "Delete", onClick = onDelete),
+                    KebabItem(
+                        label = "Edit",
+                        onClick = onEdit,
+                        testTag = snippetEditActionTestTag(snippet.id),
+                        contentDescription = "Edit snippet ${snippet.displayLabel()}",
+                    ),
+                    KebabItem(
+                        label = "Rename",
+                        onClick = onRename,
+                        testTag = snippetRenameActionTestTag(snippet.id),
+                        contentDescription = "Rename snippet ${snippet.displayLabel()}",
+                    ),
+                    KebabItem(
+                        label = "Delete",
+                        onClick = onDelete,
+                        testTag = snippetDeleteActionTestTag(snippet.id),
+                        contentDescription = "Delete snippet ${snippet.displayLabel()}",
+                    ),
                 ),
             )
         },
@@ -632,12 +603,26 @@ private fun CommandTemplateRow(
     ListRow(
         title = template.label,
         subtitle = commandTemplatePreview(template.commands),
+        modifier = Modifier.testTag(commandTemplateRowTestTag(template.id)),
         trailing = {
             MacroTag()
             Kebab(
+                contentDescription = "Macro ${template.label} actions",
+                triggerTestTag = commandTemplateActionsTestTag(template.id),
+                triggerSize = PocketShellDensity.tapTargetMin,
                 items = listOf(
-                    KebabItem(label = "Edit", onClick = onEdit),
-                    KebabItem(label = "Delete", onClick = onDelete),
+                    KebabItem(
+                        label = "Edit",
+                        onClick = onEdit,
+                        testTag = commandTemplateEditActionTestTag(template.id),
+                        contentDescription = "Edit macro ${template.label}",
+                    ),
+                    KebabItem(
+                        label = "Delete",
+                        onClick = onDelete,
+                        testTag = commandTemplateDeleteActionTestTag(template.id),
+                        contentDescription = "Delete macro ${template.label}",
+                    ),
                 ),
             )
         },
@@ -654,24 +639,35 @@ private fun commandTemplatePreview(commands: String): String? =
 
 @Composable
 private fun MacroTag() {
-    Box(
-        modifier = Modifier
-            .background(PocketShellColors.AccentSoft, RoundedCornerShape(6.dp))
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.AccentDim,
-                shape = RoundedCornerShape(6.dp),
-            )
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Text(
-            text = "macro",
-            color = PocketShellColors.Accent,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
+    Badge(label = "macro", role = BadgeRole.Agent, mono = false)
 }
+
+@Composable
+private fun SnippetKindBadge(kind: SnippetKind) {
+    Badge(
+        label = kind.label.lowercase(),
+        role = if (kind == SnippetKind.Prompt) BadgeRole.Agent else BadgeRole.Shell,
+        mono = false,
+    )
+}
+
+internal fun snippetRowTestTag(id: Long): String = "snippets:row:$id"
+
+internal fun snippetActionsTestTag(id: Long): String = "snippets:row:$id:actions"
+
+internal fun snippetEditActionTestTag(id: Long): String = "snippets:row:$id:edit"
+
+internal fun snippetRenameActionTestTag(id: Long): String = "snippets:row:$id:rename"
+
+internal fun snippetDeleteActionTestTag(id: Long): String = "snippets:row:$id:delete"
+
+internal fun commandTemplateRowTestTag(id: Long): String = "snippets:macro:$id"
+
+internal fun commandTemplateActionsTestTag(id: Long): String = "snippets:macro:$id:actions"
+
+internal fun commandTemplateEditActionTestTag(id: Long): String = "snippets:macro:$id:edit"
+
+internal fun commandTemplateDeleteActionTestTag(id: Long): String = "snippets:macro:$id:delete"
 
 /**
  * Add dialog (issue #190). Single body text input + the command/prompt

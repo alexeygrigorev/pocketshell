@@ -1,11 +1,17 @@
 package com.pocketshell.app.snippets
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -31,6 +37,7 @@ class SnippetsScreenTabsTest {
 
     private lateinit var db: AppDatabase
     private lateinit var viewModel: SnippetsViewModel
+    private lateinit var commandTemplatesViewModel: CommandTemplatesViewModel
     private var hostId: Long = 0L
 
     @Before
@@ -57,6 +64,7 @@ class SnippetsScreenTabsTest {
             ),
         )
         viewModel = SnippetsViewModel(db.snippetDao())
+        commandTemplatesViewModel = CommandTemplatesViewModel(db.commandTemplateDao())
     }
 
     @After
@@ -89,6 +97,7 @@ class SnippetsScreenTabsTest {
                     hostId = hostId,
                     onBack = {},
                     viewModel = viewModel,
+                    commandTemplatesViewModel = commandTemplatesViewModel,
                 )
             }
         }
@@ -112,6 +121,7 @@ class SnippetsScreenTabsTest {
                     hostId = hostId,
                     onBack = {},
                     viewModel = viewModel,
+                    commandTemplatesViewModel = commandTemplatesViewModel,
                 )
             }
         }
@@ -150,5 +160,92 @@ class SnippetsScreenTabsTest {
             listOf(SnippetKind.Prompt.storageValue, SnippetKind.Command.storageValue),
             rows.sortedBy { it.id }.map { it.kind },
         )
+    }
+
+    @Test
+    fun snippetRowActions_areReachableThroughKebab() {
+        runBlocking {
+            val snippetId = db.snippetDao().insert(
+                SnippetEntity(
+                    hostId = hostId,
+                    label = "Deploy checklist",
+                    body = "Run tests\nShip build",
+                    kind = SnippetKind.Prompt.storageValue,
+                ),
+            )
+
+            compose.setContent {
+                PocketShellTheme {
+                    SnippetsScreen(
+                        hostId = hostId,
+                        onBack = {},
+                        viewModel = viewModel,
+                        commandTemplatesViewModel = commandTemplatesViewModel,
+                    )
+                }
+            }
+
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(snippetRowTestTag(snippetId))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            compose.onNodeWithTag(snippetActionsTestTag(snippetId)).performClick()
+            compose.onNodeWithTag(snippetEditActionTestTag(snippetId)).assertIsDisplayed().performClick()
+            compose.onNodeWithText("Edit snippet").assertIsDisplayed()
+            compose.onNodeWithText("Cancel").performClick()
+
+            compose.onNodeWithTag(snippetActionsTestTag(snippetId)).performClick()
+            compose.onNodeWithTag(snippetRenameActionTestTag(snippetId)).assertIsDisplayed().performClick()
+            compose.onNodeWithText("Rename snippet").assertIsDisplayed()
+            compose.onNodeWithText("Cancel").performClick()
+
+            compose.onNodeWithTag(snippetActionsTestTag(snippetId)).performClick()
+            compose.onNodeWithTag(snippetDeleteActionTestTag(snippetId)).assertIsDisplayed().performClick()
+            compose.onNodeWithText("Delete this snippet?").assertIsDisplayed()
+        }
+    }
+
+    @Test
+    fun longSnippetContent_keepsTrailingKebabUsable() {
+        runBlocking {
+            val snippetId = db.snippetDao().insert(
+                SnippetEntity(
+                    hostId = hostId,
+                    label = "Very long prompt label that should ellipsize before the " +
+                        "trailing menu button",
+                    body = "A very long command or prompt preview that should not push " +
+                        "the actions off screen",
+                    kind = SnippetKind.Prompt.storageValue,
+                ),
+            )
+
+            compose.setContent {
+                PocketShellTheme {
+                    Box(
+                        modifier = Modifier
+                            .width(260.dp)
+                            .height(520.dp),
+                    ) {
+                        SnippetsScreen(
+                            hostId = hostId,
+                            onBack = {},
+                            viewModel = viewModel,
+                            commandTemplatesViewModel = commandTemplatesViewModel,
+                        )
+                    }
+                }
+            }
+
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(snippetRowTestTag(snippetId))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            compose.onNodeWithTag(snippetActionsTestTag(snippetId)).assertIsDisplayed().performClick()
+            compose.onNodeWithTag(snippetEditActionTestTag(snippetId)).assertIsDisplayed()
+        }
     }
 }

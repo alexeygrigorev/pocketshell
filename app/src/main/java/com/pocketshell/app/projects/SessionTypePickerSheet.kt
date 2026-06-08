@@ -6,7 +6,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,6 +14,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -40,10 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
-import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
-import com.pocketshell.uikit.theme.PocketShellDensity
-import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -117,7 +114,7 @@ internal fun SessionTypePickerContent(
             .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
             text = "New session",
@@ -137,9 +134,10 @@ internal fun SessionTypePickerContent(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(44.dp)
+                    .height(PICKER_SEGMENT_HEIGHT)
                     .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-                    .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp)),
+                    .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+                    .selectableGroup(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 SegmentButton(
@@ -163,32 +161,35 @@ internal fun SessionTypePickerContent(
         if (sessionType == SessionType.Agent) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 SectionTitle("Agent CLI")
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .height(PICKER_SEGMENT_HEIGHT)
                         .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-                        .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp)),
+                        .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+                        .selectableGroup(),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    AgentCliRow(
+                    SegmentButton(
                         label = "claude",
-                        cli = AgentCli.Claude,
                         selected = agentKind == AgentCli.Claude,
                         onClick = { agentKind = AgentCli.Claude },
                         testTag = SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG,
+                        modifier = Modifier.weight(1f),
                     )
-                    AgentCliRow(
+                    SegmentButton(
                         label = "codex",
-                        cli = AgentCli.Codex,
                         selected = agentKind == AgentCli.Codex,
                         onClick = { agentKind = AgentCli.Codex },
                         testTag = SESSION_TYPE_PICKER_AGENT_CODEX_TAG,
+                        modifier = Modifier.weight(1f),
                     )
-                    AgentCliRow(
+                    SegmentButton(
                         label = "opencode",
-                        cli = AgentCli.OpenCode,
                         selected = agentKind == AgentCli.OpenCode,
                         onClick = { agentKind = AgentCli.OpenCode },
                         testTag = SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG,
+                        modifier = Modifier.weight(1f),
                     )
                 }
                 Text(
@@ -284,7 +285,7 @@ private fun SegmentButton(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(44.dp)
+            .height(PICKER_SEGMENT_HEIGHT)
             .padding(2.dp)
             .background(bg, RoundedCornerShape(8.dp))
             .clickable(role = Role.Tab, onClick = onClick)
@@ -296,46 +297,6 @@ private fun SegmentButton(
             color = fg,
             style = PocketShellType.bodyDense,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-        )
-    }
-}
-
-@Composable
-private fun AgentCliRow(
-    label: String,
-    @Suppress("UNUSED_PARAMETER") cli: AgentCli,
-    selected: Boolean,
-    onClick: () -> Unit,
-    testTag: String,
-) {
-    val bg = if (selected) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
-            .background(bg, PocketShellShapes.small)
-            .border(
-                width = if (selected) 1.dp else 0.dp,
-                color = if (selected) PocketShellColors.AccentDim else bg,
-                shape = PocketShellShapes.small,
-            )
-            .clickable(role = Role.RadioButton, onClick = onClick)
-            .testTag(testTag),
-    ) {
-        ListRow(
-            title = label,
-            trailing = if (selected) {
-                {
-                    Text(
-                        text = "✓",
-                        color = PocketShellColors.Accent,
-                        style = PocketShellType.bodyDense,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-            } else {
-                null
-            },
         )
     }
 }
@@ -368,7 +329,7 @@ private fun SkipPermissionsRow(
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                text = "Launch without per-action approval prompts.",
+                text = "No per-action approval prompts.",
                 color = PocketShellColors.TextMuted,
                 style = PocketShellType.labelMono,
             )
@@ -551,6 +512,8 @@ enum class AgentCli(val command: String) {
         private val ENV_VAR_NAME_REGEX = Regex("^[A-Za-z0-9_]+$")
     }
 }
+
+private val PICKER_SEGMENT_HEIGHT = 48.dp
 
 // Test tags exposed for unit / connected tests.
 const val SESSION_TYPE_PICKER_SHEET_TAG: String = "session-type-picker:sheet"

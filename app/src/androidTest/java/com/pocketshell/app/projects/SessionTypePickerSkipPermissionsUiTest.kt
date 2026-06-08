@@ -18,6 +18,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.abs
 
 /**
  * UI proof for issue #428: the session-create picker shows a default-ON
@@ -92,6 +93,34 @@ class SessionTypePickerSkipPermissionsUiTest {
         compose.waitForIdle()
         assertTrue(lastChoice?.skipPermissions == false)
         assertTrue(lastChoice?.startCommand() == "claude")
+    }
+
+    @Test
+    fun agentCliChoicesUseSingleAlignedSegmentedRow() {
+        compose.setContent {
+            PocketShellTheme {
+                SessionTypePickerContent(
+                    folderPath = "/srv/app",
+                    folderLabel = "app",
+                    onCancel = {},
+                    onCreate = {},
+                )
+            }
+        }
+
+        val claude = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG)
+            .fetchSemanticsNode().boundsInRoot
+        val codex = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CODEX_TAG)
+            .fetchSemanticsNode().boundsInRoot
+        val opencode = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG)
+            .fetchSemanticsNode().boundsInRoot
+
+        assertTrue("codex should sit to the right of claude", codex.left > claude.left)
+        assertTrue("opencode should sit to the right of codex", opencode.left > codex.left)
+        assertTrue("CLI segments should share one row", abs(claude.top - codex.top) < 1f)
+        assertTrue("CLI segments should share one row", abs(codex.top - opencode.top) < 1f)
+        assertTrue("CLI segments should have matching heights", abs(claude.height - codex.height) < 1f)
+        assertTrue("CLI segments should have matching heights", abs(codex.height - opencode.height) < 1f)
     }
 
     // Screenshot capture is best-effort evidence: a content-only Compose

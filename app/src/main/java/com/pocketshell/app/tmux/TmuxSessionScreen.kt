@@ -162,6 +162,7 @@ import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.KeyBar
+import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.StatusDot
@@ -4219,19 +4220,12 @@ internal fun ConsolidatedTopChrome(
         )
 
         Box(modifier = Modifier.size(48.dp)) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onMore)
-                    .testTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "⋮",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 20.sp,
-                )
-            }
+            KebabTrigger(
+                contentDescription = "More session actions",
+                onClick = onMore,
+                triggerTestTag = TMUX_FULL_CHROME_MORE_BUTTON_TAG,
+                triggerSize = 48.dp,
+            )
             moreMenu()
         }
     }
@@ -4540,19 +4534,12 @@ internal fun CompactBreadcrumb(
                 .width(48.dp)
                 .fillMaxHeight(),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onMore)
-                    .testTag(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "⋮",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 20.sp,
-                )
-            }
+            KebabTrigger(
+                contentDescription = "More session actions",
+                onClick = onMore,
+                triggerTestTag = TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
+                triggerSize = 48.dp,
+            )
             moreMenu()
         }
     }

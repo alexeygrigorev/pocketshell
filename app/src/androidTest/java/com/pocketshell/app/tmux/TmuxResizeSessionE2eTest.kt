@@ -157,11 +157,12 @@ class TmuxResizeSessionE2eTest {
 
         // --- (3) Open kebab. Confirm the hard-cut manual item is absent.
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithText("⋮", useUnmergedTree = true)
+            compose.onAllNodesWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithText("⋮").performClick()
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("Kill session", useUnmergedTree = true)
                 .fetchSemanticsNodes()

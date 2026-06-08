@@ -197,11 +197,12 @@ class KillWindowE2eTest {
         // reconciled to a multi-window state), the latter is what we
         // tap next.
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithText("⋮", useUnmergedTree = true)
+            compose.onAllNodesWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithText("⋮").performClick()
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
         compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -273,9 +274,12 @@ class KillWindowE2eTest {
         // WindowSwitcher and observe exactly 2 surviving pages.
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("⋮").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
         }
-        compose.onNodeWithText("⋮").performClick()
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()

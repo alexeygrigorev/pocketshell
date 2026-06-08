@@ -35,8 +35,10 @@ import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -525,6 +527,72 @@ class HostListViewModelTest {
         assertNotNull(warning)
         assertEquals(hostId, warning!!.hostId)
         assertEquals(info, warning.releaseInfo)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun appUpdateWarning_offersResolvedRelease_whenCachedHostProbeSaysRemoteCliNewerThanApp() = runTest {
+        // Regression for the 2026-06-08 dogfood recurrence: once a probe has
+        // persisted "remote CLI newer than this APK", the host becomes a
+        // compatible/ready cache hit. That cache hit must still surface the
+        // same actionable in-app update path instead of silently navigating.
+        val info = ReleaseInfo(
+            tagName = "v9999.0.0",
+            htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v9999.0.0",
+            apkUrl = "https://example.com/pocketshell-9999.0.0-debug.apk",
+        )
+        val checker = SequenceReleaseChecker(
+            listOf(
+                ReleaseCheckResult.UpToDate, // init checkForUpdates()
+                ReleaseCheckResult.UpdateAvailable(info), // cached host warning resolution
+            ),
+        )
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val now = System.currentTimeMillis()
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "cached-remote-newer",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                lastBootstrapAt = now - 60_000L,
+                pocketshellInstalled = true,
+                pocketshellLastDetectedAt = now - 60_000L,
+                pocketshellCliVersion = "9999.0.0",
+                pocketshellExpectedCliVersion = "0.2.0",
+                pocketshellVersionCompatible = true,
+                pocketshellDaemonRunning = true,
+                pocketshellDaemonEnabled = true,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        var openCount = 0
+        val viewModel = newViewModel(
+            releaseChecker = checker,
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                openCount += 1
+                null
+            },
+        )
+        advanceUntilIdle()
+
+        val warning = viewModel.appUpdateWarning.value
+        assertNotNull(warning)
+        assertEquals(hostId, warning!!.hostId)
+        assertEquals("9999.0.0", warning.remoteVersion)
+        assertEquals("0.2.0", warning.appVersion)
+        assertEquals(info, warning.releaseInfo)
+        assertNull(warning.releaseResolutionFailure)
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k")
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(true, pending!!.ready)
+        assertEquals("cache hit should not need a live SSH probe", 0, openCount)
+        assertNull(viewModel.bootstrapState.value)
+        assertEquals(2, checker.callCount)
     }
 
     @Test

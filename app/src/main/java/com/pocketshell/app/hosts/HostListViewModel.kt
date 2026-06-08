@@ -13,6 +13,7 @@ import com.pocketshell.app.bootstrap.PocketshellDaemonStatus
 import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.bootstrap.cliUpdateFailureMessage
+import com.pocketshell.app.bootstrap.compareSemver
 import com.pocketshell.app.notifications.DefaultUpdateNotifier
 import com.pocketshell.app.notifications.UpdateNotifier
 import com.pocketshell.app.release.ReleaseCheckResult
@@ -52,6 +53,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -417,11 +419,80 @@ class HostListViewModel internal constructor(
      */
     private fun maybeRaiseAppUpdateWarning(host: HostEntity, report: HostBootstrapReport) {
         val appUpdate = report.pocketshellAppUpdateRequired ?: return
-        if (_dismissedAppUpdateWarnings.value.contains(host.id)) return
-        _appUpdateWarning.value = AppUpdateWarning(
+        raiseAppUpdateWarning(
             hostId = host.id,
             remoteVersion = appUpdate.currentVersion,
             appVersion = appUpdate.expectedVersion,
+        )
+    }
+
+    /**
+     * Issue #515 recurrence, 2026-06-08: the live foreground probe path
+     * raised [AppUpdateWarning], but the app also persists the same
+     * "remote CLI is newer than this APK" evidence as a compatible/ready
+     * host. A later cold launch or 24h cache hit can therefore skip the
+     * live probe branch entirely. Surface the same actionable warning from
+     * that cached evidence too, so a proven app-old state never becomes a
+     * silent ready host.
+     */
+    private fun observeCachedAppUpdateWarnings() {
+        viewModelScope.launch {
+            hostDao.getAll().collect { rows ->
+                val candidate = rows.firstNotNullOfOrNull { host ->
+                    cachedAppUpdateEvidence(host)?.let { evidence -> host to evidence }
+                } ?: return@collect
+                val (host, evidence) = candidate
+                raiseAppUpdateWarning(
+                    hostId = host.id,
+                    remoteVersion = evidence.remoteVersion,
+                    appVersion = evidence.appVersion,
+                )
+            }
+        }
+    }
+
+    private fun maybeRaiseCachedAppUpdateWarning(host: HostEntity) {
+        val evidence = cachedAppUpdateEvidence(host) ?: return
+        raiseAppUpdateWarning(
+            hostId = host.id,
+            remoteVersion = evidence.remoteVersion,
+            appVersion = evidence.appVersion,
+        )
+    }
+
+    private fun cachedAppUpdateEvidence(host: HostEntity): CachedAppUpdateEvidence? {
+        if (_dismissedAppUpdateWarnings.value.contains(host.id)) return null
+        if (!host.hasFreshCompatiblePocketshellResult()) return null
+        val remoteVersion = host.pocketshellCliVersion?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val appVersion = currentVersionName()
+            ?: host.pocketshellExpectedCliVersion?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return null
+        return when (compareSemver(remoteVersion, appVersion)) {
+            in 1..Int.MAX_VALUE -> CachedAppUpdateEvidence(remoteVersion, appVersion)
+            else -> null
+        }
+    }
+
+    private fun raiseAppUpdateWarning(
+        hostId: Long,
+        remoteVersion: String,
+        appVersion: String,
+    ) {
+        if (_dismissedAppUpdateWarnings.value.contains(hostId)) return
+        val current = _appUpdateWarning.value
+        if (
+            current != null &&
+            current.hostId == hostId &&
+            current.remoteVersion == remoteVersion &&
+            current.appVersion == appVersion
+        ) {
+            return
+        }
+        if (current != null) return
+        _appUpdateWarning.value = AppUpdateWarning(
+            hostId = hostId,
+            remoteVersion = remoteVersion,
+            appVersion = appVersion,
             isResolvingRelease = true,
         )
         // Issue #515: the host probe just *proved* this app build is behind
@@ -432,8 +503,13 @@ class HostListViewModel internal constructor(
         // a dead passive line. This is non-blocking: the host is already
         // fully usable. If GitHub/APK resolution fails, the same banner shows
         // the concrete reason plus Retry rather than silently degrading.
-        resolveAppUpdateRelease(host.id)
+        resolveAppUpdateRelease(hostId)
     }
+
+    private data class CachedAppUpdateEvidence(
+        val remoteVersion: String,
+        val appVersion: String,
+    )
 
     /**
      * Best-effort GitHub-release lookup that populates the [AppUpdateWarning]
@@ -578,6 +654,7 @@ class HostListViewModel internal constructor(
 
     init {
         checkForUpdates()
+        observeCachedAppUpdateWarnings()
     }
 
     /**
@@ -959,6 +1036,7 @@ class HostListViewModel internal constructor(
 
         if (skipTmuxProbe) {
             _bootstrapState.value = null
+            maybeRaiseCachedAppUpdateWarning(host)
             setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
             _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
             return completedJob()
@@ -969,6 +1047,7 @@ class HostListViewModel internal constructor(
                 val currentHost = hostDao.getById(host.id) ?: host
                 if (currentHost.canUseBootstrapCache()) {
                     _bootstrapState.value = null
+                    maybeRaiseCachedAppUpdateWarning(currentHost)
                     setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
                     _pendingNavigation.value = PendingNavigation(currentHost, keyPath, passphrase, ready = true)
                     return@withLock
@@ -1095,12 +1174,14 @@ class HostListViewModel internal constructor(
                             if (!isSilentProbeStillCurrent(host.id, scheduledGeneration)) return@withLock
                             persistResult(host, installed = true)
                             persistPocketshellResult(host, report)
+                            maybeRaiseAppUpdateWarning(host, report)
                         }
                         TmuxStatus.Missing -> {
                             val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                             if (!isSilentProbeStillCurrent(host.id, scheduledGeneration)) return@withLock
                             persistResult(host, installed = false)
                             persistPocketshellResult(host, report)
+                            maybeRaiseAppUpdateWarning(host, report)
                         }
                         is TmuxStatus.Unknown -> {
                             // Cannot prove either way — leave the persisted

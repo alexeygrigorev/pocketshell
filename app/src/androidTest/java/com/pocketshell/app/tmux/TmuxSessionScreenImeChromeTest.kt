@@ -236,6 +236,42 @@ class TmuxSessionScreenImeChromeTest {
     }
 
     @Test
+    fun usageQuotaStatesDoNotRenderOrReserveSessionChrome() {
+        val quotaState = mutableStateOf(UsageQuotaChromeScenario.Warning)
+        compose.setContent {
+            PocketShellTheme {
+                TmuxStackWithQuotaStateUnderTest(quotaState.value)
+            }
+        }
+
+        UsageQuotaChromeScenario.values().forEach { scenario ->
+            compose.runOnIdle { quotaState.value = scenario }
+            compose.waitForIdle()
+
+            compose.onNodeWithText("WARNING", substring = true).assertDoesNotExist()
+            compose.onNodeWithText("EXCEEDED", substring = true).assertDoesNotExist()
+            compose.onNodeWithText("quota", substring = true).assertDoesNotExist()
+
+            val chromeBottom = compose
+                .onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG)
+                .fetchSemanticsNode()
+                .boundsInRoot
+                .bottom
+            val terminalTop = compose
+                .onNodeWithTag(TERMINAL_PROXY_TAG)
+                .fetchSemanticsNode()
+                .boundsInRoot
+                .top
+
+            assertTrue(
+                "Usage quota state $scenario must not allocate a banner/chip row between " +
+                    "tmux chrome and terminal; chromeBottom=$chromeBottom terminalTop=$terminalTop",
+                kotlin.math.abs(terminalTop - chromeBottom) <= 0.5f,
+            )
+        }
+    }
+
+    @Test
     fun fullChromeRightEdgeTapOpensMoreMenu() {
         compose.setContent {
             PocketShellTheme {
@@ -359,6 +395,34 @@ class TmuxSessionScreenImeChromeTest {
     }
 
     @Composable
+    private fun TmuxStackWithQuotaStateUnderTest(
+        @Suppress("UNUSED_PARAMETER") quotaState: UsageQuotaChromeScenario,
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            ConsolidatedTopChrome(
+                sessionName = "claude-main",
+                onBack = {},
+                onMore = {},
+                modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(PocketShellColors.SurfaceElev)
+                    .testTag(TERMINAL_PROXY_TAG),
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(96.dp)
+                    .background(PocketShellColors.Surface)
+                    .testTag(BOTTOM_CHROME_PROXY_TAG),
+            )
+        }
+    }
+
+    @Composable
     private fun ChromeWithAnchoredMenuUnderTest(compact: Boolean) {
         val expanded = remember { mutableStateOf(false) }
         val menu: @Composable () -> Unit = {
@@ -401,5 +465,11 @@ class TmuxSessionScreenImeChromeTest {
     private companion object {
         const val TERMINAL_PROXY_TAG = "tmux:ime-chrome-test:terminal"
         const val BOTTOM_CHROME_PROXY_TAG = "tmux:ime-chrome-test:bottom-chrome"
+    }
+
+    private enum class UsageQuotaChromeScenario {
+        Warning,
+        Dismissed,
+        Exceeded,
     }
 }

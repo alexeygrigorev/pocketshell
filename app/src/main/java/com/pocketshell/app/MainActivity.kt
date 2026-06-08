@@ -147,12 +147,10 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var settingsRepository: SettingsRepository
 
-    // Issue #116 (usage-panel Fix B): session/navigation surfaces need
-    // the per-host worst-case usage record for compact quota affordances.
-    // Injecting the
-    // scheduler at the activity lets the navigator pass a snapshot
-    // map down to each session destination without coupling
-    // SessionViewModel / TmuxSessionViewModel to the scheduler.
+    // UsageScheduler remains activity-visible for instrumentation that
+    // asserts lifecycle/background behavior. Usage alerts are delivered
+    // by the scheduler/notifier path; terminal session screens must not
+    // receive scheduler snapshots for persistent quota chrome.
     @Inject
     lateinit var usageScheduler: UsageScheduler
 

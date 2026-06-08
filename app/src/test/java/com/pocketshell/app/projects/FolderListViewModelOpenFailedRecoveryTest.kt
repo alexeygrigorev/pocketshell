@@ -174,6 +174,40 @@ class FolderListViewModelOpenFailedRecoveryTest {
     }
 
     @Test
+    fun refreshSessionsCommandFailurePreservesReadySnapshot() = runTest {
+        val gateway = ScriptedGateway(
+            results = listOf(
+                FolderListResult.Sessions(rows = listOf(sessionRow("alpha"), sessionRow("beta"))),
+                FolderListResult.Failed("tmux list-sessions failed"),
+            ),
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+            assertEquals(setOf("alpha", "beta"), readySessionNames(vm))
+
+            vm.refreshSessions()
+            runCurrent()
+
+            assertEquals(
+                "manual Refresh sessions must not discard visible sessions on a command failure",
+                setOf("alpha", "beta"),
+                readySessionNames(vm),
+            )
+            val actionStatus = vm.actionStatus.value
+            when (actionStatus) {
+                is FolderActionStatus.Failed -> {
+                    assertTrue(actionStatus.message.contains("tmux list-sessions failed"))
+                }
+                else -> fail("expected a lightweight refresh failure banner, got $actionStatus")
+            }
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
     fun refreshSessionsReloadsVisibleSessionSnapshot() = runTest {
         val gateway = ScriptedGateway(
             results = listOf(

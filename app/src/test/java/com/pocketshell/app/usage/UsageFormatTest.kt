@@ -235,7 +235,7 @@ class UsageFormatTest {
     }
 
     @Test
-    fun errorClaudeTelemetry_hasUnavailableSummaryWithoutAuthOrBlockedCopy() {
+    fun errorClaudeTelemetry_hasAuthSetupSummaryWithoutOkOrBlockedCopy() {
         val record = UsageProviderRecord(
             provider = "claude",
             status = UsageStatus.Error,
@@ -244,8 +244,8 @@ class UsageFormatTest {
             lastError = "HTTP Error 401: Unauthorized",
         )
 
-        assertEquals("Usage data unavailable", statusLabel(record))
-        assertEquals("Usage data unavailable", usageProviderStateDescription(record))
+        assertEquals("Auth setup required", statusLabel(record))
+        assertEquals("Auth setup required", usageProviderStateDescription(record))
         assertEquals(
             "Usage authentication needs setup on this host. " +
                 "Sign in with the provider CLI on the host, then refresh usage.",
@@ -256,11 +256,34 @@ class UsageFormatTest {
             usageProviderStateDescription(record),
             usageTelemetryMessageForDisplay(record.lastError).orEmpty(),
         ).forEach { text ->
+            assertEquals(false, text.equals("OK", ignoreCase = true))
             assertEquals(false, text.contains("claude " + "/login", ignoreCase = true))
             assertEquals(false, text.contains("authentication " + "failed", ignoreCase = true))
             assertEquals(false, text.contains("provider " + "blocked", ignoreCase = true))
             assertEquals(false, text.contains("HTTP Error 401", ignoreCase = true))
         }
+    }
+
+    @Test
+    fun okCodexRecordWithAuthTelemetry_doesNotRenderAsOk() {
+        val record = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Ok,
+            rawStatus = "ok",
+            windows = emptyList(),
+            lastError = "No auth token. Run codex login.",
+        )
+
+        val ui = usageProviderStatusUi(record)
+
+        assertEquals("Auth setup required", ui.label)
+        assertEquals("Auth setup required", ui.description)
+        assertEquals(true, ui.needsAuthSetup)
+        assertEquals(
+            "Codex usage authentication needs setup on this host. " +
+                "Run `codex login` in the host shell, then refresh usage.",
+            usageTelemetryMessageForDisplay(record.lastError),
+        )
     }
 
     @Test
@@ -325,6 +348,40 @@ class UsageFormatTest {
         assertEquals("Codex", row.provider)
         assertEquals(UsageStatus.Blocked, row.status)
         assertEquals(100.0, row.percent, 0.001)
+        assertEquals("100% used", row.percentLabel)
         assertEquals(UsageThresholdState.Exceeded, row.thresholdState)
+    }
+
+    @Test
+    fun dashboardRows_exposesExplicitPercentUsedLabel() {
+        val record = UsageProviderRecord(
+            provider = "openai",
+            status = UsageStatus.Ok,
+            rawStatus = "ok",
+            windows = listOf(
+                UsageWindow(
+                    name = "7d",
+                    used = 65.0,
+                    limit = 100.0,
+                    unit = "percent",
+                    resetAt = Instant.parse("2026-06-11T00:27:17Z"),
+                ),
+            ),
+        )
+        val state = UsageScreenState(
+            hosts = listOf(
+                UsageHostSnapshot(
+                    hostId = 1L,
+                    hostName = "agents",
+                    records = listOf(record),
+                    lastSyncedAt = Instant.parse("2026-06-07T12:00:00Z"),
+                ),
+            ),
+        )
+
+        val row = state.dashboardRows().single()
+
+        assertEquals("65% used", row.percentLabel)
+        assertEquals(Instant.parse("2026-06-11T00:27:17Z"), row.soonestReset)
     }
 }

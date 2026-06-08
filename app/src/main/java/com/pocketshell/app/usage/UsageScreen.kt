@@ -201,7 +201,7 @@ fun UsageDashboardStrip(
                     )
                 }
                 Text(
-                    text = formatPercentUsed(row.percent),
+                    text = row.percentLabel,
                     color = thresholdTextColor(row.thresholdState),
                     style = PocketShellType.labelMono,
                 )
@@ -438,7 +438,7 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ProviderDot(kind = dotKind(record.status, record.isNearLimit, record.isBlocked))
+                ProviderDot(kind = dotKind(record))
                 Text(
                     text = record.displayName,
                     color = PocketShellColors.Text,
@@ -643,10 +643,11 @@ internal enum class DotKind {
     Neutral,
 }
 
-private fun dotKind(status: UsageStatus, nearLimit: Boolean, blocked: Boolean): DotKind = when {
-    blocked -> DotKind.Blocked
-    nearLimit || status == UsageStatus.Warn -> DotKind.Warn
-    status == UsageStatus.Ok -> DotKind.Ok
+private fun dotKind(record: UsageProviderRecord): DotKind = when {
+    usageProviderStatusUi(record).needsAuthSetup -> DotKind.Neutral
+    record.isBlocked -> DotKind.Blocked
+    record.isNearLimit || record.status == UsageStatus.Warn -> DotKind.Warn
+    record.status == UsageStatus.Ok -> DotKind.Ok
     else -> DotKind.Neutral
 }
 
@@ -695,6 +696,7 @@ internal fun thresholdBannerSuffix(state: UsageThresholdState): String = when (s
 }
 
 private fun pillKind(record: UsageProviderRecord): PillKind = when {
+    usageProviderStatusUi(record).needsAuthSetup -> PillKind.Error
     record.isBlocked -> PillKind.Blocked
     record.isNearLimit || record.status == UsageStatus.Warn -> PillKind.Warn
     record.status == UsageStatus.Ok -> PillKind.Ok

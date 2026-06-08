@@ -11,20 +11,18 @@ import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.max
 
-internal fun statusLabel(record: UsageProviderRecord): String = when {
-    record.thresholdState() == UsageThresholdState.Exceeded -> "Exceeded"
-    record.status == UsageStatus.Warn || record.isNearLimit -> "Warn"
-    record.status == UsageStatus.Ok -> "OK"
-    record.status == UsageStatus.Unsupported -> "Unsupported"
-    record.status == UsageStatus.Error -> USAGE_DATA_UNAVAILABLE
-    else -> record.rawStatus.replaceFirstChar { it.uppercase() }
-}
+internal fun statusLabel(record: UsageProviderRecord): String =
+    usageProviderStatusUi(record).label
 
 internal const val USAGE_DATA_UNAVAILABLE: String = "Usage data unavailable"
 internal const val REFRESH_USAGE_FAILED: String = "Refresh usage failed"
+internal const val USAGE_AUTH_SETUP_REQUIRED: String = "Auth setup required"
 internal const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE: String =
     "Claude usage authentication needs setup on this host. " +
         "Open Claude Code on the host and complete sign-in, then refresh usage."
+internal const val CODEX_USAGE_AUTH_SETUP_MESSAGE: String =
+    "Codex usage authentication needs setup on this host. " +
+        "Run `codex login` in the host shell, then refresh usage."
 private const val PROVIDER_USAGE_AUTH_SETUP_MESSAGE: String =
     "Usage authentication needs setup on this host. " +
         "Sign in with the provider CLI on the host, then refresh usage."
@@ -32,11 +30,40 @@ private const val PROVIDER_USAGE_AUTH_SETUP_MESSAGE: String =
 internal fun usageProviderStateDescription(
     record: UsageProviderRecord,
     state: UsageThresholdState = record.thresholdState(),
-): String = when {
-    record.status == UsageStatus.Error -> USAGE_DATA_UNAVAILABLE
-    record.status == UsageStatus.Unsupported -> "Unsupported"
-    state.warrantsWarning -> thresholdRowDescription(state)
-    else -> "OK"
+): String = usageProviderStatusUi(record, state).description
+
+internal data class UsageProviderStatusUi(
+    val label: String,
+    val description: String,
+    val needsAuthSetup: Boolean,
+)
+
+internal fun usageProviderStatusUi(
+    record: UsageProviderRecord,
+    state: UsageThresholdState = record.thresholdState(),
+): UsageProviderStatusUi {
+    val needsAuthSetup = usageAuthSetupMessageForDisplay(record.lastError) != null
+    val label = when {
+        needsAuthSetup -> USAGE_AUTH_SETUP_REQUIRED
+        state == UsageThresholdState.Exceeded -> "Exceeded"
+        record.status == UsageStatus.Warn || record.isNearLimit -> "Warn"
+        record.status == UsageStatus.Ok -> "OK"
+        record.status == UsageStatus.Unsupported -> "Unsupported"
+        record.status == UsageStatus.Error -> USAGE_DATA_UNAVAILABLE
+        else -> record.rawStatus.replaceFirstChar { it.uppercase() }
+    }
+    val description = when {
+        needsAuthSetup -> USAGE_AUTH_SETUP_REQUIRED
+        record.status == UsageStatus.Error -> USAGE_DATA_UNAVAILABLE
+        record.status == UsageStatus.Unsupported -> "Unsupported"
+        state.warrantsWarning -> thresholdRowDescription(state)
+        else -> "OK"
+    }
+    return UsageProviderStatusUi(
+        label = label,
+        description = description,
+        needsAuthSetup = needsAuthSetup,
+    )
 }
 
 internal fun usageTelemetryMessageForDisplay(message: String?): String? {
@@ -44,8 +71,17 @@ internal fun usageTelemetryMessageForDisplay(message: String?): String? {
     val lower = trimmed.lowercase(Locale.US)
     return when {
         lower.startsWith(CLAUDE_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) ||
+            lower.startsWith(CODEX_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) ||
             lower.startsWith(PROVIDER_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) ||
             lower.startsWith(REFRESH_USAGE_FAILED.lowercase(Locale.US)) -> trimmed
+        lower.contains("codex") &&
+            (
+                    lower.contains("no auth token") ||
+                    lower.contains("no-auth-token") ||
+                    lower.contains("codex login") ||
+                    lower.contains("authentication") ||
+                    lower.contains("login required")
+            ) -> CODEX_USAGE_AUTH_SETUP_MESSAGE
         lower.contains("claude") &&
             (
                     lower.contains("authentication " + "failed") ||
@@ -60,6 +96,17 @@ internal fun usageTelemetryMessageForDisplay(message: String?): String? {
             lower == "no credentials" -> PROVIDER_USAGE_AUTH_SETUP_MESSAGE
         lower.startsWith(USAGE_DATA_UNAVAILABLE.lowercase(Locale.US)) -> trimmed
         else -> trimmed
+    }
+}
+
+internal fun usageAuthSetupMessageForDisplay(message: String?): String? {
+    val display = usageTelemetryMessageForDisplay(message) ?: return null
+    val lower = display.lowercase(Locale.US)
+    return when {
+        lower.startsWith(CLAUDE_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) -> display
+        lower.startsWith(CODEX_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) -> display
+        lower.startsWith(PROVIDER_USAGE_AUTH_SETUP_MESSAGE.lowercase(Locale.US)) -> display
+        else -> null
     }
 }
 

@@ -12,6 +12,7 @@ import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
 import java.time.Instant
+import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Before
@@ -40,14 +41,26 @@ class UsageNotificationsTest {
                 provider = "codex",
                 status = UsageStatus.Ok,
                 rawStatus = "ok",
-                windows = listOf(UsageWindow("7d", 80.0, 100.0, "percent", null)),
+                windows = listOf(
+                    UsageWindow(
+                        "7d",
+                        86.0,
+                        100.0,
+                        "percent",
+                        Instant.parse("2026-06-08T12:00:00Z"),
+                    ),
+                ),
             ),
             state = UsageThresholdState.Approaching,
             warnPercent = 80.0,
+            now = Instant.parse("2026-06-08T10:00:00Z"),
+            zoneId = ZoneId.of("UTC"),
         )
 
-        assertEquals("Codex usage reached 80%", event.title)
+        assertEquals("Codex usage: 86% used", event.title)
+        assertEquals("Approaching limit · resets in 2h · Tap to open Usage.", event.text)
         assertFalse(event.title.contains("blocked", ignoreCase = true))
+        assertFalse(event.text.contains("blocked", ignoreCase = true))
     }
 
     @Test
@@ -65,8 +78,11 @@ class UsageNotificationsTest {
         )
 
         assertEquals("Codex weekly quota exceeded", event.title)
+        assertEquals("100% used · Tap to open Usage.", event.text)
         assertFalse(event.title.contains("provider " + "blocked", ignoreCase = true))
         assertFalse(event.title.contains("blocked", ignoreCase = true))
+        assertFalse(event.text.contains("provider " + "blocked", ignoreCase = true))
+        assertFalse(event.text.contains("blocked", ignoreCase = true))
     }
 
     @Test
@@ -82,7 +98,8 @@ class UsageNotificationsTest {
             warnPercent = 80.0,
         )
 
-        assertEquals("Claude Code usage reached 95%", event.title)
+        assertEquals("Claude Code usage: 96% used", event.title)
+        assertEquals("Critical usage · Tap to open Usage.", event.text)
         assertFalse(event.title.contains("provider " + "blocked", ignoreCase = true))
         assertFalse(event.title.contains("blocked", ignoreCase = true))
     }
@@ -93,6 +110,8 @@ class UsageNotificationsTest {
         val notifier = DefaultUsageNotifier(
             context = context,
             settingsRepository = SettingsRepository(context),
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
+            zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
         )
         val approaching = UsageSnapshot.Records(
@@ -126,8 +145,15 @@ class UsageNotificationsTest {
         notifier.onSnapshotsChanged(mapOf(1L to exceeded))
 
         assertEquals(
-            listOf("Codex usage reached 80%", "Codex weekly quota exceeded"),
+            listOf("Codex usage: 80% used", "Codex weekly quota exceeded"),
             events.map { it.title },
+        )
+        assertEquals(
+            listOf(
+                "agent-box · Approaching limit · Tap to open Usage.",
+                "agent-box · 100% used · Tap to open Usage.",
+            ),
+            events.map { it.text },
         )
     }
 
@@ -137,6 +163,8 @@ class UsageNotificationsTest {
         val notifier = DefaultUsageNotifier(
             context = context,
             settingsRepository = SettingsRepository(context),
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
+            zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
         )
 
@@ -145,7 +173,7 @@ class UsageNotificationsTest {
         notifier.onSnapshotsChanged(mapOf(1L to snapshot(percent = 80.0)))
 
         assertEquals(
-            listOf("Codex usage reached 80%", "Codex usage reached 80%"),
+            listOf("Codex usage: 80% used", "Codex usage: 80% used"),
             events.map { it.title },
         )
     }
@@ -156,6 +184,8 @@ class UsageNotificationsTest {
         val notifier = DefaultUsageNotifier(
             context = context,
             settingsRepository = SettingsRepository(context),
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
+            zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
         )
 
@@ -185,8 +215,15 @@ class UsageNotificationsTest {
         )
 
         assertEquals(
-            listOf("Codex usage reached 80%", "Codex usage reached 80%"),
+            listOf("Codex usage: 80% used", "Codex usage: 80% used"),
             events.map { it.title },
+        )
+        assertEquals(
+            listOf(
+                "agent-box · Approaching limit · resets in 5h · Tap to open Usage.",
+                "agent-box · Approaching limit · resets in 2 days · Tap to open Usage.",
+            ),
+            events.map { it.text },
         )
     }
 

@@ -16,6 +16,7 @@ import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageThresholdState
 import java.time.Instant
+import java.time.ZoneId
 
 public interface UsageNotifier {
     public fun onSnapshotsChanged(snapshots: Map<Long, UsageSnapshot>)
@@ -28,6 +29,8 @@ public interface UsageNotifier {
 public class DefaultUsageNotifier(
     context: Context,
     private val settingsRepository: SettingsRepository,
+    private val now: () -> Instant = { Instant.now() },
+    private val zoneId: () -> ZoneId = { ZoneId.systemDefault() },
     private val poster: (UsageNotificationEvent) -> Unit = { event ->
         UsageNotifications.show(context.applicationContext, event)
     },
@@ -45,7 +48,17 @@ public class DefaultUsageNotifier(
                 val key = usageNotificationKey(snapshot.hostId, record, state)
                 current += key
                 if (key !in activeKeys) {
-                    poster(usageNotificationEvent(record, state, warnPercent))
+                    poster(
+                        usageNotificationEvent(
+                            record = record,
+                            state = state,
+                            warnPercent = warnPercent,
+                            now = now(),
+                            zoneId = zoneId(),
+                            hostName = snapshot.hostName,
+                            hostId = snapshot.hostId,
+                        ),
+                    )
                 }
             }
         }
@@ -71,21 +84,38 @@ internal fun usageNotificationEvent(
     record: UsageProviderRecord,
     state: UsageThresholdState,
     warnPercent: Double,
+    now: Instant = Instant.now(),
+    zoneId: ZoneId = ZoneId.systemDefault(),
+    hostName: String? = null,
+    hostId: Long? = null,
 ): UsageNotificationEvent {
+    val percentLabel = record.mostConstrainedWindow?.percent?.let(::formatPercentUsed)
     val title = when (state) {
         UsageThresholdState.Approaching ->
-            "${record.displayName} usage reached ${formatPercent(warnPercent)}"
+            "${record.displayName} usage: ${percentLabel ?: formatPercentUsed(warnPercent)}"
         UsageThresholdState.Critical ->
-            "${record.displayName} usage reached ${formatPercent(UsageProviderRecord.CRITICAL_PERCENT)}"
+            "${record.displayName} usage: ${percentLabel ?: formatPercentUsed(UsageProviderRecord.CRITICAL_PERCENT)}"
         UsageThresholdState.Exceeded ->
             "${record.displayName} ${exceededQuotaLabel(record)}"
         UsageThresholdState.Ok ->
             "${record.displayName} usage"
     }
+    val resetText = record.mostConstrainedWindow?.resetAt?.let { reset ->
+        "resets ${formatResetRelative(now, reset, zoneId)}"
+    }
+    val hostText = hostName?.trim()?.takeIf { it.isNotEmpty() }
+    val stateText = when (state) {
+        UsageThresholdState.Approaching -> "Approaching limit"
+        UsageThresholdState.Critical -> "Critical usage"
+        UsageThresholdState.Exceeded -> percentLabel ?: "Quota exceeded"
+        UsageThresholdState.Ok -> null
+    }
+    val body = listOfNotNull(hostText, stateText, resetText, "Tap to open Usage.")
+        .joinToString(" · ")
     return UsageNotificationEvent(
         title = title,
-        text = "Tap to open Usage.",
-        notificationId = 27_000 + record.provider.lowercase().hashCode().and(0x0fff),
+        text = body,
+        notificationId = 27_000 + "${record.provider.lowercase()}:${hostId ?: 0L}".hashCode().and(0x0fff),
     )
 }
 

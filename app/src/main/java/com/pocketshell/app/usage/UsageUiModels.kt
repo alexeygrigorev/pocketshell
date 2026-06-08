@@ -82,4 +82,12 @@ public data class UsageDashboardRow(
      * provider reports no reset times.
      */
     val soonestReset: Instant? = null,
-)
+) {
+    /**
+     * Device-facing summary copy. Keeping the explicit "used" suffix in
+     * the model prevents compact surfaces from regressing to ambiguous
+     * bare percentages.
+     */
+    public val percentLabel: String
+        get() = formatPercentUsed(percent)
+}

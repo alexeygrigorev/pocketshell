@@ -24,6 +24,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
@@ -87,6 +88,11 @@ data class KebabItem(
  * [triggerTestTag] overrides the default [KEBAB_BUTTON_TAG] on the trigger so a
  * screen that already has stable instrumentation for its overflow button can
  * adopt this component without breaking existing tests.
+ *
+ * [triggerSize] defaults to the compact 40dp visual used by most rows. Screens
+ * that need the trigger itself to be the full touch target (for example dense
+ * session rows with long names) can raise it to their a11y floor without adding
+ * a second clickable wrapper around the menu.
  */
 @Composable
 fun Kebab(
@@ -94,6 +100,7 @@ fun Kebab(
     modifier: Modifier = Modifier,
     contentDescription: String = "More actions",
     triggerTestTag: String = KEBAB_BUTTON_TAG,
+    triggerSize: Dp = 40.dp,
     expanded: Boolean? = null,
     onExpandedChange: ((Boolean) -> Unit)? = null,
 ) {
@@ -106,7 +113,7 @@ fun Kebab(
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
-                .size(40.dp)
+                .size(triggerSize)
                 .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
                 .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
                 .clickable(role = Role.Button, onClick = { setExpanded(true) })

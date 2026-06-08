@@ -1890,38 +1890,30 @@ private fun SessionActionsKebab(
     onStop: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    Box(
-        modifier = Modifier
-            .size(PocketShellDensity.tapTargetMin)
-            .clickable(role = Role.Button, onClick = { expanded = true })
-            .semantics { contentDescription = "Session actions $sessionName" }
-            .testTag(triggerTestTag),
-        contentAlignment = Alignment.CenterEnd,
-    ) {
-        Kebab(
-            contentDescription = "Session actions $sessionName",
-            triggerTestTag = "$triggerTestTag:visual",
-            expanded = expanded,
-            onExpandedChange = { expanded = it },
-            items = listOf(
-                KebabItem(
-                    label = "Open session",
-                    onClick = onOpen,
-                    testTag = openItemTestTag,
-                ),
-                KebabItem(
-                    label = "Rename session",
-                    onClick = onRename,
-                    testTag = renameItemTestTag,
-                ),
-                KebabItem(
-                    label = "Stop session",
-                    onClick = onStop,
-                    testTag = stopItemTestTag,
-                ),
+    Kebab(
+        contentDescription = "Session actions $sessionName",
+        triggerTestTag = triggerTestTag,
+        triggerSize = PocketShellDensity.tapTargetMin,
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        items = listOf(
+            KebabItem(
+                label = "Open session",
+                onClick = onOpen,
+                testTag = openItemTestTag,
             ),
-        )
-    }
+            KebabItem(
+                label = "Rename session",
+                onClick = onRename,
+                testTag = renameItemTestTag,
+            ),
+            KebabItem(
+                label = "Stop session",
+                onClick = onStop,
+                testTag = stopItemTestTag,
+            ),
+        ),
+    )
 }
 
 @Composable

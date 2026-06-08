@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -81,8 +82,6 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
-import com.pocketshell.uikit.components.Badge
-import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
@@ -1330,9 +1329,8 @@ private fun FlatSessionRow(
         },
         trailing = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Badge(
-                    label = sessionBadgeLabel(session),
-                    role = if (isAgent) BadgeRole.Agent else BadgeRole.Shell,
+                AgentTypeBadge(
+                    session = session,
                     modifier = Modifier.testTag(folderListFlatRowBadgeTestTag(session.sessionName)),
                 )
                 Spacer(modifier = Modifier.width(4.dp))
@@ -2004,6 +2002,7 @@ private fun AgentTypeBadge(
     }
     Box(
         modifier = modifier
+            .widthIn(max = SessionBadgeMaxWidth)
             .background(bg, RoundedCornerShape(6.dp))
             .padding(horizontal = PocketShellDensity.chipPadH, vertical = PocketShellDensity.chipPadV),
     ) {
@@ -2013,9 +2012,12 @@ private fun AgentTypeBadge(
             style = PocketShellType.labelMono,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
+
+private val SessionBadgeMaxWidth = 84.dp
 
 /**
  * Compact host-detail tree gutter. The shared density token keeps the default

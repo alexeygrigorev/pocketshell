@@ -311,6 +311,7 @@ class FolderListStopSessionTest {
             longName = longName,
             mode = HostDetailViewMode.Tree,
             rowTag = folderDetailRowTestTag(projectPath, longName),
+            badgeTag = folderSessionBadgeTestTag(projectPath, longName),
             triggerTag = folderSessionActionsTestTag(projectPath, longName),
             openItemTag = folderSessionOpenMenuItemTestTag(projectPath, longName),
             renameItemTag = folderSessionRenameMenuItemTestTag(projectPath, longName),
@@ -327,6 +328,7 @@ class FolderListStopSessionTest {
             longName = longName,
             mode = HostDetailViewMode.Flat,
             rowTag = folderListFlatRowTestTag(longName),
+            badgeTag = folderListFlatRowBadgeTestTag(longName),
             triggerTag = folderListFlatRowActionsTestTag(longName),
             openItemTag = folderListFlatRowOpenMenuItemTestTag(longName),
             renameItemTag = folderListFlatRowRenameMenuItemTestTag(longName),
@@ -358,6 +360,7 @@ class FolderListStopSessionTest {
         longName: String,
         mode: HostDetailViewMode,
         rowTag: String,
+        badgeTag: String,
         triggerTag: String,
         openItemTag: String,
         renameItemTag: String,
@@ -425,6 +428,7 @@ class FolderListStopSessionTest {
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG).performScrollToNode(hasTestTag(rowTag))
 
         assertActionTargetVisibleInsideRow(rowTag = rowTag, triggerTag = triggerTag)
+        assertNodeVisibleInsideRow(rowTag = rowTag, nodeTag = badgeTag)
 
         compose.onNodeWithTag(triggerTag).performClick()
         compose.onNodeWithTag(openItemTag).assertExists()
@@ -461,6 +465,22 @@ class FolderListStopSessionTest {
             "long session names must not push the action target outside the row: " +
                 "row=$rowBounds trigger=$triggerBounds",
             triggerBounds.left >= rowBounds.left && triggerBounds.right <= rowBounds.right,
+        )
+    }
+
+    private fun assertNodeVisibleInsideRow(rowTag: String, nodeTag: String) {
+        val rowBounds = compose.onNodeWithTag(rowTag, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val nodeBounds = compose.onNodeWithTag(nodeTag, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        assertTrue(
+            "long session names must not push trailing row chrome outside the row: " +
+                "row=$rowBounds node=$nodeBounds",
+            nodeBounds.left >= rowBounds.left && nodeBounds.right <= rowBounds.right,
         )
     }
 

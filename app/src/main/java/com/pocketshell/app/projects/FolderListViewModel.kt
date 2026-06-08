@@ -41,6 +41,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -178,6 +179,7 @@ sealed interface FolderListUiState {
         val treeRoots: List<FolderTreeRoot>,
         val flatSessions: List<FolderSessionEntry>,
         val expandedProjectPaths: Set<String>,
+        val isRefreshing: Boolean = false,
         val portForwarding: HostPortForwardingSummary = HostPortForwardingSummary(),
     ) : FolderListUiState
 
@@ -269,6 +271,8 @@ class FolderListViewModel internal constructor(
         },
     ),
     @ApplicationContext private val applicationContext: Context? = null,
+    private val hostSessionListCache: HostSessionListCache? =
+        applicationContext?.let(::HostSessionListCache),
     private val assistantClientFactory: AssistantLlmClientFactory? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
     private val forwardingController: ForwardingController,
@@ -309,6 +313,7 @@ class FolderListViewModel internal constructor(
         // connection (reference-counted) instead of racing a second one.
         sshLeaseManager: SshLeaseManager,
         @ApplicationContext applicationContext: Context,
+        hostSessionListCache: HostSessionListCache,
         assistantClientFactory: AssistantLlmClientFactory?,
         reposRemoteSource: ReposRemoteSource?,
         forwardingController: ForwardingController,
@@ -319,6 +324,7 @@ class FolderListViewModel internal constructor(
         projectRootDao = projectRootDao,
         sshLeaseManager = sshLeaseManager,
         applicationContext = applicationContext,
+        hostSessionListCache = hostSessionListCache,
         assistantClientFactory = assistantClientFactory,
         reposRemoteSource = reposRemoteSource,
         forwardingController = forwardingController,
@@ -363,6 +369,7 @@ class FolderListViewModel internal constructor(
     private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
     private var lastCreatedFolders: Map<String, String> = emptyMap()
     private var expandedProjectPaths: Set<String> = emptySet()
+    private var sessionRefreshInFlight: Boolean = false
 
     /**
      * Issue #471: folder paths the user has *explicitly collapsed*. This is
@@ -398,6 +405,7 @@ class FolderListViewModel internal constructor(
      * stale `false`.
      */
     private val processStarted = MutableStateFlow(false)
+    private var foregroundGeneration: Long = 0L
     private var lifecycleObserver: LifecycleEventObserver? = null
 
     init {
@@ -468,8 +476,8 @@ class FolderListViewModel internal constructor(
         if (lifecycleObserver != null) return
         val observer = LifecycleEventObserver { _: LifecycleOwner, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> processStarted.value = true
-                Lifecycle.Event.ON_STOP -> processStarted.value = false
+                Lifecycle.Event.ON_START -> updateProcessStarted(true)
+                Lifecycle.Event.ON_STOP -> updateProcessStarted(false)
                 else -> Unit
             }
         }
@@ -481,7 +489,7 @@ class FolderListViewModel internal constructor(
         // inline there. Connected tests that construct the VM off the
         // main thread drive the gate via [setProcessStartedForTest] and
         // pass `attachLifecycle = false` so we never reach the registry.
-        processStarted.value = owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        updateProcessStarted(owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
         owner.lifecycle.addObserver(observer)
     }
 
@@ -492,7 +500,15 @@ class FolderListViewModel internal constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal fun setProcessStartedForTest(started: Boolean) {
+        updateProcessStarted(started)
+    }
+
+    private fun updateProcessStarted(started: Boolean) {
+        val wasStarted = processStarted.value
         processStarted.value = started
+        if (!wasStarted && started) {
+            foregroundGeneration += 1
+        }
     }
 
     /**
@@ -540,11 +556,13 @@ class FolderListViewModel internal constructor(
         lastScannedProjectFoldersByRoot = emptyMap()
         lastHistoryProjectFoldersByRoot = emptyMap()
         lastResolvedWatchedRootPaths = emptyMap()
+        sessionRefreshInFlight = false
         // Issue #471: a new host starts with no expansion memory so auto-expand
         // applies fresh and a prior host's collapse choices don't leak across.
         expandedProjectPaths = emptySet()
         userCollapsedProjectPaths = emptySet()
         _state.value = loadingState()
+        restoreCachedSessions(hostId)
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {
@@ -966,8 +984,9 @@ class FolderListViewModel internal constructor(
                 // immediate probe and a host's live tmux sessions
                 // reappear on the folder tree without manual re-attach.
                 processStarted.first { it }
+                setSessionRefreshInFlight(true)
                 runProbe(params)
-                delay(POLL_INTERVAL_MS)
+                waitForNextPollOrForegroundReturn(foregroundGeneration)
             }
         }
     }
@@ -987,6 +1006,7 @@ class FolderListViewModel internal constructor(
 
     private suspend fun runProbe(params: BoundParams) {
         val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
+            setSessionRefreshInFlight(false)
             _state.value = FolderListUiState.Failed("Host not found.")
             return
         }
@@ -1000,6 +1020,7 @@ class FolderListViewModel internal constructor(
         when (result) {
             is FolderListResult.Sessions -> {
                 hasSessionProbeSnapshot = true
+                hostSessionListCache?.save(params.hostId, result.rows)
                 lastSessions = result.rows.map { row ->
                     FolderSessionEntry(
                         sessionName = row.sessionName,
@@ -1033,32 +1054,54 @@ class FolderListViewModel internal constructor(
                         process = port.processName,
                     )
                 }
+                setSessionRefreshInFlight(false)
                 emitReady()
-                completeManualRefresh()
+                if (refreshSessionsRequested) {
+                    completeManualRefresh()
+                } else {
+                    clearRefreshFailure()
+                }
             }
             is FolderListResult.Failed -> {
-                if (preserveReadyOnManualRefresh("Couldn't refresh sessions: ${result.message}")) return
+                setSessionRefreshInFlight(false)
+                if (preserveReadyOnRefresh("Couldn't refresh sessions: ${result.message}")) return
                 _state.value = FolderListUiState.Failed(result.message)
             }
             is FolderListResult.ConnectFailed -> {
                 val message = result.cause.message ?: "Connection failed"
-                if (preserveReadyOnManualRefresh("Couldn't refresh sessions: $message")) return
+                setSessionRefreshInFlight(false)
+                if (preserveReadyOnRefresh("Couldn't refresh sessions: $message")) return
                 _state.value = FolderListUiState.ConnectError(
                     message = message,
                     cause = result.cause,
                 )
             }
             FolderListResult.ToolUnavailable -> {
-                if (preserveReadyOnManualRefresh("Couldn't refresh sessions: tmux is not installed.")) return
+                setSessionRefreshInFlight(false)
+                if (preserveReadyOnRefresh("Couldn't refresh sessions: tmux is not installed.")) return
                 _state.value = FolderListUiState.ToolUnavailable
             }
         }
     }
 
-    private fun preserveReadyOnManualRefresh(message: String): Boolean {
-        if (!refreshSessionsRequested || _state.value !is FolderListUiState.Ready) return false
+    private suspend fun waitForNextPollOrForegroundReturn(observedForegroundGeneration: Long) {
+        var waitedMs = 0L
+        while (currentCoroutineContext().isActive && waitedMs < POLL_INTERVAL_MS) {
+            delay(POLL_TICK_MS)
+            if (foregroundGeneration != observedForegroundGeneration) return
+            if (!processStarted.value) {
+                processStarted.first { it }
+                return
+            }
+            waitedMs += POLL_TICK_MS
+        }
+    }
+
+    private fun preserveReadyOnRefresh(message: String): Boolean {
+        if (_state.value !is FolderListUiState.Ready) return false
         refreshSessionsRequested = false
         _actionStatus.value = FolderActionStatus.Failed(message)
+        emitReady()
         return true
     }
 
@@ -1066,6 +1109,45 @@ class FolderListViewModel internal constructor(
         if (!refreshSessionsRequested) return
         refreshSessionsRequested = false
         _actionStatus.value = FolderActionStatus.Succeeded("Sessions refreshed")
+    }
+
+    private fun clearRefreshFailure() {
+        val status = _actionStatus.value as? FolderActionStatus.Failed ?: return
+        if (status.message.startsWith("Couldn't refresh sessions:")) {
+            _actionStatus.value = FolderActionStatus.Idle
+        }
+    }
+
+    private fun restoreCachedSessions(hostId: Long) {
+        val snapshot = hostSessionListCache?.read(hostId) ?: return
+        hasSessionProbeSnapshot = true
+        lastSessions = snapshot.rows.map { row ->
+            FolderSessionEntry(
+                sessionName = row.sessionName,
+                lastActivity = row.lastActivity,
+                attached = row.attached,
+                agentKind = row.agentKind,
+                windows = row.windows.map { window ->
+                    FolderSessionWindowEntry(
+                        index = window.index,
+                        name = window.name,
+                        active = window.active,
+                        command = window.command,
+                        agentKind = window.agentKind,
+                    )
+                },
+            )
+        }
+        lastSessionFolderPaths = snapshot.rows.associate { row ->
+            row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
+        }
+        emitReady()
+    }
+
+    private fun setSessionRefreshInFlight(refreshing: Boolean) {
+        if (sessionRefreshInFlight == refreshing) return
+        sessionRefreshInFlight = refreshing
+        if (hasSessionProbeSnapshot) emitReady()
     }
 
     /**
@@ -1122,6 +1204,7 @@ class FolderListViewModel internal constructor(
                     .thenBy { it.sessionName },
             ),
             expandedProjectPaths = expandedProjectPaths,
+            isRefreshing = sessionRefreshInFlight,
             portForwarding = forwardingSummary(),
         )
     }

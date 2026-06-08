@@ -316,6 +316,7 @@ fun FolderListScreen(
                     treeRoots = s.treeRoots,
                     flatSessions = s.flatSessions,
                     expandedProjectPaths = s.expandedProjectPaths,
+                    isRefreshing = s.isRefreshing,
                     portForwarding = s.portForwarding,
                     showFlatFolderList = showFlatFolderList,
                     actionStatus = actionStatus,
@@ -929,6 +930,7 @@ private fun FolderListContent(
     treeRoots: List<FolderTreeRoot>,
     flatSessions: List<FolderSessionEntry>,
     expandedProjectPaths: Set<String>,
+    isRefreshing: Boolean,
     portForwarding: HostPortForwardingSummary,
     showFlatFolderList: Boolean,
     actionStatus: FolderActionStatus,
@@ -985,6 +987,11 @@ private fun FolderListContent(
                     status = actionStatus,
                     onDismiss = onDismissActionStatus,
                 )
+            }
+        }
+        if (isRefreshing) {
+            item {
+                FolderRefreshStatusRow()
             }
         }
         if (showFlatFolderList) {
@@ -1117,6 +1124,31 @@ private fun FolderListContent(
                     .testTag(FOLDER_LIST_BOTTOM_SPACER_TAG),
             )
         }
+    }
+}
+
+@Composable
+private fun FolderRefreshStatusRow() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag(FOLDER_LIST_REFRESHING_TAG),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(
+            color = PocketShellColors.Accent,
+            strokeWidth = 2.dp,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(
+            text = "Refreshing sessions",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            maxLines = 1,
+        )
     }
 }
 
@@ -2511,6 +2543,7 @@ const val FOLDER_LIST_BACK_TAG: String = "folder-list:back"
 const val FOLDER_LIST_TITLE_TAG: String = "folder-list:title"
 const val FOLDER_LIST_LOADING_TAG: String = "folder-list:loading"
 const val FOLDER_LIST_LOADING_BODY_TAG: String = "folder-list:loading:body"
+const val FOLDER_LIST_REFRESHING_TAG: String = "folder-list:refreshing"
 const val FOLDER_LIST_ERROR_TAG: String = "folder-list:error"
 const val FOLDER_LIST_RETRY_TAG: String = "folder-list:retry"
 const val FOLDER_LIST_EMPTY_TAG: String = "folder-list:empty"

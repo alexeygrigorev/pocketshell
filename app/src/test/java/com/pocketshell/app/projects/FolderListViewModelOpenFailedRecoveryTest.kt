@@ -121,12 +121,21 @@ class FolderListViewModelOpenFailedRecoveryTest {
             runCurrent()
 
             // Return to the tree -> re-bind same host kicks the failing probe.
+            // Issue #620 keeps the last visible rows usable instead of
+            // replacing the host detail screen with an error panel; the failure
+            // is surfaced through the existing lightweight action banner.
             bind(vm)
             runCurrent()
-            assertTrue(
-                "the probe after returning from the dead session should fail",
-                vm.state.value is FolderListUiState.ConnectError,
+            assertEquals(
+                "failed automatic refresh should keep the stale-but-usable tree visible",
+                setOf("alpha", "ghost"),
+                readySessionNames(vm),
             )
+            val failedStatus = vm.actionStatus.value
+            when (failedStatus) {
+                is FolderActionStatus.Failed -> assertTrue(failedStatus.message.contains("open failed"))
+                else -> fail("expected an automatic refresh failure banner, got $failedStatus")
+            }
 
             // Retry recovers; stale ghost row is dropped by the authoritative probe.
             vm.refresh()

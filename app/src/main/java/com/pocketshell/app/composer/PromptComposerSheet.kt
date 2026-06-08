@@ -24,11 +24,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -54,6 +56,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -186,6 +189,8 @@ public fun PromptComposerSheet(
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val isImeVisible = WindowInsets.ime.getBottom(density) > 0
 
     var showApiKeyDialog by remember { mutableStateOf(false) }
     // Issue #17: tracks whether the Snippets bottom sheet is currently
@@ -304,6 +309,27 @@ public fun PromptComposerSheet(
         viewModel.cancelRecording()
         onDismiss()
     }
+    var expandedForIme by remember { mutableStateOf(false) }
+    LaunchedEffect(isImeVisible, sheetState.currentValue) {
+        when {
+            shouldAutoExpandPromptComposerForIme(
+                isImeVisible = isImeVisible,
+                currentValue = sheetState.currentValue,
+                expandedForIme = expandedForIme,
+            ) -> {
+                if (runCatching { sheetState.expand() }.isSuccess) {
+                    expandedForIme = true
+                }
+            }
+            shouldRestorePromptComposerPartialAfterIme(
+                isImeVisible = isImeVisible,
+                expandedForIme = expandedForIme,
+            ) -> {
+                runCatching { sheetState.partialExpand() }
+                expandedForIme = false
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = dismissComposer,
@@ -334,8 +360,14 @@ public fun PromptComposerSheet(
         // by default, occupying the bottom ~50% of the screen and
         // leaving the top ~50% scrim + visible terminal — the
         // composer-modal-inversion fix the #191 UX audit asked for.
+        //
+        // Issues #567/#615: when the soft keyboard opens from the draft
+        // field, temporarily give the composer full-height sheet content and
+        // expand the sheet. The internal `.imePadding()` below still lifts the
+        // action row above the keyboard, but the extra measured height keeps
+        // the draft/status area from being crushed into a tiny strip.
         SheetContent(
-            modifier = Modifier.fillMaxHeight(0.65f),
+            modifier = Modifier.fillMaxHeight(promptComposerSheetHeightFraction(isImeVisible)),
             state = state,
             onClose = dismissComposer,
             onDraftChange = viewModel::onDraftChange,
@@ -439,6 +471,22 @@ public fun PromptComposerSheet(
         )
     }
 }
+
+internal fun promptComposerSheetHeightFraction(isImeVisible: Boolean): Float =
+    if (isImeVisible) PromptComposerImeVisibleHeightFraction else PromptComposerRestingHeightFraction
+
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun shouldAutoExpandPromptComposerForIme(
+    isImeVisible: Boolean,
+    currentValue: SheetValue,
+    expandedForIme: Boolean,
+): Boolean =
+    isImeVisible && !expandedForIme && currentValue == SheetValue.PartiallyExpanded
+
+internal fun shouldRestorePromptComposerPartialAfterIme(
+    isImeVisible: Boolean,
+    expandedForIme: Boolean,
+): Boolean = !isImeVisible && expandedForIme
 
 /**
  * Pure-renderer content for the sheet body. Pulled out of
@@ -2199,6 +2247,8 @@ internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recor
  */
 internal const val COMPOSER_CANCEL_TRANSCRIPTION_TAG = "prompt-composer-cancel-transcription"
 private const val MIC_LOCK_SWIPE_THRESHOLD_DP = 40
+private const val PromptComposerRestingHeightFraction = 0.65f
+private const val PromptComposerImeVisibleHeightFraction = 1f
 
 /**
  * Issue #180: test tags for the failed-transcription queue surface.

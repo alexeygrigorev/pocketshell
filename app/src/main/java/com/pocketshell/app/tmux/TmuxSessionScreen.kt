@@ -2339,6 +2339,8 @@ private sealed interface TmuxDialogMode {
 
 private val VerticalSwipeThreshold = 72.dp
 private val SessionDrawerMaxWidth = 360.dp
+internal val TmuxCreateSessionDialogBodyMaxHeight = 360.dp
+internal val TmuxCreateSessionStartFolderSuggestionsMaxHeight = 144.dp
 private const val MotionDurationMs: Int = 200
 private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
 internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
@@ -2505,6 +2507,12 @@ internal const val TMUX_SETTINGS_BUTTON_TAG = "tmux:session:settings-button"
 internal const val TMUX_OPEN_FILE_BUTTON_TAG = "tmux:session:open-file-button"
 internal const val TMUX_OPEN_FILE_DIALOG_FIELD_TAG = "tmux:session:open-file-field"
 internal const val TMUX_OPEN_FILE_DIALOG_CONFIRM_TAG = "tmux:session:open-file-confirm"
+internal const val TMUX_CREATE_SESSION_DIALOG_BODY_TAG = "tmux:session:create-dialog:body"
+internal const val TMUX_CREATE_SESSION_NAME_FIELD_TAG = "tmux:session:create-dialog:name"
+internal const val TMUX_CREATE_SESSION_START_FOLDER_FIELD_TAG =
+    "tmux:session:create-dialog:start-folder"
+internal const val TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG = "tmux:session:lifecycle-dialog:confirm"
+internal const val TMUX_LIFECYCLE_DIALOG_CANCEL_TAG = "tmux:session:lifecycle-dialog:cancel"
 /**
  * Issue #528: stable test tag for the kebab's "Browse files…" item, used by
  * instrumentation to drive kebab -> file explorer.
@@ -4975,21 +4983,37 @@ private fun TmuxLifecycleDialog(
     val isCreateMode = mode == TmuxDialogMode.CreateSession
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier
+            .navigationBarsPadding()
+            .imePadding(),
         title = { Text(title) },
         text = {
             if (isCreateMode) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = TmuxCreateSessionDialogBodyMaxHeight)
+                        .verticalScroll(rememberScrollState())
+                        .testTag(TMUX_CREATE_SESSION_DIALOG_BODY_TAG),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
                     OutlinedTextField(
                         value = text,
                         onValueChange = onTextChange,
                         singleLine = true,
                         label = { Text("Session name") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(TMUX_CREATE_SESSION_NAME_FIELD_TAG),
                     )
                     StartDirectoryAutocompleteField(
                         value = startDirectory,
                         onValueChange = onStartDirectoryChange,
+                        modifier = Modifier.fillMaxWidth(),
                         label = { Text("Start folder") },
+                        textFieldTestTag = TMUX_CREATE_SESSION_START_FOLDER_FIELD_TAG,
                         autocompleteController = startDirectoryAutocompleteController,
+                        suggestionsMaxHeight = TmuxCreateSessionStartFolderSuggestionsMaxHeight,
                     )
                 }
             } else if (isTextMode) {
@@ -5013,12 +5037,16 @@ private fun TmuxLifecycleDialog(
             TextButton(
                 onClick = onConfirm,
                 enabled = isCreateMode || !isTextMode || text.trim().isNotEmpty(),
+                modifier = Modifier.testTag(TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG),
             ) {
                 Text(confirm)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag(TMUX_LIFECYCLE_DIALOG_CANCEL_TAG),
+            ) {
                 Text("Cancel")
             }
         },

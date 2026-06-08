@@ -87,7 +87,6 @@ class UsageResetTimeScreenshotTest {
         compose.onAllNodesWithText("18% used").assertCountEquals(1)
         compose.onNodeWithTag(USAGE_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(USAGE_REFRESH_ACTION_TAG).assertExists()
-        compose.onNodeWithTag(USAGE_SETTINGS_ACTION_TAG).assertExists()
         SystemClock.sleep(200)
 
         captureFullDevice(File(ensureArtifactDir(), "usage-reset-times-detail.png"))

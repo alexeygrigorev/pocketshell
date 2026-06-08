@@ -81,6 +81,57 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
+    fun parse_codexFallsBackToDetailResetAfterSeconds() {
+        val parser = PocketshellUsageJsonParser(
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
+        )
+        val records = parser.parse(
+            """
+            {"provider":"codex","status":"ok",
+             "short_term":{"percent_remaining":100.0,"reset_at":null},
+             "long_term":{"percent_remaining":69.0,"reset_at":null},
+             "block_reason":null,"error":null,
+             "details":{"windows":{
+               "primary_window":{
+                 "used_percent":12,
+                 "limit_window_seconds":18000,
+                 "reset_after_seconds":7200
+               },
+               "secondary_window":{
+                 "used_percent":31,
+                 "limit_window_seconds":604800,
+                 "reset_after_seconds":"604800"
+               }
+             }}}
+            """.trimIndent(),
+        )
+
+        val record = records.single()
+        assertEquals("5h", record.windows[0].name)
+        assertEquals(12.0, record.windows[0].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-08T12:00:00Z"), record.windows[0].resetAt)
+        assertEquals("7d", record.windows[1].name)
+        assertEquals(31.0, record.windows[1].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-15T10:00:00Z"), record.windows[1].resetAt)
+    }
+
+    @Test
+    fun parse_topLevelResetAfterSecondsWhenResetAtMissing() {
+        val parser = PocketshellUsageJsonParser(
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
+        )
+        val record = parser.parse(
+            """{"provider":"codex","status":"ok",
+              "short_term":{"percent_remaining":35.0,"reset_at":null,"reset_after_seconds":3600,"window":"5h"},
+              "long_term":null,
+              "block_reason":null,"error":null,"details":{}}""".trimIndent(),
+        ).single()
+
+        assertEquals(65.0, record.windows.single().percent, 0.001)
+        assertEquals(Instant.parse("2026-06-08T11:00:00Z"), record.windows.single().resetAt)
+    }
+
+    @Test
     fun parse_codexPrefersDetailWindowPeriodAndResetWhenTopLevelIsGeneric() {
         val records = parser.parse(
             """

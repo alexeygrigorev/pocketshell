@@ -1,8 +1,10 @@
 package com.pocketshell.app.usage
 
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -55,5 +57,30 @@ class UsageOverflowMenuTest {
         compose.waitForIdle()
         assertEquals(1, refreshClicks)
         assertEquals(1, settingsClicks)
+    }
+
+    @Test
+    fun settingsItemIsOmittedWhenNoSettingsActionIsWired() {
+        var refreshClicks = 0
+
+        compose.setContent {
+            PocketShellTheme {
+                UsageScreen(
+                    state = UsageScreenState(),
+                    onBack = {},
+                    onRefresh = { refreshClicks++ },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(USAGE_OVERFLOW_TAG).performClick()
+        compose.onAllNodesWithTag(USAGE_SETTINGS_ACTION_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.onNodeWithTag(USAGE_REFRESH_ACTION_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitForIdle()
+
+        assertEquals(1, refreshClicks)
     }
 }

@@ -3,6 +3,7 @@ package com.pocketshell.core.usage
 import org.json.JSONException
 import org.json.JSONObject
 import java.time.Instant
+import kotlin.math.ceil
 
 /**
  * Parser for the normalized JSON produced by `pocketshell usage --json`.
@@ -30,7 +31,9 @@ import java.time.Instant
  * Parsing stays app-credential-free: the app only consumes JSON already
  * fetched by a server-side command.
  */
-public class PocketshellUsageJsonParser {
+public class PocketshellUsageJsonParser(
+    private val now: () -> Instant = { Instant.now() },
+) {
 
     @Throws(UsageParseException::class)
     public fun parse(input: String): List<UsageProviderRecord> {
@@ -186,9 +189,9 @@ public class PocketshellUsageJsonParser {
             limit = 100.0,
             unit = "percent",
             resetAt = if (preferDetailWindowMetadata) {
-                detailWindow?.optionalInstant("reset_at") ?: obj?.optionalInstant("reset_at")
+                detailWindow?.optionalResetInstant(now) ?: obj?.optionalResetInstant(now)
             } else {
-                obj?.optionalInstant("reset_at") ?: detailWindow?.optionalInstant("reset_at")
+                obj?.optionalResetInstant(now) ?: detailWindow?.optionalResetInstant(now)
             },
         )
     }
@@ -302,6 +305,30 @@ private fun JSONObject.optionalInstant(name: String): Instant? {
     } catch (e: Exception) {
         throw UsageParseException("invalid '$name': $raw", e)
     }
+}
+
+private fun JSONObject.optionalResetInstant(now: () -> Instant): Instant? =
+    optionalInstant("reset_at")
+        ?: optionalDurationSeconds("reset_after_seconds")?.let { seconds ->
+            try {
+                now().plusSeconds(seconds)
+            } catch (e: Exception) {
+                throw UsageParseException("invalid 'reset_after_seconds': $seconds", e)
+            }
+        }
+
+private fun JSONObject.optionalDurationSeconds(name: String): Long? {
+    if (!has(name) || isNull(name)) return null
+    val value = opt(name)
+    val seconds = when (value) {
+        is Number -> value.toDouble()
+        is String -> value.trim().toDoubleOrNull()
+        else -> null
+    } ?: throw UsageParseException("invalid '$name': $value")
+    if (!seconds.isFinite() || seconds < 0.0) {
+        throw UsageParseException("invalid '$name': $value")
+    }
+    return ceil(seconds).toLong()
 }
 
 private fun JSONObject.percentRemainingFromUsedPercent(): Double? {

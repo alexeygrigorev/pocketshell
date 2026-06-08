@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 from typing import Sequence
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from pocketshell.cli import cli, main
-from pocketshell.usage import usage_command
+from pocketshell.usage import normalize_usage_record, usage_command
 
 
 def _fake_completed(
@@ -257,6 +258,72 @@ def test_usage_json_normalizes_openai_compatible_detail_windows() -> None:
         "percent_remaining": 35.0,
         "reset_at": "2026-06-11T00:27:17Z",
         "window": "7d",
+    }
+
+
+def test_normalize_usage_record_preserves_codex_reset_after_seconds() -> None:
+    record = normalize_usage_record(
+        {
+            "provider": "codex",
+            "status": "ok",
+            "short_term": {"percent_remaining": 35.0, "reset_at": None},
+            "long_term": {"percent_remaining": 69.0, "reset_at": None},
+            "block_reason": None,
+            "error": None,
+            "details": {
+                "windows": {
+                    "primary_window": {
+                        "used_percent": 65,
+                        "window_minutes": 300,
+                        "reset_after_seconds": 3600,
+                    },
+                    "secondary_window": {
+                        "used_percent": 31,
+                        "limit_window_seconds": 604800,
+                        "reset_after_seconds": "604800",
+                    },
+                },
+            },
+        },
+        now=datetime(2026, 6, 8, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert record["short_term"] == {
+        "percent_remaining": 35.0,
+        "reset_at": "2026-06-08T11:00:00Z",
+        "window": "5h",
+    }
+    assert record["long_term"] == {
+        "percent_remaining": 69.0,
+        "reset_at": "2026-06-15T10:00:00Z",
+        "window": "7d",
+    }
+
+
+def test_normalize_usage_record_converts_top_level_reset_after_seconds() -> None:
+    with patch("pocketshell.usage._fetch_codex_detail_windows", return_value=None):
+        record = normalize_usage_record(
+            {
+                "provider": "codex",
+                "status": "ok",
+                "short_term": {
+                    "percent_remaining": 35.0,
+                    "reset_at": None,
+                    "reset_after_seconds": 3600,
+                    "window": "5h",
+                },
+                "long_term": None,
+                "block_reason": None,
+                "error": None,
+                "details": {},
+            },
+            now=datetime(2026, 6, 8, 10, 0, tzinfo=timezone.utc),
+        )
+
+    assert record["short_term"] == {
+        "percent_remaining": 35.0,
+        "reset_at": "2026-06-08T11:00:00Z",
+        "window": "5h",
     }
 
 

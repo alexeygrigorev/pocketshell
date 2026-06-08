@@ -158,6 +158,30 @@ def _percent_remaining_from_used(value: Any) -> Optional[float]:
     return round(max(0.0, min(100.0, 100.0 - used)), 2)
 
 
+def _reset_after_seconds_to_iso(
+    value: Any,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    base = now or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    reset_at = base.astimezone(timezone.utc).timestamp() + seconds
+    try:
+        parsed = datetime.fromtimestamp(reset_at, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _window_label_from_seconds(value: Any) -> Optional[str]:
     try:
         seconds = int(float(value))
@@ -176,12 +200,30 @@ def _window_label_from_seconds(value: Any) -> Optional[str]:
     return f"{seconds}s"
 
 
-def _window_from_detail(detail: Any) -> Optional[dict[str, Any]]:
+def _window_label_from_detail(detail: dict[str, Any]) -> Optional[str]:
+    label = _window_label_from_seconds(detail.get("limit_window_seconds"))
+    if label is not None:
+        return label
+    try:
+        minutes = float(detail.get("window_minutes"))
+    except (TypeError, ValueError):
+        return None
+    return _window_label_from_seconds(minutes * 60)
+
+
+def _window_from_detail(
+    detail: Any,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
     if not isinstance(detail, dict):
         return None
     percent_remaining = _percent_remaining_from_used(detail.get("used_percent"))
-    reset_at = _normalize_reset_at(detail.get("reset_at"))
-    window = _window_label_from_seconds(detail.get("limit_window_seconds"))
+    reset_at = _normalize_reset_at(detail.get("reset_at")) or _reset_after_seconds_to_iso(
+        detail.get("reset_after_seconds"),
+        now=now,
+    )
+    window = _window_label_from_detail(detail)
     if percent_remaining is None and reset_at is None and window is None:
         return None
     return {
@@ -196,6 +238,7 @@ def _merge_window(
     detail: Any,
     *,
     prefer_detail_percent: bool = False,
+    now: Optional[datetime] = None,
 ) -> Any:
     if not isinstance(current, dict):
         if not isinstance(detail, dict):
@@ -204,7 +247,7 @@ def _merge_window(
     else:
         current = dict(current)
 
-    detail_window = _window_from_detail(detail)
+    detail_window = _window_from_detail(detail, now=now)
     if detail_window is not None:
         if prefer_detail_percent or current.get("percent_remaining") is None:
             current["percent_remaining"] = detail_window.get("percent_remaining")
@@ -213,7 +256,12 @@ def _merge_window(
         if current.get("window") is None and detail_window.get("window") is not None:
             current["window"] = detail_window.get("window")
 
-    current["reset_at"] = _normalize_reset_at(current.get("reset_at"))
+    reset_after_seconds = current.get("reset_after_seconds")
+    current["reset_at"] = _normalize_reset_at(current.get("reset_at")) or _reset_after_seconds_to_iso(
+        reset_after_seconds,
+        now=now,
+    )
+    current.pop("reset_after_seconds", None)
     return current
 
 
@@ -290,8 +338,16 @@ def _codex_needs_source_patch(record: dict[str, Any], detail_windows: dict[str, 
     ):
         top_level = record.get(top_level_key)
         detail = detail_windows.get(detail_key)
-        top_level_reset = top_level.get("reset_at") if isinstance(top_level, dict) else None
-        detail_reset = detail.get("reset_at") if isinstance(detail, dict) else None
+        top_level_reset = None
+        if isinstance(top_level, dict):
+            top_level_reset = top_level.get("reset_at")
+            if top_level_reset is None:
+                top_level_reset = top_level.get("reset_after_seconds")
+        detail_reset = None
+        if isinstance(detail, dict):
+            detail_reset = detail.get("reset_at")
+            if detail_reset is None:
+                detail_reset = detail.get("reset_after_seconds")
         if top_level_reset is None and detail_reset is None:
             return True
     return False
@@ -301,7 +357,11 @@ def _is_codex_compatible_provider(provider: str) -> bool:
     return provider.replace(" ", "_").lower() in _CODEX_COMPATIBLE_PROVIDERS
 
 
-def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
+def normalize_usage_record(
+    record: dict[str, Any],
+    *,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
     """Normalize a provider record emitted by ``quse --json``.
 
     PocketShell owns the app-facing schema even when it delegates provider
@@ -330,6 +390,7 @@ def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
             normalized.get("short_term"),
             detail_windows.get("primary_window"),
             prefer_detail_percent=True,
+            now=now,
         )
         if short_term is not None:
             normalized["short_term"] = short_term
@@ -337,6 +398,7 @@ def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
             normalized.get("long_term"),
             detail_windows.get("secondary_window"),
             prefer_detail_percent=True,
+            now=now,
         )
         if long_term is not None:
             normalized["long_term"] = long_term
@@ -344,20 +406,22 @@ def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
         short_term = _merge_window(
             normalized.get("short_term"),
             detail_windows.get("five_hour"),
+            now=now,
         )
         if short_term is not None:
             normalized["short_term"] = short_term
         long_term = _merge_window(
             normalized.get("long_term"),
             detail_windows.get("seven_day"),
+            now=now,
         )
         if long_term is not None:
             normalized["long_term"] = long_term
     else:
         if isinstance(normalized.get("short_term"), dict):
-            normalized["short_term"] = _merge_window(normalized.get("short_term"), None)
+            normalized["short_term"] = _merge_window(normalized.get("short_term"), None, now=now)
         if isinstance(normalized.get("long_term"), dict):
-            normalized["long_term"] = _merge_window(normalized.get("long_term"), None)
+            normalized["long_term"] = _merge_window(normalized.get("long_term"), None, now=now)
 
     actionable = _actionable_error(provider, normalized.get("error"))
     if actionable != normalized.get("error"):
@@ -365,7 +429,11 @@ def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def normalize_usage_stdout(stdout: str) -> str:
+def normalize_usage_stdout(
+    stdout: str,
+    *,
+    now: Optional[datetime] = None,
+) -> str:
     """Normalize NDJSON stdout from ``quse --json`` for app consumption."""
     if not stdout.strip():
         return stdout
@@ -381,7 +449,7 @@ def normalize_usage_stdout(stdout: str) -> str:
             return stdout
         if not isinstance(parsed, dict):
             return stdout
-        normalized = normalize_usage_record(parsed)
+        normalized = normalize_usage_record(parsed, now=now)
         changed = changed or normalized != parsed
         lines.append(json.dumps(normalized, sort_keys=True))
     suffix = "\n" if stdout.endswith("\n") else ""

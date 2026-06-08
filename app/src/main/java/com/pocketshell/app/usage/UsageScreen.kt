@@ -50,7 +50,7 @@ fun UsageScreen(
     state: UsageScreenState,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
-    onOpenSettings: () -> Unit = {},
+    onOpenSettings: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     now: Instant = Instant.now(),
 ) {
@@ -89,7 +89,7 @@ fun UsageScreen(
 private fun UsageHeader(
     onBack: () -> Unit,
     onRefresh: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenSettings: (() -> Unit)?,
 ) {
     Row(
         modifier = Modifier
@@ -123,18 +123,24 @@ private fun UsageHeader(
         Kebab(
             triggerTestTag = USAGE_OVERFLOW_TAG,
             contentDescription = "Usage actions",
-            items = listOf(
-                KebabItem(
-                    label = "Refresh usage",
-                    onClick = onRefresh,
-                    testTag = USAGE_REFRESH_ACTION_TAG,
-                ),
-                KebabItem(
-                    label = "Usage settings",
-                    onClick = onOpenSettings,
-                    testTag = USAGE_SETTINGS_ACTION_TAG,
-                ),
-            ),
+            items = buildList {
+                add(
+                    KebabItem(
+                        label = "Refresh usage",
+                        onClick = onRefresh,
+                        testTag = USAGE_REFRESH_ACTION_TAG,
+                    ),
+                )
+                if (onOpenSettings != null) {
+                    add(
+                        KebabItem(
+                            label = "Usage settings",
+                            onClick = onOpenSettings,
+                            testTag = USAGE_SETTINGS_ACTION_TAG,
+                        ),
+                    )
+                }
+            },
         )
     }
 }

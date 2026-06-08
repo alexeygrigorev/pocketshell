@@ -55,6 +55,17 @@ class FilePathScannerTest {
     }
 
     @Test
+    fun detectsLocalhostFileUriAsDecodedAbsolutePath() {
+        val decoded =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1.png"
+        val uri = "file://localhost$decoded"
+
+        assertEquals(listOf(decoded), paths("generated image: $uri"))
+    }
+
+    @Test
     fun fileUriPathIsPercentDecodedForViewerRoute() {
         val uri = "file:///home/alexey/.codex/generated_images/a%20b/out%20image.png"
 

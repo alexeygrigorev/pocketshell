@@ -248,6 +248,38 @@ class WrappedLineReassemblyTest {
     }
 
     @Test
+    fun `wrapped percent encoded generated image file uri emits decoded smart selection target per visual row`() {
+        val decoded =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1 final.png"
+        val uri = decoded.replace(" ", "%20").let { "file://$it" }
+        val firstSplit = uri.indexOf("019e9d03")
+        val secondSplit = uri.indexOf("ig_")
+        val rows = listOf(
+            VisualRow(43, uri.take(firstSplit), wrapsToNext = false),
+            VisualRow(44, uri.substring(firstSplit, secondSplit), wrapsToNext = false),
+            VisualRow(45, uri.substring(secondSplit), wrapsToNext = false),
+        )
+
+        val regions = terminalMatchRegionsForRows(rows, columns = 120, matcher = DefaultTerminalMatcher())
+        val pathRegions = regions.filter { it.match is TerminalMatch.Path }
+
+        assertEquals(3, pathRegions.size)
+        assertEquals(listOf(43, 44, 45), pathRegions.map { it.row })
+        assertTrue(
+            "every visual fragment should carry the decoded complete path: $pathRegions",
+            pathRegions.all { it.match.value == decoded },
+        )
+        assertEquals(0, pathRegions[0].startCol)
+        assertEquals(rows[0].text.length, pathRegions[0].endColExclusive)
+        assertEquals(0, pathRegions[1].startCol)
+        assertEquals(rows[1].text.length, pathRegions[1].endColExclusive)
+        assertEquals(0, pathRegions[2].startCol)
+        assertEquals(rows[2].text.length, pathRegions[2].endColExclusive)
+    }
+
+    @Test
     fun `wrapped PocketShell attachment path emits full smart selection target per visual row`() {
         val attachment =
             "~/.pocketshell/attachments/host-1-git-course-management-platform/" +

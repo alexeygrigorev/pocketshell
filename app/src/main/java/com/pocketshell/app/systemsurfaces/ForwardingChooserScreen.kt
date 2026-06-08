@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -42,6 +43,8 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
@@ -107,7 +110,10 @@ fun ForwardingChooserScreen(
                 text = error,
                 color = PocketShellColors.Red,
                 style = PocketShellType.bodyDense,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.padding(
+                    horizontal = PocketShellDensity.rowPadH,
+                    vertical = PocketShellDensity.rowPadV,
+                ),
             )
         }
 
@@ -122,8 +128,11 @@ fun ForwardingChooserScreen(
         } else {
             LazyColumn(
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(
+                    horizontal = PocketShellDensity.rowPadH,
+                    vertical = PocketShellSpacing.md,
+                ),
+                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
             ) {
                 items(hosts, key = { it.id }) { host ->
                     ForwardingHostRow(
@@ -208,9 +217,9 @@ private fun ForwardingHostRow(host: HostEntity, onClick: () -> Unit) {
 private fun TextButtonBox(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
+            .size(PocketShellDensity.tapTargetMin)
             .background(PocketShellColors.SurfaceElev)
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .clickable(role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(

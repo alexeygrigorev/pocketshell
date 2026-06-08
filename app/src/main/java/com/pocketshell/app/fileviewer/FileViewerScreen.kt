@@ -60,6 +60,8 @@ import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -326,7 +328,7 @@ private fun FileViewerAppBar(
         leading = {
             Box(
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(PocketShellDensity.tapTargetMin)
                     .clickable(role = Role.Button, onClick = onBack)
                     .testTag(FILE_VIEWER_BACK_TAG),
                 contentAlignment = Alignment.Center,
@@ -366,16 +368,16 @@ private fun HeaderAction(
 ) {
     Box(
         modifier = Modifier
-            .height(40.dp)
+            .height(PocketShellDensity.tapTargetMin)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = PocketShellSpacing.sm)
             .testTag(testTag),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             color = PocketShellColors.Accent,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }

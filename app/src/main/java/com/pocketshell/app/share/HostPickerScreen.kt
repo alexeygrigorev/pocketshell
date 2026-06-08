@@ -36,7 +36,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.launch
 
@@ -240,24 +244,18 @@ private fun TargetPickerScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 24.dp)
             .testTag(SHARE_TARGET_PICKER_TAG),
-        contentPadding = PaddingValues(bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(
+            horizontal = PocketShellDensity.rowPadH,
+            vertical = PocketShellSpacing.md,
+        ),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
         item {
-            Text(
-                text = "Send to ${selection.host.name}",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
+            ScreenHeader(
+                title = "Send to ${selection.host.name}",
+                subtitle = "Pick the destination on this host",
             )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "Pick the destination on this host",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(16.dp))
         }
 
         // Issue #560: the host's active tmux sessions lead the list — the
@@ -266,11 +264,7 @@ private fun TargetPickerScreen(
         // session with the file as a composer chip, composer focused.
         if (selection.activeSessions.isNotEmpty()) {
             item {
-                Text(
-                    text = "Active sessions",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                SectionHeader(label = "Active sessions", count = selection.activeSessions.size)
             }
         }
         itemsIndexed(
@@ -309,10 +303,9 @@ private fun TargetPickerScreen(
         // first entry is the focused session.
         if (selection.sessionProjects.isNotEmpty()) {
             item {
-                Text(
-                    text = "Open session projects",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                SectionHeader(
+                    label = "Open session projects",
+                    count = selection.sessionProjects.size,
                 )
             }
         }
@@ -339,20 +332,20 @@ private fun TargetPickerScreen(
         if (selection.loading) {
             item {
                 Text(
-                    text = "Loading projects…",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = "Loading projects...",
+                    style = PocketShellType.bodyDense,
+                    color = PocketShellColors.TextSecondary,
+                    modifier = Modifier.padding(
+                        horizontal = PocketShellDensity.rowPadH,
+                        vertical = PocketShellSpacing.sm,
+                    ),
                 )
             }
         }
 
         if (selection.knownProjects.isNotEmpty()) {
             item {
-                Text(
-                    text = "Watched roots",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                SectionHeader(label = "Watched roots", count = selection.knownProjects.size)
             }
         }
         items(selection.knownProjects, key = { it.path }) { project ->
@@ -402,24 +395,15 @@ private fun HostList(
 ) {
     LazyColumn(
         modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 24.dp),
-        contentPadding = PaddingValues(bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .fillMaxSize(),
+        contentPadding = PaddingValues(
+            horizontal = PocketShellDensity.rowPadH,
+            vertical = PocketShellSpacing.md,
+        ),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
         item {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(16.dp))
+            ScreenHeader(title = title, subtitle = subtitle)
         }
         items(hosts, key = { it.id }) { host ->
             HostRow(host = host, onClick = { onHostClick(host) })

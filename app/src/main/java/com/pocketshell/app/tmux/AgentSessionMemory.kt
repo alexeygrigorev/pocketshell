@@ -2,6 +2,8 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.core.agents.AgentDetection
 import java.util.concurrent.ConcurrentHashMap
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Issue #495: process-scoped memory of which tmux windows are agent
@@ -45,7 +47,8 @@ import java.util.concurrent.ConcurrentHashMap
  * — the remote tmux session keeps the real state and we only need to bridge
  * the brief reconnect gap.
  */
-internal class AgentSessionMemory {
+@Singleton
+public class AgentSessionMemory @Inject constructor() {
     private val statuses: MutableMap<Key, RememberedAgentStatus> = ConcurrentHashMap()
 
     /**
@@ -55,7 +58,7 @@ internal class AgentSessionMemory {
      * Conversation tab selected for this window. Restored on reconnect so a
      * user who was reading/dictating in Conversation stays there.
      */
-    fun remember(
+    internal fun remember(
         hostId: Long,
         sessionName: String,
         windowId: String,
@@ -74,7 +77,7 @@ internal class AgentSessionMemory {
      * remembered (never been an agent window, or it was [forget]-ten after
      * the agent exited).
      */
-    fun recall(
+    internal fun recall(
         hostId: Long,
         sessionName: String,
         windowId: String,
@@ -88,7 +91,7 @@ internal class AgentSessionMemory {
      * reports that the window no longer hosts an agent (the agent exited),
      * so a later reconnect does not resurrect a phantom Conversation tab.
      */
-    fun forget(
+    internal fun forget(
         hostId: Long,
         sessionName: String,
         windowId: String,

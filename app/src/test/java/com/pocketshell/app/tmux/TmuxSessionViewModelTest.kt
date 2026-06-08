@@ -98,6 +98,7 @@ class TmuxSessionViewModelTest {
     private fun newVm(
         registry: ActiveTmuxClients = ActiveTmuxClients(),
         runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
+        agentSessionMemory: AgentSessionMemory = AgentSessionMemory(),
         sshLeaseManager: SshLeaseManager = SshLeaseManager(
             connector = SshLeaseConnector { target ->
                 error("unexpected SSH lease connect for ${target.leaseKey}")
@@ -110,6 +111,7 @@ class TmuxSessionViewModelTest {
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = registry,
             runtimeCache = runtimeCache,
+            agentSessionMemory = agentSessionMemory,
             sshLeaseManager = sshLeaseManager,
             sessionLifecycleSignals = sessionLifecycleSignals,
         ).also { createdViewModels += it }
@@ -4713,6 +4715,33 @@ class TmuxSessionViewModelTest {
             AgentKind.ClaudeCode,
             vm.agentForWindow("@0"),
         )
+    }
+
+    @Test
+    fun sharedAgentSessionMemoryRestoresAfterViewModelRecreation() = runTest {
+        val memory = AgentSessionMemory()
+        val firstVm = newVm(agentSessionMemory = memory)
+        firstVm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        firstVm.startAgentConversationForTest("%0", newClaudeDetection())
+        firstVm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        val recreatedVm = newVm(agentSessionMemory = memory)
+        recreatedVm.connectWithPaneForTest(paneId = "%8", windowId = "@0")
+        runCurrent()
+
+        val restored = recreatedVm.agentConversations.value["%8"]
+        assertNotNull(
+            "process-scoped memory must restore agent status for a fresh VM before detection",
+            restored,
+        )
+        assertEquals(AgentKind.ClaudeCode, restored!!.detection?.agent)
+        assertEquals(
+            "the user's Conversation tab choice survives VM recreation",
+            SessionTab.Conversation,
+            restored.selectedTab,
+        )
+        assertEquals(AgentKind.ClaudeCode, recreatedVm.agentForWindow("@0"))
     }
 
     @Test

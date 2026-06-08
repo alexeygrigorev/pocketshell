@@ -169,6 +169,7 @@ public class TmuxSessionViewModel @Inject constructor(
     @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
     private val runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
+    private val agentSessionMemory: AgentSessionMemory = AgentSessionMemory(),
     private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
         connector = SshLeaseConnector { target ->
             com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
@@ -395,12 +396,11 @@ public class TmuxSessionViewModel @Inject constructor(
     private var controlClientSizeGeneration: Long = 0L
     private var windowSizePolicyAppliedForAttach: Boolean = false
     private val agentRepository: AgentConversationRepository = AgentConversationRepository()
-    // Issue #495: remember which tmux windows are agent windows (and which
-    // agent + the user's last tab choice) keyed by stable
-    // host/session/window identity, so a reconnect restores the
-    // Conversation tab immediately instead of bouncing the user to Terminal
-    // while live re-detection round-trips. See [AgentSessionMemory].
-    private val agentSessionMemory: AgentSessionMemory = AgentSessionMemory()
+    // Issue #495/#554: injected process-scoped memory of which tmux windows
+    // are agent windows (and which agent + the user's last tab choice), keyed
+    // by stable host/session/window identity. This lets a reconnect or VM
+    // recreation restore the Conversation tab immediately while live
+    // re-detection round-trips. See [AgentSessionMemory].
     private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneAgentTailGenerations: MutableMap<String, Long> = ConcurrentHashMap()
     private val nextAgentTailGeneration: AtomicInteger = AtomicInteger(0)

@@ -91,6 +91,43 @@ Not allowed between review rounds:
 
 If the orchestrator accidentally edits scoped code during a review round, that edit must be called out explicitly in the next implementer brief. The implementer owns either adopting it, replacing it, or reverting it. The issue still needs another reviewer pass.
 
+## Local Confidence Before CI
+
+GitHub Actions is the release backstop, not the first test runner. The
+orchestrator must not push a slice to `main` just to see what CI says and then
+iterate from red CI. Before any push to `main`, the local evidence must make it
+reasonable to expect CI to pass.
+
+Minimum pre-push gate:
+
+- The implementer runs focused tests for every touched module and reports the
+  exact commands.
+- A verifier/reviewer agent independently inspects the diff and reruns the
+  relevant local checks from the implementer's worktree before the orchestrator
+  integrates it.
+- The orchestrator runs a final local gate in the integration worktree after
+  applying the reviewed patch. The gate must include `git diff --check`,
+  compile for touched Android/Kotlin modules, and the focused unit/instrumented
+  tests that cover the changed behavior.
+- For UI, terminal, SSH, tmux, share, voice, update, or release flows, the gate
+  must include the fastest reliable local proof available: focused JVM tests
+  first, then emulator/Docker only for the user-facing path that actually needs
+  it. Do not replace a missing local proof with "CI will tell us."
+- If a local focused check is infeasible, the orchestrator must write down why
+  and what narrower evidence was used. That exception should be rare.
+
+CI policy after push:
+
+- After pushing, monitor CI for that slice, but do not treat waiting as the main
+  activity if other independent backlog work is available. Continue issue
+  triage, launch non-overlapping implementers/reviewers, review completed
+  worktrees, or prepare the next local verification gate.
+- If CI fails despite the local gate, treat it as a process miss: identify which
+  local check would have caught it, add or document that check, then send the
+  fix through the implementer/reviewer loop.
+- Release cuts may still require waiting for full CI/release workflows; feature
+  development should not collapse into idle CI watching.
+
 ## Issue Comment Authority
 
 GitHub issue comments are process inputs only when they come from the

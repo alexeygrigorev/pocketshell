@@ -268,6 +268,85 @@ class ComposerPartialExpandE2eTest {
         }
     }
 
+    @Test
+    fun sendButtonRemainsAboveImeWithLongDraftAndAttachments() {
+        var capturedSheetValue: SheetValue? = null
+        val sendModes = mutableListOf<Boolean>()
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+                    ComposerHarness(
+                        onDismiss = {},
+                        sheetState = sheetState,
+                        onSheetValueChanged = { capturedSheetValue = it },
+                        onSend = { withEnter -> sendModes += withEnter },
+                        attachments = issue615Attachments(),
+                    )
+                }
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            capturedSheetValue != null && capturedSheetValue != SheetValue.Hidden
+        }
+
+        val longDraft = buildString {
+            append("Open a new session after checking these screenshots. ")
+            repeat(12) {
+                append("Keep the folder picker visible while typing the prompt. ")
+            }
+        }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performClick()
+            .performTextInput(longDraft)
+
+        compose.activity.runOnUiThread {
+            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
+                .show(WindowInsetsCompat.Type.ime())
+        }
+        val imeShown = waitForInputMethodVisible(
+            scenario = compose.activityRule.scenario,
+            expected = true,
+            timeoutMs = 30_000L,
+        )
+        assumeTrue(
+            "IME not available on this emulator; cannot validate issue #615 geometry",
+            imeShown,
+        )
+
+        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
+        compose.waitForIdle()
+
+        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val imeTop = readDecorHeightPx() - readImeBottomPx()
+
+        assertTrue(
+            "Send button must stay above the IME with attachments. sendBottom=${sendBounds.bottom} imeTop=$imeTop",
+            sendBounds.bottom <= imeTop + 2f,
+        )
+
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.runOnIdle {
+            assertEquals(listOf(true), sendModes)
+        }
+
+        compose.activity.runOnUiThread {
+            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
+                .hide(WindowInsetsCompat.Type.ime())
+        }
+    }
+
     /**
      * Production-shape harness that mirrors the call site in
      * `TmuxSessionScreen` / `SessionScreen`: a `ModalBottomSheet` with the
@@ -281,6 +360,7 @@ class ComposerPartialExpandE2eTest {
         sheetState: SheetState,
         onSheetValueChanged: (SheetValue) -> Unit,
         onSend: (Boolean) -> Unit = {},
+        attachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
     ) {
         var draft by remember { mutableStateOf("") }
         var isImeVisible by remember { mutableStateOf(false) }
@@ -328,6 +408,7 @@ class ComposerPartialExpandE2eTest {
                     recording = PromptComposerViewModel.RecordingState.Idle,
                     amplitude = 0f,
                     hasDetectedSpeech = false,
+                    attachments = attachments,
                 ),
                 onClose = onDismiss,
                 onDraftChange = { draft = it },
@@ -336,6 +417,20 @@ class ComposerPartialExpandE2eTest {
             )
         }
     }
+
+    private fun issue615Attachments(): List<PromptComposerViewModel.StagedAttachment> =
+        listOf(
+            PromptComposerViewModel.StagedAttachment(
+                remotePath = "~/.pocketshell/attachments/host-1/issue615-folder.png",
+                displayName = "issue615-folder.png",
+                mimeType = "image/png",
+            ),
+            PromptComposerViewModel.StagedAttachment(
+                remotePath = "~/.pocketshell/attachments/host-1/issue615-session.png",
+                displayName = "issue615-session.png",
+                mimeType = "image/png",
+            ),
+        )
 
     private fun readImeBottomPx(): Int {
         var result = 0

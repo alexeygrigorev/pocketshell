@@ -590,6 +590,150 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
+    fun `within grace foreground diagnostics classify pending network as suppressed with live runtime`() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val gate = TerminalNetworkLifecycleGate(nowMillis = { currentTime })
+            val change = terminalNetworkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "default-network-capabilities",
+            )
+            val controller = BackgroundGraceController(
+                scope = backgroundScope,
+                graceMillis = graceMillis,
+                onGraceElapsed = {},
+                onForeground = { resumedWithinGrace ->
+                    assertTrue(resumedWithinGrace)
+                    assertTrue(
+                        gate.onForegroundResumeFinished(
+                            resumedWithinGrace = true,
+                            hasLiveTerminalRuntime = true,
+                        ) is TerminalNetworkDecision.Suppress,
+                    )
+                },
+                nowMillis = { currentTime },
+                foregroundDiagnosticFields = { resumedWithinGrace ->
+                    listOf(
+                        "hasLiveTerminalRuntime" to true,
+                        "activeTmuxClientCount" to 1,
+                        "liveActiveTmuxClientCount" to 1,
+                        "cachedRuntimeCount" to 0,
+                        "liveCachedRuntimeCount" to 0,
+                        "clientDisconnected" to false,
+                        "sessionConnected" to true,
+                    ) + gate.previewForegroundResumeFinished(
+                        resumedWithinGrace = resumedWithinGrace,
+                        hasLiveTerminalRuntime = true,
+                    ).diagnosticFields()
+                },
+            )
+
+            gate.onBackground(graceMillis = graceMillis)
+            controller.onBackground()
+            runCurrent()
+            advanceTimeBy(graceMillis / 2)
+            runCurrent()
+            assertTrue(gate.onNetworkChange(change, hasLiveTerminalRuntime = true) is TerminalNetworkDecision.Defer)
+
+            gate.onForegroundResumeStarted()
+            controller.onForeground()
+            runCurrent()
+
+            val foreground = diagnostics.eventsNamed("background_grace_foreground").single()
+            assertEquals(true, foreground.fields["resumedWithinGrace"])
+            assertEquals(true, foreground.fields["hasLiveTerminalRuntime"])
+            assertEquals(1, foreground.fields["activeTmuxClientCount"])
+            assertEquals(1, foreground.fields["liveActiveTmuxClientCount"])
+            assertEquals(0, foreground.fields["cachedRuntimeCount"])
+            assertEquals(0, foreground.fields["liveCachedRuntimeCount"])
+            assertEquals(false, foreground.fields["clientDisconnected"])
+            assertEquals(true, foreground.fields["sessionConnected"])
+            assertEquals("suppress", foreground.fields["gateDecision"])
+            assertEquals("within_grace_live_runtime", foreground.fields["gateReason"])
+            assertEquals("suppressed", foreground.fields["reconnectOutcome"])
+            assertEquals(true, foreground.fields["pendingNetworkChange"])
+            assertEquals("real_validated_identity_change", foreground.fields["pendingNetworkClassification"])
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
+    fun `within grace foreground diagnostics classify pending network as scheduled with no live runtime`() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val events = mutableListOf<String>()
+            val gate = TerminalNetworkLifecycleGate(nowMillis = { currentTime })
+            val change = terminalNetworkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "default-network-capabilities",
+            )
+            val controller = BackgroundGraceController(
+                scope = backgroundScope,
+                graceMillis = graceMillis,
+                onGraceElapsed = {},
+                onForeground = { resumedWithinGrace ->
+                    val decision = gate.onForegroundResumeFinished(
+                        resumedWithinGrace = resumedWithinGrace,
+                        hasLiveTerminalRuntime = false,
+                    )
+                    if (decision is TerminalNetworkDecision.Dispatch) {
+                        events += "network:${decision.change.reason}"
+                    }
+                },
+                nowMillis = { currentTime },
+                foregroundDiagnosticFields = { resumedWithinGrace ->
+                    listOf(
+                        "hasLiveTerminalRuntime" to false,
+                        "activeTmuxClientCount" to 1,
+                        "liveActiveTmuxClientCount" to 0,
+                        "cachedRuntimeCount" to 0,
+                        "liveCachedRuntimeCount" to 0,
+                        "clientDisconnected" to true,
+                        "sessionConnected" to false,
+                    ) + gate.previewForegroundResumeFinished(
+                        resumedWithinGrace = resumedWithinGrace,
+                        hasLiveTerminalRuntime = false,
+                    ).diagnosticFields()
+                },
+            )
+
+            gate.onBackground(graceMillis = graceMillis)
+            controller.onBackground()
+            runCurrent()
+            advanceTimeBy(graceMillis / 2)
+            runCurrent()
+            assertTrue(gate.onNetworkChange(change, hasLiveTerminalRuntime = false) is TerminalNetworkDecision.Defer)
+
+            gate.onForegroundResumeStarted()
+            controller.onForeground()
+            runCurrent()
+
+            assertEquals(listOf("network:default-network-capabilities"), events)
+            val foreground = diagnostics.eventsNamed("background_grace_foreground").single()
+            assertEquals(true, foreground.fields["resumedWithinGrace"])
+            assertEquals(false, foreground.fields["hasLiveTerminalRuntime"])
+            assertEquals(1, foreground.fields["activeTmuxClientCount"])
+            assertEquals(0, foreground.fields["liveActiveTmuxClientCount"])
+            assertEquals(0, foreground.fields["cachedRuntimeCount"])
+            assertEquals(0, foreground.fields["liveCachedRuntimeCount"])
+            assertEquals(true, foreground.fields["clientDisconnected"])
+            assertEquals(false, foreground.fields["sessionConnected"])
+            assertEquals("dispatch", foreground.fields["gateDecision"])
+            assertEquals("within_grace_no_live_runtime_real_handoff", foreground.fields["gateReason"])
+            assertEquals("scheduled", foreground.fields["reconnectOutcome"])
+            assertEquals(true, foreground.fields["pendingNetworkChange"])
+            assertEquals("real_validated_identity_change", foreground.fields["pendingNetworkClassification"])
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
     fun `queued network change dispatches after post grace foreground decision`() {
         val gate = TerminalNetworkLifecycleGate()
         val change = terminalNetworkChange(

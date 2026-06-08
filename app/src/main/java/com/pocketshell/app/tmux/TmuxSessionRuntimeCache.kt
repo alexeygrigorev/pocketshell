@@ -82,6 +82,19 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         }
     }
 
+    internal fun diagnosticSnapshot(): TmuxRuntimeCacheDiagnostics = synchronized(this) {
+        val values = runtimes.values.map { it.runtime }
+        TmuxRuntimeCacheDiagnostics(
+            cachedRuntimeCount = values.size,
+            liveCachedRuntimeCount = values.count { runtime ->
+                !runtime.client.disconnected.value &&
+                    runtime.session?.isConnected != false
+            },
+            clientDisconnected = values.singleOrNull()?.client?.disconnected?.value,
+            sessionConnected = values.singleOrNull()?.session?.isConnected,
+        )
+    }
+
     internal fun snapshotKeys(): List<TmuxRuntimeKey> = synchronized(this) {
         runtimes.keys.toList()
     }
@@ -155,6 +168,13 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
 internal data class CacheActivation(
     val runtime: CachedTmuxRuntime?,
     val evicted: List<CachedTmuxRuntime>,
+)
+
+internal data class TmuxRuntimeCacheDiagnostics(
+    val cachedRuntimeCount: Int,
+    val liveCachedRuntimeCount: Int,
+    val clientDisconnected: Boolean?,
+    val sessionConnected: Boolean?,
 )
 
 private data class CacheEntry(

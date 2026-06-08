@@ -52,6 +52,7 @@ import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -425,32 +426,15 @@ private fun AddKeyDialog(
 
 @Composable
 private fun FileTargetSelector(selected: EnvFileTarget, onSelect: (EnvFileTarget) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        EnvFileTarget.entries.forEach { target ->
-            val isSelected = target == selected
-            Box(
-                modifier = Modifier
-                    .background(
-                        color = if (isSelected) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev,
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .border(
-                        width = 1.dp,
-                        color = if (isSelected) PocketShellColors.Accent else PocketShellColors.BorderSoft,
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .clickable(role = Role.RadioButton) { onSelect(target) }
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-                    .testTag(envFileTargetTestTag(target)),
-            ) {
-                Text(
-                    text = target.fileName,
-                    color = if (isSelected) PocketShellColors.Accent else PocketShellColors.TextSecondary,
-                    style = PocketShellType.bodyMono,
-                )
-            }
-        }
-    }
+    val targets = EnvFileTarget.entries
+    SegmentedToggle(
+        labels = targets.map { it.fileName },
+        selectedIndex = targets.indexOf(selected).coerceAtLeast(0),
+        onSelected = { index -> onSelect(targets[index]) },
+        segmentTag = { index -> envFileTargetTestTag(targets[index]) },
+        fillSegments = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -579,22 +563,15 @@ private fun CopyFromFolderSheet(
 
 @Composable
 private fun SourceFolderRow(folder: EnvCopySourceFolder, onClick: () -> Unit) {
-    Column(
+    ListRow(
+        title = folder.label,
+        subtitle = folder.path,
+        onClick = onClick,
         modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
             .testTag(envCopySourceTestTag(folder.path)),
-    ) {
-        Text(text = folder.label, color = PocketShellColors.Text, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            text = folder.path,
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.labelMono,
-        )
-    }
+    )
 }
 
 @Composable

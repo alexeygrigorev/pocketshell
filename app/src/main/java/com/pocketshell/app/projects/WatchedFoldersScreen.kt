@@ -484,32 +484,21 @@ private fun DiscoveryPanel(
             )
         }
         candidates.forEach { candidate ->
-            Row(
+            ListRow(
+                title = candidate.label,
+                subtitle = candidate.path,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = candidate.label,
-                        color = PocketShellColors.Text,
-                        style = PocketShellType.bodyDense,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        text = candidate.path,
-                        color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.bodyMono,
-                    )
-                }
-                TextButton(
-                    onClick = { onAccept(candidate) },
-                    modifier = Modifier.testTag(watchedFolderAcceptTestTag(candidate.path)),
-                ) {
-                    Text("Add", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
-                }
-            }
+                trailing = {
+                    TextButton(
+                        onClick = { onAccept(candidate) },
+                        modifier = Modifier.testTag(watchedFolderAcceptTestTag(candidate.path)),
+                    ) {
+                        Text("Add", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
+                    }
+                },
+            )
         }
     }
 }

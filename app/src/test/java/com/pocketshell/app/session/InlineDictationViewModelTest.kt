@@ -7,6 +7,7 @@ import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.session.InlineDictationViewModel.DictationMode
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.InlineDictationViewModel.RecordingState
+import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
@@ -198,12 +199,46 @@ class InlineDictationViewModelTest {
     private class FakeVoiceSettings(
         private var window: Long = InlineDictationViewModel.SILENCE_WINDOW_MS,
         private var language: String? = null,
+        private var provider: VoiceTranscriptionProvider = VoiceTranscriptionProvider.OpenAiWhisper,
     ) : PromptComposerViewModel.VoiceSettingsSnapshot {
         override fun silenceWindowMs(): Long = window
         override fun whisperLanguageHint(): String? = language
+        override fun transcriptionProvider(): VoiceTranscriptionProvider = provider
 
         fun setWindow(ms: Long) { window = ms }
         fun setLanguage(code: String?) { language = code }
+        fun setProvider(value: VoiceTranscriptionProvider) { provider = value }
+    }
+
+    private class FakeSpeechRecognitionProvider(
+        var available: Boolean = true,
+    ) : PromptComposerViewModel.SpeechRecognitionProvider {
+        var startCount = 0
+        var stopCount = 0
+        var cancelCount = 0
+        var language: String? = null
+        var listener: PromptComposerViewModel.SpeechRecognitionListener? = null
+
+        override fun isAvailable(): Boolean = available
+
+        override fun start(
+            language: String?,
+            listener: PromptComposerViewModel.SpeechRecognitionListener,
+        ): PromptComposerViewModel.SpeechRecognitionSession? {
+            if (!available) return null
+            startCount++
+            this.language = language
+            this.listener = listener
+            return object : PromptComposerViewModel.SpeechRecognitionSession {
+                override fun stopListening() {
+                    stopCount++
+                }
+
+                override fun cancel() {
+                    cancelCount++
+                }
+            }
+        }
     }
 
     private fun newVm(
@@ -213,6 +248,8 @@ class InlineDictationViewModelTest {
         samplerDispatcher: TestDispatcher? = null,
         clock: () -> Long = { System.currentTimeMillis() },
         voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
+        speechRecognitionProvider: PromptComposerViewModel.SpeechRecognitionProvider =
+            FakeSpeechRecognitionProvider(available = false),
         pendingQueue: PromptComposerViewModel.PendingTranscriptionQueue =
             com.pocketshell.app.composer.DisabledPendingTranscriptionQueue,
     ): InlineDictationViewModel {
@@ -222,6 +259,7 @@ class InlineDictationViewModelTest {
             whisperClientFactory = factory,
             apiKeyStorage = storage,
             voiceSettings = voiceSettings,
+            speechRecognitionProvider = speechRecognitionProvider,
             pendingTranscriptionStore = pendingQueue,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
@@ -970,6 +1008,115 @@ class InlineDictationViewModelTest {
 
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
         assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun androidSpeechProviderStartsWithoutOpenAiKey() = runTest {
+        val mic = FakeMicCapture()
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(
+            provider = VoiceTranscriptionProvider.AndroidSpeech,
+            language = "de",
+        )
+        var whisperCalls = 0
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient {
+                whisperCalls++
+                Result.success("should not run")
+            },
+            storage = FakeVault(),
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertFalse(vm.needsOpenAiKeyForMicTap())
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        assertEquals(1, speech.startCount)
+        assertEquals("de", speech.language)
+        assertEquals(0, mic.startCount)
+        assertEquals(0, whisperCalls)
+        assertNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun androidSpeechFinalTranscriptEmitsToTerminalStream() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val received = mutableListOf<String>()
+        val collector = launch { received += vm.transcriptions.first() }
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(1, speech.stopCount)
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        speech.listener!!.onFinal(" git status ")
+        advanceUntilIdle()
+
+        assertEquals(listOf("git status"), received)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertNull(vm.uiState.value.error)
+        assertTrue(speech.cancelCount > 0)
+        collector.join()
+    }
+
+    @Test
+    fun androidSpeechUnavailableShowsErrorWithoutStartingMic() = runTest {
+        val speech = FakeSpeechRecognitionProvider(available = false)
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val mic = FakeMicCapture()
+        val vm = newVm(
+            mic = mic,
+            storage = FakeVault(),
+            whisper = null,
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(0, speech.startCount)
+        assertEquals(0, mic.startCount)
+        assertEquals(PromptComposerViewModel.ANDROID_SPEECH_UNAVAILABLE_MESSAGE, vm.uiState.value.error)
+    }
+
+    @Test
+    fun androidSpeechEmptyFinalShowsNoSpeechAndEmitsNothing() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val received = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.take(1).toList(received) }
+
+        vm.onMicTap()
+        runCurrent()
+        speech.listener!!.onFinal("   ")
+        advanceUntilIdle()
+
+        assertTrue(received.isEmpty())
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE, vm.uiState.value.error)
+        collector.cancel()
     }
 
     @Test

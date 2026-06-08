@@ -39,8 +39,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.DisabledPendingTranscriptionQueue
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.UnavailableSpeechRecognitionProvider
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.voice.AudioRecorderException
@@ -149,6 +151,8 @@ public class InlineDictationViewModel @Inject constructor(
     internal val whisperClientFactory: WhisperClientFactory,
     internal val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
     internal val voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot,
+    internal val speechRecognitionProvider: PromptComposerViewModel.SpeechRecognitionProvider =
+        UnavailableSpeechRecognitionProvider,
     internal val pendingTranscriptionStore: PromptComposerViewModel.PendingTranscriptionQueue =
         DisabledPendingTranscriptionQueue,
 ) : ViewModel() {
@@ -177,6 +181,9 @@ public class InlineDictationViewModel @Inject constructor(
 
     private var recordingJob: Job? = null
     private var transcribeJob: Job? = null
+    private var speechRecognitionSession: PromptComposerViewModel.SpeechRecognitionSession? = null
+    private var speechRecognitionGeneration: Long = 0L
+    private var activeProvider: VoiceTranscriptionProvider? = null
 
     // Test seam — defaults to wall-clock, tests substitute a virtual clock
     // bound to the test scheduler so the 5s silence window advances
@@ -215,6 +222,14 @@ public class InlineDictationViewModel @Inject constructor(
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startRecording() {
+        when (voiceSettings.transcriptionProvider()) {
+            VoiceTranscriptionProvider.OpenAiWhisper -> startWhisperRecording()
+            VoiceTranscriptionProvider.AndroidSpeech -> startAndroidSpeechRecognition()
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun startWhisperRecording() {
         // Guard: refuse to record if no API key is stored. The screen
         // surfaces the key-entry path; the inline path just reports the
         // gap rather than capturing audio that can't be uploaded.
@@ -222,6 +237,7 @@ public class InlineDictationViewModel @Inject constructor(
             DiagnosticEvents.record(
                 "action",
                 "inline_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                 "status" to "failure",
                 "cause" to "MissingApiKey",
             )
@@ -231,12 +247,15 @@ public class InlineDictationViewModel @Inject constructor(
             return
         }
 
+        activeProvider = VoiceTranscriptionProvider.OpenAiWhisper
         try {
             audioRecorder.start()
         } catch (e: AudioRecorderException) {
+            activeProvider = null
             DiagnosticEvents.record(
                 "action",
                 "inline_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                 "status" to "failure",
                 "cause" to e.javaClass.simpleName,
             )
@@ -252,6 +271,7 @@ public class InlineDictationViewModel @Inject constructor(
         DiagnosticEvents.record(
             "action",
             "inline_recording_start_result",
+            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
             "status" to "success",
             "mode" to _uiState.value.mode.name,
             "silenceWindowMs" to voiceSettings.silenceWindowMs(),
@@ -266,6 +286,87 @@ public class InlineDictationViewModel @Inject constructor(
 
         recordingJob = viewModelScope.launch(samplerDispatcher) {
             sampleAmplitudeAndAutoStopOnSilence()
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun startAndroidSpeechRecognition() {
+        if (!speechRecognitionProvider.isAvailable()) {
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+                "status" to "failure",
+                "cause" to "Unavailable",
+            )
+            _uiState.update { it.copy(error = PromptComposerViewModel.ANDROID_SPEECH_UNAVAILABLE_MESSAGE) }
+            return
+        }
+
+        val generation = ++speechRecognitionGeneration
+        val listener = object : PromptComposerViewModel.SpeechRecognitionListener {
+            override fun onPartial(text: String) {
+                if (isCurrentAndroidSpeechRecognition(generation) && text.isNotBlank()) {
+                    _uiState.update {
+                        if (it.recording == RecordingState.Recording) {
+                            it.copy(amplitude = 0.35f, error = null)
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
+
+            override fun onFinal(text: String) {
+                if (isCurrentAndroidSpeechRecognition(generation)) {
+                    finishAndroidSpeechRecognition(text)
+                }
+            }
+
+            override fun onError(message: String) {
+                if (isCurrentAndroidSpeechRecognition(generation)) {
+                    failAndroidSpeechRecognition(message)
+                }
+            }
+        }
+
+        val session = try {
+            speechRecognitionProvider.start(
+                language = voiceSettings.recognitionLanguageTag(),
+                listener = listener,
+            )
+        } catch (_: Throwable) {
+            null
+        }
+
+        if (session == null) {
+            speechRecognitionGeneration++
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_start_result",
+                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+                "status" to "failure",
+                "cause" to "StartFailed",
+            )
+            _uiState.update { it.copy(error = PromptComposerViewModel.ANDROID_SPEECH_UNAVAILABLE_MESSAGE) }
+            return
+        }
+
+        speechRecognitionSession = session
+        activeProvider = VoiceTranscriptionProvider.AndroidSpeech
+        DiagnosticEvents.record(
+            "action",
+            "inline_recording_start_result",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "success",
+            "mode" to _uiState.value.mode.name,
+        )
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Recording,
+                amplitude = 0.12f,
+                error = null,
+            )
         }
     }
 
@@ -312,15 +413,22 @@ public class InlineDictationViewModel @Inject constructor(
     }
 
     private fun stopAndTranscribe() {
+        if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
+            stopAndroidSpeechRecognition()
+            return
+        }
+
         recordingJob?.cancel()
         recordingJob = null
 
         val audio = try {
             audioRecorder.stop()
         } catch (e: AudioRecorderException) {
+            activeProvider = null
             DiagnosticEvents.record(
                 "action",
                 "inline_recording_stop",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                 "status" to "failure",
                 "cause" to e.javaClass.simpleName,
             )
@@ -335,9 +443,11 @@ public class InlineDictationViewModel @Inject constructor(
         }
 
         if (audio.isEmpty()) {
+            activeProvider = null
             DiagnosticEvents.record(
                 "action",
                 "inline_recording_stop",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                 "status" to "empty_audio",
                 "audioBytes" to 0,
             )
@@ -356,6 +466,7 @@ public class InlineDictationViewModel @Inject constructor(
             DiagnosticEvents.record(
                 "action",
                 "inline_recording_stop",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                 "status" to "no_speech",
                 "audioBytes" to audio.size,
                 "recoverable" to recoverableNoSpeech,
@@ -381,9 +492,11 @@ public class InlineDictationViewModel @Inject constructor(
                             },
                         )
                     }
+                    activeProvider = null
                 }
                 return
             }
+            activeProvider = null
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -397,6 +510,7 @@ public class InlineDictationViewModel @Inject constructor(
         DiagnosticEvents.record(
             "action",
             "inline_recording_stop",
+            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
             "status" to "transcribing",
             "audioBytes" to audio.size,
             "mode" to _uiState.value.mode.name,
@@ -406,9 +520,11 @@ public class InlineDictationViewModel @Inject constructor(
         transcribeJob = viewModelScope.launch {
             val client = whisperClientFactory.create()
             if (client == null) {
+                activeProvider = null
                 DiagnosticEvents.record(
                     "action",
                     "inline_transcription_result",
+                    "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                     "status" to "failure",
                     "audioBytes" to audio.size,
                     "cause" to "MissingApiKey",
@@ -454,9 +570,11 @@ public class InlineDictationViewModel @Inject constructor(
                                 },
                             )
                         }
+                        activeProvider = null
                         DiagnosticEvents.record(
                             "action",
                             "inline_transcription_result",
+                            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                             "status" to "empty",
                             "audioBytes" to audio.size,
                             "pendingQueued" to (pendingId != null),
@@ -485,9 +603,11 @@ public class InlineDictationViewModel @Inject constructor(
                                 error = NO_SPEECH_DETECTED_MESSAGE,
                             )
                         }
+                        activeProvider = null
                         DiagnosticEvents.record(
                             "action",
                             "inline_transcription_result",
+                            "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                             "status" to "hallucination_filtered",
                             "audioBytes" to audio.size,
                             "pendingQueued" to (pendingId != null),
@@ -500,9 +620,11 @@ public class InlineDictationViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, amplitude = 0f, error = null)
                     }
+                    activeProvider = null
                     DiagnosticEvents.record(
                         "action",
                         "inline_transcription_result",
+                        "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                         "status" to "success",
                         "audioBytes" to audio.size,
                         "transcriptBytes" to trimmed.toByteArray(Charsets.UTF_8).size,
@@ -523,12 +645,14 @@ public class InlineDictationViewModel @Inject constructor(
                     if (pendingId != null) {
                         runCatching { pendingTranscriptionStore.markFailure(pendingId, msg) }
                     }
+                    activeProvider = null
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, amplitude = 0f, error = msg)
                     }
                     DiagnosticEvents.record(
                         "action",
                         "inline_transcription_result",
+                        "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
                         "status" to "failure",
                         "audioBytes" to audio.size,
                         "pendingQueued" to (pendingId != null),
@@ -537,6 +661,107 @@ public class InlineDictationViewModel @Inject constructor(
                 },
             )
         }
+    }
+
+    private fun isCurrentAndroidSpeechRecognition(generation: Long): Boolean =
+        activeProvider == VoiceTranscriptionProvider.AndroidSpeech &&
+            speechRecognitionSession != null &&
+            speechRecognitionGeneration == generation
+
+    private fun stopAndroidSpeechRecognition() {
+        val session = speechRecognitionSession ?: run {
+            failAndroidSpeechRecognition(PromptComposerViewModel.ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
+            return
+        }
+        runCatching { session.stopListening() }.onFailure {
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_stop",
+                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+                "status" to "failure",
+                "cause" to it.javaClass.simpleName,
+            )
+            failAndroidSpeechRecognition(
+                it.message ?: PromptComposerViewModel.ANDROID_SPEECH_UNAVAILABLE_MESSAGE,
+            )
+            return
+        }
+        DiagnosticEvents.record(
+            "action",
+            "inline_recording_stop",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "transcribing",
+            "mode" to _uiState.value.mode.name,
+        )
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Transcribing,
+                amplitude = 0f,
+                error = null,
+            )
+        }
+    }
+
+    private fun finishAndroidSpeechRecognition(rawText: String) {
+        val text = rawText.trim()
+        if (text.isEmpty()) {
+            failAndroidSpeechRecognition(NO_SPEECH_DETECTED_MESSAGE)
+            return
+        }
+
+        clearAndroidSpeechSession()
+        _uiState.update {
+            it.copy(recording = RecordingState.Idle, amplitude = 0f, error = null)
+        }
+        DiagnosticEvents.record(
+            "action",
+            "inline_transcription_result",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "success",
+            "transcriptBytes" to text.toByteArray(Charsets.UTF_8).size,
+            "mode" to _uiState.value.mode.name,
+        )
+        transcribeJob = viewModelScope.launch {
+            _transcriptions.emit(text)
+        }
+    }
+
+    private fun failAndroidSpeechRecognition(message: String) {
+        clearAndroidSpeechSession()
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                error = message.ifBlank { PromptComposerViewModel.ANDROID_SPEECH_FAILED_MESSAGE },
+            )
+        }
+        DiagnosticEvents.record(
+            "action",
+            "inline_transcription_result",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+            "status" to "failure",
+            "cause" to "SpeechRecognitionError",
+        )
+    }
+
+    private fun cancelAndroidSpeechRecognition() {
+        clearAndroidSpeechSession()
+        _uiState.update {
+            it.copy(recording = RecordingState.Idle, amplitude = 0f, error = null)
+        }
+        DiagnosticEvents.record(
+            "action",
+            "inline_recording_cancel",
+            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
+        )
+    }
+
+    private fun clearAndroidSpeechSession() {
+        val session = speechRecognitionSession
+        speechRecognitionSession = null
+        speechRecognitionGeneration++
+        runCatching { session?.cancel() }
+        activeProvider = null
     }
 
     /** Clear the inline error banner. */
@@ -565,12 +790,27 @@ public class InlineDictationViewModel @Inject constructor(
         return true
     }
 
+    public fun needsOpenAiKeyForMicTap(): Boolean =
+        voiceSettings.transcriptionProvider() == VoiceTranscriptionProvider.OpenAiWhisper &&
+            !hasApiKey()
+
     override fun onCleared() {
         recordingJob?.cancel()
         transcribeJob?.cancel()
         if (_uiState.value.recording == RecordingState.Recording) {
-            runCatching { audioRecorder.stop() }
-            DiagnosticEvents.record("action", "inline_recording_cancel")
+            if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
+                cancelAndroidSpeechRecognition()
+            } else {
+                runCatching { audioRecorder.stop() }
+                activeProvider = null
+                DiagnosticEvents.record(
+                    "action",
+                    "inline_recording_cancel",
+                    "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                )
+            }
+        } else {
+            clearAndroidSpeechSession()
         }
         super.onCleared()
     }

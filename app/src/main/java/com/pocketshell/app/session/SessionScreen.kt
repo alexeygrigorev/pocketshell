@@ -63,6 +63,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
+import com.pocketshell.app.conversation.ConversationInteractionCleanupEffect
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
 import com.pocketshell.app.conversation.ToolResultPairing
@@ -595,6 +596,8 @@ internal fun ConversationPane(
     // rendered as actionable links when the screen supplies a tap sink.
     onConversationLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
+    ConversationInteractionCleanupEffect()
+
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
     val visibleEvents = remember(events, showSystemNotes) {

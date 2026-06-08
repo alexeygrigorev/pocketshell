@@ -98,6 +98,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
+import com.pocketshell.app.conversation.ConversationInteractionCleanupEffect
 import com.pocketshell.app.conversation.ToolResultPairing
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
@@ -3163,6 +3164,8 @@ internal fun TmuxConversationPane(
     // Null default keeps direct callers/screenshot tests rendering plain text.
     onConversationLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
+    ConversationInteractionCleanupEffect()
+
     // Issue #459: this pane is now read-only chrome — search + the
     // conversation feed. Sending is owned by the shared unified composer
     // ([PromptComposerSheet]) mounted at the screen level, identical to the

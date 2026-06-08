@@ -1,11 +1,17 @@
 package com.pocketshell.app.tmux
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
@@ -19,6 +25,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -135,6 +142,75 @@ class TmuxConversationPaneNavigationUiTest {
             .performScrollToIndex(1798)
         compose.waitForIdle()
         compose.onNodeWithText("codex-visible-message-899").assertIsDisplayed()
+    }
+
+    @Test
+    fun terminalTabSwitchAfterExpandedSelectableToolOutputDoesNotStall() {
+        val events = sampleCodexTranscript(turns = 3, outputLines = 320)
+        compose.setContent {
+            PocketShellTheme {
+                var selectedTab by remember { mutableStateOf("conversation") }
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Text(
+                        text = "Terminal",
+                        modifier = Modifier
+                            .testTag(TMUX_TERMINAL_TAB_TAG)
+                            .clickable { selectedTab = "terminal" }
+                            .padding(8.dp),
+                    )
+                    Text(
+                        text = "Conversation",
+                        modifier = Modifier
+                            .testTag(TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + "1")
+                            .clickable { selectedTab = "conversation" }
+                            .padding(8.dp),
+                    )
+                    if (selectedTab == "conversation") {
+                        TmuxConversationPane(
+                            events = events,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .testTag(TMUX_CONVERSATION_PANE_TAG),
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .testTag(TEST_TERMINAL_SURFACE_TAG),
+                        ) {
+                            Text("terminal-ready")
+                        }
+                    }
+                }
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("codex-visible-message-2")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_CONVERSATION_LIST_TAG)
+            .performScrollToIndex(4)
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "codex-tool-1")
+            .performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("tool-output-1-0", substring = true, useUnmergedTree = true)
+            .performClick()
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG)
+            .performClick()
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(TEST_TERMINAL_SURFACE_TAG)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TEST_TERMINAL_SURFACE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG).assertDoesNotExist()
     }
 
     @Test
@@ -356,7 +432,10 @@ class TmuxConversationPaneNavigationUiTest {
         }
     }
 
-    private fun sampleCodexTranscript(turns: Int): List<ConversationEvent> {
+    private fun sampleCodexTranscript(
+        turns: Int,
+        outputLines: Int = 80,
+    ): List<ConversationEvent> {
         val ts = 1_700_000_000_000L
         return buildList {
             repeat(turns) { i ->
@@ -385,7 +464,7 @@ class TmuxConversationPaneNavigationUiTest {
                         atMillis = ts + i,
                         toolCallId = "codex-tool-$i",
                         output = buildString {
-                            repeat(80) { line ->
+                            repeat(outputLines) { line ->
                                 append("tool-output-$i-$line ")
                                 append("0123456789abcdef0123456789abcdef0123456789abcdef")
                                 append('\n')
@@ -395,5 +474,9 @@ class TmuxConversationPaneNavigationUiTest {
                 )
             }
         }
+    }
+
+    private companion object {
+        const val TEST_TERMINAL_SURFACE_TAG = "test-terminal-surface"
     }
 }

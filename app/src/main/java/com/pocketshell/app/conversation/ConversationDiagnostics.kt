@@ -65,30 +65,46 @@ internal object ConversationDiagnostics {
             is ConversationEvent.Message -> common += listOf(
                 "role" to event.role.name,
                 "agent" to event.agent.name,
-                "textBytes" to event.text.utf8Bytes(),
-                "lineCount" to event.text.lineCount(),
                 "streaming" to event.streaming,
                 "sendState" to event.sendState.name,
+            ) + event.text.diagnosticTextFields(
+                bytesKey = "textBytes",
+                lineCountKey = "lineCount",
+                charsKey = "textChars",
+                exactKey = "textMetricsExact",
             )
             is ConversationEvent.ToolCall -> common += listOf(
                 "agent" to event.agent.name,
                 "toolName" to event.name,
-                "inputBytes" to event.input.utf8Bytes(),
                 "hasPairedResult" to (pairedToolResult != null),
-                "resultBytes" to pairedToolResult?.output?.utf8Bytes(),
-                "resultLineCount" to pairedToolResult?.output?.lineCount(),
+            ) + event.input.diagnosticTextFields(
+                bytesKey = "inputBytes",
+                lineCountKey = "inputLineCount",
+                charsKey = "inputChars",
+                exactKey = "inputMetricsExact",
+            ) + pairedToolResult?.output.diagnosticTextFields(
+                bytesKey = "resultBytes",
+                lineCountKey = "resultLineCount",
+                charsKey = "resultChars",
+                exactKey = "resultMetricsExact",
             )
             is ConversationEvent.ToolResult -> common += listOf(
                 "agent" to event.agent.name,
                 "toolCallId" to event.toolCallId,
-                "outputBytes" to event.output.utf8Bytes(),
-                "lineCount" to event.output.lineCount(),
+            ) + event.output.diagnosticTextFields(
+                bytesKey = "outputBytes",
+                lineCountKey = "lineCount",
+                charsKey = "outputChars",
+                exactKey = "outputMetricsExact",
             )
             is ConversationEvent.SystemNote -> common += listOf(
                 "agent" to event.agent.name,
                 "tag" to event.tag,
-                "contentBytes" to event.content.utf8Bytes(),
-                "lineCount" to event.content.lineCount(),
+            ) + event.content.diagnosticTextFields(
+                bytesKey = "contentBytes",
+                lineCountKey = "lineCount",
+                charsKey = "contentChars",
+                exactKey = "contentMetricsExact",
             )
         }
         return common.toTypedArray()
@@ -101,8 +117,46 @@ internal object ConversationDiagnostics {
         is ConversationEvent.SystemNote -> "system_note"
     }
 
-    private fun String.utf8Bytes(): Int = toByteArray(Charsets.UTF_8).size
+    private fun String?.diagnosticTextFields(
+        bytesKey: String,
+        lineCountKey: String,
+        charsKey: String,
+        exactKey: String,
+    ): List<Pair<String, Any?>> {
+        if (this == null) {
+            return listOf(
+                bytesKey to null,
+                lineCountKey to null,
+                charsKey to null,
+                exactKey to null,
+            )
+        }
+        val exact = length <= MaxExactDiagnosticChars
+        val fields = mutableListOf<Pair<String, Any?>>(
+            bytesKey to if (exact) toByteArray(Charsets.UTF_8).size else null,
+            lineCountKey to if (exact) exactLineCount() else null,
+            charsKey to length,
+            exactKey to exact,
+        )
+        if (!exact) {
+            fields += "${lineCountKey}AtLeast" to sampledLineCount(MaxExactDiagnosticChars)
+            fields += "${exactKey}CharLimit" to MaxExactDiagnosticChars
+        }
+        return fields
+    }
 
-    private fun String.lineCount(): Int =
+    private fun String.exactLineCount(): Int =
         if (isEmpty()) 0 else count { it == '\n' } + 1
+
+    private fun String.sampledLineCount(maxChars: Int): Int {
+        if (isEmpty()) return 0
+        var lines = 1
+        val limit = minOf(length, maxChars)
+        for (index in 0 until limit) {
+            if (this[index] == '\n') lines += 1
+        }
+        return lines
+    }
+
+    private const val MaxExactDiagnosticChars = 100_000
 }

@@ -68,4 +68,41 @@ class ConversationDiagnosticsTest {
         assertFalse(fields.containsValue(input))
         assertFalse(fields.containsValue(output))
     }
+
+    @Test
+    fun hugeToolResultRowToggleFieldsDoNotRequireExactPayloadScan() {
+        val output = buildString {
+            repeat(101_000) { index ->
+                append(if (index % 20 == 0) '\n' else 'x')
+            }
+            append("private output tail")
+        }
+        val toolCall = ConversationEvent.ToolCall(
+            id = "tool-1",
+            agent = AgentKind.Codex,
+            name = "exec_command",
+            input = """{"cmd":"./gradlew connectedDebugAndroidTest"}""",
+        )
+        val result = ConversationEvent.ToolResult(
+            id = "result-1",
+            agent = AgentKind.Codex,
+            toolCallId = "tool-1",
+            output = output,
+        )
+
+        val fields = ConversationDiagnostics.rowToggleFields(
+            mode = "tmux",
+            event = toolCall,
+            expanded = true,
+            pairedToolResult = result,
+        ).toMap()
+
+        assertEquals(null, fields["resultBytes"])
+        assertEquals(null, fields["resultLineCount"])
+        assertEquals(output.length, fields["resultChars"])
+        assertEquals(false, fields["resultMetricsExact"])
+        assertEquals(100_000, fields["resultMetricsExactCharLimit"])
+        assertEquals(5_001, fields["resultLineCountAtLeast"])
+        assertFalse(fields.containsValue(output))
+    }
 }

@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,7 +32,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.getValue
@@ -44,12 +42,18 @@ import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.MicGlyphIcon
 import com.pocketshell.uikit.model.MicButtonState
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Shared voice-surface composables used by both
@@ -70,24 +74,32 @@ import com.pocketshell.uikit.theme.PocketShellDensity
  * Compact one-line error strip surfaced when the inline-dictation FSM
  * reports a permission / API-key / Whisper failure. Tapping the strip
  * dismisses the banner; the next mic tap also clears it via the
- * ViewModel's `clearError()`. Visually distinct from the armed-modifier
- * strip — accent-soft fill with an accent-dim top border, full-width.
+ * ViewModel's `clearError()`. It renders as a dense full-width status row
+ * using the shared error badge and semantic status colour.
  */
 @Composable
 internal fun InlineDictationErrorStrip(message: String, onDismiss: () -> Unit) {
-    Box(
+    val semantic = LocalPocketShellSemantic.current
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.AccentSoft)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim)
+            .heightIn(min = PocketShellDensity.rowMinHeight)
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = semantic.statusError)
             .clickable(onClick = onDismiss)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        contentAlignment = Alignment.CenterStart,
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
+        Badge(label = "voice", role = BadgeRole.Error, mono = false)
         Text(
             text = message,
-            color = PocketShellColors.Accent,
-            fontSize = 11.sp,
+            color = semantic.statusError,
+            style = PocketShellType.bodyDense,
+            modifier = Modifier.weight(1f),
         )
     }
 }
@@ -124,30 +136,29 @@ internal fun AssistantStrip(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .background(color = PocketShellColors.Surface, shape = PocketShellShapes.medium)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = PocketShellShapes.medium)
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            )
             .testTag(ASSISTANT_STRIP_TAG),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(PocketShellDensity.sectionGap),
     ) {
         when (state) {
-            is AssistantUiState.Thinking -> Text(
+            is AssistantUiState.Thinking -> AssistantStatusRow(
+                badge = "working",
+                role = BadgeRole.Active,
                 text = "Working...",
-                color = PocketShellColors.Text,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
             )
             is AssistantUiState.Confirming -> {
-                Text(
+                AssistantStatusRow(
+                    badge = "confirm",
                     text = "Is this what you want me to execute?",
-                    color = PocketShellColors.Text,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
+                    role = BadgeRole.Agent,
                 )
-                Text(
-                    text = state.candidate.summary,
-                    color = PocketShellColors.Text,
-                    fontSize = 12.sp,
+                AssistantCommandPreview(
+                    summary = state.candidate.summary,
                     modifier = Modifier.testTag(ASSISTANT_CANDIDATE_TAG),
                 )
                 if (correcting) {
@@ -157,7 +168,7 @@ internal fun AssistantStrip(
                         correctionDictation.onDictatedTextConsumed()
                     }
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         OutlinedTextField(
@@ -166,6 +177,8 @@ internal fun AssistantStrip(
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag(ASSISTANT_CORRECTION_FIELD_TAG),
+                            shape = PocketShellShapes.small,
+                            textStyle = PocketShellType.bodyDense,
                             keyboardActions = KeyboardActions(onDone = {
                                 onCorrect(correctionText)
                                 correcting = false
@@ -180,7 +193,7 @@ internal fun AssistantStrip(
                             )
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
                         TextButton(
                             onClick = {
                                 onCorrect(correctionText)
@@ -193,7 +206,7 @@ internal fun AssistantStrip(
                     }
                 } else {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         TextButton(
@@ -209,11 +222,10 @@ internal fun AssistantStrip(
                 }
             }
             is AssistantUiState.Choosing -> {
-                Text(
+                AssistantStatusRow(
+                    badge = "choose",
                     text = "Which folder did you mean for \"${state.query}\"?",
-                    color = PocketShellColors.Text,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
+                    role = BadgeRole.Agent,
                     modifier = Modifier.testTag(ASSISTANT_CHOOSING_TAG),
                 )
                 state.candidates.forEach { candidate ->
@@ -228,12 +240,21 @@ internal fun AssistantStrip(
                 TextButton(onClick = onCancelChoice) { Text("Cancel") }
             }
             is AssistantUiState.Done -> {
-                Text(text = state.message, color = PocketShellColors.Text, fontSize = 12.sp)
+                AssistantStatusRow(
+                    badge = "done",
+                    role = BadgeRole.Active,
+                    text = state.message,
+                )
                 TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
             is AssistantUiState.Error -> {
-                Text(text = state.message, color = PocketShellColors.Accent, fontSize = 12.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistantStatusRow(
+                    badge = "error",
+                    role = BadgeRole.Error,
+                    text = state.message,
+                    color = LocalPocketShellSemantic.current.statusError,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
                     if (state.retryable) {
                         TextButton(
                             onClick = onRetry,
@@ -246,6 +267,49 @@ internal fun AssistantStrip(
             AssistantUiState.Idle -> Unit
         }
     }
+}
+
+@Composable
+private fun AssistantStatusRow(
+    badge: String,
+    role: BadgeRole,
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = PocketShellColors.Text,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = PocketShellDensity.rowMinHeight),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Badge(label = badge, role = role, mono = false)
+        Text(
+            text = text,
+            color = color,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun AssistantCommandPreview(summary: String, modifier: Modifier = Modifier) {
+    Text(
+        text = summary,
+        color = PocketShellColors.Text,
+        style = PocketShellType.bodyMono,
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.SurfaceElev, shape = PocketShellShapes.small)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = PocketShellShapes.small)
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.chipPadV,
+            ),
+    )
 }
 
 internal data class AssistantCorrectionDictation(
@@ -321,8 +385,8 @@ private fun ScrollableChipStrip(
     Row(
         modifier = modifier
             .horizontalScroll(scrollState)
-            .padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(PocketShellSpacing.sm),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         chips.forEach { chip ->
@@ -338,7 +402,7 @@ private fun ScrollableChipStrip(
                 icon = DictateDotIcon,
             )
         }
-        Spacer(modifier = Modifier.width(4.dp))
+        Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
     }
 }
 
@@ -381,8 +445,12 @@ private fun PrimaryChipCluster(
     ) return
     Row(
         modifier = modifier
-            .padding(top = 8.dp, bottom = 8.dp, end = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(
+                top = PocketShellSpacing.sm,
+                bottom = PocketShellSpacing.sm,
+                end = PocketShellSpacing.sm,
+            ),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (onAgentCommandsTap != null) {
@@ -503,7 +571,11 @@ internal fun BottomChipControls(
         if (onDictateTap != null) {
             Box(
                 modifier = Modifier
-                    .padding(top = 8.dp, bottom = 8.dp, end = 8.dp),
+                    .padding(
+                        top = PocketShellSpacing.sm,
+                        bottom = PocketShellSpacing.sm,
+                        end = PocketShellSpacing.sm,
+                    ),
                 contentAlignment = Alignment.CenterEnd,
             ) {
                 ComposerLauncherButton(
@@ -526,11 +598,11 @@ private fun ComposerLauncherButton(
     val containerColor = if (enabled) PocketShellColors.SurfaceElev else PocketShellColors.Surface
     val borderColor = if (enabled) PocketShellColors.AccentDim else PocketShellColors.BorderSoft
     val glyphColor = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted
-    val shape = RoundedCornerShape(8.dp)
+    val shape = PocketShellShapes.small
 
     Box(
         modifier = modifier
-            .size(48.dp)
+            .size(PocketShellDensity.tapTargetMin)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION }
             .testTag(SESSION_COMPOSER_LAUNCHER_TAG),
@@ -538,7 +610,7 @@ private fun ComposerLauncherButton(
     ) {
         Box(
             modifier = Modifier
-                .size(36.dp)
+                .size(PocketShellDensity.tapTargetMin - PocketShellSpacing.md)
                 .background(color = containerColor, shape = shape)
                 .border(width = 1.dp, color = borderColor, shape = shape),
             contentAlignment = Alignment.Center,
@@ -547,7 +619,7 @@ private fun ComposerLauncherButton(
                 imageVector = ComposerLauncherIcon,
                 contentDescription = null,
                 tint = glyphColor,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(PocketShellDensity.treeIndent),
             )
         }
     }

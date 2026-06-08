@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -61,6 +62,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.io.File
@@ -176,7 +178,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .testTag(SETTINGS_LAZY_COLUMN_TAG),
-            contentPadding = PaddingValues(vertical = 12.dp),
+            contentPadding = PaddingValues(vertical = PocketShellSpacing.md),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             // Settings are ordered most-useful-first (issue #486):
@@ -404,7 +406,7 @@ private fun SectionLabel(text: String, includeTopDivider: Boolean = true) {
                     .height(1.dp)
                     .background(PocketShellColors.BorderSoft),
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
         }
         SectionHeader(
             label = text,
@@ -430,7 +432,7 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
                 color = PocketShellColors.BorderSoft,
                 shape = RoundedCornerShape(12.dp),
             )
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md),
         content = content,
     )
 }
@@ -483,7 +485,7 @@ private fun SettingsNavRow(
             modifier = Modifier.padding(
                 start = PocketShellSpacing.sm,
                 top = 2.dp,
-                bottom = 4.dp,
+                bottom = PocketShellSpacing.xs,
             ),
         )
     }
@@ -572,7 +574,7 @@ private fun TerminalSection(
                         .weight(1f)
                         .testTag(TERMINAL_FONT_SLIDER_TAG),
                 )
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(PocketShellSpacing.md))
                 Text(
                     text = "${fontSizeSp.roundToInt()}sp",
                     color = PocketShellColors.TextSecondary,
@@ -580,7 +582,7 @@ private fun TerminalSection(
                     fontWeight = FontWeight.Medium,
                 )
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             // Issue #496: conversation message-body font size. Sits next to
             // the terminal font slider so both text-size knobs live together.
@@ -615,7 +617,7 @@ private fun TerminalSection(
                         .weight(1f)
                         .testTag(CONVERSATION_FONT_SLIDER_TAG),
                 )
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(PocketShellSpacing.md))
                 Text(
                     text = "${conversationFontSizeSp.roundToInt()}sp",
                     color = PocketShellColors.TextSecondary,
@@ -624,7 +626,7 @@ private fun TerminalSection(
                     modifier = Modifier.testTag(CONVERSATION_FONT_VALUE_TAG),
                 )
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -667,7 +669,7 @@ private fun TerminalSection(
                     modifier = Modifier.testTag(TERMINAL_SMART_TEXT_SWITCH_TAG),
                 )
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -715,7 +717,7 @@ private fun TerminalSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             AppSettings.BACKGROUND_GRACE_OPTIONS.forEach { option ->
                 DefaultHostOptionRow(
                     title = option.label,
@@ -735,7 +737,7 @@ private fun TerminalSection(
             // the submit Enter as a separate key so a fast Enter doesn't race
             // ahead of the agent TUI's paste ingestion (which left the message
             // sitting unsent). Lives next to the other terminal/session knobs.
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
             Text(
                 text = "Agent submit delay",
                 color = PocketShellColors.Text,
@@ -769,7 +771,7 @@ private fun TerminalSection(
                         .weight(1f)
                         .testTag(AGENT_SUBMIT_DELAY_SLIDER_TAG),
                 )
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(PocketShellSpacing.md))
                 Text(
                     text = "${agentSubmitEnterDelayMs}ms",
                     color = PocketShellColors.TextSecondary,
@@ -781,7 +783,7 @@ private fun TerminalSection(
 
             // -- Startup: open-on-launch destination (folded in from the
             //    former standalone "Startup" section, issue #486) --------
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
             Text(
                 text = "Open on launch",
                 color = PocketShellColors.Text,
@@ -794,7 +796,7 @@ private fun TerminalSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             DefaultHostOptionRow(
                 title = "Host list",
                 subtitle = "Show all saved hosts first",
@@ -836,12 +838,13 @@ private fun DefaultHostOptionRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(vertical = 10.dp)
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .padding(vertical = PocketShellDensity.rowPadV)
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         RadioMark(selected = selected)
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(PocketShellSpacing.md))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
@@ -1108,23 +1111,14 @@ private fun LanguageOptionRow(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    Row(
+    ListRow(
+        title = option.label,
+        leading = { RadioMark(selected = selected) },
         modifier = Modifier
-            .fillMaxWidth()
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
             .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(vertical = 8.dp)
             .testTag(voiceLanguageOptionTestTag(option.code)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioMark(selected = selected)
-        Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = option.label,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.Medium,
-        )
-    }
+    )
 }
 
 @Composable
@@ -1139,12 +1133,13 @@ private fun VoiceProviderOptionRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(vertical = 8.dp)
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .padding(vertical = PocketShellDensity.rowPadV)
             .testTag(voiceProviderOptionTestTag(provider)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         RadioMark(selected = selected)
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(PocketShellSpacing.md))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
@@ -1185,7 +1180,7 @@ internal fun VoiceApiKeyEntryDialog(
                     color = PocketShellColors.TextSecondary,
                     style = MaterialTheme.typography.labelSmall,
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 OutlinedTextField(
                     value = keyText,
                     onValueChange = { keyText = it },
@@ -1409,23 +1404,14 @@ private fun AssistantProviderRow(
     onClick: () -> Unit,
     testTag: String,
 ) {
-    Row(
+    ListRow(
+        title = label,
+        leading = { RadioMark(selected = selected) },
         modifier = Modifier
-            .fillMaxWidth()
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
             .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(vertical = 8.dp)
             .testTag(testTag),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioMark(selected = selected)
-        Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = label,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.Medium,
-        )
-    }
+    )
 }
 
 /**
@@ -1450,7 +1436,7 @@ internal fun AssistantApiKeyEntryDialog(
                     color = PocketShellColors.TextSecondary,
                     style = MaterialTheme.typography.labelSmall,
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 OutlinedTextField(
                     value = keyText,
                     onValueChange = { keyText = it },

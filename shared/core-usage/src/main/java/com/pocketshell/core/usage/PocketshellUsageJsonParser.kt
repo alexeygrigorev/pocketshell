@@ -106,6 +106,7 @@ public class PocketshellUsageJsonParser {
                 },
             ),
             preferDetailPercent = codexCompatible,
+            preferDetailWindowMetadata = codexCompatible,
         )?.let { windows += it }
         parseWindow(
             record = obj,
@@ -120,6 +121,7 @@ public class PocketshellUsageJsonParser {
                 },
             ),
             preferDetailPercent = codexCompatible,
+            preferDetailWindowMetadata = codexCompatible,
         )?.let { windows += it }
 
         return UsageProviderRecord(
@@ -149,6 +151,7 @@ public class PocketshellUsageJsonParser {
         provider: String,
         detailWindow: JSONObject? = null,
         preferDetailPercent: Boolean = false,
+        preferDetailWindowMetadata: Boolean = false,
     ): UsageWindow? {
         val obj = if (!record.has(jsonKey) || record.isNull(jsonKey)) {
             null
@@ -171,14 +174,22 @@ public class PocketshellUsageJsonParser {
             return null
         }
         val used = (100.0 - percentRemaining).coerceIn(0.0, 100.0)
+        val detailWindowLabel = detailWindow?.windowLabelFromLimitSeconds()
+        val topLevelWindowLabel = obj?.optionalString("window")
         return UsageWindow(
-            name = obj?.optionalString("window")
-                ?: detailWindow?.windowLabelFromLimitSeconds()
-                ?: windowName,
+            name = if (preferDetailWindowMetadata) {
+                detailWindowLabel ?: topLevelWindowLabel ?: windowName
+            } else {
+                topLevelWindowLabel ?: detailWindowLabel ?: windowName
+            },
             used = used,
             limit = 100.0,
             unit = "percent",
-            resetAt = obj?.optionalInstant("reset_at") ?: detailWindow?.optionalInstant("reset_at"),
+            resetAt = if (preferDetailWindowMetadata) {
+                detailWindow?.optionalInstant("reset_at") ?: obj?.optionalInstant("reset_at")
+            } else {
+                obj?.optionalInstant("reset_at") ?: detailWindow?.optionalInstant("reset_at")
+            },
         )
     }
 

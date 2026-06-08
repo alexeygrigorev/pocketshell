@@ -18,9 +18,16 @@ public data class UsageMissingToolHost(
     val toolName: String = "pocketshell",
 )
 
+public data class UsageFailedHost(
+    val hostId: Long,
+    val hostName: String,
+    val reason: String,
+)
+
 public data class UsageScreenState(
     val hosts: List<UsageHostSnapshot> = emptyList(),
     val missingToolHosts: List<UsageMissingToolHost> = emptyList(),
+    val failedHosts: List<UsageFailedHost> = emptyList(),
     val isRefreshing: Boolean = false,
 ) {
     public val providerCount: Int

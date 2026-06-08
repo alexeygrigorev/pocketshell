@@ -35,9 +35,10 @@ import javax.inject.Inject
  * present — [UsageRemoteSource.fetchUsage].
  *
  * The result is one of the four [HostUsageFetch] cases the view model
- * already partitions on (Records / ToolMissing / Skipped). Failures land
- * in `Skipped`; a future Fix C iteration can surface them as
- * `UsageScreenState.errors` so the user sees why a host is missing.
+ * already partitions on (Records / ToolMissing / Failed / Skipped). Usage
+ * command failures land in `Failed` so the panel can show why a host is
+ * missing; credential/key-prep gaps remain `Skipped` because this screen
+ * cannot resolve them yet.
  */
 public interface HostUsageFetcher {
     public suspend fun fetch(host: HostEntity): HostUsageFetch
@@ -50,6 +51,7 @@ public sealed interface HostUsageFetch {
     ) : HostUsageFetch
 
     public data object ToolMissing : HostUsageFetch
+    public data class Failed(val reason: String) : HostUsageFetch
     public data object Skipped : HostUsageFetch
 }
 
@@ -134,7 +136,7 @@ public class SshHostUsageFetcher : HostUsageFetcher {
                 )
 
                 UsageFetchResult.ToolMissing -> HostUsageFetch.ToolMissing
-                is UsageFetchResult.Failed -> HostUsageFetch.Skipped
+                is UsageFetchResult.Failed -> HostUsageFetch.Failed(fetch.reason)
             }
         } finally {
             runCatching { session.close() }
@@ -149,9 +151,10 @@ public class SshHostUsageFetcher : HostUsageFetcher {
  * pocketshell/quota state. Results are aggregated into a single
  * [UsageScreenState] that the screen renders. Hosts whose key file is
  * missing, who fail to connect, or whose pocketshell status is unknown are
- * silently skipped so the panel only shows actionable rows. Hosts where
+ * skipped because the panel cannot fix those locally yet. Hosts where
  * pocketshell is confirmed absent populate the "missing tool" empty-state
- * list.
+ * list. Hosts where the usage command runs but fails populate
+ * [UsageScreenState.failedHosts] so provider/auth errors are not hidden.
  *
  * The view model is deliberately stateless across visits: every
  * navigation to [com.pocketshell.app.nav.AppDestination.Usage] spins up a
@@ -267,15 +270,16 @@ open class UsageViewModel internal constructor(
         // `false` written before #514 replaced exact-`==` with semver
         // semantics, and that stale value silently dropped the host to
         // "0 hosts" → a blank panel. The fetcher already classifies every
-        // host into Records / ToolMissing / Skipped from the SAME single
+        // host into Records / ToolMissing / Failed / Skipped from the SAME single
         // usage command the host-list summary runs, so attempting the fetch
         // for every saved host is both correct and consistent across
         // surfaces. A host that genuinely cannot serve usage lands in
-        // ToolMissing (explicit empty-reason) or Skipped — never silently
-        // hidden behind a stale compat flag.
+        // ToolMissing / Failed (explicit visible reasons) or Skipped — never
+        // silently hidden behind a stale compat flag.
         val hosts = hostDao.getAll().first()
         val snapshots = mutableListOf<UsageHostSnapshot>()
         val missing = mutableListOf<UsageMissingToolHost>()
+        val failed = mutableListOf<UsageFailedHost>()
         val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()
 
         hosts.forEach { host ->
@@ -309,6 +313,11 @@ open class UsageViewModel internal constructor(
                 }
 
                 HostUsageFetch.Skipped -> Unit
+                is HostUsageFetch.Failed -> failed += UsageFailedHost(
+                    hostId = host.id,
+                    hostName = host.name,
+                    reason = result.reason,
+                )
             }
         }
 
@@ -316,6 +325,7 @@ open class UsageViewModel internal constructor(
             state = UsageScreenState(
                 hosts = snapshots,
                 missingToolHosts = missing,
+                failedHosts = failed,
                 isRefreshing = false,
             ),
             schedulerUpdates = schedulerUpdates,

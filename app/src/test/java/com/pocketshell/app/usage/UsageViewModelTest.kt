@@ -269,6 +269,37 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun refresh_surfacesUsageFetchFailureInsteadOfSilentlySkippingHost() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "agents",
+                hostname = "claude401.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf(
+                "claude401.example" to HostUsageFetch.Failed("HTTP Error 401: Unauthorized"),
+            ),
+        )
+
+        val viewModel = testViewModel(fetcher, testScheduler)
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertFalse(state.isRefreshing)
+        assertEquals(emptyList<UsageHostSnapshot>(), state.hosts)
+        assertEquals(1, state.failedHosts.size)
+        assertEquals(hostId, state.failedHosts.single().hostId)
+        assertEquals("agents", state.failedHosts.single().hostName)
+        assertEquals("HTTP Error 401: Unauthorized", state.failedHosts.single().reason)
+    }
+
+    @Test
     fun refreshTimeoutClearsRefreshingInsteadOfLeavingPanelStuck() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
@@ -453,6 +484,44 @@ class UsageViewModelTest {
         val result = fetcher.fetch(host)
 
         assertEquals(HostUsageFetch.ToolMissing, result)
+    }
+
+    @Test
+    fun sshHostUsageFetcher_nonJsonUsageFailureIsReturnedForUi() = runTest {
+        val keyFile = Files.createTempFile("pocketshell-usage-failed", ".key").toFile()
+        keyFile.deleteOnExit()
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val host = HostEntity(
+            name = "claude401",
+            hostname = "claude401.example",
+            username = "u",
+            keyId = keyId,
+        )
+        val wrappedUsage = com.pocketshell.app.pocketshell.PocketshellCommand.wrap(
+            UsageRemoteSource.DEFAULT_USAGE_ARGS,
+        )
+        val session = FakeSshSession(
+            canned = mapOf(
+                wrappedUsage to ExecResult(
+                    stdout = "",
+                    stderr = "HTTP Error 401: Unauthorized",
+                    exitCode = 1,
+                ),
+            ),
+        )
+        val fetcher = SshHostUsageFetcher(
+            sshKeyDao = db.sshKeyDao(),
+            remoteSource = UsageRemoteSource(),
+            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+        )
+
+        val result = fetcher.fetch(host)
+
+        assertTrue(result is HostUsageFetch.Failed)
+        assertEquals("HTTP Error 401: Unauthorized", (result as HostUsageFetch.Failed).reason)
+        assertTrue("session should be closed after failure", session.closed)
     }
 
     private class FakeFetcher(

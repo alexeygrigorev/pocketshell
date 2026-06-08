@@ -77,6 +77,10 @@ fun UsageScreen(
             UsageEmptyHost(host = host)
         }
 
+        state.failedHosts.forEach { host ->
+            UsageFailedHostPanel(host = host)
+        }
+
         Spacer(modifier = Modifier.height(30.dp))
     }
 }
@@ -584,6 +588,32 @@ private fun UsageEmptyHost(host: UsageMissingToolHost) {
             color = PocketShellColors.TextMuted,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun UsageFailedHostPanel(host: UsageFailedHost) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "${host.hostName}: usage fetch failed",
+            color = PocketShellColors.TextMuted,
+            style = PocketShellType.bodyDense,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = host.reason,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.labelMono,
+            modifier = Modifier.padding(top = 8.dp),
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

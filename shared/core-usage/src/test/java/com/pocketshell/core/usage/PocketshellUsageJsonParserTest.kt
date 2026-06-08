@@ -81,6 +81,36 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
+    fun parse_codexPrefersDetailWindowPeriodAndResetWhenTopLevelIsGeneric() {
+        val records = parser.parse(
+            """
+            {"provider":"codex","status":"ok",
+             "short_term":{"percent_remaining":100.0,"reset_at":"2026-06-07T00:00:00Z","window":"primary_window"},
+             "long_term":{"percent_remaining":69.0,"reset_at":"2026-06-10T00:00:00Z","window":"secondary_window"},
+             "block_reason":null,"error":null,
+             "details":{"windows":{
+               "primary_window":{
+                 "used_percent":12,
+                 "limit_window_seconds":18000,
+                 "reset_at":1780828285
+               },
+               "secondary_window":{
+                 "used_percent":31,
+                 "limit_window_seconds":604800,
+                 "reset_at":1781137638
+               }
+             }}}
+            """.trimIndent(),
+        )
+
+        val record = records.single()
+        assertEquals("5h", record.windows[0].name)
+        assertEquals(Instant.parse("2026-06-07T10:31:25Z"), record.windows[0].resetAt)
+        assertEquals("7d", record.windows[1].name)
+        assertEquals(Instant.parse("2026-06-11T00:27:18Z"), record.windows[1].resetAt)
+    }
+
+    @Test
     fun parse_openAiCompatibleFallsBackToDetailWindowsAndPeriodLabels() {
         val records = parser.parse(
             """

@@ -2,6 +2,7 @@ package com.pocketshell.app.sessions
 
 import android.util.Log
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.DiagnosticPrivacy
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -36,9 +37,11 @@ internal object SshOpenTelemetry {
             "source" to source,
             "sourceCount" to sourceCount,
             "total" to totalCount,
-            "host" to host,
             "port" to port,
-            "user" to user,
+            *DiagnosticPrivacy.connectionContextFields(
+                host = host,
+                user = user,
+            ).toTypedArray(),
         )
         return sourceCount
     }

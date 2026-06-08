@@ -11,6 +11,7 @@ context; the README and current feature docs track released behavior.
 | [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
 | [agent-awareness.md](agent-awareness.md) | Detecting Claude Code, Codex, and OpenCode in a tmux pane and showing a clean conversation view |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side `pocketshell usage` over SSH — zero credentials on the phone |
+| [diagnostics.md](diagnostics.md) | Shareable JSONL flight recorder for app, connection, network, and action events |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
 | [design-system.md](design-system.md) | Codified dark dev-tool design tokens and shared UI primitives |
 | [server-setup.md](server-setup.md) | Server-side `pocketshell` helper install, PATH, and troubleshooting |

@@ -47,7 +47,10 @@ class DiagnosticRecorderTest {
         assertEquals(1L, json.getLong("sequence"))
         assertEquals("connection", json.getString("category"))
         assertEquals("connect_start", json.getString("name"))
-        assertEquals("dev", json.getJSONObject("metadata").getString("host"))
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("dev"),
+            json.getJSONObject("metadata").getString("host"),
+        )
         assertTrue(json.has("wallClockTime"))
         assertTrue(json.has("monotonicTimestampNanos"))
     }
@@ -160,6 +163,8 @@ class DiagnosticRecorderTest {
                 "prompt" to "please run sk-secret",
                 "command" to "cat ~/.ssh/id_rsa",
                 "message" to "failed with user prompt",
+                "session" to "work-production",
+                "cwd" to "/home/alexey/private/project",
                 "textBytes" to 12,
             ),
         )
@@ -169,6 +174,14 @@ class DiagnosticRecorderTest {
         assertEquals("[redacted]", metadata.getString("prompt"))
         assertEquals("[redacted]", metadata.getString("command"))
         assertEquals("[redacted]", metadata.getString("message"))
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("work-production"),
+            metadata.getString("session"),
+        )
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("/home/alexey/private/project"),
+            metadata.getString("cwd"),
+        )
         assertEquals(12, metadata.getInt("textBytes"))
     }
 }

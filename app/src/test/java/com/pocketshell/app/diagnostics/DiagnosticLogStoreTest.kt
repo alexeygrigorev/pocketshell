@@ -71,6 +71,64 @@ class DiagnosticLogStoreTest {
     }
 
     @Test
+    fun `redactor fingerprints shareable host user session and path context`() {
+        val fields = DiagnosticRedactor.redact(
+            mapOf(
+                "host" to "prod.example.com",
+                "username" to "alexey",
+                "session" to "customer-migration",
+                "cwd" to "/home/alexey/private/customer",
+                "parent_path" to "/home/alexey/private",
+                "hostKind" to "dns",
+            ),
+        )
+
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("prod.example.com"),
+            fields["host"],
+        )
+        assertEquals(DiagnosticPrivacy.stableFingerprint("alexey"), fields["username"])
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("customer-migration"),
+            fields["session"],
+        )
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("/home/alexey/private/customer"),
+            fields["cwd"],
+        )
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("/home/alexey/private"),
+            fields["parent_path"],
+        )
+        assertEquals("dns", fields["hostKind"])
+    }
+
+    @Test
+    fun `connection context emits stable fingerprints and coarse host kind`() {
+        val privateHost = DiagnosticPrivacy.connectionContextFields(
+            host = "192.168.1.42",
+            user = "alexey",
+            session = "pocketshell",
+        ).toMap()
+
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("192.168.1.42"),
+            privateHost["hostFingerprint"],
+        )
+        assertEquals("private_ipv4", privateHost["hostKind"])
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("alexey"),
+            privateHost["userFingerprint"],
+        )
+        assertEquals(
+            DiagnosticPrivacy.stableFingerprint("pocketshell"),
+            privateHost["sessionFingerprint"],
+        )
+        assertEquals("dns", DiagnosticPrivacy.hostKind("prod.example.com"))
+        assertEquals("loopback", DiagnosticPrivacy.hostKind("localhost"))
+    }
+
+    @Test
     fun `event json decodes event for read api`() {
         val event = DiagnosticsEvent(
             sequence = 1L,

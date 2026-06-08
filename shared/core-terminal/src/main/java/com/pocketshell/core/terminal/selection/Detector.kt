@@ -16,10 +16,11 @@ package com.pocketshell.core.terminal.selection
  *   Non-HTTP schemes (`ftp://`, `git@github.com:...`, `ssh://`, IPv6 literals)
  *   are intentionally **not** matched — extend [TerminalMatcher] yourself if
  *   you need them.
- * - [TerminalMatch.Path] — absolute Unix paths (`/usr/local/bin/foo`) and
- *   relative paths (`src/main/kotlin/Foo.kt`, `./build.gradle`,
- *   `../README.md`, `~/projects/foo`). See "Known limitations" below for the
- *   false-positive cases the relative-path regex deliberately rejects.
+ * - [TerminalMatch.Path] — local `file://` URIs, absolute Unix paths
+ *   (`/usr/local/bin/foo`), and relative paths (`src/main/kotlin/Foo.kt`,
+ *   `./build.gradle`, `../README.md`, `~/projects/foo`). See "Known
+ *   limitations" below for the false-positive cases the relative-path regex
+ *   deliberately rejects.
  * - [TerminalMatch.Error] — stack-trace frames (Java/Kotlin `at
  *   pkg.Class.method(File.kt:42)`, Python `File "x.py", line 7, in foo`) and
  *   whole lines containing the keywords `Error`, `Exception`, `Traceback`,
@@ -38,14 +39,16 @@ package com.pocketshell.core.terminal.selection
  *
  * 1. URLs — claim the full `https://host/path...` so the tail does not also
  *    surface as a Path.
- * 2. Absolute Unix paths — `/usr/local/bin/foo`, `/etc/hosts`. A bare `/` is
+ * 2. Local file URIs — `file:///home/me/out.png`; the visible span is the URI
+ *    but the Path value is the decoded absolute path.
+ * 3. Absolute Unix paths — `/usr/local/bin/foo`, `/etc/hosts`. A bare `/` is
  *    rejected.
- * 3. Relative paths — must start with `./`, `../`, `~/`, or end in a known
+ * 4. Relative paths — must start with `./`, `../`, `~/`, or end in a known
  *    file extension (see [DefaultTerminalMatcher.REL_PATH_EXTENSIONS]). See
  *    "Known limitations" for what this excludes.
- * 4. Stack-trace frames — Java/Kotlin `at pkg.Cls.m(File.kt:42)` and Python
+ * 5. Stack-trace frames — Java/Kotlin `at pkg.Cls.m(File.kt:42)` and Python
  *    `File "x.py", line N, in fn`. Reported as [TerminalMatch.Error].
- * 5. Generic error keyword lines — the **whole containing line** is emitted
+ * 6. Generic error keyword lines — the **whole containing line** is emitted
  *    as [TerminalMatch.Error] so the copied text carries context.
  *
  * ## Snapshot windowing
@@ -103,9 +106,9 @@ package com.pocketshell.core.terminal.selection
  *   user is likely to want to copy (paste into a bug report, search the web,
  *   ...). Tapping copies the value to the clipboard.
  *
- * The [value] of each variant is the literal substring the matcher extracted
- * from the terminal buffer, with no normalisation — the consumer decides what
- * to do with it (open in browser, copy as-is, prefix `cd `, ...).
+ * The [value] of each variant is normally the literal substring the matcher
+ * extracted from the terminal buffer. Local `file://` paths are the exception:
+ * their tap span covers the URI while the value is the decoded absolute path.
  */
 sealed class TerminalMatch {
     abstract val value: String
@@ -219,7 +222,24 @@ class DefaultTerminalMatcher : TerminalSpanMatcher {
             )
         }
 
-        // 2. Absolute Unix paths.
+        // 2. Local file URIs. Claim the raw URI span so the later absolute path
+        //    pass does not see any slash tail, while actions receive the
+        //    decoded absolute path.
+        FILE_URI_PATTERN.findAll(scanned).forEach { match ->
+            val raw = match.value.trimEndOfFileUriPunctuation()
+            if (raw.isEmpty()) return@forEach
+            val start = match.range.first
+            val end = start + raw.length
+            if (!claim(claimed, start, end)) return@forEach
+            val decoded = decodeLocalFileUriPath(raw) ?: return@forEach
+            results += TerminalMatchSpan(
+                TerminalMatch.Path(decoded),
+                scannedOffset + start,
+                scannedOffset + end,
+            )
+        }
+
+        // 3. Absolute Unix paths.
         ABS_PATH_PATTERN.findAll(scanned).forEach { match ->
             val raw = match.value
             // Reject the bare root `/` — it's never a useful tap target.
@@ -234,7 +254,7 @@ class DefaultTerminalMatcher : TerminalSpanMatcher {
             )
         }
 
-        // 3. Relative paths.
+        // 4. Relative paths.
         REL_PATH_PATTERN.findAll(scanned).forEach { match ->
             val raw = match.value
             val start = match.range.first
@@ -247,7 +267,7 @@ class DefaultTerminalMatcher : TerminalSpanMatcher {
             )
         }
 
-        // 4. Stack-trace frames (Java-style and Python-style).
+        // 5. Stack-trace frames (Java-style and Python-style).
         STACK_FRAME_PATTERN.findAll(scanned).forEach { match ->
             val raw = match.value
             val start = match.range.first
@@ -260,7 +280,7 @@ class DefaultTerminalMatcher : TerminalSpanMatcher {
             )
         }
 
-        // 5. Generic error keywords — emit the whole containing line so the
+        // 6. Generic error keywords — emit the whole containing line so the
         //    copied text carries context.
         ERROR_KEYWORD_PATTERN.findAll(scanned).forEach { match ->
             val lineStart = scanned.lastIndexOf('\n', match.range.first).let {
@@ -300,6 +320,12 @@ class DefaultTerminalMatcher : TerminalSpanMatcher {
     private fun String.trimEndOfUrlPunctuation(): String {
         var end = length
         while (end > 0 && this[end - 1] in URL_TRAILING_PUNCTUATION) end--
+        return substring(0, end)
+    }
+
+    private fun String.trimEndOfFileUriPunctuation(): String {
+        var end = length
+        while (end > 0 && this[end - 1] in FILE_URI_TRAILING_PUNCTUATION) end--
         return substring(0, end)
     }
 
@@ -357,6 +383,15 @@ class DefaultTerminalMatcher : TerminalSpanMatcher {
          */
         private val URL_PATTERN = Regex(
             "https?://[\\w.-]+(?::\\d+)?(?:/[\\w./?=&%+#~@:!,;-]*)?"
+        )
+
+        /**
+         * Local/server-visible file URI. The URI pass decodes the value with
+         * [decodeLocalFileUriPath] and rejects non-local authorities.
+         */
+        private val FILE_URI_PATTERN = Regex(
+            "(?<![\\w/.~-])file://[^\\s`\"'<>]+",
+            RegexOption.IGNORE_CASE,
         )
 
         /**
@@ -454,5 +489,8 @@ class DefaultTerminalMatcher : TerminalSpanMatcher {
 
         /** Punctuation characters that get stripped from URL tails. */
         private val URL_TRAILING_PUNCTUATION = setOf('.', ',', ';', ':', ')', ']', '!', '?', '\'', '"', '>', '<')
+
+        /** Punctuation characters that get stripped from local file URI tails. */
+        private val FILE_URI_TRAILING_PUNCTUATION = setOf('.', ',', ';', ':', ')', ']', '}', '!', '?', '\'', '"', '>', '<')
     }
 }

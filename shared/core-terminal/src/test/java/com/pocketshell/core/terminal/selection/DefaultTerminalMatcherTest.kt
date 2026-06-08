@@ -109,6 +109,31 @@ class DefaultTerminalMatcherTest {
         )
     }
 
+    @Test
+    fun `matches local file uri as decoded path with raw uri span`() {
+        val decoded =
+            "/home/alexey/.codex/generated_images/" +
+                "019e9d03-13bc-7280-8d97-40a592fbfcb0/" +
+                "ig_04202f5df68d850a016a255d81c5d48191ad5bc191b780d5c1.png"
+        val uri = "file://$decoded"
+        val text = "generated image: $uri."
+
+        val spans = matcher.matchSpans(text).filter { it.match is TerminalMatch.Path }
+
+        assertEquals(1, spans.size)
+        assertEquals(TerminalMatch.Path(decoded), spans.single().match)
+        assertEquals(uri, text.substring(spans.single().start, spans.single().endExclusive))
+    }
+
+    @Test
+    fun `rejects non local file uri without surfacing its path tail`() {
+        val text = "remote uri file://example.com/home/alexey/out.png"
+
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+
+        assertTrue("remote file URI must not create path matches, got $paths", paths.isEmpty())
+    }
+
     // -------------------------------------------------------------------
     // Relative paths
     // -------------------------------------------------------------------

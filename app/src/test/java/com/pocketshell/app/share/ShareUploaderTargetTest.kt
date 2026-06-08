@@ -163,7 +163,7 @@ class ShareUploaderTargetTest {
     private fun newUploader(session: SshSession): ShareUploader =
         ShareUploader(
             context = context,
-            connect = { _, _ -> Result.success(session) },
+            connect = { _, _, _ -> Result.success(session) },
             now = { 0L },
         )
 
@@ -181,7 +181,6 @@ class ShareUploaderTargetTest {
         )
 
     private fun keyEntity(): SshKeyEntity {
-        // The uploader checks the key file exists; create a temp file.
         val keyFile = File.createTempFile("share-key", ".pem", context.cacheDir)
         keyFile.writeText("dummy")
         keyFile.deleteOnExit()

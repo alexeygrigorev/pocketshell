@@ -1,11 +1,11 @@
 package com.pocketshell.app.share
 
+import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,11 +22,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -36,6 +38,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlinx.coroutines.launch
 
 /**
  * Host picker for the Android share-target flow (issue #138).
@@ -172,10 +175,16 @@ internal fun HostPickerScreen(
                         },
                     )
                 } else {
-                    LaunchedEffect(state) {
-                        onUploadComplete()
-                    }
-                    Box(Modifier.fillMaxSize())
+                    UploadResultSurface(
+                        title = "Uploaded to ${state.hostName}",
+                        detail = state.remotePath,
+                        isError = false,
+                        copyText = state.copyText,
+                        onDismiss = {
+                            viewModel.clearUploadState()
+                            onUploadComplete()
+                        },
+                    )
                 }
             }
             is UploadState.Failed -> {
@@ -194,6 +203,9 @@ internal fun HostPickerScreen(
                     },
                     detail = state.message,
                     isError = true,
+                    copyText = state.copyText.takeIf { it.isNotBlank() },
+                    onRetry = { viewModel.retryLastShareAction() },
+                    onChooseHost = { viewModel.chooseDifferentShareTarget() },
                     onDismiss = {
                         viewModel.clearUploadState()
                         onUploadComplete()
@@ -481,8 +493,13 @@ private fun UploadResultSurface(
     title: String,
     detail: String,
     isError: Boolean,
+    copyText: String? = null,
+    onRetry: (() -> Unit)? = null,
+    onChooseHost: (() -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -514,7 +531,42 @@ private fun UploadResultSurface(
             )
         }
         Spacer(Modifier.height(24.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (copyText?.isNotBlank() == true) {
+                TextButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            clipboard.setClipEntry(
+                                ClipEntry(
+                                    ClipData.newPlainText("Share result", copyText),
+                                ),
+                            )
+                        }
+                    },
+                    modifier = Modifier.testTag(SHARE_RESULT_COPY_TAG),
+                ) {
+                    Text(text = "Copy")
+                }
+            }
+            if (onChooseHost != null) {
+                TextButton(
+                    onClick = onChooseHost,
+                    modifier = Modifier.testTag(SHARE_RESULT_CHOOSE_HOST_TAG),
+                ) {
+                    Text(text = "Choose host")
+                }
+            }
+            if (onRetry != null) {
+                TextButton(
+                    onClick = onRetry,
+                    modifier = Modifier.testTag(SHARE_RESULT_RETRY_TAG),
+                ) {
+                    Text(text = "Retry")
+                }
+            }
             TextButton(onClick = onDismiss) {
                 Text(text = "Done")
             }
@@ -581,6 +633,9 @@ internal const val SHARE_HOST_ROW_TAG_PREFIX: String = "share:host:row:"
 internal const val SHARE_RESULT_SUCCESS_TAG: String = "share:result:success"
 internal const val SHARE_RESULT_FAILURE_TAG: String = "share:result:failure"
 internal const val SHARE_RESULT_DETAIL_TAG: String = "share:result:detail"
+internal const val SHARE_RESULT_COPY_TAG: String = "share:result:copy"
+internal const val SHARE_RESULT_RETRY_TAG: String = "share:result:retry"
+internal const val SHARE_RESULT_CHOOSE_HOST_TAG: String = "share:result:choose-host"
 internal const val SHARE_TEXT_PASTE_TAG: String = "share:text:paste"
 internal const val SHARE_TEXT_SAVE_TAG: String = "share:text:save"
 internal const val SHARE_EMPTY_STATE_TAG: String = "share:picker:empty"

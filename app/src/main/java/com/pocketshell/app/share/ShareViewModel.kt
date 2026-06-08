@@ -10,7 +10,10 @@ import com.pocketshell.app.notifications.ShareUploadNotifications
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
@@ -75,6 +78,7 @@ internal class ShareViewModel internal constructor(
     private val sshKeyDao: SshKeyDao,
     private val activeTmuxClients: ActiveTmuxClients,
     private val projectRootDao: ProjectRootDao,
+    private val sshLeaseManager: SshLeaseManager,
     private val stageIntoSessionTimeoutMs: Long = STAGE_INTO_SESSION_TIMEOUT_MS,
 ) : ViewModel() {
 
@@ -85,12 +89,14 @@ internal class ShareViewModel internal constructor(
         sshKeyDao: SshKeyDao,
         activeTmuxClients: ActiveTmuxClients,
         projectRootDao: ProjectRootDao,
+        sshLeaseManager: SshLeaseManager,
     ) : this(
         applicationContext = applicationContext,
         hostDao = hostDao,
         sshKeyDao = sshKeyDao,
         activeTmuxClients = activeTmuxClients,
         projectRootDao = projectRootDao,
+        sshLeaseManager = sshLeaseManager,
         stageIntoSessionTimeoutMs = STAGE_INTO_SESSION_TIMEOUT_MS,
     )
 
@@ -169,7 +175,12 @@ internal class ShareViewModel internal constructor(
      * reassigns it.
      */
     @androidx.annotation.VisibleForTesting
-    internal var uploader: ShareItemUploader = ShareUploader(applicationContext)
+    internal var uploader: ShareItemUploader = ShareUploader(
+        context = applicationContext,
+        connect = { host, key, keyPath -> connectForUpload(host, key, keyPath) },
+    )
+
+    private var lastShareAction: ShareRetryAction? = null
 
     /**
      * Issue #560: one-shot navigation event. After the shared file is
@@ -187,31 +198,54 @@ internal class ShareViewModel internal constructor(
     val sessionLaunch: Flow<SessionLaunch> = _sessionLaunch.receiveAsFlow()
 
     /**
-     * Issue #560: SSH connect seam for the share-into-session staging
-     * round-trip. Defaults to the same [SshConnection.connect] the rest of
-     * the app uses; a `var` so unit tests can substitute a fake session
-     * without a live host. Production never reassigns it.
+     * Issue #560/#621: SSH connect seam for the share-into-session staging
+     * round-trip. Defaults to the app-scoped SSH lease manager so shares
+     * use the same host/key identity as active sessions instead of starting
+     * an unrelated auth attempt. A `var` lets unit tests substitute a fake
+     * session without a live host. Production never reassigns it.
      */
     @androidx.annotation.VisibleForTesting
     internal var connectForStaging: suspend (HostEntity, SshKeyEntity) -> Result<SshSession> =
         { host, keyEntity ->
-            val keyFile = java.io.File(keyEntity.privateKeyPath)
-            if (!keyFile.exists()) {
-                Result.failure(
-                    com.pocketshell.core.ssh.SshException(
-                        "No SSH key for host ${host.name} (missing ${keyEntity.name})",
-                    ),
-                )
-            } else {
-                SshConnection.connect(
-                    host = host.hostname,
-                    port = host.port,
-                    user = host.username,
-                    key = SshKey.Path(keyFile),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
-                )
-            }
+            acquireLeaseBackedSession(host = host, keyPath = keyEntity.privateKeyPath)
         }
+
+    private suspend fun connectForUpload(
+        host: HostEntity,
+        key: SshKey,
+        keyPath: String,
+    ): Result<SshSession> {
+        if (key !is SshKey.Path) {
+            return Result.failure(
+                com.pocketshell.core.ssh.SshException("Share upload requires a persisted SSH key"),
+            )
+        }
+        return acquireLeaseBackedSession(host = host, keyPath = keyPath)
+    }
+
+    private suspend fun acquireLeaseBackedSession(
+        host: HostEntity,
+        keyPath: String,
+    ): Result<SshSession> {
+        val target = host.toShareLeaseTarget(keyPath)
+        return sshLeaseManager.acquire(target).map { lease ->
+            LeaseBackedShareSession(lease)
+        }
+    }
+
+    private fun HostEntity.toShareLeaseTarget(keyPath: String): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = hostname,
+                port = port,
+                user = username,
+                credentialId = "$id:$keyPath",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(File(keyPath)),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
 
     /**
      * Stage the [items] the activity extracted from the share intent.
@@ -359,6 +393,7 @@ internal class ShareViewModel internal constructor(
         val payload = _items.value
         if (payload.isEmpty()) return
         if (_uploadState.value is UploadState.Running) return
+        lastShareAction = ShareRetryAction.StageIntoSession(host, session)
         DiagnosticEvents.record(
             "action",
             "share_stage_into_session_start",
@@ -599,6 +634,7 @@ internal class ShareViewModel internal constructor(
         val payload = _items.value
         if (payload.isEmpty()) return
         if (_uploadState.value is UploadState.Running) return
+        lastShareAction = ShareRetryAction.Upload(host, target)
         val targetName = target.diagnosticName()
         DiagnosticEvents.record(
             "action",
@@ -638,8 +674,18 @@ internal class ShareViewModel internal constructor(
                 val itemLabel = item.displayName?.takeIf { it.isNotBlank() } ?: "file"
                 uploader.upload(host, keyEntity, item, target).fold(
                     onSuccess = { remotePath ->
-                        android.util.Log.i(LOG_TAG, "share upload succeeded: $remotePath")
-                        succeededPaths += remotePath
+                        if (remotePath.isBlank()) {
+                            val message = "Upload completed but returned no remote path"
+                            android.util.Log.w(
+                                LOG_TAG,
+                                "share upload produced no returned path for $itemLabel",
+                            )
+                            failedNames += itemLabel
+                            lastError = message
+                        } else {
+                            android.util.Log.i(LOG_TAG, "share upload succeeded: $remotePath")
+                            succeededPaths += remotePath
+                        }
                     },
                     onFailure = { error ->
                         val message = error.message ?: "Upload failed"
@@ -688,6 +734,26 @@ internal class ShareViewModel internal constructor(
         val successCount = succeededPaths.size
         when {
             failedNames.isEmpty() -> {
+                if (succeededPaths.isEmpty()) {
+                    DiagnosticEvents.record(
+                        "action",
+                        "share_upload_result",
+                        "status" to "failure",
+                        "hostId" to host.id,
+                        "target" to targetName,
+                        "totalCount" to total,
+                        "successCount" to 0,
+                        "cause" to "MissingReturnedPaths",
+                    )
+                    val message = "Upload completed but returned no remote paths"
+                    _uploadState.value = UploadState.Failed(
+                        hostName = host.name,
+                        message = message,
+                        totalCount = total,
+                    )
+                    notifyShareFailure(host.name, message)
+                    return
+                }
                 DiagnosticEvents.record(
                     "action",
                     "share_upload_result",
@@ -747,6 +813,8 @@ internal class ShareViewModel internal constructor(
                     append("Failed: ")
                     append(failedNames.joinToString(", "))
                     lastError?.let { append(" ($it)") }
+                    append("\nUploaded:\n")
+                    append(succeededPaths.joinToString("\n"))
                 }
                 android.util.Log.w(LOG_TAG, "partial share upload: $message")
                 _uploadState.value = UploadState.Failed(
@@ -755,6 +823,7 @@ internal class ShareViewModel internal constructor(
                     totalCount = total,
                     successCount = successCount,
                     failedNames = failedNames,
+                    successfulPaths = succeededPaths,
                 )
                 notifyShareFailure(host.name, message)
             }
@@ -796,6 +865,7 @@ internal class ShareViewModel internal constructor(
             return
         }
         if (_uploadState.value is UploadState.Running) return
+        lastShareAction = ShareRetryAction.PasteIntoSession(host)
         DiagnosticEvents.record(
             "action",
             "share_paste_into_session_start",
@@ -973,6 +1043,21 @@ internal class ShareViewModel internal constructor(
         _uploadState.value = UploadState.Idle
     }
 
+    fun chooseDifferentShareTarget() {
+        _targetSelection.value = null
+        _uploadState.value = UploadState.Idle
+    }
+
+    fun retryLastShareAction() {
+        val action = lastShareAction ?: return
+        _uploadState.value = UploadState.Idle
+        when (action) {
+            is ShareRetryAction.Upload -> startUpload(action.host, action.target)
+            is ShareRetryAction.StageIntoSession -> stageIntoSession(action.host, action.session)
+            is ShareRetryAction.PasteIntoSession -> pasteIntoSession(action.host)
+        }
+    }
+
     private companion object {
         /** "Short text" threshold from the issue spec. */
         const val TEXT_PASTE_BUDGET_BYTES: Int = 8 * 1024
@@ -1069,7 +1154,76 @@ internal sealed interface UploadState {
         val totalCount: Int = 1,
         val successCount: Int = 0,
         val failedNames: List<String> = emptyList(),
+        val successfulPaths: List<String> = emptyList(),
+        val copyText: String = successfulPaths.joinToString("\n"),
     ) : UploadState
+}
+
+private sealed interface ShareRetryAction {
+    data class Upload(val host: HostEntity, val target: ShareTarget) : ShareRetryAction
+    data class StageIntoSession(
+        val host: HostEntity,
+        val session: ActiveSessionTarget,
+    ) : ShareRetryAction
+    data class PasteIntoSession(val host: HostEntity) : ShareRetryAction
+}
+
+private class LeaseBackedShareSession(
+    private val lease: SshLease,
+) : SshSession {
+    private val session: SshSession get() = lease.session
+
+    override val isConnected: Boolean
+        get() = session.isConnected
+
+    override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult =
+        session.exec(command)
+
+    override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job =
+        session.tail(path, onLine)
+
+    override fun tail(
+        path: String,
+        fromLineExclusive: Long,
+        onLine: (String) -> Unit,
+    ): kotlinx.coroutines.Job =
+        session.tail(path, fromLineExclusive, onLine)
+
+    override fun openLocalPortForward(
+        remoteHost: String,
+        remotePort: Int,
+        localPort: Int,
+    ): com.pocketshell.core.ssh.SshPortForward =
+        session.openLocalPortForward(remoteHost, remotePort, localPort)
+
+    override fun startShell(): com.pocketshell.core.ssh.SshShell =
+        session.startShell()
+
+    override suspend fun uploadFile(file: File, remotePath: String): String =
+        session.uploadFile(file, remotePath)
+
+    override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
+        session.downloadFile(remotePath, maxBytes)
+
+    override suspend fun uploadStream(
+        input: java.io.InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+    ): String =
+        session.uploadStream(input, length, name, remotePath)
+
+    override suspend fun listDirectory(
+        remotePath: String,
+        maxEntries: Int,
+    ): com.pocketshell.core.ssh.RemoteListing =
+        session.listDirectory(remotePath, maxEntries)
+
+    override fun close() {
+        kotlinx.coroutines.runBlocking {
+            lease.release()
+        }
+    }
 }
 
 /**

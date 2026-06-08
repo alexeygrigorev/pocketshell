@@ -11,6 +11,11 @@ import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.ssh.SshException
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.tmux.CommandResponse
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -501,6 +506,25 @@ class ShareViewModelTest {
     }
 
     @Test
+    fun startUploadTreatsBlankReturnedLinkAsFailure() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 131L, name = "hetzner")
+        val fake = FakeUploader(blankNames = setOf("empty.txt")).also { vm.uploader = it }
+        vm.setItem(uriItem("empty.txt"))
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals("hetzner", failed.hostName)
+        assertTrue(
+            "a successful transport with no returned path is not usable: ${failed.message}",
+            failed.message.contains("returned no remote path", ignoreCase = true),
+        )
+        assertEquals(listOf("empty.txt"), failed.failedNames)
+    }
+
+    @Test
     fun startUploadReportsPartialFailureWhenSomeItemsFail() = runTest {
         val vm = newVm(ActiveTmuxClients())
         val host = seededHost(id = 32L, name = "hetzner")
@@ -530,6 +554,15 @@ class ShareViewModelTest {
         assertTrue(
             "partial-failure message should report the 2 of 3 success and name the failure, got '${failed.message}'",
             failed.message.contains("2 of 3") && failed.message.contains("bad.png"),
+        )
+        assertEquals(
+            "partial failure must preserve returned links for files that did land",
+            listOf("~/inbox/pocketshell/ok1.png", "~/inbox/pocketshell/ok2.png"),
+            failed.successfulPaths,
+        )
+        assertEquals(
+            "~/inbox/pocketshell/ok1.png\n~/inbox/pocketshell/ok2.png",
+            failed.copyText,
         )
     }
 
@@ -592,6 +625,84 @@ class ShareViewModelTest {
             "foreground share flow already shows the failure surface; no duplicate notification expected",
             manager.activeNotifications.isEmpty(),
         )
+    }
+
+    @Test
+    fun retryLastShareActionPreservesPayloadAndTarget() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 137L, name = "hetzner")
+        val fake = FakeUploader(failNames = setOf("retry.txt")).also { vm.uploader = it }
+        val item = uriItem("retry.txt")
+        vm.setItem(item)
+
+        vm.startUpload(host, ShareTarget.Project("/home/alexey/git/pocketshell"))
+        advanceUntilIdle()
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals("Permission denied", failed.message)
+
+        fake.failNames = emptySet()
+        vm.retryLastShareAction()
+        advanceUntilIdle()
+
+        val success = vm.uploadState.first { it is UploadState.Success } as UploadState.Success
+        assertEquals("/home/alexey/git/pocketshell/.inbox/retry.txt", success.copyText)
+        assertEquals(listOf(item), vm.items.value)
+        assertEquals(
+            listOf(
+                ShareTarget.Project("/home/alexey/git/pocketshell"),
+                ShareTarget.Project("/home/alexey/git/pocketshell"),
+            ),
+            fake.uploadedTargets,
+        )
+    }
+
+    @Test
+    fun startUploadReusesActiveSshLeaseInsteadOfStartingFreshAuth() = runTest {
+        val host = seededHost(id = 138L, name = "hetzner")
+        val keyPath = "/tmp/key-138"
+        val fakeSession = FakeStagingSshSession()
+        var connectCalls = 0
+        val leaseManager = SshLeaseManager(
+            connector = { _: SshLeaseTarget ->
+                connectCalls += 1
+                if (connectCalls == 1) {
+                    Result.success(fakeSession)
+                } else {
+                    Result.failure(SshException("Authentication failed"))
+                }
+            },
+        )
+        val activeLease = leaseManager.acquire(host.shareTestLeaseTarget(keyPath)).getOrThrow()
+        try {
+            val vm = newVm(ActiveTmuxClients(), sshLeaseManager = leaseManager)
+            vm.setItem(ShareableItem.TextItem(text = "crash report body", displayName = "report"))
+
+            vm.startUpload(host)
+            advanceUntilIdle()
+
+            val success = vm.uploadState.first { it is UploadState.Success } as UploadState.Success
+            assertTrue(
+                "share upload must return the staged reference, got ${success.copyText}",
+                success.copyText.contains("~/inbox/pocketshell/") &&
+                    success.copyText.endsWith("report.txt"),
+            )
+            assertEquals(
+                "a live lease for the same host/key should be reused",
+                1,
+                connectCalls,
+            )
+            assertTrue(
+                "the upload should have used the already-live session",
+                fakeSession.uploadedRemotePaths.isNotEmpty(),
+            )
+            assertFalse(
+                "releasing the share lease must not close the active app session",
+                fakeSession.closed,
+            )
+        } finally {
+            activeLease.release()
+            leaseManager.close()
+        }
     }
 
     @Test
@@ -1251,7 +1362,8 @@ class ShareViewModelTest {
      * failure aggregation can be asserted without a live SSH session.
      */
     private class FakeUploader(
-        private val failNames: Set<String> = emptySet(),
+        var failNames: Set<String> = emptySet(),
+        private val blankNames: Set<String> = emptySet(),
     ) : ShareItemUploader {
         val uploadedNames = mutableListOf<String>()
 
@@ -1268,6 +1380,8 @@ class ShareViewModelTest {
             uploadedTargets += target
             return if (name in failNames) {
                 Result.failure(IllegalStateException("Permission denied"))
+            } else if (name in blankNames) {
+                Result.success("")
             } else {
                 when (target) {
                     ShareTarget.HostInbox -> Result.success("~/inbox/pocketshell/$name")
@@ -1313,6 +1427,9 @@ class ShareViewModelTest {
     private fun newVm(
         registry: ActiveTmuxClients,
         stageIntoSessionTimeoutMs: Long = 90_000L,
+        sshLeaseManager: SshLeaseManager = SshLeaseManager(
+            connector = { Result.failure(SshException("unexpected SSH connect in share unit test")) },
+        ),
     ): ShareViewModel {
         return ShareViewModel(
             applicationContext = context,
@@ -1320,6 +1437,7 @@ class ShareViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             activeTmuxClients = registry,
             projectRootDao = db.projectRootDao(),
+            sshLeaseManager = sshLeaseManager,
             stageIntoSessionTimeoutMs = stageIntoSessionTimeoutMs,
         )
     }
@@ -1350,5 +1468,17 @@ class ShareViewModelTest {
             port = 22,
             username = "alex",
             keyId = 99L,
+        )
+
+    private fun HostEntity.shareTestLeaseTarget(keyPath: String): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = hostname,
+                port = port,
+                user = username,
+                credentialId = "$id:$keyPath",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(java.io.File(keyPath)),
         )
 }

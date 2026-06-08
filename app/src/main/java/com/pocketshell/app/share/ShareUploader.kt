@@ -96,7 +96,7 @@ internal class ShareUploader(
      * default points at the same [SshConnection.connect] the rest of
      * the app uses.
      */
-    private val connect: suspend (HostEntity, SshKey) -> Result<SshSession> = { host, key ->
+    private val connect: suspend (HostEntity, SshKey, String) -> Result<SshSession> = { host, key, _ ->
         SshConnection.connect(
             host = host.hostname,
             port = host.port,
@@ -125,13 +125,8 @@ internal class ShareUploader(
         target: ShareTarget,
     ): Result<String> = withContext(Dispatchers.IO) {
         val keyFile = File(keyEntity.privateKeyPath)
-        if (!keyFile.exists()) {
-            return@withContext Result.failure(
-                SshException("No SSH key for host ${host.name} (missing ${keyEntity.name})"),
-            )
-        }
         val key: SshKey = SshKey.Path(keyFile)
-        val sessionResult = connect(host, key)
+        val sessionResult = connect(host, key, keyEntity.privateKeyPath)
         val session = sessionResult.getOrElse { e ->
             return@withContext Result.failure(
                 SshException(errorMessage("connect", e), e),

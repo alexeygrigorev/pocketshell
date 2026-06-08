@@ -63,12 +63,6 @@ class ShareActivity : FragmentActivity() {
             }
         }
 
-        // Keep failure feedback independent of Compose recomposition.
-        // Successful file uploads stay quiet and finish the one-shot
-        // share surface; the share action was user-initiated and does
-        // not need an extra Android toast.
-        watchUploadStateForFailures()
-
         // Issue #560: when the user picked an active SESSION as the
         // destination, the ViewModel stages the file into that session's
         // attachment scope and emits a one-shot launch event. Hand off to
@@ -113,24 +107,6 @@ class ShareActivity : FragmentActivity() {
                 launch.attachmentPaths.toTypedArray(),
             )
         }
-
-    private fun watchUploadStateForFailures() {
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.uploadState.collect { state ->
-                    when (state) {
-                        is UploadState.Failed ->
-                            Toast.makeText(
-                                this@ShareActivity,
-                                state.message,
-                                Toast.LENGTH_LONG,
-                            ).show()
-                        else -> Unit
-                    }
-                }
-            }
-        }
-    }
 
     /**
      * Convert the inbound share `Intent` into the staged item list,

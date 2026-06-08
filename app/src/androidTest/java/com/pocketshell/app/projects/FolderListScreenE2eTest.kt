@@ -175,6 +175,8 @@ class FolderListScreenE2eTest {
         }
 
         compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
+        compose.onNodeWithText("App settings").assertIsDisplayed()
+        compose.onNodeWithText("Workspace settings").assertIsDisplayed()
         compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG)
             .assertIsDisplayed()
             .performClick()
@@ -186,6 +188,70 @@ class FolderListScreenE2eTest {
             .assertIsDisplayed()
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) { openedWorkspaceSettings }
+    }
+
+    @Test
+    fun hostOverflowRefreshSessionsReloadsInPlace() {
+        val fakeGateway = FakeFolderListGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = "alpha",
+                    lastActivity = 1_700_004_000L,
+                    attached = true,
+                    cwd = "/home/u/git/pocketshell",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+            projectFoldersByRoot = mapOf("~/git" to listOf("/home/u/git/pocketshell")),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
+        var openedSettings = false
+        var openedWorkspaceSettings = false
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue607-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue607",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onOpenSettings = { openedSettings = true },
+                    onOpenWorkspaceSettings = { openedWorkspaceSettings = true },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(FOLDER_LIST_OVERFLOW_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
+        compose.onNodeWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG)
+            .assertIsDisplayed()
+            .performClick()
+
+        compose.waitUntil(timeoutMillis = 5_000) { fakeGateway.callCount.get() >= 2 }
+        compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertIsDisplayed()
+        compose.onNodeWithText("alpha", useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(FOLDER_LIST_ACTION_STATUS_TAG))
+        compose.onNodeWithTag(FOLDER_LIST_ACTION_STATUS_TAG).assertExists()
+        compose.onNodeWithText("Sessions refreshed").assertExists()
+        assertEquals(false, openedSettings)
+        assertEquals(false, openedWorkspaceSettings)
     }
 
     @Test
@@ -466,7 +532,7 @@ class FolderListScreenE2eTest {
         // (#522 item 2). Tapping a menu item dismisses the menu.
         compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         // #522 item 2 + #592 evidence: the single header kebab opens a menu
-        // with the host actions plus separate global Settings and Workspace
+        // with the host actions plus separate global App settings and Workspace
         // settings entries.
         compose.onNodeWithTag(FOLDER_LIST_BROWSE_REPOS_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG)
@@ -481,6 +547,8 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_USAGE_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG).assertExists()
+        compose.onNodeWithText("App settings").assertIsDisplayed()
+        compose.onNodeWithText("Workspace settings").assertIsDisplayed()
         android.os.SystemClock.sleep(200)
         WalkthroughScreenshotArtifacts.capture("issue522-header-kebab-open")
         compose.onNodeWithTag(FOLDER_LIST_USAGE_TAG)

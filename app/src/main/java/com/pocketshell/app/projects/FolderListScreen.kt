@@ -121,7 +121,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
  *    prompts for type (agent / shell) with an agent CLI sub-picker.
  *  - Tap "Workspace settings" in the app-bar overflow → opens workspace
  *    settings where roots and the default tree/flat mode are configured.
- *  - Tap "Settings" in the app-bar overflow → opens the global app settings.
+ *  - Tap "App settings" in the app-bar overflow → opens the global app settings.
  */
 @Composable
 fun FolderListScreen(
@@ -633,7 +633,7 @@ internal fun knownSessionNames(state: FolderListUiState): Set<String> =
  * with the `N active · M idle · K sessions` count line directly beneath it and a
  * single `⋮` kebab on the right — not the old three cramped circular action
  * buttons and not a second host-name band in the list. Host assistant, Browse
- * repos, global Settings, and Workspace settings are items in the kebab
+ * repos, global app settings, and Workspace settings are items in the kebab
  * overflow menu (same affordance pattern as the host-list card kebab), and the
  * count subtitle ([headerGroups]) is the single host-level summary the screen
  * carries.
@@ -748,9 +748,9 @@ private fun FolderListOverflowMenu(
                 testTag = FOLDER_LIST_USAGE_TAG,
             ),
             KebabItem(
-                label = "Settings",
+                label = "App settings",
                 onClick = onOpenSettings,
-                contentDescription = "Settings",
+                contentDescription = "App settings",
                 testTag = FOLDER_LIST_SETTINGS_TAG,
             ),
             KebabItem(

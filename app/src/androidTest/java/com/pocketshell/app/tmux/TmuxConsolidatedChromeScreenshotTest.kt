@@ -14,16 +14,23 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -91,9 +98,54 @@ class TmuxConsolidatedChromeScreenshotTest {
             }
         }
         compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
+        assertTrue(
+            "forwarding chrome button must be hidden when no forwarding is active",
+            compose.onAllNodesWithTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
+                .fetchSemanticsNodes()
+                .isEmpty(),
+        )
         compose.waitForIdle()
         SystemClock.sleep(200)
         captureFullDevice(File(artifactDir(), "consolidated-chrome-single-window-no-agent.png"))
+    }
+
+    @Test
+    fun activeForwardingRendersInChromeAndOpensPanel() {
+        var openPortForwardingClicks = 0
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "scratch",
+                        forwardingState = SessionForwardingIndicatorState(
+                            active = true,
+                            tunnelCount = 2,
+                        ),
+                        onOpenPortForwarding = { openPortForwardingClicks++ },
+                        onBack = {},
+                        onMore = {},
+                    )
+                    PaneProxy()
+                }
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
+            .assertIsDisplayed()
+        compose.onNodeWithContentDescription("2 ports forwarding active for this host")
+            .assertIsDisplayed()
+        captureFullDevice(File(artifactDir(), "consolidated-chrome-active-forwarding.png"))
+
+        compose.onNodeWithTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
+            .performClick()
+        compose.waitForIdle()
+        assertEquals(1, openPortForwardingClicks)
     }
 
     @Test

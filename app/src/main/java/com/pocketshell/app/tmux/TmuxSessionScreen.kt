@@ -111,6 +111,7 @@ import com.pocketshell.app.composer.AttachmentTileGrid
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.ConversationLinkAction
@@ -873,6 +874,8 @@ public fun TmuxSessionScreen(
                                     )
                                 },
                                 connectionStatus = status.toUiStatus(),
+                                forwardingState = sessionForwardingState,
+                                onOpenPortForwarding = onOpenPortForwarding,
                                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                             )
                             // Issue #192 / #156: per-window nav strip is
@@ -919,6 +922,8 @@ public fun TmuxSessionScreen(
                             showCommandPalette = paletteAgent != null,
                             onCommandPalette = { showAgentCommands = true },
                             connectionStatus = status.toUiStatus(),
+                            forwardingState = sessionForwardingState,
+                            onOpenPortForwarding = onOpenPortForwarding,
                             modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                         )
                     }
@@ -2481,6 +2486,10 @@ internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG =
 // Issue #462: the dedicated "/" agent command-palette button rendered in the
 // session header chrome (and the IME-up compact breadcrumb) for agent panes.
 internal const val TMUX_COMMAND_PALETTE_BUTTON_TAG = "tmux:chrome:command-palette"
+
+// Issue #601/#603 design slice: active port-forwarding state is surfaced as
+// compact session chrome, not as terminal content or a terminal-row overlay.
+internal const val TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG = "tmux:chrome:forwarding"
 
 // Issue #463: the tappable project/folder crumb in the session header that
 // opens the in-session project-scoped session switcher dropdown, and the
@@ -4159,6 +4168,13 @@ internal fun ConsolidatedTopChrome(
     // steady-state breadcrumb.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
+    // Issue #601: active forwarding belongs in the session chrome. The
+    // default hidden state keeps standalone screenshot harnesses source
+    // compatible while production wires the per-host state from
+    // [SessionForwardingIndicatorViewModel].
+    forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
+        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
+    onOpenPortForwarding: () -> Unit = {},
 ) {
     Row(
         modifier = modifier
@@ -4241,6 +4257,11 @@ internal fun ConsolidatedTopChrome(
         if (showCommandPalette) {
             CommandPaletteButton(onClick = onCommandPalette)
         }
+
+        SessionForwardingChromeButton(
+            state = forwardingState,
+            onClick = onOpenPortForwarding,
+        )
 
         Box(modifier = Modifier.size(48.dp)) {
             Box(
@@ -4564,6 +4585,9 @@ internal fun CompactBreadcrumb(
     // be able to tell the session is not live before they dictate into it.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
+    forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
+        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
+    onOpenPortForwarding: () -> Unit = {},
 ) {
     Row(
         modifier = modifier
@@ -4607,6 +4631,10 @@ internal fun CompactBreadcrumb(
             CommandPaletteButton(onClick = onCommandPalette)
             Spacer(modifier = Modifier.width(4.dp))
         }
+        SessionForwardingChromeButton(
+            state = forwardingState,
+            onClick = onOpenPortForwarding,
+        )
         Box(
             modifier = Modifier
                 .width(48.dp)
@@ -4626,6 +4654,59 @@ internal fun CompactBreadcrumb(
                 )
             }
             moreMenu()
+        }
+    }
+}
+
+/**
+ * Issue #601: compact active-port-forwarding affordance for tmux session
+ * chrome. It renders only while THIS host has forwarding active, so the
+ * terminal viewport and bottom key/composer rows never lose space to a
+ * persistent status chip. Tapping opens the existing per-host port-forward
+ * panel; the kebab menu keeps the more verbose status row.
+ */
+@Composable
+private fun SessionForwardingChromeButton(
+    state: com.pocketshell.app.portfwd.SessionForwardingIndicatorState,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!state.visible) return
+    val color = if (state.restoring) PocketShellColors.Amber else PocketShellColors.Accent
+    Row(
+        modifier = modifier
+            .padding(start = 4.dp)
+            .height(36.dp)
+            .defaultMinSize(minWidth = 40.dp)
+            .background(
+                color = color.copy(alpha = 0.14f),
+                shape = RoundedCornerShape(8.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = color.copy(alpha = 0.45f),
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .semantics { contentDescription = state.contentDescription }
+            .testTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
+            .padding(horizontal = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        ForwardingGlyph(
+            modifier = Modifier.size(14.dp),
+            color = color,
+        )
+        if (state.label.isNotBlank()) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = state.label,
+                color = color,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
         }
     }
 }

@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
+import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.release.launchUpdateDownload
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
@@ -1091,54 +1092,6 @@ private fun ForwardingIndicatorPill(
             color = PocketShellColors.Text,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-private fun ForwardingGlyph() {
-    val color = PocketShellColors.Accent
-    Canvas(modifier = Modifier.size(14.dp)) {
-        val w = size.width
-        val h = size.height
-        val stroke = Stroke(width = w * 0.12f)
-        // Top arrow pointing right.
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(0f, h * 0.3f),
-            end = androidx.compose.ui.geometry.Offset(w, h * 0.3f),
-            strokeWidth = stroke.width,
-        )
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(w * 0.65f, h * 0.05f),
-            end = androidx.compose.ui.geometry.Offset(w, h * 0.3f),
-            strokeWidth = stroke.width,
-        )
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(w * 0.65f, h * 0.55f),
-            end = androidx.compose.ui.geometry.Offset(w, h * 0.3f),
-            strokeWidth = stroke.width,
-        )
-        // Bottom arrow pointing left.
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(0f, h * 0.7f),
-            end = androidx.compose.ui.geometry.Offset(w, h * 0.7f),
-            strokeWidth = stroke.width,
-        )
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(w * 0.35f, h * 0.45f),
-            end = androidx.compose.ui.geometry.Offset(0f, h * 0.7f),
-            strokeWidth = stroke.width,
-        )
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(w * 0.35f, h * 0.95f),
-            end = androidx.compose.ui.geometry.Offset(0f, h * 0.7f),
-            strokeWidth = stroke.width,
         )
     }
 }

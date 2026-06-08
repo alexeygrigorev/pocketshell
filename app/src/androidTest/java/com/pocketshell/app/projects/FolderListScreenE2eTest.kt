@@ -358,7 +358,15 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(folderTreeRootEmptyHintAddTestTag("~/archive"))
             .assertIsDisplayed()
             .assertHasClickAction()
-        compose.onNodeWithText("+ Add").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Add project folder").assertIsDisplayed()
+        compose.onNodeWithTag(folderTreeRootEmptyHintActionLabelTestTag("~/archive"), useUnmergedTree = true)
+            .assertTextEquals("Add")
+        compose.onAllNodesWithText("+ Add")
+            .fetchSemanticsNodes()
+            .also {
+                assertTrue("empty watched-root action should not render the retired '+ Add' pill", it.isEmpty())
+            }
+        assertEmptyRootActionRowIsCompact("~/archive")
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
         // #602: the host-detail Port forwarding entry point is intentionally
@@ -1131,6 +1139,12 @@ class FolderListScreenE2eTest {
             compose.onNodeWithTag(folderTreeRootEmptyHintAddTestTag(longRootPath))
                 .assertIsDisplayed()
                 .assertHasClickAction()
+            compose.onNodeWithContentDescription("Review inactive project folders").assertIsDisplayed()
+            compose.onNodeWithTag(
+                folderTreeRootEmptyHintActionLabelTestTag(longRootPath),
+                useUnmergedTree = true,
+            ).assertTextEquals("Review")
+            assertEmptyRootActionRowIsCompact(longRootPath)
         }
     }
 
@@ -1261,6 +1275,33 @@ class FolderListScreenE2eTest {
             "new-session row must stay above port-forwarding row without overlap: " +
                 "new.bottom=${newSessionBounds.bottom}px forwarding.top=${forwardingBounds.top}px",
             newSessionBounds.bottom <= forwardingBounds.top,
+        )
+    }
+
+    private fun assertEmptyRootActionRowIsCompact(rootPath: String) {
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderTreeRootEmptyHintAddTestTag(rootPath)))
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val rowBounds = compose.onNodeWithTag(
+            folderTreeRootEmptyHintAddTestTag(rootPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val actionBounds = compose.onNodeWithTag(
+            folderTreeRootEmptyHintActionLabelTestTag(rootPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val maxCompactHeightPx = 56f * density
+        val minInsetPx = 8f * density
+
+        assertTrue(
+            "inactive watched-root hint should render as one compact dense row: height=${rowBounds.height}px",
+            rowBounds.height <= maxCompactHeightPx,
+        )
+        assertTrue(
+            "inactive watched-root trailing action must stay inside the row: " +
+                "action.right=${actionBounds.right}px row.right=${rowBounds.right}px",
+            actionBounds.right <= rowBounds.right - minInsetPx,
         )
     }
 

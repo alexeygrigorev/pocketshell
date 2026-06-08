@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
 import com.pocketshell.app.composer.PromptComposerViewModel
@@ -17,7 +18,18 @@ import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.uikit.theme.PocketShellTheme
+import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -159,6 +171,55 @@ class RawSessionBottomControlsUiTest {
     }
 
     @Test
+    fun keyboardHiddenBottomEnterWritesCarriageReturnThroughRawSshViewModel() = runBlocking {
+        val vm = SessionViewModel(
+            applicationContext = ApplicationProvider.getApplicationContext(),
+            sshLeaseManager = SshLeaseManager(
+                connector = SshLeaseConnector {
+                    error("raw SSH lease acquire is not expected in this UI wiring test")
+                },
+            ),
+        )
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            compose.setContent {
+                PocketShellTheme {
+                    RawSessionBottomControls(
+                        isImeVisible = false,
+                        showConversation = false,
+                        sessionLive = true,
+                        onKey = { binding -> vm.onKeyBarKey(binding.label) },
+                        onChipTap = {},
+                        onDictateTap = {},
+                        onShowKeyboardTap = {},
+                        onAddSnippetTap = {},
+                        onProjectNavigationTap = {},
+                    )
+                }
+            }
+
+            compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
+                .assertIsDisplayed()
+                .assertHasClickAction()
+                .performClick()
+
+            waitForStdin(stdin, "\r")
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
     fun rawSshKeyBarLayoutPlacesEnterInDefaultRowNearCtrlControls() {
         assertEquals(
             listOf("Esc", "Ctrl", "Ctrl-C", SessionKeyBarEnterLabel, "Ctrl-D", "Tab"),
@@ -168,5 +229,13 @@ class RawSessionBottomControlsUiTest {
 
     private companion object {
         const val RAW_BOTTOM_CONTROLS_TAG = "raw:bottom-controls"
+
+        suspend fun waitForStdin(stdin: ByteArrayOutputStream, expected: String) {
+            withTimeout(5_000) {
+                while (stdin.toString(Charsets.UTF_8.name()) != expected) {
+                    delay(25)
+                }
+            }
+        }
     }
 }

@@ -270,6 +270,7 @@ project.afterEvaluate {
         useJUnit()
         include("**/*RealLlmTest.class")
         shouldRunAfter(unitTest)
+        systemProperty("pocketshell.realLlm.repoRoot", rootProject.layout.projectDirectory.asFile.absolutePath)
 
         testLogging {
             events("passed", "skipped", "failed")

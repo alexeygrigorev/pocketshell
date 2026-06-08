@@ -743,9 +743,14 @@ POCKETSHELL_REAL_LLM_TESTS=1 ./gradlew :app:realLlmTest
 ```
 
 The test reads provider credentials only from the PocketShell repo root `.env`.
-It does not inspect sibling repos, `app/.env`, `.env.local`, shell history, or
-any unrelated dotenv files. Do not commit `.env` with real keys. Values are
-never printed by the test; skip messages name only missing variable names.
+It does not read sibling repos. It also ignores `app/.env`, `.env.local`,
+shell history, and unrelated dotenv files. Do not commit `.env` with real keys.
+Values are never printed by the test, and skip messages name only missing
+variable names.
+
+When running from a git worktree, put `.env` in that worktree root. The
+harness intentionally does not read the primary checkout or any parent
+directory.
 
 ZAI is the primary target provider. The implementation uses the
 Anthropic-compatible Messages wire format for ZAI, but this is only a wire

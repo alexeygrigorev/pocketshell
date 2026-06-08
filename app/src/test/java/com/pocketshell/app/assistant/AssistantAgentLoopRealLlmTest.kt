@@ -392,10 +392,20 @@ class AssistantAgentLoopRealLlmTest {
     }
 
     private fun projectRoot(): Path {
+        System.getProperty("pocketshell.realLlm.repoRoot")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { Paths.get(it).toAbsolutePath().normalize() }
+            ?.takeIf { Files.exists(it.resolve("settings.gradle.kts")) }
+            ?.let { return it }
+
         var current = Paths.get("").toAbsolutePath()
         while (current.parent != null && !Files.exists(current.resolve("settings.gradle.kts"))) {
             current = current.parent
         }
+        assumeTrue(
+            "real LLM scenario skipped: could not identify PocketShell repo root for .env lookup",
+            Files.exists(current.resolve("settings.gradle.kts")),
+        )
         return current
     }
 

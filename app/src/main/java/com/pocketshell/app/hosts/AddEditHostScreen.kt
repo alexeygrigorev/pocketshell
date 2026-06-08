@@ -48,6 +48,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Test tags exposed for the issue #111 Add Host instrumentation tests.
@@ -357,13 +359,13 @@ private fun AddEditHostTabs(
         Tab(
             selected = selectedTab == AddEditHostTab.Details,
             onClick = { onSelect(AddEditHostTab.Details) },
-            text = { Text("Host details") },
+            text = { Text("Host details", style = PocketShellType.bodyDense) },
             modifier = Modifier.testTag(ADD_HOST_DETAILS_TAB_TAG),
         )
         Tab(
             selected = selectedTab == AddEditHostTab.ManageKeys,
             onClick = { onSelect(AddEditHostTab.ManageKeys) },
-            text = { Text("Manage keys") },
+            text = { Text("Manage keys", style = PocketShellType.bodyDense) },
             modifier = Modifier.testTag(ADD_HOST_MANAGE_KEYS_TAB_TAG),
         )
     }
@@ -602,6 +604,7 @@ private fun KeySelector(
                         Text(
                             text = "No keys yet — tap Manage keys",
                             color = PocketShellColors.TextMuted,
+                            style = PocketShellType.bodyDense,
                         )
                     },
                     onClick = {
@@ -618,7 +621,10 @@ private fun KeySelector(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(
+                                horizontal = PocketShellDensity.rowPadH,
+                                vertical = PocketShellDensity.rowPadV,
+                            ),
                     ) {
                         OutlinedTextField(
                             value = keyQuery,
@@ -652,6 +658,7 @@ private fun KeySelector(
                             Text(
                                 text = "No keys match \"$keyQuery\"",
                                 color = PocketShellColors.TextMuted,
+                                style = PocketShellType.bodyDense,
                             )
                         },
                         onClick = { /* swallow — keeps the menu open */ },
@@ -661,7 +668,13 @@ private fun KeySelector(
                 } else {
                     filteredKeys.forEach { (id, name) ->
                         DropdownMenuItem(
-                            text = { Text(name, color = PocketShellColors.Text) },
+                            text = {
+                                Text(
+                                    text = name,
+                                    color = PocketShellColors.Text,
+                                    style = PocketShellType.bodyDense,
+                                )
+                            },
                             onClick = {
                                 onSelect(id)
                                 expanded = false
@@ -674,6 +687,7 @@ private fun KeySelector(
                         Text(
                             text = "Manage keys…",
                             color = PocketShellColors.Accent,
+                            style = PocketShellType.bodyDense,
                             fontWeight = FontWeight.SemiBold,
                         )
                     },

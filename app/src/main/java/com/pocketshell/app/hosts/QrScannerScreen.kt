@@ -51,6 +51,8 @@ import com.google.zxing.BarcodeFormat
 import com.pocketshell.app.R
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -193,7 +195,10 @@ fun QrScannerScreen(
                             text = context.getString(R.string.qr_scanner_prompt),
                             color = PocketShellColors.TextSecondary,
                             style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                            modifier = Modifier.padding(
+                                horizontal = PocketShellSpacing.lg + PocketShellSpacing.sm,
+                                vertical = PocketShellSpacing.lg,
+                            ),
                         )
                     }
                 }
@@ -224,7 +229,10 @@ private fun ScanningPrompt(state: QrScannerViewModel.State.Scanning) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 8.dp),
+                .padding(
+                    horizontal = PocketShellSpacing.lg + PocketShellSpacing.sm,
+                    vertical = PocketShellDensity.rowPadV,
+                ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
@@ -233,7 +241,10 @@ private fun ScanningPrompt(state: QrScannerViewModel.State.Scanning) {
                         color = PocketShellColors.Surface,
                         shape = RoundedCornerShape(10.dp),
                     )
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .padding(
+                        horizontal = PocketShellDensity.chipPadH,
+                        vertical = PocketShellSpacing.xs,
+                    )
                     .testTag(QR_SCANNER_PROGRESS_CHIP_TAG),
             ) {
                 Text(
@@ -260,7 +271,7 @@ private fun PermissionDeniedBlock(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(PocketShellSpacing.lg + PocketShellSpacing.sm),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -269,7 +280,7 @@ private fun PermissionDeniedBlock(
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyDense,
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
         if (onRetry != null) {
             Button(
                 onClick = onRetry,
@@ -281,7 +292,7 @@ private fun PermissionDeniedBlock(
             ) {
                 Text(context.getString(R.string.qr_scanner_permission_retry))
             }
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
         }
         TextButton(
             onClick = onPickFile,
@@ -305,7 +316,7 @@ private fun ErrorBlock(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(PocketShellSpacing.lg + PocketShellSpacing.sm),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -315,13 +326,13 @@ private fun ErrorBlock(
             style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
         Text(
             text = context.getString(R.string.qr_scanner_error_generic),
             color = PocketShellColors.TextSecondary,
             style = MaterialTheme.typography.labelSmall,
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
         Row {
             Button(
                 onClick = onRetry,
@@ -333,7 +344,7 @@ private fun ErrorBlock(
             ) {
                 Text(context.getString(R.string.qr_scanner_retry))
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
             TextButton(onClick = onClose) {
                 Text(
                     text = context.getString(R.string.qr_scanner_close),
@@ -349,7 +360,7 @@ private fun InfoCard(title: String, body: String) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(PocketShellSpacing.lg + PocketShellSpacing.sm),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -358,7 +369,7 @@ private fun InfoCard(title: String, body: String) {
             color = PocketShellColors.Text,
             style = MaterialTheme.typography.titleMedium,
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
         Text(
             text = body,
             color = PocketShellColors.TextSecondary,

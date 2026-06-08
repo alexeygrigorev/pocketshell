@@ -2,6 +2,7 @@ package com.pocketshell.core.terminal.ui
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -69,8 +70,8 @@ class TerminalSurfaceStateEmitOutputTest {
         val state = TerminalSurfaceState()
         val initialTick = state.bufferTicks.value
 
-        // Need a collector for `output` so the SUSPEND-on-overflow flow
-        // can actually emit (no collector + buffer overflow = suspension).
+        // Need a collector for `output` so this also verifies the public
+        // side-channel while checking the tick signal.
         val collectorJob = launch(Dispatchers.Unconfined) {
             state.output.collect { /* drain */ }
         }
@@ -107,10 +108,10 @@ class TerminalSurfaceStateEmitOutputTest {
             assertTrue(state.emitOutputForTesting(payload))
         }
 
-        // With BufferOverflow.SUSPEND + an active collector on Unconfined,
-        // each emit progresses the collector synchronously before returning,
-        // so by the time the for-loop finishes the collector has observed
-        // every emission. No extra yield / waitFor needed.
+        // With an active Unconfined collector, each emit progresses the
+        // collector synchronously before returning, so by the time the
+        // for-loop finishes the collector has observed every emission. No
+        // extra yield / waitFor needed.
         assertEquals(
             "every emitted payload must reach the collector",
             targetCount,
@@ -129,6 +130,37 @@ class TerminalSurfaceStateEmitOutputTest {
             state.bufferTicks.value,
         )
         collectorJob.cancel()
+    }
+
+    @Test
+    fun `emitOutputForTesting stays non blocking behind a slow side-channel collector`() = runBlocking {
+        val state = TerminalSurfaceState()
+        val firstPayloadObserved = CompletableDeferred<Unit>()
+        val slowCollector = launch {
+            state.output.collect {
+                firstPayloadObserved.complete(Unit)
+                delay(60_000)
+            }
+        }
+        yield()
+
+        val payloads = (0 until 256).map { i -> "codex-output-$i\n".toByteArray() }
+        withTimeout(1_000) {
+            payloads.forEach { payload ->
+                assertTrue(
+                    "terminal output side-channel must accept/drop locally instead of backpressuring rendering",
+                    state.emitOutputForTesting(payload),
+                )
+            }
+        }
+
+        withTimeout(1_000) { firstPayloadObserved.await() }
+        assertEquals(
+            "bufferTicks must still reflect every rendering-side emission even when the side-channel drops",
+            payloads.size.toLong(),
+            state.bufferTicks.value,
+        )
+        slowCollector.cancel()
     }
 
     @Test

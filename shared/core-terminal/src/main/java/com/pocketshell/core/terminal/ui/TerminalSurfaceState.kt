@@ -106,7 +106,7 @@ class TerminalSurfaceState(
     private val _output = MutableSharedFlow<ByteArray>(
         replay = 0,
         extraBufferCapacity = 64,
-        onBufferOverflow = BufferOverflow.SUSPEND,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
     /**
@@ -317,10 +317,11 @@ class TerminalSurfaceState(
      * module's unit tests to exercise the flow without standing up a
      * session.
      *
-     * Suspends if the flow's buffer is full and no collector is consuming
-     * (`BufferOverflow.SUSPEND`). Returns true if delivered, false if the
-     * flow was closed (currently the flow is never closed, but the return
-     * value matches `MutableSharedFlow.tryEmit`'s contract for symmetry).
+     * Best-effort side channel: if a collector falls behind, the oldest
+     * buffered side-channel bytes may be dropped (`BufferOverflow.DROP_OLDEST`)
+     * so rendering-side output never waits on diagnostics or tests. Returns
+     * true after the payload is accepted by the side channel; this flow is
+     * never closed.
      */
     internal suspend fun emitOutputForTesting(bytes: ByteArray): Boolean {
         _output.emit(bytes)

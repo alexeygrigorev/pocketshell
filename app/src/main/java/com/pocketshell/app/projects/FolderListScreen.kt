@@ -83,6 +83,7 @@ import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.ScreenHeader
@@ -1534,8 +1535,7 @@ private fun FolderTreeRootHeader(
         }
         if (hasActions) {
             Spacer(modifier = Modifier.width(6.dp))
-            CompactTreeIconButton(
-                label = "⋮",
+            RowOverflowButton(
                 contentDescription = "Root actions",
                 onClick = onRootActions,
                 testTag = folderTreeRootActionsTestTag(root.path),
@@ -1821,8 +1821,7 @@ private fun FolderHeader(
         // via the screen-level FAB.
         if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                CompactTreeIconButton(
-                    label = "⋮",
+                RowOverflowButton(
                     contentDescription = "Project actions",
                     onClick = onFolderActions,
                     testTag = folderDetailActionsTestTag(folder.path),
@@ -1978,6 +1977,22 @@ private fun SessionActionsKebab(
                 testTag = stopItemTestTag,
             ),
         ),
+    )
+}
+
+@Composable
+private fun RowOverflowButton(
+    contentDescription: String,
+    onClick: () -> Unit,
+    testTag: String,
+    modifier: Modifier = Modifier,
+) {
+    KebabTrigger(
+        contentDescription = contentDescription,
+        triggerTestTag = testTag,
+        triggerSize = PocketShellDensity.tapTargetMin,
+        onClick = onClick,
+        modifier = modifier,
     )
 }
 

@@ -10,6 +10,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -625,6 +626,8 @@ class FolderListScreenE2eTest {
         // and can return blank), so this is the authoritative #504 screenshot.
         WalkthroughScreenshotArtifacts.capture("issue504-folder-tree-header-no-grid-toggle")
         captureViewport("issue504-folder-tree-header-no-grid-toggle-viewport.png")
+        assertOverflowTrigger(folderTreeRootActionsTestTag("~/git"), "Root actions")
+        assertOverflowTrigger(folderDetailActionsTestTag("/home/u/git/pocketshell"), "Project actions")
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/tmp"))
@@ -1266,6 +1269,7 @@ class FolderListScreenE2eTest {
             }
             compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
                 .performScrollToNode(hasTestTag(folderTreeRootActionsTestTag(longRootPath)))
+            assertOverflowTrigger(folderTreeRootActionsTestTag(longRootPath), "Root actions")
             assertRootHeaderLeavesRoomForActions(longRootPath)
             assertAccessibleTouchTarget(folderTreeRootActionsTestTag(longRootPath))
             assertAccessibleTouchTarget(folderTreeRootCreateTestTag(longRootPath))
@@ -1283,6 +1287,68 @@ class FolderListScreenE2eTest {
             ).assertTextEquals("Review")
             assertEmptyRootActionRowIsCompact(longRootPath)
         }
+    }
+
+    @Test
+    fun longProjectNameKeepsOverflowVisibleAndActionSheetWorks() {
+        val longFolderName = "project-" + "very-long-name-segment-".repeat(8) + "tail"
+        val folderPath = "/home/u/git/$longFolderName"
+        val fakeGateway = FakeFolderListGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = "claude-long-folder",
+                    lastActivity = 1_700_004_000L,
+                    attached = true,
+                    cwd = folderPath,
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+            projectFoldersByRoot = mapOf("~/git" to listOf(folderPath)),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
+        var editedEnvPath: String? = null
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue479-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue479",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { path, _, _ -> editedEnvPath = path },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(folderDetailActionsTestTag(folderPath))
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderDetailActionsTestTag(folderPath)))
+
+        assertOverflowTrigger(folderDetailActionsTestTag(folderPath), "Project actions")
+        assertAccessibleTouchTarget(folderDetailActionsTestTag(folderPath))
+        assertProjectHeaderLeavesRoomForOverflow(folderPath)
+
+        compose.onNodeWithTag(folderDetailActionsTestTag(folderPath)).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(FOLDER_CONTEXT_ENV_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_CONTEXT_NEW_SESSION_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_CONTEXT_ENV_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { editedEnvPath == folderPath }
     }
 
     private fun assertProjectNameKeepsReadableWidth(
@@ -1345,6 +1411,57 @@ class FolderListScreenE2eTest {
         // substitution in the rendered text), as a belt-and-braces semantic
         // check that pairs with the geometric one above.
         labelNode.assertTextEquals(expectedName)
+    }
+
+    private fun assertProjectHeaderLeavesRoomForOverflow(folderPath: String) {
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val rowBounds = compose.onNodeWithTag(
+            folderHeaderClickTestTag(folderPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val labelBounds = compose.onNodeWithTag(
+            folderHeaderLabelTag(folderPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val countBounds = compose.onNodeWithTag(
+            folderCountPillTestTag(folderPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val actionsBounds = compose.onNodeWithTag(
+            folderDetailActionsTestTag(folderPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val minGapPx = 4f * density
+
+        assertTrue(
+            "long project overflow must stay inside row: " +
+                "actions.right=${actionsBounds.right}px row.right=${rowBounds.right}px",
+            actionsBounds.right <= rowBounds.right + minGapPx,
+        )
+        assertTrue(
+            "long project label must end before overflow: " +
+                "label.right=${labelBounds.right}px actions.left=${actionsBounds.left}px",
+            labelBounds.right <= actionsBounds.left - minGapPx,
+        )
+        assertTrue(
+            "long project count must end before overflow: " +
+                "count.right=${countBounds.right}px actions.left=${actionsBounds.left}px",
+            countBounds.right <= actionsBounds.left + 1f,
+        )
+        assertTrue(
+            "long project label should keep readable width before ellipsizing: width=${labelBounds.width}px",
+            labelBounds.width >= 120f * density,
+        )
+    }
+
+    private fun assertOverflowTrigger(tag: String, contentDescription: String) {
+        compose.onNode(
+            hasTestTag(tag) and hasContentDescription(contentDescription),
+            useUnmergedTree = true,
+        )
+            .assertExists()
+            .assertHasClickAction()
     }
 
     private fun assertRootHeaderLeavesRoomForActions(rootPath: String) {

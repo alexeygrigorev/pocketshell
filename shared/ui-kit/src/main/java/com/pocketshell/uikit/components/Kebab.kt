@@ -111,18 +111,12 @@ fun Kebab(
     }
 
     Box(modifier = modifier) {
-        Box(
-            modifier = Modifier
-                .size(triggerSize)
-                .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
-                .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
-                .clickable(role = Role.Button, onClick = { setExpanded(true) })
-                .semantics { this.contentDescription = contentDescription }
-                .testTag(triggerTestTag),
-            contentAlignment = Alignment.Center,
-        ) {
-            KebabIcon()
-        }
+        KebabTrigger(
+            contentDescription = contentDescription,
+            triggerTestTag = triggerTestTag,
+            triggerSize = triggerSize,
+            onClick = { setExpanded(true) },
+        )
         DropdownMenu(
             expanded = isExpanded,
             onDismissRequest = { setExpanded(false) },
@@ -163,6 +157,34 @@ fun Kebab(
                 )
             }
         }
+    }
+}
+
+/**
+ * Shared visible overflow trigger for callers whose actions are not rendered by
+ * [DropdownMenu] directly, for example rows that open a bottom sheet. This keeps
+ * the glyph, circular chrome, semantics, and test-tag behavior identical to
+ * [Kebab] while letting the caller own the action surface.
+ */
+@Composable
+fun KebabTrigger(
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    triggerTestTag: String = KEBAB_BUTTON_TAG,
+    triggerSize: Dp = 40.dp,
+) {
+    Box(
+        modifier = modifier
+            .size(triggerSize)
+            .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { this.contentDescription = contentDescription }
+            .testTag(triggerTestTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        KebabIcon()
     }
 }
 

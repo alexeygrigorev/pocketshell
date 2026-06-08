@@ -73,13 +73,16 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -554,6 +557,13 @@ internal fun SheetContent(
         onSend(true)
         imeScope.launch { keyboardController?.hide() }
     }
+    val lockThresholdPx = with(LocalDensity.current) { MIC_LOCK_SWIPE_THRESHOLD_DP.dp.toPx() }
+    val currentOnMicTap by rememberUpdatedState(onMicTap)
+    val currentOnLockRecording by rememberUpdatedState(onLockRecording)
+    val micGestureEnabled by rememberUpdatedState(
+        state.recording == PromptComposerViewModel.RecordingState.Idle,
+    )
+    var micBoundsInControlsRow by remember { mutableStateOf<Rect?>(null) }
 
     Column(
         modifier = modifier
@@ -773,6 +783,13 @@ internal fun SheetContent(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .micSwipeUpLockGesture(
+                    lockThresholdPx = lockThresholdPx,
+                    enabled = { micGestureEnabled },
+                    startBounds = { micBoundsInControlsRow },
+                    onPressStart = { currentOnMicTap() },
+                    onLockRecording = { currentOnLockRecording() },
+                )
                 .padding(top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -828,9 +845,12 @@ internal fun SheetContent(
                     // Sits AFTER Send so the row reads "type + send, or dictate".
                     MicTriggerButton(
                         onClick = onMicTap,
-                        onLockRecording = onLockRecording,
                         enabled = true,
-                        modifier = Modifier.testTag(COMPOSER_MIC_TAG),
+                        modifier = Modifier
+                            .testTag(COMPOSER_MIC_TAG)
+                            .onGloballyPositioned { coordinates ->
+                                micBoundsInControlsRow = coordinates.boundsInParent()
+                            },
                     )
                 }
 
@@ -1206,24 +1226,16 @@ private fun StopSendButton(
 @Composable
 private fun MicTriggerButton(
     onClick: () -> Unit,
-    onLockRecording: () -> Unit,
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val accent = LocalPocketShellSemantic.current.accent
-    val lockThresholdPx = with(LocalDensity.current) { MIC_LOCK_SWIPE_THRESHOLD_DP.dp.toPx() }
     Box(
         modifier = modifier
             .size(44.dp)
             .background(
                 color = if (enabled) accent else PocketShellColors.SurfaceElev,
                 shape = androidx.compose.foundation.shape.CircleShape,
-            )
-            .micSwipeUpLockGesture(
-                enabled = enabled,
-                lockThresholdPx = lockThresholdPx,
-                onPressStart = onClick,
-                onLockRecording = onLockRecording,
             )
             .semantics {
                 contentDescription = "Start dictation. Swipe up to lock recording"
@@ -1251,15 +1263,19 @@ private fun MicTriggerButton(
 }
 
 private fun Modifier.micSwipeUpLockGesture(
-    enabled: Boolean,
     lockThresholdPx: Float,
+    enabled: () -> Boolean,
+    startBounds: () -> Rect?,
     onPressStart: () -> Unit,
     onLockRecording: () -> Unit,
 ): Modifier {
-    if (!enabled) return this
-    return pointerInput(enabled, lockThresholdPx, onPressStart, onLockRecording) {
+    return pointerInput(lockThresholdPx) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
+            val bounds = startBounds()
+            if (!enabled() || bounds == null || !bounds.contains(down.position)) {
+                return@awaitEachGesture
+            }
             val tracker = MicSwipeUpLockGestureTracker(lockThresholdPx)
             if (tracker.onPressStart() == MicSwipeUpLockGestureEvent.StartRecording) {
                 onPressStart()

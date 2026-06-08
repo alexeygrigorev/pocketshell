@@ -167,7 +167,9 @@ class PromptComposerSmokeTest {
             onMicTapCount = { micTaps += 1 },
             onLockRecording = {
                 lockCalls += 1
-                state = state.copy(recordingLocked = true)
+                if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
+                    state = state.copy(recordingLocked = true)
+                }
             },
         )
 
@@ -182,6 +184,51 @@ class PromptComposerSmokeTest {
         compose.waitForIdle()
 
         assertEquals(1, micTaps)
+        assertEquals(1, lockCalls)
+        assertEquals(PromptComposerViewModel.RecordingState.Recording, state.recording)
+        assertTrue(state.recordingLocked)
+        compose.onNodeWithTag(COMPOSER_RECORDING_LOCKED_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun micSwipeUpLocksAfterPressRecomposesAwayMic() {
+        var micTaps = 0
+        var lockCalls = 0
+        var state by mutableStateOf(PromptComposerViewModel.UiState())
+        renderInteractiveComposer(
+            state = { state },
+            onStateChange = { state = it },
+            onMicTapCount = { micTaps += 1 },
+            onLockRecording = {
+                lockCalls += 1
+                if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
+                    state = state.copy(recordingLocked = true)
+                }
+            },
+        )
+
+        compose.onNodeWithTag(COMPOSER_MIC_TAG)
+            .assertIsDisplayed()
+            .performTouchInput {
+                down(center)
+            }
+
+        compose.waitForIdle()
+
+        assertEquals(1, micTaps)
+        assertEquals(PromptComposerViewModel.RecordingState.Recording, state.recording)
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).assertDoesNotExist()
+
+        compose.onRoot().performTouchInput {
+            moveBy(Offset(x = 0f, y = -220f))
+            up()
+        }
+
+        compose.waitForIdle()
+
         assertEquals(1, lockCalls)
         assertEquals(PromptComposerViewModel.RecordingState.Recording, state.recording)
         assertTrue(state.recordingLocked)

@@ -153,10 +153,19 @@ class TmuxKeyboardPanLayoutTest {
             .fetchSemanticsNode()
             .boundsInRoot
             .height
+        val keyBarHeight = compose
+            .onNodeWithTag(TMUX_KEY_BAR_TAG)
+            .fetchSemanticsNode()
+            .boundsInRoot
+            .height
 
         assertTrue(
             "tmux IME accessory controls must not collapse to a thin strip",
             height >= 56f,
+        )
+        assertTrue(
+            "tmux IME keybar itself must stay visible and usable",
+            keyBarHeight >= 56f,
         )
     }
 

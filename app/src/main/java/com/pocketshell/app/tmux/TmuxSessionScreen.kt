@@ -1226,6 +1226,11 @@ public fun TmuxSessionScreen(
 
             currentPane?.let { pane ->
                 val isAgentPane = currentAgentConversation?.detection != null
+                val bottomControlsModifier = if (isImeVisible) {
+                    Modifier
+                } else {
+                    Modifier.navigationBarsPadding()
+                }
                 TmuxTerminalBottomControlsWithComposerAttachments(
                     promptComposerViewModel = promptComposerViewModel,
                     isImeVisible = isImeVisible,
@@ -1280,7 +1285,7 @@ public fun TmuxSessionScreen(
                     onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
                         { showSnippetPicker = true }
                     } else null,
-                    modifier = Modifier.navigationBarsPadding(),
+                    modifier = bottomControlsModifier,
                 )
             }
 
@@ -5215,6 +5220,9 @@ internal fun TmuxTerminalBottomControls(
                 },
                 modifierStates = modifierStates,
                 onModifierStateChange = onModifierStateChange,
+                modifier = Modifier
+                    .heightIn(min = SessionBottomControlsMinHeight)
+                    .testTag(TMUX_KEY_BAR_TAG),
             )
         } else {
             BottomChipControls(
@@ -5267,6 +5275,7 @@ internal const val TmuxCtrlModifierLabel: String = "Ctrl"
  * a single non-scrolling row width on a phone so nothing clips.
  */
 internal const val TmuxKeyBarEnterLabel: String = "⏎"
+internal const val TMUX_KEY_BAR_TAG: String = "tmux:keybar"
 
 internal val TmuxKeyBarLayoutCompact: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),

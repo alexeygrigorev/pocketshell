@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -106,61 +108,62 @@ internal fun SessionTypePickerContent(
     // agent launched without per-action approval prompts.
     var skipPermissions by remember { mutableStateOf(true) }
     var startDirectory by remember { mutableStateOf(folderPath) }
+    val scrollState = rememberScrollState()
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
             .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .fillMaxHeight(SESSION_TYPE_PICKER_HEIGHT_FRACTION)
+            .heightIn(max = SESSION_TYPE_PICKER_MAX_HEIGHT),
     ) {
-        Text(
-            text = "New session",
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = "in $folderLabel",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyMono,
-        )
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 20.dp)
+                .padding(top = 16.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "New session",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "in $folderLabel",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyMono,
+            )
 
-        // Segmented control: Shell vs Agent.
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            SectionTitle("Session type")
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(PICKER_SEGMENT_HEIGHT)
-                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-                    .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
-                    .selectableGroup(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SegmentButton(
-                    label = "Shell",
-                    selected = sessionType == SessionType.Shell,
-                    onClick = { sessionType = SessionType.Shell },
-                    testTag = SESSION_TYPE_PICKER_SHELL_TAG,
-                    modifier = Modifier.weight(1f),
-                )
-                SegmentButton(
-                    label = "Agent",
-                    selected = sessionType == SessionType.Agent,
-                    onClick = { sessionType = SessionType.Agent },
-                    testTag = SESSION_TYPE_PICKER_AGENT_TAG,
-                    modifier = Modifier.weight(1f),
+            // Start folder — pre-filled, editable. Keep this near the top of
+            // the sheet so autocomplete results remain visible while the IME
+            // is open instead of landing below the session-type controls.
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionTitle("Start folder")
+                StartDirectoryAutocompleteField(
+                    value = startDirectory,
+                    onValueChange = { startDirectory = it },
+                    modifier = Modifier
+                        .fillMaxWidth(),
+                    textFieldTestTag = SESSION_TYPE_PICKER_CWD_TAG,
+                    autocompleteController = autocompleteController,
+                    suggestionsMaxHeight = SESSION_TYPE_PICKER_SUGGESTIONS_MAX_HEIGHT,
                 )
             }
         }
 
-        // Conditional agent CLI sub-picker.
-        if (sessionType == SessionType.Agent) {
+        Column(
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .verticalScroll(scrollState)
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Segmented control: Shell vs Agent.
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                SectionTitle("Agent CLI")
+                SectionTitle("Session type")
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -171,65 +174,86 @@ internal fun SessionTypePickerContent(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     SegmentButton(
-                        label = "claude",
-                        selected = agentKind == AgentCli.Claude,
-                        onClick = { agentKind = AgentCli.Claude },
-                        testTag = SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG,
+                        label = "Shell",
+                        selected = sessionType == SessionType.Shell,
+                        onClick = { sessionType = SessionType.Shell },
+                        testTag = SESSION_TYPE_PICKER_SHELL_TAG,
                         modifier = Modifier.weight(1f),
                     )
                     SegmentButton(
-                        label = "codex",
-                        selected = agentKind == AgentCli.Codex,
-                        onClick = { agentKind = AgentCli.Codex },
-                        testTag = SESSION_TYPE_PICKER_AGENT_CODEX_TAG,
-                        modifier = Modifier.weight(1f),
-                    )
-                    SegmentButton(
-                        label = "opencode",
-                        selected = agentKind == AgentCli.OpenCode,
-                        onClick = { agentKind = AgentCli.OpenCode },
-                        testTag = SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG,
+                        label = "Agent",
+                        selected = sessionType == SessionType.Agent,
+                        onClick = { sessionType = SessionType.Agent },
+                        testTag = SESSION_TYPE_PICKER_AGENT_TAG,
                         modifier = Modifier.weight(1f),
                     )
                 }
-                Text(
-                    text = "The CLI will auto-start in the new pane.",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
+            }
 
-                // Skip-permissions toggle (issue #428). Hidden for
-                // OpenCode: its per-action permissions are config-driven
-                // in opencode.json, not a CLI flag, so the checkbox would
-                // be a no-op there. OpenCode is always launched
-                // env-stripped (subscription auth) regardless.
-                if (agentKind != AgentCli.OpenCode) {
-                    SkipPermissionsRow(
-                        checked = skipPermissions,
-                        onToggle = { skipPermissions = !skipPermissions },
+            // Conditional agent CLI sub-picker.
+            if (sessionType == SessionType.Agent) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    SectionTitle("Agent CLI")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(PICKER_SEGMENT_HEIGHT)
+                            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+                            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+                            .selectableGroup(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SegmentButton(
+                            label = "claude",
+                            selected = agentKind == AgentCli.Claude,
+                            onClick = { agentKind = AgentCli.Claude },
+                            testTag = SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SegmentButton(
+                            label = "codex",
+                            selected = agentKind == AgentCli.Codex,
+                            onClick = { agentKind = AgentCli.Codex },
+                            testTag = SESSION_TYPE_PICKER_AGENT_CODEX_TAG,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SegmentButton(
+                            label = "opencode",
+                            selected = agentKind == AgentCli.OpenCode,
+                            onClick = { agentKind = AgentCli.OpenCode },
+                            testTag = SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Text(
+                        text = "The CLI will auto-start in the new pane.",
+                        color = PocketShellColors.TextMuted,
+                        style = PocketShellType.labelMono,
                     )
+
+                    // Skip-permissions toggle (issue #428). Hidden for
+                    // OpenCode: its per-action permissions are config-driven
+                    // in opencode.json, not a CLI flag, so the checkbox would
+                    // be a no-op there. OpenCode is always launched
+                    // env-stripped (subscription auth) regardless.
+                    if (agentKind != AgentCli.OpenCode) {
+                        SkipPermissionsRow(
+                            checked = skipPermissions,
+                            onToggle = { skipPermissions = !skipPermissions },
+                        )
+                    }
                 }
             }
         }
 
-        // Start folder — pre-filled, editable.
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            SectionTitle("Start folder")
-            StartDirectoryAutocompleteField(
-                value = startDirectory,
-                onValueChange = { startDirectory = it },
-                modifier = Modifier
-                    .fillMaxWidth(),
-                textFieldTestTag = SESSION_TYPE_PICKER_CWD_TAG,
-                autocompleteController = autocompleteController,
-            )
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
-
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface)
+                .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             TextButton(
                 onClick = onCancel,
@@ -514,6 +538,9 @@ enum class AgentCli(val command: String) {
 }
 
 private val PICKER_SEGMENT_HEIGHT = 48.dp
+private const val SESSION_TYPE_PICKER_HEIGHT_FRACTION = 0.85f
+private val SESSION_TYPE_PICKER_MAX_HEIGHT = 560.dp
+private val SESSION_TYPE_PICKER_SUGGESTIONS_MAX_HEIGHT = 96.dp
 
 // Test tags exposed for unit / connected tests.
 const val SESSION_TYPE_PICKER_SHEET_TAG: String = "session-type-picker:sheet"

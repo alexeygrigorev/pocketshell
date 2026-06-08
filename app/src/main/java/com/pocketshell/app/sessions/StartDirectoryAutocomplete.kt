@@ -2,11 +2,14 @@ package com.pocketshell.app.sessions
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -26,6 +29,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -191,6 +195,7 @@ fun StartDirectoryAutocompleteField(
     singleLine: Boolean = true,
     textFieldTestTag: String? = null,
     autocompleteController: StartDirectoryAutocompleteController? = null,
+    suggestionsMaxHeight: Dp = START_DIRECTORY_AUTOCOMPLETE_DEFAULT_MAX_HEIGHT,
 ) {
     val autocompleteState by autocompleteController?.state?.collectAsState()
         ?: remember { MutableStateFlow(StartDirectoryAutocompleteUiState()) }.collectAsState()
@@ -224,6 +229,8 @@ fun StartDirectoryAutocompleteField(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(max = suggestionsMaxHeight)
+                    .verticalScroll(rememberScrollState())
                     .padding(top = 4.dp)
                     .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
                     .testTag(START_DIRECTORY_AUTOCOMPLETE_SUGGESTIONS_TAG),
@@ -256,6 +263,8 @@ fun StartDirectoryAutocompleteField(
         }
     }
 }
+
+private val START_DIRECTORY_AUTOCOMPLETE_DEFAULT_MAX_HEIGHT = 220.dp
 
 internal data class StartDirectoryAutocompleteRequest(
     val parentDirectory: String,

@@ -1092,6 +1092,40 @@ class ShareViewModelTest {
         assertTrue(failed.message.contains("save to inbox", ignoreCase = true))
     }
 
+    @Test
+    @Config(sdk = [28])
+    fun stageIntoSessionFailureInBackgroundPostsAndroidNotificationWithoutFakeActions() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 54L, name = "gpu-box")
+        vm.setItem(uriItem("shot.png"))
+        vm.setShareFlowForeground(false)
+        val manager = context.getSystemService(NotificationManager::class.java)
+
+        vm.stageIntoSession(
+            host,
+            ActiveSessionTarget(sessionName = "scratch", cwd = "/home/alexey/git/live", label = "scratch"),
+        )
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertTrue(failed.message.contains("save to inbox", ignoreCase = true))
+        val posted = manager.activeNotifications.singleOrNull()
+        assertEquals(
+            "failed share-to-session uploads must keep Android error feedback",
+            "Could not upload to gpu-box",
+            posted?.notification?.extras?.getCharSequence("android.title")?.toString(),
+        )
+        assertEquals(
+            failed.message,
+            posted?.notification?.extras?.getCharSequence("android.text")?.toString(),
+        )
+        assertTrue(
+            "background failure notification must not add actions that cannot restore the share payload",
+            posted?.notification?.actions.isNullOrEmpty(),
+        )
+    }
+
     /**
      * Minimal [com.pocketshell.core.ssh.SshSession] fake for the
      * share-into-session staging round-trip: records exec commands +

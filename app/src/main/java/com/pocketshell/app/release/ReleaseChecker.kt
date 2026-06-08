@@ -9,7 +9,7 @@ import java.net.URL
 
 /**
  * Metadata about a GitHub Release that PocketShell can offer the user as
- * a download. Returned by [ReleaseChecker.check] when a newer release is
+ * a download. Returned by [ReleaseChecker.checkForUpdate] when a newer release is
  * available than the currently installed [versionName][android.content.pm.PackageInfo.versionName].
  *
  * - [tagName] is the upstream tag (e.g. `v0.2.0`) — shown verbatim in
@@ -38,8 +38,7 @@ data class ReleaseInfo(
  *
  * - [UpdateAvailable] — a strictly-newer release with a downloadable APK
  *   asset was found.
- * - [UpToDate] — the check succeeded and the installed build is current
- *   (or the newer tag had no matching dotted-APK asset). No banner.
+ * - [UpToDate] — the check succeeded and the installed build is current.
  * - [Failed] — the check could not complete (non-200, rate-limit,
  *   network error, unparseable body). Carries a human-readable [reason]
  *   for logging and an optional "tap to retry" affordance. NOT a silent
@@ -69,9 +68,8 @@ sealed interface ReleaseCheckResult {
  * - All network IO runs on [Dispatchers.IO]; the public surface is a
  *   single `suspend` function so the caller (a `ViewModel`) can launch
  *   it within `viewModelScope`.
-     * - The primary [checkForUpdate] API classifies failures so callers can
-     *   log and surface a retry. The legacy [check] wrapper still returns
-     *   `null` for callers that only need "release or nothing" semantics.
+     * - The [checkForUpdate] API classifies failures so callers can log and
+     *   surface a retry.
  *
  * The check picks the exact dotted-version debug APK asset, e.g.
  * `pocketshell-0.2.1-debug.apk`, so a tagged release points the browser
@@ -90,13 +88,12 @@ open class ReleaseChecker(
 
     /**
      * Query the GitHub Releases API and classify the outcome (issue
-     * #515). Unlike the legacy [check], this distinguishes three states:
+     * #515). It distinguishes three states:
      *
      *  - [ReleaseCheckResult.UpdateAvailable] when the remote tag is
      *    strictly newer than [currentVersion] and ships the dotted-APK
      *    asset;
-     *  - [ReleaseCheckResult.UpToDate] when the install is current (or
-     *    the newer tag has no matching APK);
+     *  - [ReleaseCheckResult.UpToDate] when the install is current;
      *  - [ReleaseCheckResult.Failed] when the request itself failed
      *    (non-200 / rate-limit / network error / unparseable body).
      *
@@ -129,11 +126,15 @@ open class ReleaseChecker(
                 }
 
                 val body = conn.inputStream.bufferedReader().readText()
-                val info = parseRelease(body, currentVersion)
-                if (info != null) {
-                    ReleaseCheckResult.UpdateAvailable(info)
-                } else {
-                    ReleaseCheckResult.UpToDate
+                when (val outcome = parseReleaseOutcome(body, currentVersion)) {
+                    is ParsedReleaseOutcome.UpdateAvailable ->
+                        ReleaseCheckResult.UpdateAvailable(outcome.info)
+                    ParsedReleaseOutcome.UpToDate ->
+                        ReleaseCheckResult.UpToDate
+                    is ParsedReleaseOutcome.Failed -> {
+                        Log.w(TAG, "release check failed: ${outcome.reason} (current=$currentVersion)")
+                        ReleaseCheckResult.Failed(outcome.reason)
+                    }
                 }
             } catch (e: Exception) {
                 val reason = "${e.javaClass.simpleName}: ${e.message ?: "no message"}"
@@ -142,25 +143,32 @@ open class ReleaseChecker(
             }
         }
 
-    internal fun parseRelease(body: String, currentVersion: String): ReleaseInfo? {
+    internal fun parseRelease(body: String, currentVersion: String): ReleaseInfo? =
+        (parseReleaseOutcome(body, currentVersion) as? ParsedReleaseOutcome.UpdateAvailable)?.info
+
+    private fun parseReleaseOutcome(body: String, currentVersion: String): ParsedReleaseOutcome {
         val json = JSONObject(body)
         val tagName = json.getString("tag_name")
-        val remoteVersion = ParsedVersion.from(tagName) ?: return null
+        val remoteVersion = ParsedVersion.from(tagName)
+            ?: return ParsedReleaseOutcome.Failed("Latest release tag is not parseable: $tagName")
 
-        if (!isNewer(currentVersion, tagName)) return null
+        if (!isNewer(currentVersion, tagName)) return ParsedReleaseOutcome.UpToDate
 
         val htmlUrl = json.getString("html_url")
-        val assets = json.optJSONArray("assets") ?: return null
+        val assets = json.optJSONArray("assets")
+            ?: return ParsedReleaseOutcome.Failed("Release $tagName has no downloadable APK assets")
         val expectedApkName = "pocketshell-${remoteVersion.toDottedString()}-debug.apk"
 
         for (i in 0 until assets.length()) {
             val asset = assets.getJSONObject(i)
             if (asset.getString("name") == expectedApkName) {
-                return ReleaseInfo(tagName, htmlUrl, asset.getString("browser_download_url"))
+                return ParsedReleaseOutcome.UpdateAvailable(
+                    ReleaseInfo(tagName, htmlUrl, asset.getString("browser_download_url")),
+                )
             }
         }
 
-        return null
+        return ParsedReleaseOutcome.Failed("Release $tagName is missing $expectedApkName")
     }
 
     /**
@@ -205,5 +213,11 @@ open class ReleaseChecker(
                 )
             }
         }
+    }
+
+    private sealed interface ParsedReleaseOutcome {
+        data class UpdateAvailable(val info: ReleaseInfo) : ParsedReleaseOutcome
+        data object UpToDate : ParsedReleaseOutcome
+        data class Failed(val reason: String) : ParsedReleaseOutcome
     }
 }

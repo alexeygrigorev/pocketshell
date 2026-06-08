@@ -130,13 +130,14 @@ class AppUpdateActionBannerTest {
     }
 
     @Test
-    fun appUpdateBanner_withoutResolvedRelease_isPassiveDismissibleNote() {
+    fun appUpdateBanner_withResolutionFailure_isVisibleAndRetryable() {
         val viewModel = newViewModel(StubReleaseChecker(null))
         val warning = HostListViewModel.AppUpdateWarning(
             hostId = 7L,
             remoteVersion = "9999.0.0",
             appVersion = "0.3.22",
             releaseInfo = null,
+            releaseResolutionFailure = "GitHub returned HTTP 403",
         )
         val context = RecordingContext(
             ApplicationProvider.getApplicationContext(),
@@ -147,10 +148,13 @@ class AppUpdateActionBannerTest {
             AppUpdateNoticesUnderTest(context = context, viewModel = viewModel, warning = warning)
         }
 
-        // No resolved release → no Update action, just the passive note.
-        compose.onNodeWithTag(HOST_LIST_APP_UPDATE_ACTION_TAG).assertDoesNotExist()
-        compose.onNodeWithText("consider updating the app", substring = true).assertExists()
-        capture("app-update-banner-passive.png")
+        // A failed APK resolution is visible and retryable, not a passive
+        // note with no action.
+        compose.onNodeWithTag(HOST_LIST_APP_UPDATE_ACTION_TAG).assertExists()
+        compose.onNodeWithText("Couldn't prepare the update download", substring = true).assertExists()
+        capture("app-update-banner-resolution-failed.png")
+
+        compose.onNodeWithText("Retry").assertExists()
     }
 
     @Test
@@ -219,6 +223,7 @@ class AppUpdateActionBannerTest {
                     onUpdate = warning.releaseInfo?.let { info ->
                         { launchApkDownload(context, info, viewModel) }
                     },
+                    onRetry = viewModel::retryAppUpdateWarningRelease,
                     onDismiss = viewModel::dismissAppUpdateWarning,
                 )
             }

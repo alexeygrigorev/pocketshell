@@ -218,6 +218,23 @@ class HostListViewModelTest {
         }
     }
 
+    private class SequenceReleaseChecker(
+        results: List<ReleaseCheckResult>,
+    ) : ReleaseChecker() {
+        private val remaining = ArrayDeque(results)
+        var callCount: Int = 0
+            private set
+
+        override suspend fun checkForUpdate(currentVersion: String): ReleaseCheckResult {
+            callCount += 1
+            return if (remaining.isNotEmpty()) {
+                remaining.removeFirst()
+            } else {
+                ReleaseCheckResult.UpToDate
+            }
+        }
+    }
+
     @Test
     fun hostsFlow_emitsStoredHosts_orderedByName() = runTest {
         // Seed two keys + two hosts in non-alphabetic order; expect the
@@ -511,10 +528,11 @@ class HostListViewModelTest {
     }
 
     @Test
-    fun appUpdateWarning_degradesToPassiveNote_whenGithubResolvesNoRelease() = runTest {
-        // If GitHub finds nothing newer (or the lookup fails) the #514 soft
-        // warning still appears — it just degrades to a passive dismissible
-        // note with no Update action. #514's behavior is preserved.
+    fun appUpdateWarning_surfacesRetryableFailure_whenGithubResolvesNoRelease() = runTest {
+        // If the host probe proves the app is behind but GitHub cannot
+        // provide a downloadable APK, the warning must not silently degrade
+        // to passive text. It carries a visible failure reason for the
+        // banner's Retry action while preserving the non-blocking host flow.
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val hostId = db.hostDao().insert(
             HostEntity(name = "remote-newer", hostname = "h.example", username = "u", keyId = keyId),
@@ -532,8 +550,56 @@ class HostListViewModelTest {
         val warning = viewModel.appUpdateWarning.value
         assertNotNull(warning)
         assertEquals(hostId, warning!!.hostId)
-        // No resolved release → passive note (banner shows Dismiss only).
         assertNull(warning.releaseInfo)
+        assertEquals("No newer downloadable APK was found on GitHub", warning.releaseResolutionFailure)
+        assertFalse(warning.isResolvingRelease)
+    }
+
+    @Test
+    fun appUpdateWarning_retryResolvesRelease_afterInitialGithubFailure() = runTest {
+        // Regression for the 2026-06-08 dogfood recurrence: the host probe
+        // is the strongest "this app is old" signal. A failed APK resolution
+        // must be visible and retryable from that same warning, not hidden
+        // behind a separate cold-launch check.
+        val info = ReleaseInfo(
+            tagName = "v9999.0.0",
+            htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v9999.0.0",
+            apkUrl = "https://example.com/pocketshell-9999.0.0-debug.apk",
+        )
+        val checker = SequenceReleaseChecker(
+            listOf(
+                ReleaseCheckResult.UpToDate, // init checkForUpdates()
+                ReleaseCheckResult.Failed("GitHub returned HTTP 403"),
+                ReleaseCheckResult.UpdateAvailable(info),
+            ),
+        )
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "remote-newer", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            releaseChecker = checker,
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(pocketshellVersion = "9999.0.0")
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        val failedWarning = viewModel.appUpdateWarning.value
+        assertNotNull(failedWarning)
+        assertEquals("GitHub returned HTTP 403", failedWarning!!.releaseResolutionFailure)
+        assertNull(failedWarning.releaseInfo)
+
+        viewModel.retryAppUpdateWarningRelease()
+
+        val resolvedWarning = viewModel.appUpdateWarning.value
+        assertNotNull(resolvedWarning)
+        assertEquals(info, resolvedWarning!!.releaseInfo)
+        assertNull(resolvedWarning.releaseResolutionFailure)
+        assertFalse(resolvedWarning.isResolvingRelease)
+        assertEquals(info, viewModel.updateAvailable.value)
     }
 
     @Test

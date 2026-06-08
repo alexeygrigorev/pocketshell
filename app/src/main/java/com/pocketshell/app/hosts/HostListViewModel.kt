@@ -422,35 +422,86 @@ class HostListViewModel internal constructor(
             hostId = host.id,
             remoteVersion = appUpdate.currentVersion,
             appVersion = appUpdate.expectedVersion,
+            isResolvingRelease = true,
         )
         // Issue #515: the host probe just *proved* this app build is behind
         // the remote pocketshell CLI — the strongest possible "you should
         // update" signal. Try to resolve a real downloadable GitHub release
         // so the banner can offer an actionable, OPTIONAL "Update" (the same
         // ACTION_VIEW → APK path the standalone UpdateBanner uses) instead of
-        // a dead passive line. This is best-effort and non-blocking: the host
-        // is already fully usable, and if the GitHub lookup finds nothing
-        // newer (or fails) the banner stays a passive note that still
-        // dismisses cleanly.
+        // a dead passive line. This is non-blocking: the host is already
+        // fully usable. If GitHub/APK resolution fails, the same banner shows
+        // the concrete reason plus Retry rather than silently degrading.
         resolveAppUpdateRelease(host.id)
     }
 
     /**
      * Best-effort GitHub-release lookup that populates the [AppUpdateWarning]
      * banner's actionable [AppUpdateWarning.releaseInfo] so the user can tap
-     * "Update" and get the APK. Runs in [viewModelScope]; on any failure or
-     * "no newer release" the banner simply keeps its passive form. Guards
+     * "Update" and get the APK. Runs in [viewModelScope]; failures are
+     * surfaced on that same banner so the host-probe "app is behind" signal
+     * never becomes a passive warning with no retryable update path. Guards
      * against a stale write by re-checking the live warning still targets the
-     * same host before applying the resolved release.
+     * same host before applying the resolved result.
      */
     private fun resolveAppUpdateRelease(hostId: Long) {
         viewModelScope.launch {
-            val currentVersion = currentVersionName() ?: return@launch
-            val info = releaseChecker.checkForUpdate(currentVersion).infoOrNull() ?: return@launch
-            val current = _appUpdateWarning.value ?: return@launch
-            if (current.hostId != hostId || current.releaseInfo != null) return@launch
-            _appUpdateWarning.value = current.copy(releaseInfo = info)
+            val currentVersion = currentVersionName()
+            if (currentVersion == null) {
+                updateAppWarningResolution(
+                    hostId = hostId,
+                    releaseInfo = null,
+                    failureReason = "Installed version is unknown",
+                )
+                return@launch
+            }
+            when (val result = releaseChecker.checkForUpdate(currentVersion)) {
+                is ReleaseCheckResult.UpdateAvailable -> {
+                    updateAppWarningResolution(
+                        hostId = hostId,
+                        releaseInfo = result.info,
+                        failureReason = null,
+                    )
+                    _updateAvailable.value = result.info
+                    _updateCheckFailed.value = null
+                    updateNotifier.notifyUpdateAvailable(result.info)
+                }
+                ReleaseCheckResult.UpToDate -> updateAppWarningResolution(
+                    hostId = hostId,
+                    releaseInfo = null,
+                    failureReason = "No newer downloadable APK was found on GitHub",
+                )
+                is ReleaseCheckResult.Failed -> updateAppWarningResolution(
+                    hostId = hostId,
+                    releaseInfo = null,
+                    failureReason = result.reason,
+                )
+            }
         }
+    }
+
+    private fun updateAppWarningResolution(
+        hostId: Long,
+        releaseInfo: ReleaseInfo?,
+        failureReason: String?,
+    ) {
+        val current = _appUpdateWarning.value ?: return
+        if (current.hostId != hostId) return
+        if (releaseInfo != null && current.releaseInfo != null) return
+        _appUpdateWarning.value = current.copy(
+            releaseInfo = releaseInfo ?: current.releaseInfo,
+            isResolvingRelease = false,
+            releaseResolutionFailure = failureReason,
+        )
+    }
+
+    fun retryAppUpdateWarningRelease() {
+        val current = _appUpdateWarning.value ?: return
+        _appUpdateWarning.value = current.copy(
+            isResolvingRelease = true,
+            releaseResolutionFailure = null,
+        )
+        resolveAppUpdateRelease(current.hostId)
     }
 
     /**
@@ -1546,11 +1597,14 @@ class HostListViewModel internal constructor(
         val remoteVersion: String,
         val appVersion: String,
         // Issue #515: when a real downloadable GitHub release has been
-        // resolved (best-effort, after the probe proved the app is behind),
+        // resolved after the probe proved the app is behind,
         // the banner offers an actionable "Update" that opens this APK via
-        // ACTION_VIEW. `null` until/unless the lookup succeeds — the banner
-        // then stays a passive, dismissible note.
+        // ACTION_VIEW. Until then, [isResolvingRelease] and
+        // [releaseResolutionFailure] make the resolution status visible and
+        // retryable instead of silently falling back to passive text.
         val releaseInfo: ReleaseInfo? = null,
+        val isResolvingRelease: Boolean = false,
+        val releaseResolutionFailure: String? = null,
     ) {
         val message: String
             get() = "Remote pocketshell CLI $remoteVersion is newer than this app " +

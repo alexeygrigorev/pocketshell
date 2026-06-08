@@ -494,14 +494,15 @@ fun HostListScreen(
                                     // "Update" (same ACTION_VIEW → APK path as
                                     // the standalone UpdateBanner). The host is
                                     // already fully usable, so this never
-                                    // blocks; when no release is resolved the
-                                    // banner degrades to a passive dismissible
-                                    // note exactly as #514 shipped it.
+                                    // blocks; when resolution fails the
+                                    // banner shows a visible Retry instead of
+                                    // passive text.
                                     AppUpdateWarningBanner(
                                         warning = warning,
                                         onUpdate = warning.releaseInfo?.let { info ->
                                             { launchApkDownload(context, info, viewModel) }
                                         },
+                                        onRetry = viewModel::retryAppUpdateWarningRelease,
                                         onDismiss = viewModel::dismissAppUpdateWarning,
                                     )
                                 }
@@ -1347,13 +1348,16 @@ internal fun UpdateCheckFailedBanner(
  * banner — never a sheet. #515 adds an OPTIONAL "Update" action when the
  * host probe has been backed by a resolved downloadable GitHub release
  * ([onUpdate] non-null): tapping it fires the same ACTION_VIEW → APK path
- * as the standalone [UpdateBanner]. When no release was resolved ([onUpdate]
- * null) the banner degrades to the passive #514 form with just Dismiss.
+ * as the standalone [UpdateBanner]. When APK resolution fails ([onUpdate]
+ * null with [HostListViewModel.AppUpdateWarning.releaseResolutionFailure]
+ * set), the banner shows a visible Retry action instead of silently
+ * degrading to passive text.
  */
 @Composable
 internal fun AppUpdateWarningBanner(
     warning: HostListViewModel.AppUpdateWarning,
     onUpdate: (() -> Unit)?,
+    onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     Row(
@@ -1364,7 +1368,13 @@ internal fun AppUpdateWarningBanner(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = warning.message,
+            text = when {
+                warning.releaseResolutionFailure != null ->
+                    "${warning.message} Couldn't prepare the update download (${warning.releaseResolutionFailure})."
+                warning.isResolvingRelease ->
+                    "${warning.message} Preparing the update download..."
+                else -> warning.message
+            },
             color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
             modifier = Modifier.weight(1f),
@@ -1375,6 +1385,13 @@ internal fun AppUpdateWarningBanner(
                 modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
             ) {
                 Text("Update", color = PocketShellColors.Accent, fontSize = 12.sp)
+            }
+        } else if (warning.releaseResolutionFailure != null) {
+            TextButton(
+                onClick = onRetry,
+                modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
+            ) {
+                Text("Retry", color = PocketShellColors.Accent, fontSize = 12.sp)
             }
         }
         TextButton(onClick = onDismiss) {

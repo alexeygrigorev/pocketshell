@@ -3108,7 +3108,7 @@ class TmuxSessionViewModelTest {
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
-        val client = FakeTmuxClient().apply {
+        val client = FakeTmuxClient(paneOutputExtraBufferCapacity = 0).apply {
             decoupleOutputForFromEvents = true
         }
         try {

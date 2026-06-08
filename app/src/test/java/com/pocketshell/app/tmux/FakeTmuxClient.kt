@@ -38,7 +38,9 @@ import kotlinx.coroutines.flow.filterIsInstance
  *
  * Closed state is tracked via [closed] so tests can assert teardown.
  */
-internal class FakeTmuxClient : TmuxClient {
+internal class FakeTmuxClient(
+    paneOutputExtraBufferCapacity: Int = 64,
+) : TmuxClient {
 
     val emittedEvents: MutableSharedFlow<ControlEvent> = MutableSharedFlow(
         // replay=0 matches RealTmuxClient.eventBus exactly; tests subscribe
@@ -53,7 +55,7 @@ internal class FakeTmuxClient : TmuxClient {
 
     val emittedPaneOutputs: MutableSharedFlow<ControlEvent.Output> = MutableSharedFlow(
         replay = 0,
-        extraBufferCapacity = 64,
+        extraBufferCapacity = paneOutputExtraBufferCapacity,
     )
 
     /**

@@ -239,6 +239,7 @@ class FolderListScreenE2eTest {
         }
 
         compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
+        compose.onNodeWithText("Refresh Sessions").assertIsDisplayed()
         compose.onNodeWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG)
             .assertIsDisplayed()
             .performClick()

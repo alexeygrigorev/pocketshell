@@ -741,9 +741,9 @@ private fun FolderListOverflowMenu(
                 testTag = FOLDER_LIST_BROWSE_REPOS_TAG,
             ),
             KebabItem(
-                label = if (isRefreshing) "Refreshing sessions" else "Refresh sessions",
+                label = if (isRefreshing) "Refreshing Sessions" else "Refresh Sessions",
                 onClick = onRefreshSessions,
-                contentDescription = if (isRefreshing) "Refreshing sessions" else "Refresh sessions",
+                contentDescription = if (isRefreshing) "Refreshing Sessions" else "Refresh Sessions",
                 testTag = FOLDER_LIST_REFRESH_SESSIONS_TAG,
                 enabled = !isRefreshing,
             ),

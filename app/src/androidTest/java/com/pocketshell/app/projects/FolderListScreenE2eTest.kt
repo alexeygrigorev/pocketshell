@@ -487,6 +487,8 @@ class FolderListScreenE2eTest {
             .assertIsDisplayed()
             .assertHasClickAction()
         compose.onNodeWithContentDescription("Add project folder").assertIsDisplayed()
+        compose.onNodeWithTag(folderTreeRootEmptyHintActionPlusTestTag("~/archive"), useUnmergedTree = true)
+            .assertTextEquals("+")
         compose.onNodeWithTag(folderTreeRootEmptyHintActionLabelTestTag("~/archive"), useUnmergedTree = true)
             .assertTextEquals("Add")
         compose.onAllNodesWithText("+ Add")
@@ -1271,6 +1273,10 @@ class FolderListScreenE2eTest {
                 .assertHasClickAction()
             compose.onNodeWithContentDescription("Review inactive project folders").assertIsDisplayed()
             compose.onNodeWithTag(
+                folderTreeRootEmptyHintActionPlusTestTag(longRootPath),
+                useUnmergedTree = true,
+            ).assertTextEquals("+")
+            compose.onNodeWithTag(
                 folderTreeRootEmptyHintActionLabelTestTag(longRootPath),
                 useUnmergedTree = true,
             ).assertTextEquals("Review")
@@ -1421,6 +1427,10 @@ class FolderListScreenE2eTest {
             folderTreeRootEmptyHintActionLabelTestTag(rootPath),
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
+        val plusBounds = compose.onNodeWithTag(
+            folderTreeRootEmptyHintActionPlusTestTag(rootPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
         val maxCompactHeightPx = 56f * density
         val minInsetPx = 8f * density
 
@@ -1432,6 +1442,11 @@ class FolderListScreenE2eTest {
             "inactive watched-root trailing action must stay inside the row: " +
                 "action.right=${actionBounds.right}px row.right=${rowBounds.right}px",
             actionBounds.right <= rowBounds.right - minInsetPx,
+        )
+        assertTrue(
+            "inactive watched-root plus affordance must stay inline before the label: " +
+                "plus.right=${plusBounds.right}px action.left=${actionBounds.left}px",
+            plusBounds.right <= actionBounds.left,
         )
     }
 

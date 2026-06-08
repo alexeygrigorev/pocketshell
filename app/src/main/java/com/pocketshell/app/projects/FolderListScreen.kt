@@ -1612,21 +1612,39 @@ private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () ->
                 StatusDot(active = false)
             },
             trailing = {
-                Text(
-                    text = actionLabel,
-                    color = PocketShellColors.Accent,
-                    style = PocketShellType.bodyDense,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.testTag(folderTreeRootEmptyHintActionLabelTestTag(rootPath)),
-                )
+                EmptyRootHintAction(rootPath = rootPath, label = actionLabel)
             },
             onClick = onCreate,
             modifier = Modifier
                 .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
                 .semantics { contentDescription = actionDescription }
                 .testTag(folderTreeRootEmptyHintAddTestTag(rootPath)),
+        )
+    }
+}
+
+@Composable
+private fun EmptyRootHintAction(rootPath: String, label: String) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "+",
+            color = PocketShellColors.Accent,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            modifier = Modifier.testTag(folderTreeRootEmptyHintActionPlusTestTag(rootPath)),
+        )
+        Text(
+            text = label,
+            color = PocketShellColors.Accent,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.testTag(folderTreeRootEmptyHintActionLabelTestTag(rootPath)),
         )
     }
 }
@@ -2685,6 +2703,8 @@ fun folderTreeRootCreateTestTag(path: String): String = "folder-list:tree-root:$
 fun folderTreeRootActionsTestTag(path: String): String = "folder-list:tree-root:$path:actions"
 fun folderTreeRootEmptyHintAddTestTag(path: String): String =
     "folder-list:tree-root:$path:empty-hint:add"
+fun folderTreeRootEmptyHintActionPlusTestTag(path: String): String =
+    "folder-list:tree-root:$path:empty-hint:action-plus"
 fun folderTreeRootEmptyHintActionLabelTestTag(path: String): String =
     "folder-list:tree-root:$path:empty-hint:action-label"
 

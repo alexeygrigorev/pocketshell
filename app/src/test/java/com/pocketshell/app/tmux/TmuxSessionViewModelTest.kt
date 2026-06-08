@@ -9208,6 +9208,63 @@ class TmuxSessionViewModelTest {
         assertTrue("client must be closed after backgrounded detach", client.closed)
     }
 
+    @Test
+    fun onAppForegroundedProbesStaleLiveRuntimeAndForcesFreshReconnect() = runTest {
+        val registry = ActiveTmuxClients()
+        val staleSession = FakeSshSession()
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(freshSession)
+        val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = manager,
+        )
+        val staleClient = FakeTmuxClient().apply {
+            failBestEffortOnCommandPrefix = "display-message"
+            bestEffortException = TmuxClientException("tmux command timed out")
+        }
+        val freshClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            sessionsSeenByFactory += session
+            freshClient
+        }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = staleClient,
+            session = staleSession,
+        )
+        runCurrent()
+
+        vm.onAppForegrounded()
+        advanceUntilIdle()
+
+        assertTrue(
+            "foreground probe must close the stale tmux client through the reconnect teardown",
+            staleClient.closed,
+        )
+        assertTrue(
+            "foreground probe must close the stale SSH session instead of trusting isConnected",
+            staleSession.closed,
+        )
+        assertEquals(
+            "foreground probe failure must open a fresh SSH transport",
+            1,
+            connector.connectCount,
+        )
+        assertEquals(listOf(freshSession), sessionsSeenByFactory)
+        assertSame(freshClient, registry.clients.value[1L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+    }
+
     /**
      * Issue #272: if the user starts switching from session A to session
      * B and the app backgrounds before B finishes attaching, lifecycle

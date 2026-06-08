@@ -360,6 +360,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
     private var passiveDisconnectGraceJob: Job? = null
+    private var foregroundRuntimeProbeJob: Job? = null
     private var lifecycleReattachNetworkCoalesce: LifecycleReattachNetworkCoalesce? = null
 
     // Issue #440: the cause of the most recent failed connect attempt, set
@@ -515,6 +516,7 @@ public class TmuxSessionViewModel @Inject constructor(
         if (connectJob?.isActive == true && connectingTarget == target) return
         if (
             !interruptedPassiveRecovery &&
+            !shouldForceFreshLease(trigger) &&
             _connectionStatus.value is ConnectionStatus.Connected &&
             activeTarget == target
         ) {
@@ -1047,6 +1049,8 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onAppBackgrounded() {
         appActive = false
+        foregroundRuntimeProbeJob?.cancel()
+        foregroundRuntimeProbeJob = null
         val reconnecting = _connectionStatus.value as? ConnectionStatus.Reconnecting
         if (reconnecting != null) {
             autoReconnectJob?.cancel()
@@ -1163,6 +1167,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 resumePausedAutoReconnect(paused)
                 return
             }
+            if (probeCurrentRuntimeOnForegroundIfNeeded()) {
+                return
+            }
             latestConnectIntent?.let { intent ->
                 Log.i(
                     ISSUE_235_LIFECYCLE_TAG,
@@ -1239,6 +1246,72 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = TmuxConnectTrigger.LifecycleReattach,
             )
         }
+    }
+
+    private fun probeCurrentRuntimeOnForegroundIfNeeded(): Boolean {
+        val current = _connectionStatus.value
+        if (current !is ConnectionStatus.Connected) return false
+        val target = activeTarget ?: return false
+        val client = clientRef ?: return false
+        val session = sessionRef ?: return false
+        if (foregroundRuntimeProbeJob?.isActive == true) return true
+        val generation = connectGeneration
+        val probeJob = viewModelScope.launch {
+            val healthy = currentRuntimeControlChannelHealthy(client, session)
+            if (healthy) return@launch
+            if (
+                !appActive ||
+                connectGeneration != generation ||
+                clientRef !== client ||
+                sessionRef !== session ||
+                activeTarget?.let { sameSessionIdentity(it, target) } != true ||
+                _connectionStatus.value !is ConnectionStatus.Connected
+            ) {
+                return@launch
+            }
+            Log.w(
+                ISSUE_235_LIFECYCLE_TAG,
+                "tmux-foreground-runtime-probe-failed reconnecting " +
+                    "generation=$generation " + targetLogFields(target),
+            )
+            DiagnosticEvents.record(
+                "connection",
+                "foreground_runtime_probe_failed",
+                "source" to "app_lifecycle",
+                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
+                "generation" to generation,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "clientHash" to System.identityHashCode(client),
+                *shortAppSwitchReconnectFields(
+                    trigger = TmuxConnectTrigger.LifecycleReattach,
+                    target = target,
+                    sourceCandidate = "foreground_runtime_probe",
+                ),
+            )
+            connect(
+                hostId = target.hostId,
+                hostName = target.hostName,
+                host = target.host,
+                port = target.port,
+                user = target.user,
+                keyPath = target.keyPath,
+                passphrase = target.passphrase,
+                sessionName = target.sessionName,
+                startDirectory = target.startDirectory,
+                trigger = TmuxConnectTrigger.LifecycleReattach,
+            )
+        }
+        foregroundRuntimeProbeJob = probeJob
+        probeJob.invokeOnCompletion {
+            if (foregroundRuntimeProbeJob == probeJob) {
+                foregroundRuntimeProbeJob = null
+            }
+        }
+        return true
     }
 
     /**
@@ -1935,11 +2008,18 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private suspend fun cachedRuntimeControlChannelHealthy(runtime: CachedTmuxRuntime): Boolean {
-        if (runtime.client.disconnected.value) return false
-        if (runtime.session?.isConnected != true) return false
+        return currentRuntimeControlChannelHealthy(runtime.client, runtime.session)
+    }
+
+    private suspend fun currentRuntimeControlChannelHealthy(
+        client: TmuxClient,
+        session: SshSession?,
+    ): Boolean {
+        if (client.disconnected.value) return false
+        if (session?.isConnected != true) return false
         val response = runCatching {
-            withTimeoutOrNull(CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS) {
-                runtime.client.sendBestEffortCommand("display-message -p '#{session_name}'")
+            withTimeoutOrNull(RUNTIME_HEALTH_PROBE_TIMEOUT_MS) {
+                client.sendBestEffortCommand("display-message -p '#{session_name}'")
             }
         }.getOrNull() ?: return false
         return !response.isError
@@ -7484,6 +7564,8 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionPrewarmJob = null
         passiveDisconnectGraceJob?.cancelAndJoin()
         passiveDisconnectGraceJob = null
+        foregroundRuntimeProbeJob?.cancelAndJoin()
+        foregroundRuntimeProbeJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
         outputOverflowJob?.cancelAndJoin()
@@ -7717,6 +7799,8 @@ public class TmuxSessionViewModel @Inject constructor(
         orphanDetachJob = null
         passiveDisconnectGraceJob?.cancel()
         passiveDisconnectGraceJob = null
+        foregroundRuntimeProbeJob?.cancel()
+        foregroundRuntimeProbeJob = null
         eventsJob?.cancel()
         eventsJob = null
         outputOverflowJob?.cancel()
@@ -8450,7 +8534,8 @@ internal const val ATTACH_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val SEND_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val SEND_SESSION_WAIT_POLL_MS: Long = 100L
-internal const val CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
+internal const val RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
+internal const val CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = RUNTIME_HEALTH_PROBE_TIMEOUT_MS
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
 internal const val TMUX_SESSION_PREWARM_MAX_TARGETS: Int = 2
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"

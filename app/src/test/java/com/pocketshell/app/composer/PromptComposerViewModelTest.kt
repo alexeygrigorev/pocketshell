@@ -1093,6 +1093,55 @@ class PromptComposerViewModelTest {
         assertNull(vm.uiState.value.error)
     }
 
+    // -- Issue #585: mic swipe-up lock ---------------------------------------
+
+    @Test
+    fun lockRecordingOnlyAppliesDuringActiveRecording() = runTest {
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+
+        vm.lockRecording()
+        assertFalse(vm.uiState.value.recordingLocked)
+
+        vm.onMicTap()
+        runCurrent()
+        vm.lockRecording()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        assertTrue(vm.uiState.value.recordingLocked)
+
+        vm.cancelRecording()
+        advanceUntilIdle()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertFalse(vm.uiState.value.recordingLocked)
+    }
+
+    @Test
+    fun stoppingLockedRecordingClearsLockBeforeTranscribing() = runTest {
+        val release = CompletableDeferred<Unit>()
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                release.await()
+                return Result.success("locked words")
+            }
+        }
+        val vm = newVm(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        vm.lockRecording()
+        assertTrue(vm.uiState.value.recordingLocked)
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+        assertFalse(vm.uiState.value.recordingLocked)
+
+        release.complete(Unit)
+        advanceUntilIdle()
+    }
+
     // -- Issue #174: cancel-recording affordance -----------------------------
 
     @Test

@@ -97,11 +97,18 @@ class PromptComposerCancelRecordingTest {
     @Test
     fun discardIsHiddenInIdleAndVisibleInRecording() {
         var discardCalls = 0
+        val attachmentPath = "~/.pocketshell/attachments/host-1/keep-this.png"
         var state by mutableStateOf(
             PromptComposerViewModel.UiState(
                 draft = "typed draft",
                 recording = PromptComposerViewModel.RecordingState.Idle,
                 amplitude = 0f,
+                attachments = listOf(
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = attachmentPath,
+                        displayName = "keep-this.png",
+                    ),
+                ),
             ),
         )
 
@@ -123,7 +130,8 @@ class PromptComposerCancelRecordingTest {
 
         // Idle: no Cancel; the mic trigger + (disabled) Send are shown.
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertDoesNotExist()
-        compose.onNodeWithContentDescription("Start dictation").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Start dictation. Swipe up to lock recording")
+            .assertIsDisplayed()
 
         // Recording: explicit Discard is visible inside the recording panel,
         // separate from the header close `×` and separate from the two
@@ -155,6 +163,9 @@ class PromptComposerCancelRecordingTest {
         assertEquals(1, discardCalls)
         assertEquals(PromptComposerViewModel.RecordingState.Idle, state.recording)
         assertEquals("typed draft", state.draft)
+        assertEquals(1, state.attachments.size)
+        assertEquals(attachmentPath, state.attachments.single().remotePath)
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachmentPath)).assertExists()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
     }
 }

@@ -159,11 +159,16 @@ class PromptComposerSmokeTest {
     @Test
     fun micSwipeUpKeepsRecordingOpenAfterRelease() {
         var micTaps = 0
+        var lockCalls = 0
         var state by mutableStateOf(PromptComposerViewModel.UiState())
         renderInteractiveComposer(
             state = { state },
             onStateChange = { state = it },
             onMicTapCount = { micTaps += 1 },
+            onLockRecording = {
+                lockCalls += 1
+                state = state.copy(recordingLocked = true)
+            },
         )
 
         compose.onNodeWithTag(COMPOSER_MIC_TAG)
@@ -177,11 +182,13 @@ class PromptComposerSmokeTest {
         compose.waitForIdle()
 
         assertEquals(1, micTaps)
+        assertEquals(1, lockCalls)
         assertEquals(PromptComposerViewModel.RecordingState.Recording, state.recording)
+        assertTrue(state.recordingLocked)
+        compose.onNodeWithTag(COMPOSER_RECORDING_LOCKED_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Locked").assertDoesNotExist()
     }
 
     @Test
@@ -215,6 +222,7 @@ class PromptComposerSmokeTest {
         state: () -> PromptComposerViewModel.UiState,
         onStateChange: (PromptComposerViewModel.UiState) -> Unit,
         onMicTapCount: () -> Unit,
+        onLockRecording: () -> Unit = {},
     ) {
         fun nextStateAfterMicTap(): PromptComposerViewModel.UiState {
             val current = state()
@@ -240,6 +248,7 @@ class PromptComposerSmokeTest {
                         onMicTapCount()
                         onStateChange(nextStateAfterMicTap())
                     },
+                    onLockRecording = onLockRecording,
                     onSend = {},
                     onCancelRecording = {
                         onStateChange(

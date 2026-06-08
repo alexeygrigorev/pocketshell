@@ -42,6 +42,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.DataObject
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -357,6 +358,7 @@ public fun PromptComposerSheet(
             // transcribe/final-result wait.
             onCancelRecording = viewModel::cancelRecording,
             onCancelTranscription = viewModel::cancelTranscription,
+            onLockRecording = viewModel::lockRecording,
             onSend = { withEnter ->
                 // Issue #211: route through the ViewModel so the FSM
                 // decides whether to dispatch now (Idle) or queue for
@@ -467,6 +469,7 @@ internal fun SheetContent(
     // Separate from recording discard because the audio/recognizer session
     // has already moved out of active capture.
     onCancelTranscription: () -> Unit = {},
+    onLockRecording: () -> Unit = {},
     // Issue #180: queued failed / offline transcriptions. Defaults to
     // an empty list so older previews + tests that pre-date the queue
     // render the same composer shape they always did.
@@ -607,6 +610,7 @@ internal fun SheetContent(
                     capturing = state.hasDetectedSpeech,
                     elapsedLabel = formatElapsed(state.recordingElapsedMs),
                     liveTranscript = state.liveTranscript,
+                    locked = state.recordingLocked,
                     onCancel = onCancelRecording,
                 )
             }
@@ -819,6 +823,7 @@ internal fun SheetContent(
                     // Sits AFTER Send so the row reads "type + send, or dictate".
                     MicTriggerButton(
                         onClick = onMicTap,
+                        onLockRecording = onLockRecording,
                         enabled = true,
                         modifier = Modifier.testTag(COMPOSER_MIC_TAG),
                     )
@@ -890,6 +895,7 @@ private fun RecordingSurface(
     capturing: Boolean,
     elapsedLabel: String,
     liveTranscript: String?,
+    locked: Boolean,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -921,6 +927,17 @@ private fun RecordingSurface(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.testTag(COMPOSER_TIMER_TAG),
             )
+            if (locked) {
+                Icon(
+                    imageVector = Icons.Outlined.Lock,
+                    contentDescription = null,
+                    tint = PocketShellColors.Accent,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .testTag(COMPOSER_RECORDING_LOCKED_TAG)
+                        .semantics { contentDescription = "Recording locked" },
+                )
+            }
             Waveform(
                 amplitude = amplitude,
                 active = capturing,
@@ -1184,6 +1201,7 @@ private fun StopSendButton(
 @Composable
 private fun MicTriggerButton(
     onClick: () -> Unit,
+    onLockRecording: () -> Unit,
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1200,9 +1218,10 @@ private fun MicTriggerButton(
                 enabled = enabled,
                 lockThresholdPx = lockThresholdPx,
                 onPressStart = onClick,
+                onLockRecording = onLockRecording,
             )
             .semantics {
-                contentDescription = "Start dictation"
+                contentDescription = "Start dictation. Swipe up to lock recording"
                 role = Role.Button
                 if (enabled) {
                     onClick {
@@ -1230,9 +1249,10 @@ private fun Modifier.micSwipeUpLockGesture(
     enabled: Boolean,
     lockThresholdPx: Float,
     onPressStart: () -> Unit,
+    onLockRecording: () -> Unit,
 ): Modifier {
     if (!enabled) return this
-    return pointerInput(enabled, lockThresholdPx, onPressStart) {
+    return pointerInput(enabled, lockThresholdPx, onPressStart, onLockRecording) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
             val tracker = MicSwipeUpLockGestureTracker(lockThresholdPx)
@@ -1245,6 +1265,7 @@ private fun Modifier.micSwipeUpLockGesture(
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 val drag = change.position - down.position
                 if (tracker.onDrag(drag.x, drag.y) == MicSwipeUpLockGestureEvent.LockRecording) {
+                    onLockRecording()
                     change.consume()
                 }
                 if (change.changedToUpIgnoreConsumed()) {
@@ -2098,6 +2119,7 @@ internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"
 /** Issue #453: elapsed mm:ss recording timer rendered next to the waveform. */
 internal const val COMPOSER_TIMER_TAG = "prompt-composer-timer"
 internal const val COMPOSER_LIVE_TRANSCRIPT_TAG = "prompt-composer-live-transcript"
+internal const val COMPOSER_RECORDING_LOCKED_TAG = "prompt-composer-recording-locked"
 
 /**
  * Issue #508: the two explicit stop actions shown in the Recording row,

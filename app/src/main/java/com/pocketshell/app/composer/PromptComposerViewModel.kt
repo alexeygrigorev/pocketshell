@@ -500,6 +500,29 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #585: mark the active dictation as swipe-up locked. The lock does
+     * not change how the recorder is stopped: the explicit Recording controls
+     * still decide whether to discard, insert, or send. It gives the UI an
+     * observable state for the Telegram-style mic gesture without affecting a
+     * normal tap-to-record flow.
+     */
+    public fun lockRecording() {
+        if (_uiState.value.recording != RecordingState.Recording) return
+        var lockedNow = false
+        _uiState.update { current ->
+            if (current.recordingLocked) {
+                current
+            } else {
+                lockedNow = true
+                current.copy(recordingLocked = true)
+            }
+        }
+        if (lockedNow) {
+            DiagnosticEvents.record("action", "composer_recording_lock")
+        }
+    }
+
+    /**
      * Issue #211: emit a [SendRequest] for the current draft and clear
      * the draft so the next composer open is a fresh slate. No-op when
      * the draft is empty — the FSM-Idle case where the user has nothing
@@ -580,6 +603,7 @@ public class PromptComposerViewModel @Inject constructor(
                 error = message,
                 recording = RecordingState.Idle,
                 amplitude = 0f,
+                recordingLocked = false,
             )
         }
     }
@@ -628,6 +652,7 @@ public class PromptComposerViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
+                    recordingLocked = false,
                     error = e.message ?: "Microphone unavailable",
                 )
             }
@@ -668,6 +693,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(
                 recording = RecordingState.Recording,
                 amplitude = 0f,
+                recordingLocked = false,
                 // Issue #195: every fresh recording starts in the
                 // "listening, no speech yet" sub-state. The sampling loop
                 // below flips this to true on the first amplitude crossing.
@@ -763,6 +789,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(
                 recording = RecordingState.Recording,
                 amplitude = 0.12f,
+                recordingLocked = false,
                 hasDetectedSpeech = false,
                 silenceThresholdSeconds = 0f,
                 recordingElapsedMs = 0L,
@@ -880,6 +907,7 @@ public class PromptComposerViewModel @Inject constructor(
                 it.copy(
                     recording = RecordingState.Idle,
                     amplitude = 0f,
+                    recordingLocked = false,
                     error = e.message ?: "Microphone error",
                 )
             }
@@ -905,7 +933,7 @@ public class PromptComposerViewModel @Inject constructor(
                 "audioBytes" to 0,
             )
             _uiState.update {
-                it.copy(recording = RecordingState.Idle, amplitude = 0f)
+                it.copy(recording = RecordingState.Idle, amplitude = 0f, recordingLocked = false)
             }
             return
         }
@@ -932,7 +960,7 @@ public class PromptComposerViewModel @Inject constructor(
             )
             if (recoverableNoSpeech) {
                 _uiState.update {
-                    it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
+                    it.copy(recording = RecordingState.Transcribing, amplitude = 0f, recordingLocked = false)
                 }
                 transcribeJob = viewModelScope.launch {
                     val pendingId = pendingTranscriptionStore.enqueueAudio(
@@ -945,6 +973,7 @@ public class PromptComposerViewModel @Inject constructor(
                         it.copy(
                             recording = RecordingState.Idle,
                             amplitude = 0f,
+                            recordingLocked = false,
                             error = if (pendingId != null) {
                                 SUSPICIOUS_NO_SPEECH_RETRY_MESSAGE
                             } else {
@@ -962,6 +991,7 @@ public class PromptComposerViewModel @Inject constructor(
                 it.copy(
                     recording = RecordingState.Idle,
                     amplitude = 0f,
+                    recordingLocked = false,
                     error = NO_SPEECH_DETECTED_MESSAGE,
                 )
             }
@@ -977,7 +1007,7 @@ public class PromptComposerViewModel @Inject constructor(
             "audioBytes" to audio.size,
         )
         _uiState.update {
-            it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
+            it.copy(recording = RecordingState.Transcribing, amplitude = 0f, recordingLocked = false)
         }
 
         transcribeJob = viewModelScope.launch {
@@ -1002,6 +1032,7 @@ public class PromptComposerViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
+                        recordingLocked = false,
                         error = "No OpenAI API key saved. Open settings to add one.",
                     )
                 }
@@ -1065,6 +1096,7 @@ public class PromptComposerViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
+                        recordingLocked = false,
                         error = PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
                     )
                 }
@@ -1105,6 +1137,7 @@ public class PromptComposerViewModel @Inject constructor(
                             it.copy(
                                 recording = RecordingState.Idle,
                                 amplitude = 0f,
+                                recordingLocked = false,
                                 error = if (pendingId != null) {
                                     EMPTY_TRANSCRIPTION_RETRY_MESSAGE
                                 } else {
@@ -1146,6 +1179,7 @@ public class PromptComposerViewModel @Inject constructor(
                             it.copy(
                                 recording = RecordingState.Idle,
                                 amplitude = 0f,
+                                recordingLocked = false,
                                 error = NO_SPEECH_DETECTED_MESSAGE,
                             )
                         }
@@ -1225,7 +1259,7 @@ public class PromptComposerViewModel @Inject constructor(
                         "cause" to t.javaClass.simpleName,
                     )
                     _uiState.update {
-                        it.copy(recording = RecordingState.Idle, error = msg)
+                        it.copy(recording = RecordingState.Idle, recordingLocked = false, error = msg)
                     }
                 },
             )
@@ -1265,6 +1299,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(
                 recording = RecordingState.Transcribing,
                 amplitude = 0f,
+                recordingLocked = false,
                 error = null,
             )
         }
@@ -1316,6 +1351,7 @@ public class PromptComposerViewModel @Inject constructor(
                 recording = RecordingState.Idle,
                 amplitude = 0f,
                 hasDetectedSpeech = false,
+                recordingLocked = false,
                 liveTranscript = null,
                 error = null,
             )
@@ -1343,6 +1379,7 @@ public class PromptComposerViewModel @Inject constructor(
                 recording = RecordingState.Idle,
                 amplitude = 0f,
                 hasDetectedSpeech = false,
+                recordingLocked = false,
                 liveTranscript = null,
                 error = message.ifBlank { ANDROID_SPEECH_FAILED_MESSAGE },
             )
@@ -1367,6 +1404,7 @@ public class PromptComposerViewModel @Inject constructor(
                 recording = RecordingState.Idle,
                 amplitude = 0f,
                 hasDetectedSpeech = false,
+                recordingLocked = false,
                 liveTranscript = null,
                 draft = restoredDraft,
                 error = null,
@@ -1409,6 +1447,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(
                 recording = RecordingState.Idle,
                 draft = newDraft,
+                recordingLocked = false,
                 error = null,
             )
         }
@@ -1679,6 +1718,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(
                 recording = RecordingState.Idle,
                 amplitude = 0f,
+                recordingLocked = false,
                 // Existing typed draft must survive. The user's intent
                 // here is "throw away the new dictation, keep what I
                 // already typed" — wiping the draft would be a hostile
@@ -1721,6 +1761,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(
                 recording = RecordingState.Idle,
                 amplitude = 0f,
+                recordingLocked = false,
                 error = null,
             )
         }
@@ -1735,6 +1776,7 @@ public class PromptComposerViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 recording = RecordingState.Idle,
+                recordingLocked = false,
                 error = "Microphone permission denied. Grant it in system settings to use voice input.",
             )
         }
@@ -1860,12 +1902,17 @@ public class PromptComposerViewModel @Inject constructor(
      *   after Xs silence" hint so the user has a mental model. Zero while
      *   the FSM is in [RecordingState.Idle] / [RecordingState.Transcribing]
      *   so the hint is hidden outside an active recording.
+     * @param recordingLocked issue #585: true when the user swiped the mic
+     *   upward past the lock threshold during this active recording. It is a
+     *   UI affordance only; the explicit stop/discard controls still decide
+     *   how the captured audio is handled.
      */
     public data class UiState(
         val draft: String = "",
         val recording: RecordingState = RecordingState.Idle,
         val amplitude: Float = 0f,
         val hasDetectedSpeech: Boolean = false,
+        val recordingLocked: Boolean = false,
         val error: String? = null,
         val savedAudioPath: String? = null,
         val silenceThresholdSeconds: Float = 0f,

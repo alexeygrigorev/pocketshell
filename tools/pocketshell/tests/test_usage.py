@@ -112,10 +112,12 @@ def test_usage_json_normalizes_codex_detail_windows_and_epoch_resets() -> None:
                         "windows": {
                             "primary_window": {
                                 "used_percent": 12,
+                                "limit_window_seconds": 18000,
                                 "reset_at": 1780828285,
                             },
                             "secondary_window": {
                                 "used_percent": 31,
+                                "limit_window_seconds": 604800,
                                 "reset_at": 1781137638,
                             },
                         },
@@ -148,10 +150,12 @@ def test_usage_json_normalizes_codex_detail_windows_and_epoch_resets() -> None:
     assert codex["short_term"] == {
         "percent_remaining": 88.0,
         "reset_at": "2026-06-07T10:31:25Z",
+        "window": "5h",
     }
     assert codex["long_term"] == {
         "percent_remaining": 69.0,
         "reset_at": "2026-06-11T00:27:18Z",
+        "window": "7d",
     }
     assert "claude /login" in lines[1]["error"]
     assert "HTTP Error 401" not in lines[1]["error"]
@@ -182,8 +186,16 @@ def test_usage_json_patches_codex_resets_from_source_when_quse_dropped_them() ->
     ), patch(
         "pocketshell.usage._fetch_codex_detail_windows",
         return_value={
-            "primary_window": {"used_percent": 13, "reset_at": 1780828285},
-            "secondary_window": {"used_percent": 31, "reset_at": 1781137638},
+            "primary_window": {
+                "used_percent": 13,
+                "limit_window_seconds": 18000,
+                "reset_at": 1780828285,
+            },
+            "secondary_window": {
+                "used_percent": 31,
+                "limit_window_seconds": 604800,
+                "reset_at": 1781137638,
+            },
         },
     ):
         result = runner.invoke(usage_command, ["--json"])
@@ -193,10 +205,58 @@ def test_usage_json_patches_codex_resets_from_source_when_quse_dropped_them() ->
     assert codex["short_term"] == {
         "percent_remaining": 87.0,
         "reset_at": "2026-06-07T10:31:25Z",
+        "window": "5h",
     }
     assert codex["long_term"] == {
         "percent_remaining": 69.0,
         "reset_at": "2026-06-11T00:27:18Z",
+        "window": "7d",
+    }
+
+
+def test_usage_json_normalizes_openai_compatible_detail_windows() -> None:
+    raw = json.dumps(
+        {
+            "provider": "openai",
+            "status": "ok",
+            "short_term": {"percent_remaining": 100.0, "reset_at": None},
+            "long_term": {"percent_remaining": 35.0, "reset_at": None},
+            "block_reason": None,
+            "error": None,
+            "details": {
+                "windows": {
+                    "primary_window": {
+                        "used_percent": 22,
+                        "limit_window_seconds": 18000,
+                        "reset_at": "2026-06-08T02:19:59Z",
+                    },
+                    "secondary_window": {
+                        "used_percent": 65,
+                        "limit_window_seconds": 604800,
+                        "reset_at": "2026-06-11T00:27:17Z",
+                    },
+                },
+            },
+        },
+    )
+    runner = CliRunner()
+    with patch("pocketshell.usage._resolve_quse_binary", return_value="/fake/quse"), patch(
+        "pocketshell.usage.subprocess.run",
+        return_value=_fake_completed(stdout=raw + "\n"),
+    ):
+        result = runner.invoke(usage_command, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    record = json.loads(result.output)
+    assert record["short_term"] == {
+        "percent_remaining": 78.0,
+        "reset_at": "2026-06-08T02:19:59Z",
+        "window": "5h",
+    }
+    assert record["long_term"] == {
+        "percent_remaining": 35.0,
+        "reset_at": "2026-06-11T00:27:17Z",
+        "window": "7d",
     }
 
 

@@ -56,20 +56,62 @@ class PocketshellUsageJsonParserTest {
              "long_term":{"percent_remaining":69.0,"reset_at":null},
              "block_reason":null,"error":null,
              "details":{"limit_reached":false,"windows":{
-               "primary_window":{"used_percent":12,"reset_at":1780828285},
-               "secondary_window":{"used_percent":31,"reset_at":1781137638}
+               "primary_window":{
+                 "used_percent":12,
+                 "limit_window_seconds":18000,
+                 "reset_at":1780828285
+               },
+               "secondary_window":{
+                 "used_percent":31,
+                 "limit_window_seconds":604800,
+                 "reset_at":1781137638
+               }
              }}}
             """.trimIndent(),
         )
 
         val record = records.single()
         assertEquals(2, record.windows.size)
-        assertEquals("short_term", record.windows[0].name)
+        assertEquals("5h", record.windows[0].name)
         assertEquals(12.0, record.windows[0].percent, 0.001)
         assertEquals(Instant.parse("2026-06-07T10:31:25Z"), record.windows[0].resetAt)
-        assertEquals("long_term", record.windows[1].name)
+        assertEquals("7d", record.windows[1].name)
         assertEquals(31.0, record.windows[1].percent, 0.001)
         assertEquals(Instant.parse("2026-06-11T00:27:18Z"), record.windows[1].resetAt)
+    }
+
+    @Test
+    fun parse_openAiCompatibleFallsBackToDetailWindowsAndPeriodLabels() {
+        val records = parser.parse(
+            """
+            {"provider":"openai","status":"ok",
+             "short_term":{"percent_remaining":100.0,"reset_at":null},
+             "long_term":{"percent_remaining":35.0,"reset_at":null},
+             "block_reason":null,"error":null,
+             "details":{"windows":{
+               "primary_window":{
+                 "used_percent":22,
+                 "limit_window_seconds":"18000",
+                 "reset_at":"2026-06-08T02:19:59Z"
+               },
+               "secondary_window":{
+                 "used_percent":65,
+                 "limit_window_seconds":604800,
+                 "reset_at":1781137637
+               }
+             }}}
+            """.trimIndent(),
+        )
+
+        val record = records.single()
+        assertEquals("openai", record.provider)
+        assertEquals(2, record.windows.size)
+        assertEquals("5h", record.windows[0].name)
+        assertEquals(22.0, record.windows[0].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-08T02:19:59Z"), record.windows[0].resetAt)
+        assertEquals("7d", record.windows[1].name)
+        assertEquals(65.0, record.windows[1].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-11T00:27:17Z"), record.windows[1].resetAt)
     }
 
     @Test

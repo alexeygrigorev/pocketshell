@@ -92,19 +92,20 @@ public class PocketshellUsageJsonParser {
         val detailWindows = obj.optJSONObject("details")?.optJSONObject("windows")
 
         val windows = mutableListOf<UsageWindow>()
+        val codexCompatible = provider.isCodexCompatibleProvider()
         parseWindow(
             record = obj,
             jsonKey = "short_term",
             windowName = "short_term",
             provider = provider,
             detailWindow = detailWindows?.optJSONObject(
-                when (provider.lowercase()) {
-                    "codex" -> "primary_window"
-                    "claude" -> "five_hour"
+                when {
+                    codexCompatible -> "primary_window"
+                    provider.equals("claude", ignoreCase = true) -> "five_hour"
                     else -> ""
                 },
             ),
-            preferDetailPercent = provider.equals("codex", ignoreCase = true),
+            preferDetailPercent = codexCompatible,
         )?.let { windows += it }
         parseWindow(
             record = obj,
@@ -112,13 +113,13 @@ public class PocketshellUsageJsonParser {
             windowName = "long_term",
             provider = provider,
             detailWindow = detailWindows?.optJSONObject(
-                when (provider.lowercase()) {
-                    "codex" -> "secondary_window"
-                    "claude" -> "seven_day"
+                when {
+                    codexCompatible -> "secondary_window"
+                    provider.equals("claude", ignoreCase = true) -> "seven_day"
                     else -> ""
                 },
             ),
-            preferDetailPercent = provider.equals("codex", ignoreCase = true),
+            preferDetailPercent = codexCompatible,
         )?.let { windows += it }
 
         return UsageProviderRecord(
@@ -171,7 +172,9 @@ public class PocketshellUsageJsonParser {
         }
         val used = (100.0 - percentRemaining).coerceIn(0.0, 100.0)
         return UsageWindow(
-            name = windowName,
+            name = obj?.optionalString("window")
+                ?: detailWindow?.windowLabelFromLimitSeconds()
+                ?: windowName,
             used = used,
             limit = 100.0,
             unit = "percent",
@@ -202,6 +205,17 @@ public class PocketshellUsageJsonParser {
         else -> UsageStatus.Unknown
     }
 }
+
+private val CODEX_COMPATIBLE_PROVIDERS = setOf(
+    "codex",
+    "openai",
+    "openai-codex",
+    "openai_codex",
+    "chatgpt",
+)
+
+private fun String.isCodexCompatibleProvider(): Boolean =
+    lowercase().replace(' ', '_') in CODEX_COMPATIBLE_PROVIDERS
 
 private fun actionableProviderError(provider: String, error: String?): String? {
     val text = error?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -288,4 +302,25 @@ private fun JSONObject.percentRemainingFromUsedPercent(): Double? {
         else -> null
     } ?: return null
     return (100.0 - used).coerceIn(0.0, 100.0)
+}
+
+private fun JSONObject.windowLabelFromLimitSeconds(): String? {
+    if (!has("limit_window_seconds") || isNull("limit_window_seconds")) return null
+    val seconds = when (val value = opt("limit_window_seconds")) {
+        is Number -> value.toLong()
+        is String -> value.trim().toLongOrNull()
+        else -> null
+    } ?: return null
+    if (seconds <= 0L) return null
+    val units = listOf(
+        24L * 60L * 60L to "d",
+        60L * 60L to "h",
+        60L to "m",
+    )
+    for ((unitSeconds, suffix) in units) {
+        if (seconds >= unitSeconds && seconds % unitSeconds == 0L) {
+            return "${seconds / unitSeconds}$suffix"
+        }
+    }
+    return "${seconds}s"
 }

@@ -61,6 +61,13 @@ import click
 
 _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
+_CODEX_COMPATIBLE_PROVIDERS = {
+    "codex",
+    "openai",
+    "openai-codex",
+    "openai_codex",
+    "chatgpt",
+}
 
 
 def _resolve_quse_binary() -> Optional[str]:
@@ -151,16 +158,36 @@ def _percent_remaining_from_used(value: Any) -> Optional[float]:
     return round(max(0.0, min(100.0, 100.0 - used)), 2)
 
 
+def _window_label_from_seconds(value: Any) -> Optional[str]:
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if seconds <= 0:
+        return None
+    units = (
+        (24 * 60 * 60, "d"),
+        (60 * 60, "h"),
+        (60, "m"),
+    )
+    for unit_seconds, suffix in units:
+        if seconds >= unit_seconds and seconds % unit_seconds == 0:
+            return f"{seconds // unit_seconds}{suffix}"
+    return f"{seconds}s"
+
+
 def _window_from_detail(detail: Any) -> Optional[dict[str, Any]]:
     if not isinstance(detail, dict):
         return None
     percent_remaining = _percent_remaining_from_used(detail.get("used_percent"))
     reset_at = _normalize_reset_at(detail.get("reset_at"))
-    if percent_remaining is None and reset_at is None:
+    window = _window_label_from_seconds(detail.get("limit_window_seconds"))
+    if percent_remaining is None and reset_at is None and window is None:
         return None
     return {
         "percent_remaining": percent_remaining,
         "reset_at": reset_at,
+        "window": window,
     }
 
 
@@ -183,6 +210,8 @@ def _merge_window(
             current["percent_remaining"] = detail_window.get("percent_remaining")
         if current.get("reset_at") is None:
             current["reset_at"] = detail_window.get("reset_at")
+        if current.get("window") is None and detail_window.get("window") is not None:
+            current["window"] = detail_window.get("window")
 
     current["reset_at"] = _normalize_reset_at(current.get("reset_at"))
     return current
@@ -268,6 +297,10 @@ def _codex_needs_source_patch(record: dict[str, Any], detail_windows: dict[str, 
     return False
 
 
+def _is_codex_compatible_provider(provider: str) -> bool:
+    return provider.replace(" ", "_").lower() in _CODEX_COMPATIBLE_PROVIDERS
+
+
 def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
     """Normalize a provider record emitted by ``quse --json``.
 
@@ -282,7 +315,7 @@ def normalize_usage_record(record: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(detail_windows, dict):
         detail_windows = {}
 
-    if provider == "codex":
+    if _is_codex_compatible_provider(provider):
         # Codex's ChatGPT usage response exposes the real primary/secondary
         # windows under details. Older quse versions hard-code short_term to
         # 100% and lose epoch reset timestamps, which regressed issue #501.

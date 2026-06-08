@@ -7,8 +7,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,7 +18,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,15 +36,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.OutlinedTextField
 import com.pocketshell.core.ssh.RemoteEntry
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.util.Locale
 
@@ -175,7 +180,7 @@ internal fun FileExplorerScaffold(
                         text = "Enter an absolute path, a ~-relative path, or a path " +
                             "relative to the current folder.",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = PocketShellType.bodyDense,
                     )
                     OutlinedTextField(
                         value = goToText,
@@ -221,66 +226,45 @@ private fun FileExplorerHeader(
             .background(PocketShellColors.Background)
             .border(width = 1.dp, color = PocketShellColors.BorderSoft),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clickable(role = Role.Button, onClick = onBack)
-                    .testTag(FILE_EXPLORER_BACK_TAG),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "‹",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
+        ScreenHeader(
+            title = "Files",
+            subtitle = hostName.ifBlank { null },
+            leading = {
+                Box(
+                    modifier = Modifier
+                        .size(PocketShellDensity.tapTargetMin)
+                        .clickable(role = Role.Button, onClick = onBack)
+                        .testTag(FILE_EXPLORER_BACK_TAG),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "‹",
+                        color = PocketShellColors.TextSecondary,
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                }
+            },
+            trailing = {
+                HeaderAction(
+                    label = "Go to…",
+                    testTag = FILE_EXPLORER_GOTO_TAG,
+                    onClick = onGoTo,
                 )
-            }
-            Column(modifier = Modifier.weight(1f).padding(start = 2.dp)) {
-                Text(
-                    text = "Files",
-                    color = PocketShellColors.Text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = hostName,
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .clickable(role = Role.Button, onClick = onGoTo)
-                    .testTag(FILE_EXPLORER_GOTO_TAG)
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "Go to…",
-                    color = PocketShellColors.Accent,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-        }
+            },
+        )
         // Breadcrumb strip — each segment is tappable to jump to that ancestor.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(start = 8.dp, end = 8.dp, bottom = 8.dp)
+                .padding(
+                    start = PocketShellDensity.rowPadH,
+                    end = PocketShellDensity.rowPadH,
+                    bottom = PocketShellSpacing.sm,
+                )
                 .testTag(FILE_EXPLORER_PATH_TAG),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
         ) {
             val crumbs = FileExplorerViewModel.breadcrumbSegments(path)
             crumbs.forEachIndexed { index, (label, absolute) ->
@@ -293,17 +277,41 @@ private fun FileExplorerHeader(
                     maxLines = 1,
                     modifier = Modifier
                         .clickable(enabled = !isCurrent) { onCrumb(absolute) }
-                        .padding(horizontal = 2.dp, vertical = 2.dp),
+                        .padding(horizontal = PocketShellSpacing.xs / 2, vertical = PocketShellSpacing.xs / 2),
                 )
                 if (index < crumbs.lastIndex) {
                     Text(
                         text = "›",
                         color = PocketShellColors.TextMuted,
-                        fontSize = 11.sp,
+                        style = PocketShellType.labelMono,
                     )
                 }
             }
         }
+    }
+}
+
+/** A compact text action button for the file explorer header. */
+@Composable
+private fun HeaderAction(
+    label: String,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .height(PocketShellDensity.tapTargetMin)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = PocketShellSpacing.sm)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.Accent,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 
@@ -315,34 +323,32 @@ private fun ReadyPanel(
     onOpenFile: (RemoteEntry) -> Unit,
 ) {
     val atRoot = state.currentPath == "/"
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
-        // Parent row, unless we're at the filesystem root.
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
+    ) {
         if (!atRoot) {
             item(key = "__up__") {
                 ListRow(
                     title = "..",
                     subtitle = "Parent folder",
-                    leading = { GlyphCell("↑") },
+                    leading = { GlyphCell("UP") },
                     onClick = onUp,
                     modifier = Modifier.testTag(FILE_EXPLORER_UP_TAG),
                 )
             }
         }
+        item(key = "__entries_header__") {
+            SectionHeader(label = "Entries", count = state.entries.size)
+        }
         if (state.entries.isEmpty()) {
             item(key = "__empty__") {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp)
-                        .testTag(FILE_EXPLORER_EMPTY_TAG),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "This folder is empty.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 13.sp,
-                    )
-                }
+                ListRow(
+                    title = "No entries",
+                    subtitle = "This folder is empty.",
+                    leading = { GlyphCell("--") },
+                    modifier = Modifier.testTag(FILE_EXPLORER_EMPTY_TAG),
+                )
             }
         }
         items(state.entries, key = { it.name }) { entry ->
@@ -355,6 +361,7 @@ private fun ReadyPanel(
                 title = entry.name,
                 subtitle = rowSubtitle(entry),
                 leading = { GlyphCell(glyphFor(entry.type)) },
+                trailing = rowBadge(entry),
                 onClick = {
                     if (navigable) onOpenDirectory(entry) else onOpenFile(entry)
                 },
@@ -363,20 +370,12 @@ private fun ReadyPanel(
         }
         if (state.truncated) {
             item(key = "__truncated__") {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                        .testTag(FILE_EXPLORER_TRUNCATED_TAG),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "Showing the first ${state.entries.size} entries — " +
-                            "this folder has more.",
-                        color = PocketShellColors.TextMuted,
-                        fontSize = 12.sp,
-                    )
-                }
+                ListRow(
+                    title = "Folder truncated",
+                    subtitle = "Showing the first ${state.entries.size} entries; this folder has more.",
+                    leading = { GlyphCell("…") },
+                    modifier = Modifier.testTag(FILE_EXPLORER_TRUNCATED_TAG),
+                )
             }
         }
     }
@@ -385,22 +384,42 @@ private fun ReadyPanel(
 @Composable
 private fun GlyphCell(glyph: String) {
     Box(
-        modifier = Modifier.width(20.dp),
+        modifier = Modifier.width(24.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = glyph, fontSize = 15.sp, color = PocketShellColors.TextSecondary)
+        Text(
+            text = glyph,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.labelMono,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 
 @Composable
 private fun LoadingPanel() {
-    Box(
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .testTag(FILE_EXPLORER_LOADING_TAG),
-        contentAlignment = Alignment.Center,
+        contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
     ) {
-        CircularProgressIndicator(color = PocketShellColors.Accent)
+        item {
+            SectionHeader(label = "Status")
+        }
+        item {
+            ListRow(
+                title = "Loading folder",
+                subtitle = "Fetching remote entries",
+                leading = {
+                    CircularProgressIndicator(
+                        color = PocketShellColors.Accent,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(20.dp),
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -411,29 +430,42 @@ private fun ErrorPanel(
     onRetry: () -> Unit,
     onUp: () -> Unit,
 ) {
-    Box(
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp)
             .testTag(FILE_EXPLORER_ERROR_TAG),
-        contentAlignment = Alignment.Center,
+        contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = message,
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
+        item {
+            SectionHeader(label = "Status")
+        }
+        item {
+            ListRow(
+                title = "Could not load folder",
+                subtitle = message,
+                leading = { GlyphCell("!") },
+                trailing = {
+                    Badge(label = "Error", role = BadgeRole.Error, mono = false)
+                },
             )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        }
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PocketShellDensity.rowPadH),
+                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+            ) {
                 if (canRetry) {
                     TextButton(
                         onClick = onRetry,
                         modifier = Modifier.testTag(FILE_EXPLORER_RETRY_TAG),
-                    ) { Text("Retry", color = PocketShellColors.Accent) }
+                    ) {
+                        Text("Retry", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
+                    }
                 }
                 TextButton(onClick = onUp) {
-                    Text("Go up", color = PocketShellColors.TextSecondary)
+                    Text("Go up", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
                 }
             }
         }
@@ -441,10 +473,10 @@ private fun ErrorPanel(
 }
 
 private fun glyphFor(type: RemoteEntry.Type): String = when (type) {
-    RemoteEntry.Type.DIRECTORY -> "📁"
-    RemoteEntry.Type.SYMLINK -> "🔗"
-    RemoteEntry.Type.OTHER -> "⚙"
-    RemoteEntry.Type.FILE -> "📄"
+    RemoteEntry.Type.DIRECTORY -> "DIR"
+    RemoteEntry.Type.SYMLINK -> "LNK"
+    RemoteEntry.Type.OTHER -> "OTH"
+    RemoteEntry.Type.FILE -> "FILE"
 }
 
 private fun rowSubtitle(entry: RemoteEntry): String? = when (entry.type) {
@@ -452,6 +484,19 @@ private fun rowSubtitle(entry: RemoteEntry): String? = when (entry.type) {
     RemoteEntry.Type.SYMLINK -> "link"
     RemoteEntry.Type.OTHER -> null
     RemoteEntry.Type.FILE -> formatSize(entry.sizeBytes)
+}
+
+private fun rowBadge(entry: RemoteEntry): (@Composable () -> Unit)? = when (entry.type) {
+    RemoteEntry.Type.DIRECTORY -> {
+        { Badge(label = "Folder", role = BadgeRole.Idle, mono = false) }
+    }
+    RemoteEntry.Type.SYMLINK -> {
+        { Badge(label = "Link", role = BadgeRole.Shell, mono = false) }
+    }
+    RemoteEntry.Type.OTHER -> {
+        { Badge(label = "Other", role = BadgeRole.Shell, mono = false) }
+    }
+    RemoteEntry.Type.FILE -> null
 }
 
 /**

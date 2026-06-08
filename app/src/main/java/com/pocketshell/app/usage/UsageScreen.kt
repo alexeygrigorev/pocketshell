@@ -211,10 +211,10 @@ fun UsageDashboardStrip(
 }
 
 /**
- * Inline threshold-aware pill rendered on the session screen and inside
- * the host card overflow menu (issue #116; rewritten in issue #214 to
- * read from [UsageProviderRecord.thresholdState] rather than the binary
- * blocked / near-limit pair). Returns nothing when the provider's
+ * Inline threshold-aware pill rendered by compact usage affordances
+ * (issue #116; rewritten in issue #214 to read from
+ * [UsageProviderRecord.thresholdState] rather than the older two-state
+ * quota check). Returns nothing when the provider's
  * threshold state is [UsageThresholdState.Ok].
  *
  * The pill copy + colour follow the four-state ladder:
@@ -301,23 +301,19 @@ private fun UsageProviderStateRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (state.warrantsWarning) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = thresholdRowDescription(state),
-                    color = thresholdAccentColor(state),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Medium,
-                )
-            } else {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "OK",
-                    color = PocketShellColors.TextMuted,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = usageProviderStateDescription(record, state),
+                color = if (state.warrantsWarning || record.status == UsageStatus.Error) {
+                    thresholdAccentColor(
+                        if (state.warrantsWarning) state else UsageThresholdState.Critical,
+                    )
+                } else {
+                    PocketShellColors.TextMuted
+                },
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium,
+            )
         }
         if (percent != null) {
             Text(
@@ -465,7 +461,7 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
 
         val messages = listOfNotNull(
             record.blockReason.takeIf { record.windows.isEmpty() },
-            record.lastError,
+            usageTelemetryMessageForDisplay(record.lastError),
         ).distinct()
         messages.forEachIndexed { index, message ->
             Spacer(modifier = Modifier.height(if (index == 0) 10.dp else 6.dp))
@@ -608,14 +604,14 @@ private fun UsageFailedHostPanel(host: UsageFailedHost) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = "${host.hostName}: usage fetch failed",
+            text = "${host.hostName}: $REFRESH_USAGE_FAILED",
             color = PocketShellColors.TextMuted,
             style = PocketShellType.bodyDense,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            text = host.reason,
+            text = usageTelemetryMessageForDisplay(host.reason) ?: USAGE_DATA_UNAVAILABLE,
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.labelMono,
             modifier = Modifier.padding(top = 8.dp),

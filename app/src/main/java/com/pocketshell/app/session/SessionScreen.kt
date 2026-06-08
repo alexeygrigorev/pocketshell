@@ -115,7 +115,6 @@ internal const val SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "session:co
 internal const val SESSION_CONVERSATION_SEARCH_TAG = "session:conversation:search"
 internal const val SESSION_CONVERSATION_JUMP_TO_LATEST_TAG =
     "session:conversation:jump-to-latest"
-/** Issue #116: stable test tag for the in-session blocked / near-limit chip. */
 /**
  * Issue #165: stable test tags for the SSH-handshake progress overlay
  * on the raw-SSH session screen. Mirrors the

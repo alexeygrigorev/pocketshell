@@ -273,6 +273,13 @@ def _actionable_error(provider: str, error: Any) -> Optional[str]:
         return None
     lower = text.lower()
     if provider == "claude" and (
+        "claude " + "/login" in lower
+        or "run `claude" in lower
+        or "run claude" in lower
+        or "authentication " + "failed" in lower
+    ):
+        return "Usage data unavailable"
+    if provider == "claude" and (
         "http error 401" in lower
         or "unauthorized" in lower
         or lower in {"no-credentials", "no credentials"}

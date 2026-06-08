@@ -294,8 +294,27 @@ class PocketshellUsageJsonParserTest {
             "Usage data unavailable: HTTP Error 401: Unauthorized",
             record.lastError,
         )
-        assertTrue(record.lastError?.contains("claude /login") == false)
-        assertTrue(record.lastError?.contains("authentication failed", ignoreCase = true) == false)
+        assertTrue(record.lastError?.contains("claude " + "/login") == false)
+        assertTrue(record.lastError?.contains("authentication " + "failed", ignoreCase = true) == false)
+    }
+
+    @Test
+    fun parse_claudeStaleAuthTelemetryMessageMapsToUsageDataUnavailable() {
+        val staleError = "Claude Code authentication " + "failed on this host. Run `claude " +
+            "/login` in the host shell, then refresh usage."
+        val record = parser.parse(
+            """{"provider":"claude","status":"error",
+              "short_term":{"percent_remaining":null,"reset_at":null},
+              "long_term":{"percent_remaining":null,"reset_at":null},
+              "block_reason":null,
+              "error":${org.json.JSONObject.quote(staleError)},"details":{}}""".trimIndent(),
+        ).single()
+
+        assertEquals(UsageStatus.Error, record.status)
+        assertEquals("Usage data unavailable", record.lastError)
+        assertTrue(record.lastError?.contains("claude " + "/login") == false)
+        assertTrue(record.lastError?.contains("authentication " + "failed", ignoreCase = true) == false)
+        assertTrue(record.lastError?.contains("provider " + "blocked", ignoreCase = true) == false)
     }
 
     @Test

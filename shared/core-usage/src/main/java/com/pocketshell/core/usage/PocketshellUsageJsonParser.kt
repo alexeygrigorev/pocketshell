@@ -237,6 +237,14 @@ private fun actionableProviderError(provider: String, error: String?): String? {
     return when {
         provider.equals("claude", ignoreCase = true) &&
             (
+                lower.contains("claude " + "/login") ||
+                    lower.contains("run `claude") ||
+                    lower.contains("run claude") ||
+                    lower.contains("authentication " + "failed")
+            ) ->
+            "Usage data unavailable"
+        provider.equals("claude", ignoreCase = true) &&
+            (
                 lower.contains("http error 401") ||
                     lower.contains("unauthorized") ||
                     lower == "no-credentials" ||

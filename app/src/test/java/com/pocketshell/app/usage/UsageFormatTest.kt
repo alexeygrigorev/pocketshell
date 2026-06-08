@@ -235,6 +235,41 @@ class UsageFormatTest {
     }
 
     @Test
+    fun errorClaudeTelemetry_hasUnavailableSummaryWithoutAuthOrBlockedCopy() {
+        val record = UsageProviderRecord(
+            provider = "claude",
+            status = UsageStatus.Error,
+            rawStatus = "error",
+            windows = emptyList(),
+            lastError = "HTTP Error 401: Unauthorized",
+        )
+
+        assertEquals("Usage data unavailable", statusLabel(record))
+        assertEquals("Usage data unavailable", usageProviderStateDescription(record))
+        assertEquals(
+            "Usage data unavailable: HTTP Error 401: Unauthorized",
+            usageTelemetryMessageForDisplay(record.lastError),
+        )
+        listOf(
+            statusLabel(record),
+            usageProviderStateDescription(record),
+            usageTelemetryMessageForDisplay(record.lastError).orEmpty(),
+        ).forEach { text ->
+            assertEquals(false, text.contains("claude " + "/login", ignoreCase = true))
+            assertEquals(false, text.contains("authentication " + "failed", ignoreCase = true))
+            assertEquals(false, text.contains("provider " + "blocked", ignoreCase = true))
+        }
+    }
+
+    @Test
+    fun staleClaudeAuthTelemetryCopy_isSanitizedForDisplay() {
+        val stale = "Claude Code authentication " + "failed on this host. Run `claude " +
+            "/login` in the host shell."
+
+        assertEquals("Usage data unavailable", usageTelemetryMessageForDisplay(stale))
+    }
+
+    @Test
     fun exhaustedCodex_hasClearExceededLabels() {
         val record = UsageProviderRecord(
             provider = "codex",

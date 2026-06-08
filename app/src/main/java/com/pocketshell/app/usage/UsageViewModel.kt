@@ -154,7 +154,7 @@ public class SshHostUsageFetcher : HostUsageFetcher {
  * skipped because the panel cannot fix those locally yet. Hosts where
  * pocketshell is confirmed absent populate the "missing tool" empty-state
  * list. Hosts where the usage command runs but fails populate
- * [UsageScreenState.failedHosts] so provider/auth errors are not hidden.
+ * [UsageScreenState.failedHosts] so telemetry errors are not hidden.
  *
  * The view model is deliberately stateless across visits: every
  * navigation to [com.pocketshell.app.nav.AppDestination.Usage] spins up a

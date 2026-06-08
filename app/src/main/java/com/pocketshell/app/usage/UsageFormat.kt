@@ -16,8 +16,43 @@ internal fun statusLabel(record: UsageProviderRecord): String = when {
     record.status == UsageStatus.Warn || record.isNearLimit -> "Warn"
     record.status == UsageStatus.Ok -> "OK"
     record.status == UsageStatus.Unsupported -> "Unsupported"
-    record.status == UsageStatus.Error -> "Error"
+    record.status == UsageStatus.Error -> USAGE_DATA_UNAVAILABLE
     else -> record.rawStatus.replaceFirstChar { it.uppercase() }
+}
+
+internal const val USAGE_DATA_UNAVAILABLE: String = "Usage data unavailable"
+internal const val REFRESH_USAGE_FAILED: String = "Refresh usage failed"
+
+internal fun usageProviderStateDescription(
+    record: UsageProviderRecord,
+    state: UsageThresholdState = record.thresholdState(),
+): String = when {
+    record.status == UsageStatus.Error -> USAGE_DATA_UNAVAILABLE
+    record.status == UsageStatus.Unsupported -> "Unsupported"
+    state.warrantsWarning -> thresholdRowDescription(state)
+    else -> "OK"
+}
+
+internal fun usageTelemetryMessageForDisplay(message: String?): String? {
+    val trimmed = message?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val lower = trimmed.lowercase(Locale.US)
+    return when {
+        lower.startsWith(USAGE_DATA_UNAVAILABLE.lowercase(Locale.US)) ||
+            lower.startsWith(REFRESH_USAGE_FAILED.lowercase(Locale.US)) -> trimmed
+        lower.contains("claude") &&
+            (
+                    lower.contains("authentication " + "failed") ||
+                    lower.contains("claude " + "/login") ||
+                    lower.contains("run `claude") ||
+                    lower.contains("run claude") ||
+                    lower.contains("login")
+            ) -> USAGE_DATA_UNAVAILABLE
+        lower.contains("http error 401") ||
+            lower.contains("unauthorized") ||
+            lower == "no-credentials" ||
+            lower == "no credentials" -> "$USAGE_DATA_UNAVAILABLE: $trimmed"
+        else -> trimmed
+    }
 }
 
 internal fun formatPercent(value: Double): String =

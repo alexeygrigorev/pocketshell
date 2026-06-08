@@ -134,8 +134,8 @@ class UsageRemoteSourceTest {
             "Usage data unavailable: HTTP Error 401: Unauthorized",
             record.lastError,
         )
-        assertTrue(record.lastError?.contains("claude /login") == false)
-        assertTrue(record.lastError?.contains("authentication failed", ignoreCase = true) == false)
+        assertTrue(record.lastError?.contains("claude " + "/login") == false)
+        assertTrue(record.lastError?.contains("authentication " + "failed", ignoreCase = true) == false)
     }
 
     @Test

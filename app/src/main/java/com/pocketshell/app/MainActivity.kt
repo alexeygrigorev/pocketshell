@@ -148,9 +148,9 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var settingsRepository: SettingsRepository
 
-    // Issue #116 (usage-panel Fix B): the session screens need the
-    // per-host worst-case usage record so the in-session blocked /
-    // near-limit chip can render in the status area. Injecting the
+    // Issue #116 (usage-panel Fix B): session/navigation surfaces need
+    // the per-host worst-case usage record for compact quota affordances.
+    // Injecting the
     // scheduler at the activity lets the navigator pass a snapshot
     // map down to each session destination without coupling
     // SessionViewModel / TmuxSessionViewModel to the scheduler.
@@ -554,12 +554,11 @@ private fun AppNavigator(
     restoredTmuxDestination: AppDestination.TmuxSession? = null,
 ) {
     // Issue #116: per-host worst-case usage record map, derived from
-    // the scheduler's snapshot flow. Session destinations look up the
-    // active host id in this map to decide whether to render the
-    // in-session blocked / near-limit chip.
+    // the scheduler's snapshot flow. Navigation surfaces look up the
+    // active host id in this map for compact quota affordances.
     //
     // Issue #214: the worst-case derivation now consults the user-
-    // configurable warn threshold so the in-session chip respects the
+    // configurable warn threshold so quota affordances respect the
     // same "approaching limit" point as the cross-host strip + Settings
     // surface.
     val usageSnapshots by usageScheduler.snapshots.collectAsState()
@@ -905,9 +904,8 @@ private fun AppNavigator(
                     ),
                 )
             },
-            // Issue #116: in-session blocked / near-limit chip for the
-            // active host. Look up by [HostEntity.id]; absence means the
-            // scheduler has no recent record warranting a chip.
+            // Issue #116: active-host usage context. Look up by [HostEntity.id];
+            // absence means the scheduler has no recent warning record.
             usageBadgeProvider = usageBadgesByHost[dest.hostId],
         )
 

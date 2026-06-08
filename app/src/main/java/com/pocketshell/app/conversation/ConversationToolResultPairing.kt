@@ -1,5 +1,6 @@
 package com.pocketshell.app.conversation
 
+import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 
 internal data class ToolResultPairing(
@@ -13,10 +14,11 @@ internal data class ToolResultPairing(
  *
  * Explicit parser links win first. Some transcripts can still surface an
  * unlinked result immediately after its call, so the fallback pairs only the
- * visible adjacent shape `ToolCall` -> `ToolResult` when that result has no
- * explicit parent id and the call does not already have a result. That is
- * deterministic and intentionally conservative: non-adjacent, explicitly
- * mismatched, or many-to-one ambiguities stay as standalone result rows.
+ * visible adjacent shape `ToolCall` -> `ToolResult` for the same agent when
+ * that result has no explicit parent id and the call does not already have a
+ * result. That is deterministic and intentionally conservative: non-adjacent,
+ * cross-agent, explicitly mismatched, or many-to-one ambiguities stay as
+ * standalone result rows.
  */
 internal fun List<ConversationEvent>.toolResultPairing(): ToolResultPairing {
     val eventsById = associateBy { it.id }
@@ -26,7 +28,7 @@ internal fun List<ConversationEvent>.toolResultPairing(): ToolResultPairing {
 
     for (result in filterIsInstance<ConversationEvent.ToolResult>()) {
         val toolCallId = result.toolCallId
-            ?.let { eventsById.matchingToolCallId(it) }
+            ?.let { eventsById.matchingToolCallId(it, agent = result.agent) }
             ?: continue
         if (resultsByCallId.putIfAbsent(toolCallId, result) == null) {
             pairedResultIds += result.id
@@ -40,6 +42,7 @@ internal fun List<ConversationEvent>.toolResultPairing(): ToolResultPairing {
         if (call.id in resultsByCallId) continue
         if (result.id in pairedResultIds) continue
         if (result.hasExplicitToolCallId()) continue
+        if (call.agent != result.agent) continue
         resultsByCallId[call.id] = result
         pairedResultIds += result.id
         callIdsByResultId[result.id] = call.id
@@ -121,14 +124,17 @@ internal fun filterConversationRows(
 private fun ConversationEvent.ToolResult.hasExplicitToolCallId(): Boolean =
     !toolCallId.isNullOrBlank()
 
-private fun Map<String, ConversationEvent>.matchingToolCallId(toolCallId: String): String? {
-    if (this[toolCallId] is ConversationEvent.ToolCall) return toolCallId
+private fun Map<String, ConversationEvent>.matchingToolCallId(
+    toolCallId: String,
+    agent: AgentKind,
+): String? {
+    if ((this[toolCallId] as? ConversationEvent.ToolCall)?.agent == agent) return toolCallId
 
     // Codex transcript events namespace call rows as "call:<call_id>" while
     // output rows retain the raw call_id. Treat that as an explicit link so
     // non-adjacent outputs still fold into the matching call row.
     val codexCallId = "call:$toolCallId"
-    if (this[codexCallId] is ConversationEvent.ToolCall) return codexCallId
+    if ((this[codexCallId] as? ConversationEvent.ToolCall)?.agent == agent) return codexCallId
 
     return null
 }

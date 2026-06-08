@@ -65,6 +65,21 @@ class ConversationToolResultPairingTest {
     }
 
     @Test
+    fun adjacentUnlinkedCrossAgentToolResultRemainsStandalone() {
+        val events = listOf(
+            toolCall("call-1", agent = AgentKind.Codex),
+            toolResult("result-1", agent = AgentKind.ClaudeCode),
+        )
+
+        val pairing = events.toolResultPairing()
+        val filtered = filterConversationRows(events, query = "")
+
+        assertTrue(pairing.resultsByCallId.isEmpty())
+        assertEquals(listOf("call-1", "result-1"), filtered.events.map { it.id })
+        assertTrue("call-1" in runningToolCallIds(events, pairing))
+    }
+
+    @Test
     fun explicitPairingWinsOverAdjacentFallback() {
         val events = listOf(
             toolCall("call-1"),
@@ -112,6 +127,21 @@ class ConversationToolResultPairingTest {
     }
 
     @Test
+    fun explicitCrossAgentToolCallIdDoesNotPair() {
+        val events = listOf(
+            toolCall("call-1", agent = AgentKind.Codex),
+            toolResult("result-1", agent = AgentKind.ClaudeCode, toolCallId = "call-1"),
+        )
+
+        val pairing = events.toolResultPairing()
+        val filtered = filterConversationRows(events, query = "")
+
+        assertTrue(pairing.resultsByCallId.isEmpty())
+        assertEquals(listOf("call-1", "result-1"), filtered.events.map { it.id })
+        assertTrue("call-1" in runningToolCallIds(events, pairing))
+    }
+
+    @Test
     fun codexPrefixedToolCallIdPairsNonAdjacentResult() {
         val events = listOf(
             toolCall("call:call_1"),
@@ -136,22 +166,26 @@ class ConversationToolResultPairingTest {
         assertFalse("call:call_1" in runningToolCallIds(events, pairing))
     }
 
-    private fun toolCall(id: String): ConversationEvent.ToolCall =
+    private fun toolCall(
+        id: String,
+        agent: AgentKind = AgentKind.Codex,
+    ): ConversationEvent.ToolCall =
         ConversationEvent.ToolCall(
             id = id,
-            agent = AgentKind.Codex,
+            agent = agent,
             name = "exec_command",
             input = """{"cmd":"./gradlew test"}""",
         )
 
     private fun toolResult(
         id: String,
+        agent: AgentKind = AgentKind.Codex,
         toolCallId: String? = null,
         output: String = "BUILD SUCCESSFUL",
     ): ConversationEvent.ToolResult =
         ConversationEvent.ToolResult(
             id = id,
-            agent = AgentKind.Codex,
+            agent = agent,
             toolCallId = toolCallId,
             output = output,
         )

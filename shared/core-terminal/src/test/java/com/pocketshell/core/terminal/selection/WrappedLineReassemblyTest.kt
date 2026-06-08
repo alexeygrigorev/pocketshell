@@ -281,6 +281,46 @@ class WrappedLineReassemblyTest {
     }
 
     @Test
+    fun `three-row PocketShell attachment path emits full smart selection target per visual row`() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-course-management-platform/" +
+                "20260607-115723-01-Screenshot_20260607-115718.png"
+        val rows = listOf(
+            VisualRow(
+                row = 52,
+                text = "- ~/.pocketshell/attachments/host-1-git-course-",
+                wrapsToNext = false,
+            ),
+            VisualRow(
+                row = 53,
+                text = "management-platform/",
+                wrapsToNext = false,
+            ),
+            VisualRow(
+                row = 54,
+                text = "20260607-115723-01-Screenshot_20260607-115718.png",
+                wrapsToNext = false,
+            ),
+        )
+
+        val regions = terminalMatchRegionsForRows(rows, columns = 120, matcher = DefaultTerminalMatcher())
+        val pathRegions = regions.filter { it.match is TerminalMatch.Path }
+
+        assertEquals(3, pathRegions.size)
+        assertEquals(listOf(52, 53, 54), pathRegions.map { it.row })
+        assertTrue(
+            "every visual fragment should carry the complete attachment path: $pathRegions",
+            pathRegions.all { it.match.value == attachment },
+        )
+        assertEquals(2, pathRegions[0].startCol)
+        assertEquals(rows[0].text.length, pathRegions[0].endColExclusive)
+        assertEquals(0, pathRegions[1].startCol)
+        assertEquals(rows[1].text.length, pathRegions[1].endColExclusive)
+        assertEquals(0, pathRegions[2].startCol)
+        assertEquals(rows[2].text.length, pathRegions[2].endColExclusive)
+    }
+
+    @Test
     fun `unfinished generated image root does not join unrelated prose row`() {
         val unfinished = "/home/alexey/.codex/generated_images/"
         val rows = listOf(
@@ -296,6 +336,26 @@ class WrappedLineReassemblyTest {
         assertTrue(
             "unrelated prose must not become part of a generated image path: $pathRegions",
             pathRegions.none { it.row == 61 || it.match.value.contains("done") },
+        )
+        assertTrue(filePathRegionsForRows(rows, columns = 120).isEmpty())
+    }
+
+    @Test
+    fun `unfinished PocketShell attachment root does not join unrelated prose row`() {
+        val unfinished = "~/.pocketshell/attachments/host-1-git-course-"
+        val rows = listOf(
+            VisualRow(70, "attached $unfinished", wrapsToNext = false),
+            VisualRow(71, "this line is status text", wrapsToNext = false),
+        )
+
+        val marked = markFilePathContinuationWraps(rows)
+        val matchRegions = terminalMatchRegionsForRows(rows, columns = 120, matcher = DefaultTerminalMatcher())
+        val pathRegions = matchRegions.filter { it.match is TerminalMatch.Path }
+
+        assertEquals(rows, marked)
+        assertTrue(
+            "unrelated prose must not become part of an attachment path: $pathRegions",
+            pathRegions.none { it.row == 71 || it.match.value.contains("status") },
         )
         assertTrue(filePathRegionsForRows(rows, columns = 120).isEmpty())
     }

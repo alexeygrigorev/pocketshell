@@ -156,6 +156,37 @@ class FilePathScannerTest {
     }
 
     @Test
+    fun threeRowIssue609AttachmentRegionsKeepFullHomeRelativePathOnEachRow() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-course-management-platform/" +
+                "20260607-115723-01-Screenshot_20260607-115718.png"
+
+        val regions = filePathRegionsForRows(
+            visualRows = listOf(
+                VisualRow(
+                    row = 7,
+                    text = "- ~/.pocketshell/attachments/host-1-git-course-",
+                    wrapsToNext = false,
+                ),
+                VisualRow(
+                    row = 8,
+                    text = "management-platform/",
+                    wrapsToNext = false,
+                ),
+                VisualRow(
+                    row = 9,
+                    text = "20260607-115723-01-Screenshot_20260607-115718.png",
+                    wrapsToNext = false,
+                ),
+            ),
+            columns = 80,
+        )
+
+        assertEquals(listOf(attachment, attachment, attachment), regions.map { it.path })
+        assertEquals(listOf(7, 8, 9), regions.map { it.row })
+    }
+
+    @Test
     fun terminalAttachmentContinuationRowsReassembleBeforePathDetection() {
         val rows = markAttachmentContinuationWraps(
             listOf(

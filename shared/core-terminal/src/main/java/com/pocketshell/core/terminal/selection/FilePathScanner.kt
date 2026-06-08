@@ -437,9 +437,9 @@ private val ATTACHMENT_FILE_PATH_PATTERN: java.util.regex.Pattern = java.util.re
     java.util.regex.Pattern.CASE_INSENSITIVE,
 )
 
-private val ATTACHMENT_CONTINUATION_FILE_PATTERN: java.util.regex.Pattern =
+private val ATTACHMENT_CONTINUATION_SEGMENT_PATTERN: java.util.regex.Pattern =
     java.util.regex.Pattern.compile(
-        "^[\\w.-]+(?:/[\\w.-]+)*\\.(?:$EXTENSION_ALTERNATION)(?![\\w])",
+        "[\\w.-]+(?:/[\\w.-]+)*/?",
         java.util.regex.Pattern.CASE_INSENSITIVE,
     )
 
@@ -463,13 +463,16 @@ internal fun markFilePathContinuationWraps(rows: List<VisualRow>): List<VisualRo
             index += 1
             continue
         }
-        val joinsAttachment = looksLikeUnfinishedAttachmentPath(current.text) &&
-            looksLikeAttachmentContinuation(rows[index + 1].text)
+        val attachmentEnd = attachmentContinuationEnd(rows, index)
         val generatedImageEnd = generatedImageContinuationEnd(rows, index)
 
-        if (joinsAttachment) {
-            out[index] = current.copy(wrapsToNext = true)
-            changed = true
+        if (attachmentEnd != null) {
+            for (joinIndex in index until attachmentEnd) {
+                if (!out[joinIndex].wrapsToNext) {
+                    out[joinIndex] = out[joinIndex].copy(wrapsToNext = true)
+                    changed = true
+                }
+            }
         }
         if (generatedImageEnd != null) {
             for (joinIndex in index until generatedImageEnd) {
@@ -486,6 +489,22 @@ internal fun markFilePathContinuationWraps(rows: List<VisualRow>): List<VisualRo
     return if (changed) out else rows
 }
 
+private fun attachmentContinuationEnd(rows: List<VisualRow>, startIndex: Int): Int? {
+    val startToken = lastNonWhitespaceToken(rows[startIndex].text)
+    if (!looksLikeUnfinishedAttachmentPath(startToken)) return null
+
+    var candidate = startToken
+    var index = startIndex
+    while (index < rows.lastIndex && !endsWithKnownExtension(candidate)) {
+        val continuation = attachmentContinuationToken(rows[index + 1].text) ?: return null
+        candidate += continuation
+        index += 1
+    }
+    return index.takeIf {
+        it > startIndex && looksLikeCompleteAttachmentPath(candidate)
+    }
+}
+
 private fun looksLikeUnfinishedAttachmentPath(text: String): Boolean {
     val trimmed = text.trimEnd()
     val rootStart = trimmed.lastIndexOf(ATTACHMENT_ROOT)
@@ -496,10 +515,15 @@ private fun looksLikeUnfinishedAttachmentPath(text: String): Boolean {
     return !endsWithKnownExtension(candidate)
 }
 
-private fun looksLikeAttachmentContinuation(text: String): Boolean {
-    val trimmed = text.trimStart()
-    return ATTACHMENT_CONTINUATION_FILE_PATTERN.matcher(trimmed).find()
+private fun attachmentContinuationToken(text: String): String? {
+    val token = firstNonWhitespaceToken(text).trimEndOfPathPunctuation()
+    if (token.isEmpty()) return null
+    if (!ATTACHMENT_CONTINUATION_SEGMENT_PATTERN.matcher(token).matches()) return null
+    return token
 }
+
+private fun looksLikeCompleteAttachmentPath(token: String): Boolean =
+    ATTACHMENT_FILE_PATH_PATTERN.matcher(token).matches()
 
 private fun looksLikeAttachmentContinuationFragment(path: String): Boolean {
     if (path.startsWith("/") ||

@@ -91,6 +91,20 @@ class DiagnosticRecorderTest {
     }
 
     @Test
+    fun `clearAndRecord resets exported sequence window and appends marker`() = runTest {
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+
+        recorder.record("app", "created")
+        recorder.clearAndRecord("diagnostics", "capture_started")
+
+        val events = recorder.readEvents()
+
+        assertEquals(listOf(1L), events.map { it.sequence })
+        assertEquals(listOf("diagnostics"), events.map { it.category })
+        assertEquals(listOf("capture_started"), events.map { it.name })
+    }
+
+    @Test
     fun `readEvents can return recent matching events`() = runTest {
         val recorder = DiagnosticRecorder(context, settingsRepository)
 

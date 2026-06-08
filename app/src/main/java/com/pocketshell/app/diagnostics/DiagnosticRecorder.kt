@@ -42,6 +42,14 @@ class DiagnosticRecorder @Inject constructor(
                         sequence.set(0L)
                         command.done.complete(Unit)
                     }
+                    is RecorderCommand.ClearAndRecord -> {
+                        store.clear()
+                        sequence.set(0L)
+                        if (settingsRepository.settings.value.diagnosticsRecordingEnabled) {
+                            store.appendLine(eventLine(command.category, command.event, command.fields))
+                        }
+                        command.done.complete(Unit)
+                    }
                 }
             }
         }
@@ -49,15 +57,7 @@ class DiagnosticRecorder @Inject constructor(
 
     override fun record(category: String, event: String, fields: Map<String, Any?>) {
         if (!settingsRepository.settings.value.diagnosticsRecordingEnabled) return
-        val diagnosticsEvent = DiagnosticsEvent(
-            sequence = sequence.incrementAndGet(),
-            wallClockTime = Instant.now(clock),
-            monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
-            category = category,
-            name = event,
-            metadata = DiagnosticRedactor.redact(fields),
-        )
-        val line = DiagnosticEventJson.encode(diagnosticsEvent)
+        val line = eventLine(category, event, fields)
         if (commands.trySend(RecorderCommand.Line(line)).isFailure) {
             val overflow = DiagnosticsEvent(
                 sequence = sequence.incrementAndGet(),
@@ -75,6 +75,12 @@ class DiagnosticRecorder @Inject constructor(
     suspend fun clear() {
         val done = CompletableDeferred<Unit>()
         commands.send(RecorderCommand.Clear(done))
+        done.await()
+    }
+
+    suspend fun clearAndRecord(category: String, event: String, fields: Map<String, Any?> = emptyMap()) {
+        val done = CompletableDeferred<Unit>()
+        commands.send(RecorderCommand.ClearAndRecord(category, event, fields, done))
         done.await()
     }
 
@@ -98,6 +104,18 @@ class DiagnosticRecorder @Inject constructor(
         done.await()
     }
 
+    private fun eventLine(category: String, event: String, fields: Map<String, Any?>): String =
+        DiagnosticEventJson.encode(
+            DiagnosticsEvent(
+                sequence = sequence.incrementAndGet(),
+                wallClockTime = Instant.now(clock),
+                monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
+                category = category,
+                name = event,
+                metadata = DiagnosticRedactor.redact(fields),
+            ),
+        )
+
     private fun deviceLabel(): String =
         listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
             .filter { it.isNotBlank() }
@@ -108,6 +126,12 @@ class DiagnosticRecorder @Inject constructor(
         data class Line(val line: String) : RecorderCommand
         data class Flush(val done: CompletableDeferred<Unit>) : RecorderCommand
         data class Clear(val done: CompletableDeferred<Unit>) : RecorderCommand
+        data class ClearAndRecord(
+            val category: String,
+            val event: String,
+            val fields: Map<String, Any?>,
+            val done: CompletableDeferred<Unit>,
+        ) : RecorderCommand
     }
 
     private companion object {

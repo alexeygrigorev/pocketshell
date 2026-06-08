@@ -232,8 +232,7 @@ class SettingsViewModel @Inject constructor(
     fun startFreshDiagnosticsCapture() {
         viewModelScope.launch {
             repository.setDiagnosticsRecordingEnabled(true)
-            diagnosticRecorder.clear()
-            diagnosticRecorder.record("diagnostics", "capture_started")
+            diagnosticRecorder.clearAndRecord("diagnostics", "capture_started")
             _diagnosticsShareState.value = DiagnosticsShareState.Idle
         }
     }

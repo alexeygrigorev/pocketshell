@@ -116,6 +116,41 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
+    fun parse_codexReadsResetFromDetailAliasesWhenTopLevelResetMissing() {
+        val parser = PocketshellUsageJsonParser(
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
+        )
+        val records = parser.parse(
+            """
+            {"provider":"codex","status":"ok",
+             "short_term":{"percent_remaining":100.0,"reset_at":null},
+             "long_term":{"percent_remaining":100.0,"reset_at":null},
+             "block_reason":null,"error":null,
+             "details":{"windows":{
+               "primary":{
+                 "used_percent":65,
+                 "limit_window_seconds":18000,
+                 "next_reset_at":"2026-06-08T15:00:00Z"
+               },
+               "secondary":{
+                 "used_percent":20,
+                 "limit_window_seconds":604800,
+                 "reset_after":7200
+               }
+             }}}
+            """.trimIndent(),
+        )
+
+        val record = records.single()
+        assertEquals("5h", record.windows[0].name)
+        assertEquals(65.0, record.windows[0].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-08T15:00:00Z"), record.windows[0].resetAt)
+        assertEquals("7d", record.windows[1].name)
+        assertEquals(20.0, record.windows[1].percent, 0.001)
+        assertEquals(Instant.parse("2026-06-08T12:00:00Z"), record.windows[1].resetAt)
+    }
+
+    @Test
     fun parse_topLevelResetAfterSecondsWhenResetAtMissing() {
         val parser = PocketshellUsageJsonParser(
             now = { Instant.parse("2026-06-08T10:00:00Z") },
@@ -291,8 +326,8 @@ class PocketshellUsageJsonParserTest {
 
         assertEquals(UsageStatus.Error, record.status)
         assertEquals(
-            "Claude usage authentication needs setup on this host. " +
-                "Open Claude Code on the host and complete sign-in, then refresh usage.",
+            "Claude login needed on this host. " +
+                "Open Claude Code on the host and sign in, then refresh usage.",
             record.lastError,
         )
         assertTrue(record.lastError?.contains("claude " + "/login") == false)
@@ -314,8 +349,8 @@ class PocketshellUsageJsonParserTest {
 
         assertEquals(UsageStatus.Error, record.status)
         assertEquals(
-            "Claude usage authentication needs setup on this host. " +
-                "Open Claude Code on the host and complete sign-in, then refresh usage.",
+            "Claude login needed on this host. " +
+                "Open Claude Code on the host and sign in, then refresh usage.",
             record.lastError,
         )
         assertTrue(record.lastError?.contains("claude " + "/login") == false)

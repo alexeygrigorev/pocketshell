@@ -16,15 +16,15 @@ internal fun statusLabel(record: UsageProviderRecord): String =
 
 internal const val USAGE_DATA_UNAVAILABLE: String = "Usage data unavailable"
 internal const val REFRESH_USAGE_FAILED: String = "Refresh usage failed"
-internal const val USAGE_AUTH_SETUP_REQUIRED: String = "Auth setup required"
+internal const val USAGE_AUTH_SETUP_REQUIRED: String = "Login required"
 internal const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE: String =
-    "Claude usage authentication needs setup on this host. " +
-        "Open Claude Code on the host and complete sign-in, then refresh usage."
+    "Claude login needed on this host. " +
+        "Open Claude Code on the host and sign in, then refresh usage."
 internal const val CODEX_USAGE_AUTH_SETUP_MESSAGE: String =
-    "Codex usage authentication needs setup on this host. " +
+    "Codex login needed on this host. " +
         "Run `codex login` in the host shell, then refresh usage."
 private const val PROVIDER_USAGE_AUTH_SETUP_MESSAGE: String =
-    "Usage authentication needs setup on this host. " +
+    "Provider login needed on this host. " +
         "Sign in with the provider CLI on the host, then refresh usage."
 
 internal fun usageProviderStateDescription(

@@ -244,10 +244,10 @@ class UsageFormatTest {
             lastError = "HTTP Error 401: Unauthorized",
         )
 
-        assertEquals("Auth setup required", statusLabel(record))
-        assertEquals("Auth setup required", usageProviderStateDescription(record))
+        assertEquals("Login required", statusLabel(record))
+        assertEquals("Login required", usageProviderStateDescription(record))
         assertEquals(
-            "Usage authentication needs setup on this host. " +
+            "Provider login needed on this host. " +
                 "Sign in with the provider CLI on the host, then refresh usage.",
             usageTelemetryMessageForDisplay(record.lastError),
         )
@@ -276,11 +276,11 @@ class UsageFormatTest {
 
         val ui = usageProviderStatusUi(record)
 
-        assertEquals("Auth setup required", ui.label)
-        assertEquals("Auth setup required", ui.description)
+        assertEquals("Login required", ui.label)
+        assertEquals("Login required", ui.description)
         assertEquals(true, ui.needsAuthSetup)
         assertEquals(
-            "Codex usage authentication needs setup on this host. " +
+            "Codex login needed on this host. " +
                 "Run `codex login` in the host shell, then refresh usage.",
             usageTelemetryMessageForDisplay(record.lastError),
         )
@@ -297,7 +297,7 @@ class UsageFormatTest {
     @Test
     fun staleGeneric401TelemetryCopy_isMappedToAuthSetup() {
         assertEquals(
-            "Usage authentication needs setup on this host. " +
+            "Provider login needed on this host. " +
                 "Sign in with the provider CLI on the host, then refresh usage.",
             usageTelemetryMessageForDisplay("Usage data unavailable: HTTP Error 401: Unauthorized"),
         )

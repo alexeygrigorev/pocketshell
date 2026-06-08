@@ -559,7 +559,7 @@ private fun UsageResetFoot(
 
 private fun resetUnavailableText(window: UsageWindow): String? {
     if (window.resetAt != null) return null
-    return "Reset time unavailable from provider data."
+    return "Reset time unavailable."
 }
 
 @Composable

@@ -101,11 +101,11 @@ public class PocketshellUsageJsonParser(
             jsonKey = "short_term",
             windowName = "short_term",
             provider = provider,
-            detailWindow = detailWindows?.optJSONObject(
+            detailWindow = detailWindows?.firstObject(
                 when {
-                    codexCompatible -> "primary_window"
-                    provider.equals("claude", ignoreCase = true) -> "five_hour"
-                    else -> ""
+                    codexCompatible -> listOf("primary_window", "primary", "short_term", "five_hour", "5h")
+                    provider.equals("claude", ignoreCase = true) -> listOf("five_hour", "short_term", "5h")
+                    else -> emptyList()
                 },
             ),
             preferDetailPercent = codexCompatible,
@@ -116,11 +116,11 @@ public class PocketshellUsageJsonParser(
             jsonKey = "long_term",
             windowName = "long_term",
             provider = provider,
-            detailWindow = detailWindows?.optJSONObject(
+            detailWindow = detailWindows?.firstObject(
                 when {
-                    codexCompatible -> "secondary_window"
-                    provider.equals("claude", ignoreCase = true) -> "seven_day"
-                    else -> ""
+                    codexCompatible -> listOf("secondary_window", "secondary", "long_term", "seven_day", "7d")
+                    provider.equals("claude", ignoreCase = true) -> listOf("seven_day", "long_term", "7d")
+                    else -> emptyList()
                 },
             ),
             preferDetailPercent = codexCompatible,
@@ -229,8 +229,8 @@ private val CODEX_COMPATIBLE_PROVIDERS = setOf(
 )
 
 private const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE =
-    "Claude usage authentication needs setup on this host. " +
-        "Open Claude Code on the host and complete sign-in, then refresh usage."
+    "Claude login needed on this host. " +
+        "Open Claude Code on the host and sign in, then refresh usage."
 
 private fun String.isCodexCompatibleProvider(): Boolean =
     lowercase().replace(' ', '_') in CODEX_COMPATIBLE_PROVIDERS
@@ -261,7 +261,7 @@ private fun actionableProviderError(provider: String, error: String?): String? {
                     lower == "no-auth-token" ||
                     lower == "no credentials"
             ) ->
-            "Codex authentication is missing on this host. Run `codex login` in the host shell, then refresh usage."
+            "Codex login needed on this host. Run `codex login` in the host shell, then refresh usage."
         else -> text
     }
 }
@@ -280,6 +280,13 @@ private fun JSONObject.requiredString(name: String): String {
 private fun JSONObject.optionalString(name: String): String? {
     if (!has(name) || isNull(name)) return null
     return optString(name).trim().ifBlank { null }
+}
+
+private fun JSONObject.firstObject(names: List<String>): JSONObject? {
+    names.forEach { name ->
+        optJSONObject(name)?.let { return it }
+    }
+    return null
 }
 
 private fun JSONObject.requiredNumber(name: String, provider: String, windowKey: String): Double {
@@ -321,11 +328,23 @@ private fun JSONObject.optionalInstant(name: String): Instant? {
 
 private fun JSONObject.optionalResetInstant(now: () -> Instant): Instant? =
     optionalInstant("reset_at")
+        ?: optionalInstant("resets_at")
+        ?: optionalInstant("resetAt")
+        ?: optionalInstant("resetsAt")
+        ?: optionalInstant("next_reset_at")
+        ?: optionalInstant("nextResetAt")
         ?: optionalDurationSeconds("reset_after_seconds")?.let { seconds ->
             try {
                 now().plusSeconds(seconds)
             } catch (e: Exception) {
                 throw UsageParseException("invalid 'reset_after_seconds': $seconds", e)
+            }
+        }
+        ?: optionalDurationSeconds("reset_after")?.let { seconds ->
+            try {
+                now().plusSeconds(seconds)
+            } catch (e: Exception) {
+                throw UsageParseException("invalid 'reset_after': $seconds", e)
             }
         }
 

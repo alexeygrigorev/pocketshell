@@ -77,7 +77,6 @@ private data class UsageNotificationKey(
     val provider: String,
     val state: UsageThresholdState,
     val windowName: String?,
-    val resetAt: Instant?,
 )
 
 internal fun usageNotificationEvent(
@@ -130,7 +129,6 @@ private fun usageNotificationKey(
         provider = record.provider.lowercase(),
         state = state,
         windowName = window?.name,
-        resetAt = window?.resetAt,
     )
 }
 

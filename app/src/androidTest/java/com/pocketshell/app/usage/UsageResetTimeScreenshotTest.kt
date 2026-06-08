@@ -82,7 +82,7 @@ class UsageResetTimeScreenshotTest {
         compose.onAllNodesWithText("resets in 5 days").assertCountEquals(1)
         // Codex weekly has no reset_at → placeholder.
         compose.onAllNodesWithText("resets —").assertCountEquals(1)
-        compose.onAllNodesWithText("Reset time unavailable from provider data.").assertCountEquals(1)
+        compose.onAllNodesWithText("Reset time unavailable.").assertCountEquals(1)
         compose.onAllNodesWithText("61% used").assertCountEquals(1)
         compose.onAllNodesWithText("18% used").assertCountEquals(1)
         compose.onNodeWithTag(USAGE_OVERFLOW_TAG).performClick()

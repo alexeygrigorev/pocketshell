@@ -179,7 +179,7 @@ class UsageNotificationsTest {
     }
 
     @Test
-    fun defaultNotifierRenotifiesWhenSameSeverityWindowMovesToNextReset() {
+    fun defaultNotifierDoesNotRenotifyWhenSameSeverityWindowOnlyMovesReset() {
         val events = mutableListOf<UsageNotificationEvent>()
         val notifier = DefaultUsageNotifier(
             context = context,
@@ -215,13 +215,12 @@ class UsageNotificationsTest {
         )
 
         assertEquals(
-            listOf("Codex usage: 80% used", "Codex usage: 80% used"),
+            listOf("Codex usage: 80% used"),
             events.map { it.title },
         )
         assertEquals(
             listOf(
                 "agent-box · Approaching limit · resets in 5h · Tap to open Usage.",
-                "agent-box · Approaching limit · resets in 2 days · Tap to open Usage.",
             ),
             events.map { it.text },
         )

@@ -28,7 +28,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -51,6 +50,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -65,10 +65,18 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.model.HostSetupState
+import com.pocketshell.uikit.model.HostStatus
+import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlin.math.PI
@@ -371,10 +379,10 @@ fun HostListScreen(
                     .fillMaxWidth()
                     .testTag(HOST_LIST_CONTENT_TAG),
                 contentPadding = PaddingValues(
-                    top = 4.dp,
+                    top = PocketShellSpacing.xs,
                     bottom = HostListFabContentClearance,
                 ),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(PocketShellDensity.sectionGap),
             ) {
                 // Issue #418 (dashboard declutter): the top chrome
                 // (update / share / re-check / usage-warning banners and
@@ -539,6 +547,7 @@ fun HostListScreen(
                     SectionHeader(
                         label = "Hosts",
                         count = hosts.size,
+                        modifier = Modifier.padding(horizontal = PocketShellSpacing.xs),
                     )
                 }
 
@@ -560,8 +569,8 @@ fun HostListScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                                .padding(horizontal = PocketShellSpacing.lg),
+                            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
                         ) {
                             // Issue #120: derive the per-host setup state from
                             // the ViewModel's persisted-column projection.
@@ -587,6 +596,10 @@ fun HostListScreen(
                                 sessions = sessions,
                                 attachedHostIds = attachedHostIds,
                             )
+                            val openingLabel = hostOpenProgress
+                                ?.takeIf { it.hostId == host.id }
+                                ?.phase
+                                ?.label
                             HostCard(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
@@ -622,15 +635,15 @@ fun HostListScreen(
                                         }
                                     }
                                 } else null,
-                                connectingLabel = hostOpenProgress
-                                    ?.takeIf { it.hostId == host.id }
-                                    ?.phase
-                                    ?.label,
+                                connectingLabel = openingLabel,
                                 trailingContent = {
                                     HostOverflowMenuAnchor(
                                         expanded = menuOpen,
                                         onExpand = { menuOpen = true },
                                         onDismiss = { menuOpen = false },
+                                        hostStatus = hostStatus,
+                                        setupState = setupState,
+                                        openingLabel = openingLabel,
                                         usageRecord = usageRecord,
                                         usageBadgeTestTag = HOST_USAGE_BADGE_TAG_PREFIX + host.id,
                                         // Issue #519: restore the host-edit
@@ -1168,15 +1181,19 @@ private fun SettingsGearIcon() {
  * circular [PocketShellColors.SurfaceElev] background with a 1 dp
  * [PocketShellColors.BorderSoft] hairline border — matching the design-system §8
  * requirement that the kebab read as "always visible affordance". The shared
- * Kebab draws exactly this chrome. The usage record is rendered as the first,
- * non-clickable menu row so it no longer competes with the setup-state badge in
- * the row.
+ * Kebab draws exactly this chrome. Read-only status/setup rows keep state
+ * discoverable in the menu without adding painted chips back onto the card; the
+ * usage record stays in the menu so it no longer competes with primary row
+ * scanning.
  */
 @Composable
 internal fun HostOverflowMenuAnchor(
     expanded: Boolean,
     onExpand: () -> Unit,
     onDismiss: () -> Unit,
+    hostStatus: HostStatus = HostStatus.Unknown,
+    setupState: HostSetupState = HostSetupState.Unknown,
+    openingLabel: String? = null,
     usageRecord: com.pocketshell.core.usage.UsageProviderRecord?,
     usageBadgeTestTag: String,
     onEdit: () -> Unit,
@@ -1194,8 +1211,54 @@ internal fun HostOverflowMenuAnchor(
     // 40 dp circular SurfaceElev + 1 dp BorderSoft hairline chrome the shared
     // Kebab draws is the same affordance #155 specced here.
     val items = buildList {
-        // Issue #155: per-host usage status surfaced as the first menu entry
-        // when the scheduler has a blocked / near-limit record for the host.
+        openingLabel?.let { label ->
+            add(
+                KebabItem(
+                    label = label,
+                    onClick = {},
+                    enabled = false,
+                    content = {
+                        HostOverflowStateRow(
+                            label = "Opening",
+                            value = label,
+                            kind = PillKind.Warn,
+                        )
+                    },
+                ),
+            )
+        }
+        add(
+            KebabItem(
+                label = "Status",
+                onClick = {},
+                enabled = false,
+                content = {
+                    val display = hostStatusDisplay(hostStatus)
+                    HostOverflowStateRow(
+                        label = "Status",
+                        value = display.label,
+                        kind = display.kind,
+                    )
+                },
+            ),
+        )
+        add(
+            KebabItem(
+                label = "Setup",
+                onClick = {},
+                enabled = false,
+                content = {
+                    val display = setupStateDisplay(setupState)
+                    HostOverflowStateRow(
+                        label = "Setup",
+                        value = display.label,
+                        kind = display.kind,
+                    )
+                },
+            ),
+        )
+        // Issue #155: per-host usage status is surfaced in the menu when the
+        // scheduler has a blocked / near-limit record for the host.
         // Rendered as a non-clickable header row (disabled, no-op onClick) so it
         // reads as state rather than an action. The pill is wrapped in a Box
         // carrying the existing `host:usage-badge:<id>` test tag so
@@ -1266,10 +1329,63 @@ internal fun HostOverflowMenuAnchor(
     Kebab(
         items = items,
         triggerTestTag = HOST_OVERFLOW_BUTTON_TAG,
+        triggerSize = PocketShellDensity.tapTargetMin,
         expanded = expanded,
         onExpandedChange = { next -> if (next) onExpand() else onDismiss() },
     )
 }
+
+private data class HostOverflowDisplay(
+    val label: String,
+    val kind: PillKind,
+)
+
+@Composable
+private fun HostOverflowStateRow(
+    label: String,
+    value: String,
+    kind: PillKind,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+        Pill(label = value, kind = kind)
+    }
+}
+
+private fun hostStatusDisplay(status: HostStatus): HostOverflowDisplay =
+    when (status) {
+        HostStatus.Unknown -> HostOverflowDisplay(label = "Checking", kind = PillKind.Error)
+        HostStatus.NoActiveSessions -> HostOverflowDisplay(label = "No sessions", kind = PillKind.Error)
+        is HostStatus.ActiveSessions -> HostOverflowDisplay(
+            label = if (status.count == 1) "1 session" else "${status.count} sessions",
+            kind = PillKind.Ok,
+        )
+        HostStatus.Attached -> HostOverflowDisplay(label = "Attached", kind = PillKind.Ok)
+        HostStatus.NeedsSetup -> HostOverflowDisplay(label = "Needs setup", kind = PillKind.Warn)
+        HostStatus.ConnectionError -> HostOverflowDisplay(label = "Connection error", kind = PillKind.Blocked)
+    }
+
+private fun setupStateDisplay(setupState: HostSetupState): HostOverflowDisplay =
+    when (setupState) {
+        HostSetupState.Ready -> HostOverflowDisplay(label = "Ready", kind = PillKind.Ok)
+        HostSetupState.NeedsSetup -> HostOverflowDisplay(label = "Needs setup", kind = PillKind.Warn)
+        HostSetupState.CliUpdateNeeded -> HostOverflowDisplay(label = "Update needed", kind = PillKind.Warn)
+        HostSetupState.OptionalUnavailable -> HostOverflowDisplay(label = "Partial", kind = PillKind.Warn)
+        HostSetupState.DaemonDisabled -> HostOverflowDisplay(label = "Daemon off", kind = PillKind.Warn)
+        HostSetupState.Unknown -> HostOverflowDisplay(label = "Checking", kind = PillKind.Error)
+    }
 
 internal const val HOST_OVERFLOW_BUTTON_TAG: String = "host:overflow:button"
 // Issue #519: stable tag for the kebab → "Edit" entry so instrumentation
@@ -1580,24 +1696,24 @@ private fun SshPassphraseDialog(
  */
 @Composable
 private fun EmptyHostList(modifier: Modifier = Modifier) {
-    Box(
+    Column(
         modifier = modifier
             .fillMaxWidth()
+            .padding(horizontal = PocketShellSpacing.lg)
+            .background(
+                color = PocketShellColors.Surface,
+                shape = PocketShellShapes.medium,
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = PocketShellShapes.medium,
+            )
             .testTag(HOST_LIST_EMPTY_STATE_TAG),
-        contentAlignment = Alignment.Center,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "No hosts yet",
-                color = PocketShellColors.Text,
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Tap + to add an SSH host",
-                color = PocketShellColors.TextSecondary,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
+        ListRow(
+            title = "No hosts yet",
+            subtitle = "Use + to add an SSH host",
+        )
     }
 }

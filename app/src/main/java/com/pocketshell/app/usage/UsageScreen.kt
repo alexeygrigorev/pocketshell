@@ -122,6 +122,7 @@ private fun UsageHeader(
         )
         Kebab(
             triggerTestTag = USAGE_OVERFLOW_TAG,
+            contentDescription = "Usage actions",
             items = listOf(
                 KebabItem(
                     label = "Refresh usage",

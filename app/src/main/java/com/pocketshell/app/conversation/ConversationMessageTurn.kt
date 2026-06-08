@@ -1,14 +1,15 @@
 package com.pocketshell.app.conversation
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,6 +35,9 @@ import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.terminal.selection.ConversationLink
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -64,20 +68,22 @@ internal fun ConversationMessageTurn(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 2.dp)
+            .padding(vertical = ConversationTurnVerticalPadding)
             .let { base -> if (canExpand) base.clickable(onClick = onToggleExpanded) else base },
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = ConversationTurnMinHeight),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TimelineBadge(label = roleLabel, color = roleColor)
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(start = 8.dp),
+                    .padding(start = PocketShellSpacing.sm),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
             ) {
                 if (event.streaming) {
                     StreamingBadge(roleColor = roleColor)
@@ -112,7 +118,7 @@ internal fun ConversationMessageTurn(
                         style = PocketShellType.labelMono,
                         textAlign = TextAlign.End,
                         modifier = Modifier
-                            .width(84.dp)
+                            .width(ConversationTimestampWidth)
                             .testTag(CONVERSATION_TIMESTAMP_TAG_PREFIX + event.id),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -126,7 +132,11 @@ internal fun ConversationMessageTurn(
                 onLinkTap = onLinkTap,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 90.dp, top = 4.dp),
+                    .padding(
+                        start = ConversationBodyIndent,
+                        top = PocketShellSpacing.xs,
+                        end = PocketShellSpacing.xs,
+                    ),
             )
         }
     }
@@ -138,23 +148,47 @@ private fun SendStateLabels(
     onRetrySend: (String) -> Unit,
 ) {
     when (event.sendState) {
-        MessageSendState.Pending -> Text(
+        MessageSendState.Pending -> StatusBadge(
             text = "sending…",
-            color = PocketShellColors.TextMuted,
-            style = PocketShellType.labelMono,
+            color = LocalPocketShellSemantic.current.statusConnecting,
             modifier = Modifier.testTag(CONVERSATION_PENDING_TAG_PREFIX + event.id),
         )
-        MessageSendState.Failed -> Text(
+        MessageSendState.Failed -> StatusBadge(
             text = "failed · retry",
-            color = PocketShellColors.Red,
-            style = PocketShellType.labelMono,
-            fontWeight = FontWeight.Medium,
+            color = LocalPocketShellSemantic.current.statusError,
             modifier = Modifier
                 .clickable { onRetrySend(event.id) }
                 .testTag(CONVERSATION_RETRY_TAG_PREFIX + event.id),
         )
         MessageSendState.Confirmed -> Unit
     }
+}
+
+@Composable
+private fun StatusBadge(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = text,
+        color = color,
+        style = PocketShellType.labelMono,
+        fontWeight = FontWeight.Medium,
+        modifier = modifier
+            .background(
+                color = color.copy(alpha = 0.10f),
+                shape = PocketShellShapes.small,
+            )
+            .border(
+                width = 1.dp,
+                color = color.copy(alpha = 0.22f),
+                shape = PocketShellShapes.small,
+            )
+            .padding(horizontal = PocketShellSpacing.xs, vertical = ConversationBadgeVerticalPadding),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 @Composable
@@ -198,12 +232,17 @@ private fun TimelineBadge(
         fontWeight = FontWeight.SemiBold,
         textAlign = TextAlign.Center,
         modifier = Modifier
-            .width(82.dp)
+            .width(ConversationBadgeWidth)
             .background(
                 color = color.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(3.dp),
+                shape = PocketShellShapes.small,
             )
-            .padding(horizontal = 4.dp, vertical = 2.dp),
+            .border(
+                width = 1.dp,
+                color = color.copy(alpha = 0.24f),
+                shape = PocketShellShapes.small,
+            )
+            .padding(horizontal = PocketShellSpacing.xs, vertical = ConversationBadgeVerticalPadding),
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
@@ -215,9 +254,14 @@ private fun StreamingBadge(roleColor: Color) {
         modifier = Modifier
             .background(
                 color = roleColor.copy(alpha = 0.14f),
-                shape = RoundedCornerShape(3.dp),
+                shape = PocketShellShapes.small,
             )
-            .padding(horizontal = 5.dp, vertical = 1.dp),
+            .border(
+                width = 1.dp,
+                color = roleColor.copy(alpha = 0.20f),
+                shape = PocketShellShapes.small,
+            )
+            .padding(horizontal = PocketShellSpacing.xs, vertical = ConversationBadgeVerticalPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -235,3 +279,10 @@ internal val LocalConversationFontSizeSp: ProvidableCompositionLocal<Float> =
 internal const val CONVERSATION_TIMESTAMP_TAG_PREFIX: String = "conversation-timestamp-"
 internal const val CONVERSATION_PENDING_TAG_PREFIX: String = "conversation-pending-"
 internal const val CONVERSATION_RETRY_TAG_PREFIX: String = "conversation-retry-"
+
+private val ConversationTurnVerticalPadding = PocketShellSpacing.xs / 2
+private val ConversationBadgeVerticalPadding = PocketShellSpacing.xs / 2
+private val ConversationTurnMinHeight = PocketShellDensity.rowMinHeight
+private val ConversationBadgeWidth = 82.dp
+private val ConversationTimestampWidth = 84.dp
+private val ConversationBodyIndent = ConversationBadgeWidth + PocketShellSpacing.sm

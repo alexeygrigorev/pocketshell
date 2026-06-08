@@ -1618,6 +1618,8 @@ class PromptComposerViewModelTest {
         var reconcileCount = 0
             private set
         var nextId: String = "pending-1"
+        var markFailureStarted: CompletableDeferred<Unit>? = null
+        var markFailureRelease: CompletableDeferred<Unit>? = null
 
         override suspend fun enqueueAudio(
             audio: ByteArray,
@@ -1656,6 +1658,8 @@ class PromptComposerViewModelTest {
             id: String,
             errorMessage: String,
         ): com.pocketshell.app.voice.PendingTranscriptionItem? {
+            markFailureStarted?.complete(Unit)
+            markFailureRelease?.await()
             failureIds += id to errorMessage
             val existing = flow.value.firstOrNull { it.id == id } ?: return null
             val updated = existing.copy(
@@ -1756,6 +1760,61 @@ class PromptComposerViewModelTest {
         assertEquals("pending-1", queue.failureIds[0].first)
         // Error banner mirrors the failure reason.
         assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun networkTimeoutLeavesTranscribingBeforePendingFailureWriteCompletes() = runTest {
+        val queue = FakePendingQueue()
+        queue.markFailureStarted = CompletableDeferred()
+        queue.markFailureRelease = CompletableDeferred()
+        val whisperRelease = CompletableDeferred<Unit>()
+        val attachmentPath = "~/.pocketshell/attachments/host-1/keep-this.png"
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperRelease.await()
+                return Result.failure(WhisperException.Transport("timeout"))
+            }
+        }
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+        )
+
+        vm.onDraftChange("keep this draft")
+        vm.seedAttachment(attachmentPath)
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        whisperRelease.complete(Unit)
+        runCurrent()
+        queue.markFailureStarted!!.await()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("Network error: timeout", vm.uiState.value.error)
+        assertEquals("keep this draft", vm.uiState.value.draft)
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = attachmentPath,
+                    displayName = "keep-this.png",
+                ),
+            ),
+            vm.uiState.value.attachments,
+        )
+        assertNotNull(queue.storedAudio("pending-1"))
+        assertTrue(queue.failureIds.isEmpty())
+
+        queue.markFailureRelease!!.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("pending-1" to "Network error: timeout"),
+            queue.failureIds,
+        )
+        assertNotNull(queue.storedAudio("pending-1"))
     }
 
     @Test

@@ -1236,19 +1236,32 @@ public class PromptComposerViewModel @Inject constructor(
                 },
                 onFailure = { t ->
                     val msg = userFacingWhisperError(t)
-                    if (pendingId != null) {
-                        runCatching { pendingTranscriptionStore.markFailure(pendingId, msg) }
-                    }
                     // Issue #211: drop the queued send — the round-trip
                     // failed, so we have no transcript to send. The user
                     // sees the error banner and can either retry the
                     // queued audio (#180) or type + send manually. The
-                    // audio is still in the pending-transcription queue
-                    // (markFailure above stamped it) so the user can
-                    // retry from the banner.
+                    // audio is still in the pending-transcription queue so
+                    // the user can retry from the banner.
                     pendingSendOnTranscribeSuccess = false
                     pendingSendWithEnter = false
                     activeProvider = null
+                    // Issue #587: publish the retryable error state before
+                    // updating the pending row. The audio was already queued
+                    // before Whisper was called, so a slow DB/filesystem write
+                    // must not keep the composer visually stuck on
+                    // "Transcribing..." after the provider has returned a
+                    // network timeout.
+                    _uiState.update {
+                        it.copy(
+                            recording = RecordingState.Idle,
+                            amplitude = 0f,
+                            recordingLocked = false,
+                            error = msg,
+                        )
+                    }
+                    if (pendingId != null) {
+                        runCatching { pendingTranscriptionStore.markFailure(pendingId, msg) }
+                    }
                     DiagnosticEvents.record(
                         "action",
                         "composer_transcription_result",
@@ -1258,9 +1271,6 @@ public class PromptComposerViewModel @Inject constructor(
                         "pendingQueued" to (pendingId != null),
                         "cause" to t.javaClass.simpleName,
                     )
-                    _uiState.update {
-                        it.copy(recording = RecordingState.Idle, recordingLocked = false, error = msg)
-                    }
                 },
             )
         }

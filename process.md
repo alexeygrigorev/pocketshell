@@ -551,6 +551,20 @@ Each issue must have:
 
 If implementer or reviewer confusion reveals that an issue is underspecified, fix the issue first, then relaunch.
 
+### Labels
+
+- **`needs-human-confirmation`** — applied ONLY when the code work is complete,
+  the reviewer has approved, and the issue is waiting for the maintainer's
+  final dogfood confirmation or design sign-off. Do NOT apply this label to
+  issues that still need implementation, review rounds, or bug fixes. If an
+  issue has this label but still has open implementation work, remove the label
+  and keep it in the active implementer/reviewer loop.
+- When an issue needs human action (screenshot review, design decision, config
+  change), the orchestrator MUST attach the relevant screenshots, mockups, or
+  artifacts directly to the issue so the maintainer can perform the action
+  without asking for context. A `needs-human-confirmation` issue with no
+  attached evidence is not ready for human review.
+
 ## Verification Checklist
 
 After reviewer approval, the orchestrator runs:

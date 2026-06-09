@@ -677,6 +677,18 @@ public fun TmuxSessionScreen(
         }
     }
 
+    // Issue #625: auto-switch to a newly created tmux window.
+    // The ViewModel emits the new window's ID after receiving tmux's
+    // %window-add notification and reconciling the pane list.
+    LaunchedEffect(Unit) {
+        viewModel.windowSwitchRequest.collect { windowId ->
+            val page = panes.indexOfFirst { it.windowId == windowId }
+            if (page >= 0) {
+                pagerState.animateScrollToPage(page)
+            }
+        }
+    }
+
     @Composable
     fun AnchoredTmuxMoreMenu() {
         TmuxMoreMenu(

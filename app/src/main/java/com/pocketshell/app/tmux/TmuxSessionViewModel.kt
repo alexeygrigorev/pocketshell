@@ -85,6 +85,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.trySendBlocking
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -278,6 +279,17 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val _windowKillError: MutableStateFlow<String?> = MutableStateFlow(null)
     public val windowKillError: StateFlow<String?> = _windowKillError.asStateFlow()
+
+    /**
+     * Issue #625: signal emitted after a new-window command creates a window.
+     * Carries the window ID (e.g. `@5`) so the Screen can scroll the pager
+     * to the matching pane. The Screen collects this flow and calls
+     * [selectWindow] + scrolls the pager when a value arrives.
+     */
+    private val _windowSwitchRequest: MutableSharedFlow<String> =
+        MutableSharedFlow(extraBufferCapacity = 4)
+    public val windowSwitchRequest: SharedFlow<String> =
+        _windowSwitchRequest.asSharedFlow()
 
     /**
      * Issue #458: sticky state of the key bar's `Ctrl` modifier. When armed
@@ -7286,9 +7298,61 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #625: create a new tmux window and auto-switch the terminal
+     * viewport to it. Mirrors the deterministic event-wait pattern from
+     * [killWindow]: subscribe to [ControlEvent.WindowAdd] BEFORE sending
+     * `new-window` so the notification cannot be missed, then after the
+     * event arrives reconcile the pane list and emit the new window ID
+     * through [windowSwitchRequest] so the Screen scrolls the pager.
+     *
+     * On transport failure or tmux `%error` the command is silently
+     * dropped (matching the pre-#625 fire-and-forget behaviour). A 2s
+     * fallback timeout ensures the UI is never permanently wedged if
+     * tmux never emits the event.
+     */
     public fun newWindow() {
         val target = activeTarget?.sessionName ?: return
-        sendLifecycleCommand("new-window -t '${escapeSingleQuoted(target)}'")
+        val client = clientRef ?: return
+        bridgeScope.launch {
+            // Capture the WindowAdd event's window ID. Subscribe BEFORE
+            // sending the command so we never miss the %window-add
+            // notification (same rationale as killWindow).
+            val capturedWindowId = CompletableDeferred<String?>()
+            val eventJob = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                val event = withTimeoutOrNull(NEW_WINDOW_EVENT_WAIT_MS) {
+                    client.events.first { event ->
+                        event is ControlEvent.WindowAdd
+                    } as? ControlEvent.WindowAdd
+                }
+                capturedWindowId.complete(event?.windowId)
+            }
+
+            val sendResult = runCatching {
+                client.sendCommand("new-window -t '${escapeSingleQuoted(target)}'")
+            }
+            if (sendResult.isFailure) {
+                eventJob.cancel()
+                return@launch
+            }
+            val response = sendResult.getOrNull()
+            if (response != null && response.isError) {
+                eventJob.cancel()
+                return@launch
+            }
+
+            // Wait up to NEW_WINDOW_EVENT_WAIT_MS for tmux's
+            // %window-add notification.
+            eventJob.join()
+            reconcilePanes()
+
+            // The reconciled pane list now includes the new window.
+            // Emit a switch request so the Screen can scroll the pager.
+            val addedWindowId = capturedWindowId.await()
+            if (addedWindowId != null) {
+                _windowSwitchRequest.emit(addedWindowId)
+            }
+        }
     }
 
     public fun selectWindow(windowId: String) {
@@ -8913,6 +8977,14 @@ public data class TmuxRestoreIntentSnapshot(
  * server is sub-100ms.
  */
 internal const val KILL_WINDOW_EVENT_WAIT_MS: Long = 2_000L
+
+/**
+ * Issue #625: how long [TmuxSessionViewModel.newWindow] waits for tmux's
+ * `%window-add` notification before falling back to a best-effort reconcile
+ * without emitting a switch request. 2s mirrors [KILL_WINDOW_EVENT_WAIT_MS]
+ * — tmux's actual window-creation latency on a healthy server is sub-100ms.
+ */
+internal const val NEW_WINDOW_EVENT_WAIT_MS: Long = 2_000L
 
 /**
  * Issue #145: process-wide monotonic counter of `connect()` calls that

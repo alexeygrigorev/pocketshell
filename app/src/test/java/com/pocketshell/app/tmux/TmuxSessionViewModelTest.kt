@@ -6924,6 +6924,259 @@ class TmuxSessionViewModelTest {
         assertNull(vm.windowKillError.value)
     }
 
+    // ─── Issue #625: new-window auto-switch ───
+
+    @Test
+    fun newWindowEmitsWindowSwitchRequestAfterWindowAddEvent() = runTest {
+        // Happy path: new-window succeeds → wait for %window-add →
+        // reconcile → emit the new window ID via windowSwitchRequest.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        // list-panes for the initial reconcile + the post-newWindow reconcile.
+        // First reconcile: one existing pane.
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tbash\t0"),
+                isError = false,
+            ),
+        )
+        // new-window response: empty success.
+        client.responses.addLast(
+            CommandResponse(number = 2L, output = emptyList(), isError = false),
+        )
+        // Post-newWindow reconcile: two panes (old + new).
+        client.responses.addLast(
+            CommandResponse(
+                number = 3L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tbash\t0",
+                    "%1\t@1\t\$0\twork\tbash\t0",
+                ),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        // Collect the window switch request.
+        val switchRequests = mutableListOf<String>()
+        val collectJob = launch {
+            vm.windowSwitchRequest.collect { switchRequests += it }
+        }
+
+        vm.newWindow()
+        runCurrent()
+
+        // sendCommand fired.
+        assertTrue(
+            "expected new-window dispatch on the wire",
+            client.sentCommands.any { it == "new-window -t 'work'" },
+        )
+
+        // Before the %window-add arrives, no switch request emitted.
+        assertTrue(
+            "no switch request before %window-add",
+            switchRequests.isEmpty(),
+        )
+
+        // Emit the %window-add event for the new window.
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@1", name = ""),
+        )
+        advanceUntilIdle()
+
+        // The switch request must carry the new window ID.
+        assertEquals(
+            "expected exactly one switch request for @1",
+            listOf("@1"),
+            switchRequests,
+        )
+
+        collectJob.cancel()
+    }
+
+    @Test
+    fun newWindowDoesNotEmitSwitchRequestOnTransportFailure() = runTest {
+        // Transport failure: sendCommand throws → early return, no
+        // switch request.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        // Seed initial list-panes.
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tbash\t0"),
+                isError = false,
+            ),
+        )
+        // new-window throws.
+        client.closeAndThrowOnCommandPrefix = "new-window"
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        val switchRequests = mutableListOf<String>()
+        val collectJob = launch {
+            vm.windowSwitchRequest.collect { switchRequests += it }
+        }
+
+        vm.newWindow()
+        advanceUntilIdle()
+
+        assertTrue(
+            "transport failure must not emit a switch request",
+            switchRequests.isEmpty(),
+        )
+
+        collectJob.cancel()
+    }
+
+    @Test
+    fun newWindowDoesNotEmitSwitchRequestOnTmuxError() = runTest {
+        // tmux responds with an error → early return, no switch request.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        // Seed initial list-panes.
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tbash\t0"),
+                isError = false,
+            ),
+        )
+        // new-window response: error.
+        client.responses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("can't create window"),
+                isError = true,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        val switchRequests = mutableListOf<String>()
+        val collectJob = launch {
+            vm.windowSwitchRequest.collect { switchRequests += it }
+        }
+
+        vm.newWindow()
+        advanceUntilIdle()
+
+        assertTrue(
+            "tmux error must not emit a switch request",
+            switchRequests.isEmpty(),
+        )
+
+        collectJob.cancel()
+    }
+
+    @Test
+    fun newWindowDoesNotEmitSwitchRequestOnTimeoutWithoutEvent() = runTest {
+        // The %window-add event never arrives → timeout fires →
+        // reconcile still happens but no switch request is emitted
+        // (window ID is null).
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        // Seed initial list-panes.
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tbash\t0"),
+                isError = false,
+            ),
+        )
+        // new-window succeeds.
+        client.responses.addLast(
+            CommandResponse(number = 2L, output = emptyList(), isError = false),
+        )
+        // Post-newWindow reconcile (fallback, no event arrived).
+        client.responses.addLast(
+            CommandResponse(
+                number = 3L,
+                output = listOf("%0\t@0\t\$0\twork\tbash\t0"),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        val switchRequests = mutableListOf<String>()
+        val collectJob = launch {
+            vm.windowSwitchRequest.collect { switchRequests += it }
+        }
+
+        vm.newWindow()
+        // advanceUntilIdle lets virtual time progress past the 2s timeout.
+        advanceUntilIdle()
+
+        assertTrue(
+            "timeout without event must not emit a switch request",
+            switchRequests.isEmpty(),
+        )
+
+        collectJob.cancel()
+    }
+
+    @Test
+    fun newWindowDoesNothingWithoutActiveTarget() = runTest {
+        // No active target → early return, no commands dispatched.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        val switchRequests = mutableListOf<String>()
+        val collectJob = launch {
+            vm.windowSwitchRequest.collect { switchRequests += it }
+        }
+
+        vm.newWindow()
+        advanceUntilIdle()
+
+        assertTrue(
+            "no active target → no new-window command",
+            client.sentCommands.none { it.startsWith("new-window") },
+        )
+        assertTrue(
+            "no active target → no switch request",
+            switchRequests.isEmpty(),
+        )
+
+        collectJob.cancel()
+    }
+
     /**
      * Test double that throws on a chosen command — exercises the
      * "sendCommand throws" branch of [TmuxSessionViewModel.killWindow]

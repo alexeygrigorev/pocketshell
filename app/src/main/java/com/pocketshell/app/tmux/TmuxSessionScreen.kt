@@ -90,7 +90,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -3184,7 +3186,6 @@ internal fun TmuxConversationPane(
         )
     }
     val filteredEvents = filteredConversation.events
-    val expandedMessages = remember { mutableStateOf(setOf<String>()) }
     // Tool-call expansion state per event-id. Persisted at the pane
     // level (not inside the row composable) so a row scrolling out and
     // back in remembers the user's decision until the session detaches.
@@ -3232,7 +3233,7 @@ internal fun TmuxConversationPane(
     Column(
         modifier = modifier
             .background(color = PocketShellColors.Background)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = ChatPaneHPadding, vertical = ChatPaneVPadding),
     ) {
         OutlinedTextField(
             value = effectiveQuery,
@@ -3260,15 +3261,16 @@ internal fun TmuxConversationPane(
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag(TMUX_CONVERSATION_LIST_TAG),
-                contentPadding = PaddingValues(vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                contentPadding = PaddingValues(start = 0.dp, end = 0.dp, top = 8.dp, bottom = 72.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 if (filteredEvents.isEmpty()) {
                     item {
                         Text(
                             text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
                             color = PocketShellColors.TextSecondary,
-                            fontSize = 13.sp,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(top = 16.dp),
                         )
                     }
                 }
@@ -3279,16 +3281,6 @@ internal fun TmuxConversationPane(
                         toolResultPairing = toolResultPairing,
                         isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
                             event.id in filteredConversation.searchExpandedToolCallIds,
-                        isMessageExpanded = expandedMessages.value.contains(event.id),
-                        onToggleMessageExpand = { id ->
-                            ConversationDiagnostics.recordRowToggle(
-                                mode = "tmux",
-                                paneId = paneId,
-                                event = event,
-                                expanded = !expandedMessages.value.contains(id),
-                            )
-                            expandedMessages.value = expandedMessages.value.toggle(id)
-                        },
                         onToggleExpand = { id ->
                             ConversationDiagnostics.recordRowToggle(
                                 mode = "tmux",
@@ -3522,8 +3514,6 @@ private fun ConversationEventRow(
     runningToolIds: Set<String>,
     toolResultPairing: ToolResultPairing,
     isExplicitlyExpanded: Boolean,
-    isMessageExpanded: Boolean,
-    onToggleMessageExpand: (String) -> Unit,
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
@@ -3533,12 +3523,10 @@ private fun ConversationEventRow(
     when (event) {
         is ConversationEvent.Message -> ConversationMessageRow(
             event = event,
-            isExpanded = isMessageExpanded,
-            onToggleExpand = { onToggleMessageExpand(event.id) },
             onRetryFailedSend = onRetryFailedSend,
             onLinkTap = onLinkTap,
         )
-        is ConversationEvent.ToolCall -> ConversationToolCallRow(
+        is ConversationEvent.ToolCall -> ConversationToolCallChatCard(
             toolCall = event,
             result = toolResultPairing.resultsByCallId[event.id],
             isRunning = event.id in runningToolIds,
@@ -3563,8 +3551,6 @@ private fun ConversationEventRow(
 @Composable
 private fun ConversationMessageRow(
     event: ConversationEvent.Message,
-    isExpanded: Boolean,
-    onToggleExpand: () -> Unit,
     onRetryFailedSend: (String) -> Unit = {},
     onLinkTap: ((com.pocketshell.core.terminal.selection.ConversationLink) -> Unit)? = null,
 ) {
@@ -3572,8 +3558,6 @@ private fun ConversationMessageRow(
         event = event,
         onRetrySend = onRetryFailedSend,
         onLinkTap = onLinkTap,
-        isExpanded = isExpanded,
-        onToggleExpanded = onToggleExpand,
     )
 }
 
@@ -3586,24 +3570,20 @@ private fun Set<String>.toggle(id: String): Set<String> =
 // level, identical to the Terminal tab's bottom.
 
 /**
- * Render a single tool-call invocation as either a one-line collapsed
- * row (issue #160 scope addition: subtle / minimal) or an expanded
- * card with input + output bounded by a scroll container for very long
- * payloads.
- *
- * Tool/call noise is collapsed by default. The row stays one line even
- * while a tool is running; tapping it expands details and that decision
- * is remembered by [TmuxConversationPane] while the pane remains mounted.
+ * Issue #561: Chat-style tool call card. Renders as an inline card within
+ * the conversation transcript (not a dense timeline row). The card shows
+ * the tool name, command preview, and an expand chevron. When expanded,
+ * shows input/output sections.
  */
 @Composable
-private fun ConversationToolCallRow(
+private fun ConversationToolCallChatCard(
     toolCall: ConversationEvent.ToolCall,
     result: ConversationEvent.ToolResult?,
     isRunning: Boolean,
     isExplicitlyExpanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val expanded = isExplicitlyExpanded
+    val expanded = isExplicitlyExpanded || (isRunning && result == null)
     val summary = remember(toolCall.id, toolCall.input) { ToolCallSummary.forToolCall(toolCall) }
     val statusGlyph = when {
         result?.isError == true -> "!"
@@ -3620,77 +3600,57 @@ private fun ConversationToolCallRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onToggle)
-            .padding(vertical = 2.dp)
+            .padding(bottom = ToolCallChatCardBottomMargin)
             .testTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + toolCall.id),
     ) {
-        val timestamp = remember(toolCall.atMillis) { toolCall.timelineTimestamp() }
+        // Inline tool call card (matching .tool-call from mockup)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    color = PocketShellColors.Surface,
+                    shape = RoundedCornerShape(ToolCallCardRadius),
+                )
+                .border(
+                    width = 1.dp,
+                    color = PocketShellColors.BorderSoft,
+                    shape = RoundedCornerShape(ToolCallCardRadius),
+                )
+                .clickable(onClick = onToggle)
+                .padding(horizontal = ToolCallCardHPadding, vertical = ToolCallCardVPadding),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ToolCallCardItemGap),
         ) {
-            TimelineBadgeText(
-                label = "TOOL",
-                color = PocketShellColors.TextSecondary,
+            Text(
+                text = if (expanded) "v" else "›",
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+                fontSize = 14.sp,
             )
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp)
-                    .background(
-                        color = PocketShellColors.Surface,
-                        shape = RoundedCornerShape(4.dp),
-                    )
-                    .padding(horizontal = 7.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = if (expanded) "v" else "›",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = toolCall.name,
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.labelMono,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = summary,
-                    color = PocketShellColors.Text,
-                    style = PocketShellType.bodyMono,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (statusGlyph.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = statusGlyph, color = statusColor, style = PocketShellType.labelMono)
-                }
-            }
-            if (timestamp != null) {
-                Text(
-                    text = timestamp,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                    textAlign = TextAlign.End,
-                    modifier = Modifier
-                        .width(84.dp)
-                        .padding(start = 6.dp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Text(
+                text = toolCall.name,
+                color = PocketShellColors.Accent,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = summary,
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.labelMono,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (statusGlyph.isNotEmpty()) {
+                Text(text = statusGlyph, color = statusColor, style = PocketShellType.labelMono)
             }
         }
+        // Expanded detail sections
         if (expanded) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
+                    .padding(top = 4.dp, start = 0.dp, end = 0.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 ToolCallSection(
@@ -3711,19 +3671,9 @@ private fun ConversationToolCallRow(
 }
 
 /**
- * Issue #176: muted, collapsible renderer for
- * [ConversationEvent.SystemNote] — the XML-tagged metadata blocks
- * Claude Code emits inside Message text (`<system-reminder>`,
- * `<command-name>`, `<local-command-stdout>`, …).
- *
- * Collapsed (default): a single muted row showing the tag label and a
- * one-line preview of the content so the user can scan past it quickly.
- * Tapping the row toggles to the expanded state which shows the full
- * raw content in monospace — no markdown processing because the body
- * is structured / code-like.
- *
- * Styling uses [PocketShellColors.TextMuted] / [PocketShellColors.TextSecondary]
- * so the row reads as "background metadata" rather than a peer message.
+ * Issue #176 / #561: Chat-style system note row. Renders as a muted collapsible
+ * block with a chat-style header (role label + time) and expandable body,
+ * matching the conversation mockup paradigm instead of the old dense timeline.
  */
 @Composable
 private fun ConversationSystemNoteRow(
@@ -3733,113 +3683,98 @@ private fun ConversationSystemNoteRow(
 ) {
     val actorLabel = remember(note.tag) { note.timelineActorLabel() }
     val preview = remember(note.tag, note.content) { note.timelinePreview() }
-    val chevron = if (isExpanded) "v" else "›"
+    val timestamp = remember(note.atMillis) { note.timelineTimestamp() }
+    val timeLabel = timestamp?.let { "· $it" }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onToggle)
-            .padding(vertical = 2.dp)
+            .padding(bottom = SystemNoteBlockBottomPadding)
             .testTag(TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id),
     ) {
-        val timestamp = remember(note.atMillis) { note.timelineTimestamp() }
+        // Chat-style header matching message blocks
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = MessageHeadBottomPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TimelineBadgeText(
-                label = actorLabel,
-                color = PocketShellColors.TextSecondary,
+            Text(
+                text = actorLabel,
+                color = PocketShellColors.TextMuted,
+                style = SystemNoteHeadStyle,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = MessageHeadLetterSpacing,
             )
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Spacer(modifier = Modifier.weight(1f))
+            if (timeLabel != null) {
                 Text(
-                    text = preview,
+                    text = timeLabel,
                     color = PocketShellColors.TextMuted,
                     style = PocketShellType.labelMono,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = chevron,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-            }
-            if (timestamp != null) {
-                Text(
-                    text = timestamp,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
                     textAlign = TextAlign.End,
-                    modifier = Modifier
-                        .width(84.dp)
-                        .padding(start = 6.dp),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
+        // Preview / expanded body
         if (isExpanded && note.content.isNotEmpty()) {
-            // Raw monospace body so the XML-like structure stays readable.
-            // Reuses ToolCallSection so very long blocks fall into the
-            // bounded scrollable container rather than swallowing the
-            // viewport.
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
-            ) {
-                ToolCallSection(
-                    label = "content",
-                    body = note.content,
-                    copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + note.id + ":content",
-                )
-            }
+            ToolCallSection(
+                label = "content",
+                body = note.content,
+                copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + note.id + ":content",
+            )
+        } else {
+            Text(
+                text = preview,
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.bodyDense,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
 
+/**
+ * Issue #561: Chat-style standalone tool result row (unpaired results only).
+ * Renders as a muted card matching the mockup paradigm.
+ */
 @Composable
 private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
+    val timestamp = remember(result.atMillis) { result.timelineTimestamp() }
+    val timeLabel = timestamp?.let { "· $it" }
+    val labelColor = if (result.isError) PocketShellColors.Red else PocketShellColors.TextMuted
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 2.dp),
+            .padding(bottom = ToolCallChatCardBottomMargin),
     ) {
-        val timestamp = remember(result.atMillis) { result.timelineTimestamp() }
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = MessageHeadBottomPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TimelineBadgeText(
-                label = "TOOL",
-                color = if (result.isError) PocketShellColors.Red else PocketShellColors.TextSecondary,
-            )
             Text(
-                text = if (result.isError) "result error" else "result",
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                text = if (result.isError) "ERROR" else "RESULT",
+                color = labelColor,
+                style = SystemNoteHeadStyle,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = MessageHeadLetterSpacing,
             )
-            if (timestamp != null) {
+            Spacer(modifier = Modifier.weight(1f))
+            if (timeLabel != null) {
                 Text(
-                    text = timestamp,
+                    text = timeLabel,
                     color = PocketShellColors.TextMuted,
                     style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
                     textAlign = TextAlign.End,
-                    modifier = Modifier
-                        .width(84.dp)
-                        .padding(start = 6.dp),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -3853,29 +3788,6 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
             )
         }
     }
-}
-
-@Composable
-private fun TimelineBadgeText(
-    label: String,
-    color: Color,
-) {
-    Text(
-        text = label,
-        color = color,
-        style = PocketShellType.labelMono,
-        fontWeight = FontWeight.SemiBold,
-        textAlign = TextAlign.Center,
-        modifier = Modifier
-            .width(82.dp)
-            .background(
-                color = color.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(3.dp),
-            )
-            .padding(horizontal = 4.dp, vertical = 2.dp),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
 }
 
 /**
@@ -3896,6 +3808,31 @@ private fun ToolCallSection(
         copyTestTag = copyTestTag,
     )
 }
+
+// --- Issue #561 design tokens from conversation.html mockup ---
+
+/** .conv { padding: 16px 18px 72px } */
+private val ChatPaneHPadding = 18.dp
+private val ChatPaneVPadding = 8.dp
+
+/** .msg { margin-bottom: 22px } */
+private val MessageHeadBottomPadding = 8.dp
+private val MessageHeadLetterSpacing = 0.8.sp
+private val SystemNoteBlockBottomPadding = 22.dp
+
+/** .tool-call card tokens */
+private val ToolCallCardRadius = 10.dp
+private val ToolCallCardHPadding = 12.dp
+private val ToolCallCardVPadding = 10.dp
+private val ToolCallCardItemGap = 8.dp
+private val ToolCallChatCardBottomMargin = 22.dp
+
+/** System note header style (10sp uppercase matching .msg-head) */
+private val SystemNoteHeadStyle = TextStyle(
+    fontFamily = FontFamily.SansSerif,
+    fontSize = 10.sp,
+    fontWeight = FontWeight.Bold,
+)
 
 @Composable
 internal fun TmuxMoreMenu(

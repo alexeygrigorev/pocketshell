@@ -155,7 +155,7 @@ class TmuxConversationTurnDensityScreenshotTest {
     }
 
     @Test
-    fun longMessageRowsCollapseToOneLineAndExpandOnTap() {
+    fun longMessageRowsShowFullContentWithoutExpand() {
         compose.setContent {
             PocketShellTheme {
                 TmuxConversationPane(
@@ -175,16 +175,11 @@ class TmuxConversationTurnDensityScreenshotTest {
         }
         compose.waitForIdle()
 
-        compose.onAllNodesWithText(
-            "hidden detail line 561",
-            substring = true,
-            useUnmergedTree = true,
-        ).assertCountEquals(0)
-
-        compose.onNodeWithText("first line visible 561", substring = true)
+        // Issue #561: chat-style message blocks always show full content.
+        // Both lines of the multi-line message are visible without needing
+        // to expand/collapse (the old dense timeline collapsed to one line).
+        compose.onNodeWithText("first line visible 561", substring = true, useUnmergedTree = true)
             .assertIsDisplayed()
-            .performClick()
-        compose.waitForIdle()
 
         compose.onAllNodesWithText(
             "hidden detail line 561",

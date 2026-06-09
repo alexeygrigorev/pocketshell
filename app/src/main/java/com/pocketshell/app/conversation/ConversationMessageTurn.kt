@@ -6,10 +6,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,6 +22,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -35,17 +38,19 @@ import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.terminal.selection.ConversationLink
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
-import com.pocketshell.uikit.theme.PocketShellDensity
-import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Dense timeline message row for the Conversation tab.
+ * Chat-style message block for the Conversation tab (#561).
  *
- * The scan state is one line: actor badge, truncated preview, copy affordance,
- * and a right-aligned timestamp. Long or multi-line messages expand in-place
- * to the full markdown-rendered body.
+ * Each event renders as a full message block with:
+ * - Header row: role label + timestamp aligned right
+ * - Body: full multi-line content with pre-wrap
+ * - Tool call cards inline within assistant messages
+ *
+ * This replaces the old dense timeline row (single-line preview, expand-on-click)
+ * with the chat transcript paradigm from the mockup.
  */
 @Composable
 internal fun ConversationMessageTurn(
@@ -53,92 +58,67 @@ internal fun ConversationMessageTurn(
     modifier: Modifier = Modifier,
     onRetrySend: (String) -> Unit = {},
     onLinkTap: ((ConversationLink) -> Unit)? = null,
-    isExpanded: Boolean = false,
-    onToggleExpanded: () -> Unit = {},
 ) {
     val isUser = event.role == ConversationRole.User
     val semantic = LocalPocketShellSemantic.current
     val roleColor = if (isUser) semantic.accent else semantic.agentAccent
     val roleLabel = if (isUser) "USER" else "ASSISTANT"
     val timestamp = remember(event.atMillis) { event.timelineTimestamp() }
-    val canExpand = remember(event.text) {
-        event.text.length > 96 || event.text.any { it == '\n' || it == '\r' }
-    }
+    val timeLabel = if (event.streaming) "· streaming" else timestamp?.let { "· $it" }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = ConversationTurnVerticalPadding)
-            .let { base -> if (canExpand) base.clickable(onClick = onToggleExpanded) else base },
+            .padding(bottom = MessageBlockBottomPadding),
     ) {
+        // Message header: role label + streaming badge + send state + timestamp + copy
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = ConversationTurnMinHeight),
+                .padding(bottom = MessageHeadBottomPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TimelineBadge(label = roleLabel, color = roleColor)
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = PocketShellSpacing.sm),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
-            ) {
-                if (event.streaming) {
-                    StreamingBadge(roleColor = roleColor)
-                }
-                SendStateLabels(
-                    event = event,
-                    onRetrySend = onRetrySend,
-                )
+            Text(
+                text = roleLabel,
+                color = roleColor,
+                style = MessageHeadStyle,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = MessageHeadLetterSpacing,
+            )
+            if (event.streaming) {
+                Spacer(modifier = Modifier.width(MessageHeadGap))
+                StreamingDot(roleColor = roleColor)
+            }
+            SendStateLabels(
+                event = event,
+                onRetrySend = onRetrySend,
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            if (timeLabel != null) {
                 Text(
-                    text = event.text.lineSequence().firstOrNull().orEmpty(),
-                    color = PocketShellColors.Text,
-                    style = PocketShellType.bodyMono,
-                    modifier = Modifier.weight(1f),
+                    text = timeLabel,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.testTag(CONVERSATION_TIMESTAMP_TAG_PREFIX + event.id),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (canExpand) {
-                    Text(
-                        text = if (isExpanded) "v" else "›",
-                        color = PocketShellColors.TextMuted,
-                        style = PocketShellType.labelMono,
-                    )
-                }
-                ConversationCopyAction(
-                    text = event.text,
-                    testTag = CONVERSATION_COPY_TAG_PREFIX + event.id,
-                )
-                if (timestamp != null) {
-                    Text(
-                        text = timestamp,
-                        color = PocketShellColors.TextMuted,
-                        style = PocketShellType.labelMono,
-                        textAlign = TextAlign.End,
-                        modifier = Modifier
-                            .width(ConversationTimestampWidth)
-                            .testTag(CONVERSATION_TIMESTAMP_TAG_PREFIX + event.id),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
-        }
-        if (isExpanded && canExpand) {
-            ExpandedMessageBody(
+            ConversationCopyAction(
                 text = event.text,
-                onLinkTap = onLinkTap,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(
-                        start = ConversationBodyIndent,
-                        top = PocketShellSpacing.xs,
-                        end = PocketShellSpacing.xs,
-                    ),
+                testTag = CONVERSATION_COPY_TAG_PREFIX + event.id,
+                clipboardLabel = if (isUser) "user message" else "assistant message",
             )
         }
+
+        // Message body — full content rendered inline
+        MessageBody(
+            text = event.text,
+            onLinkTap = onLinkTap,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
@@ -148,15 +128,18 @@ private fun SendStateLabels(
     onRetrySend: (String) -> Unit,
 ) {
     when (event.sendState) {
-        MessageSendState.Pending -> StatusBadge(
+        MessageSendState.Pending -> SendStateBadge(
             text = "sending…",
             color = LocalPocketShellSemantic.current.statusConnecting,
-            modifier = Modifier.testTag(CONVERSATION_PENDING_TAG_PREFIX + event.id),
+            modifier = Modifier
+                .padding(start = MessageHeadGap)
+                .testTag(CONVERSATION_PENDING_TAG_PREFIX + event.id),
         )
-        MessageSendState.Failed -> StatusBadge(
+        MessageSendState.Failed -> SendStateBadge(
             text = "failed · retry",
             color = LocalPocketShellSemantic.current.statusError,
             modifier = Modifier
+                .padding(start = MessageHeadGap)
                 .clickable { onRetrySend(event.id) }
                 .testTag(CONVERSATION_RETRY_TAG_PREFIX + event.id),
         )
@@ -165,7 +148,7 @@ private fun SendStateLabels(
 }
 
 @Composable
-private fun StatusBadge(
+private fun SendStateBadge(
     text: String,
     color: Color,
     modifier: Modifier = Modifier,
@@ -178,21 +161,47 @@ private fun StatusBadge(
         modifier = modifier
             .background(
                 color = color.copy(alpha = 0.10f),
-                shape = PocketShellShapes.small,
+                shape = RoundedCornerShape(MessageBadgeRadius),
             )
             .border(
                 width = 1.dp,
                 color = color.copy(alpha = 0.22f),
-                shape = PocketShellShapes.small,
+                shape = RoundedCornerShape(MessageBadgeRadius),
             )
-            .padding(horizontal = PocketShellSpacing.xs, vertical = ConversationBadgeVerticalPadding),
+            .padding(horizontal = PocketShellSpacing.sm, vertical = MessageBadgeVerticalPadding),
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
 }
 
 @Composable
-private fun ExpandedMessageBody(
+private fun StreamingDot(roleColor: Color) {
+    Text(
+        text = "live",
+        color = roleColor,
+        style = PocketShellType.labelMono,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier
+            .background(
+                color = roleColor.copy(alpha = 0.14f),
+                shape = RoundedCornerShape(MessageBadgeRadius),
+            )
+            .border(
+                width = 1.dp,
+                color = roleColor.copy(alpha = 0.20f),
+                shape = RoundedCornerShape(MessageBadgeRadius),
+            )
+            .padding(horizontal = PocketShellSpacing.sm, vertical = MessageBadgeVerticalPadding),
+        maxLines = 1,
+    )
+}
+
+/**
+ * Full message body with multi-line content, inline code, and word-break.
+ * Per mockup: 14sp, line-height 1.55, color Text, word-break.
+ */
+@Composable
+private fun MessageBody(
     text: String,
     onLinkTap: ((ConversationLink) -> Unit)?,
     modifier: Modifier = Modifier,
@@ -203,6 +212,7 @@ private fun ExpandedMessageBody(
     val targetFontSp = LocalConversationFontSizeSp.current
     val scale = if (baseFontSize.value > 0f) targetFontSp / baseFontSize.value else 1f
     val scaledLineHeight = (baseLineHeight.value * scale).sp
+
     Column(modifier = modifier) {
         CompositionLocalProvider(
             LocalTextStyle provides LocalTextStyle.current.merge(
@@ -220,57 +230,75 @@ private fun ExpandedMessageBody(
     }
 }
 
+/**
+ * Inline tool call card rendered within an assistant message body.
+ * Per mockup: surface background, 1dp border-soft, 10dp radius, flex row
+ * with chevron + tool name + command preview.
+ */
 @Composable
-private fun TimelineBadge(
-    label: String,
-    color: Color,
+internal fun InlineToolCallCard(
+    toolName: String,
+    command: String,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
 ) {
-    Text(
-        text = label,
-        color = color,
-        style = PocketShellType.labelMono,
-        fontWeight = FontWeight.SemiBold,
-        textAlign = TextAlign.Center,
-        modifier = Modifier
-            .width(ConversationBadgeWidth)
-            .background(
-                color = color.copy(alpha = 0.12f),
-                shape = PocketShellShapes.small,
-            )
-            .border(
-                width = 1.dp,
-                color = color.copy(alpha = 0.24f),
-                shape = PocketShellShapes.small,
-            )
-            .padding(horizontal = PocketShellSpacing.xs, vertical = ConversationBadgeVerticalPadding),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
-}
+    val cardModifier = modifier
+        .fillMaxWidth()
+        .background(
+            color = PocketShellColors.Surface,
+            shape = RoundedCornerShape(ToolCallCardRadius),
+        )
+        .border(
+            width = 1.dp,
+            color = PocketShellColors.BorderSoft,
+            shape = RoundedCornerShape(ToolCallCardRadius),
+        )
+        .let { base ->
+            if (onClick != null) base.clickable(onClick = onClick) else base
+        }
+        .padding(horizontal = ToolCallCardHPadding, vertical = ToolCallCardVPadding)
 
-@Composable
-private fun StreamingBadge(roleColor: Color) {
     Row(
-        modifier = Modifier
-            .background(
-                color = roleColor.copy(alpha = 0.14f),
-                shape = PocketShellShapes.small,
-            )
-            .border(
-                width = 1.dp,
-                color = roleColor.copy(alpha = 0.20f),
-                shape = PocketShellShapes.small,
-            )
-            .padding(horizontal = PocketShellSpacing.xs, vertical = ConversationBadgeVerticalPadding),
+        modifier = cardModifier,
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ToolCallCardItemGap),
     ) {
         Text(
-            text = "live",
-            color = roleColor,
+            text = "›",
+            color = PocketShellColors.TextMuted,
             style = PocketShellType.labelMono,
-            fontWeight = FontWeight.Medium,
+            fontSize = 14.sp,
+        )
+        Text(
+            text = toolName,
+            color = PocketShellColors.Accent,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = command,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.labelMono,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * A streaming cursor indicator for use at the end of a streaming message.
+ */
+@Composable
+internal fun StreamingCursor(
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = "▌",
+        color = PocketShellColors.Purple,
+        fontSize = 14.sp,
+        modifier = modifier,
+    )
 }
 
 internal val LocalConversationFontSizeSp: ProvidableCompositionLocal<Float> =
@@ -280,9 +308,22 @@ internal const val CONVERSATION_TIMESTAMP_TAG_PREFIX: String = "conversation-tim
 internal const val CONVERSATION_PENDING_TAG_PREFIX: String = "conversation-pending-"
 internal const val CONVERSATION_RETRY_TAG_PREFIX: String = "conversation-retry-"
 
-private val ConversationTurnVerticalPadding = PocketShellSpacing.xs / 2
-private val ConversationBadgeVerticalPadding = PocketShellSpacing.xs / 2
-private val ConversationTurnMinHeight = PocketShellDensity.rowMinHeight
-private val ConversationBadgeWidth = 82.dp
-private val ConversationTimestampWidth = 84.dp
-private val ConversationBodyIndent = ConversationBadgeWidth + PocketShellSpacing.sm
+// --- Design tokens from mockup CSS ---
+
+private val MessageBlockBottomPadding = 22.dp
+private val MessageHeadBottomPadding = 8.dp
+private val MessageHeadGap = 8.dp
+private val MessageHeadLetterSpacing = 0.8.sp
+private val MessageHeadStyle = TextStyle(
+    fontFamily = FontFamily.SansSerif,
+    fontSize = 10.sp,
+    fontWeight = FontWeight.Bold,
+)
+private val MessageBadgeRadius = 6.dp
+private val MessageBadgeVerticalPadding = 2.dp
+
+// Tool call card tokens (from .tool-call CSS)
+private val ToolCallCardRadius = 10.dp
+private val ToolCallCardHPadding = 12.dp
+private val ToolCallCardVPadding = 10.dp
+private val ToolCallCardItemGap = 8.dp

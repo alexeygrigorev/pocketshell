@@ -1,23 +1,29 @@
 package com.pocketshell.uikit.render
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
@@ -137,95 +143,209 @@ class DesignRenders {
     }
 
     /**
-     * Issue #561: fast PNG target for the dense Conversation timeline before
-     * spending emulator time. This fixture mirrors the production row grammar:
-     * actor/tool badge, one-line truncated preview, and right-aligned timestamp.
+     * Issue #561: fast PNG target for the chat-style Conversation tab.
+     * This fixture mirrors the mockup (docs/mockups/conversation.html):
+     * full message blocks with role label header, multi-line body,
+     * inline tool call cards, and right-aligned timestamps.
      */
     @Test
     fun conversationTimeline() = render("conversation-timeline") {
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
         ) {
-            ConversationTimelineRenderRow(
-                badge = "USER",
-                badgeColor = PocketShellColors.Accent,
-                preview = "check the deploy log and tell me what failed in the last run",
-                timestamp = "09:05",
+            // USER message block
+            ConversationChatBlock(
+                roleLabel = "USER",
+                roleColor = PocketShellColors.Accent,
+                timeLabel = "· 4m ago",
+                bodyContent = {
+                    ConversationChatBody(
+                        text = "check the deploy log and tell me what failed in the last run",
+                    )
+                },
             )
-            ConversationTimelineRenderRow(
-                badge = "ASSISTANT",
-                badgeColor = PocketShellColors.Purple,
-                preview = "I'll check the deploy logs and compare the failing revision with the last green run.",
-                timestamp = "09:07",
+
+            // Spacer between message blocks (22dp per mockup .msg { margin-bottom })
+            Spacer(modifier = Modifier.height(22.dp))
+
+            // ASSISTANT message block with inline tool call card
+            ConversationChatBlock(
+                roleLabel = "ASSISTANT",
+                roleColor = PocketShellColors.Purple,
+                timeLabel = "· 3m ago",
+                bodyContent = {
+                    Text(
+                        text = "I'll check the deploy logs.",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        lineHeight = (14.sp * 1.55f),
+                        fontFamily = FontFamily.SansSerif,
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    ConversationToolCallCard(
+                        toolName = "Bash",
+                        command = "kubectl logs -n prod deploy-7d9",
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "The deploy failed because the database migration timed out at step 4. The query ALTER TABLE users ADD COLUMN... took longer than the 30s limit.",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        lineHeight = (14.sp * 1.55f),
+                        fontFamily = FontFamily.SansSerif,
+                    )
+                },
             )
-            ConversationTimelineRenderRow(
-                badge = "TOOL",
-                badgeColor = PocketShellColors.TextSecondary,
-                preview = "Bash  kubectl logs -n prod deploy/api --tail=120",
-                timestamp = "09:07",
-                highlighted = true,
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            // Second USER message
+            ConversationChatBlock(
+                roleLabel = "USER",
+                roleColor = PocketShellColors.Accent,
+                timeLabel = "· 1m ago",
+                bodyContent = {
+                    ConversationChatBody(
+                        text = "show me the migration",
+                    )
+                },
             )
-            ConversationTimelineRenderRow(
-                badge = "CLAUDE",
-                badgeColor = PocketShellColors.TextSecondary,
-                preview = "Claude resuming /loop wakeup (deploy watch)",
-                timestamp = "09:08",
-            )
-            ConversationTimelineRenderRow(
-                badge = "ASSISTANT",
-                badgeColor = PocketShellColors.Purple,
-                preview = "The deploy failed because the database migration timed out at step 4.",
-                timestamp = "09:09",
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            // Second ASSISTANT with streaming indicator
+            ConversationChatBlock(
+                roleLabel = "ASSISTANT",
+                roleColor = PocketShellColors.Purple,
+                timeLabel = "· streaming",
+                bodyContent = {
+                    Text(
+                        text = "Here's the migration that timed out:",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        lineHeight = (14.sp * 1.55f),
+                        fontFamily = FontFamily.SansSerif,
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    ConversationToolCallCard(
+                        toolName = "Read",
+                        command = "migrations/0042_add_users.sql",
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "The migration adds three new columns to a 50M-row users table without batching",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        lineHeight = (14.sp * 1.55f),
+                        fontFamily = FontFamily.SansSerif,
+                    )
+                    Text(
+                        text = "▌",
+                        color = PocketShellColors.Purple,
+                        fontSize = 14.sp,
+                    )
+                },
             )
         }
     }
 
+    /**
+     * Chat-style message block: role header + body content.
+     * Mirrors the .msg / .msg-head / .msg-body structure from conversation.html.
+     */
     @Composable
-    private fun ConversationTimelineRenderRow(
-        badge: String,
-        badgeColor: Color,
-        preview: String,
-        timestamp: String,
-        highlighted: Boolean = false,
+    private fun ConversationChatBlock(
+        roleLabel: String,
+        roleColor: Color,
+        timeLabel: String,
+        bodyContent: @Composable () -> Unit,
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // .msg-head: role label + time
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = roleLabel,
+                    color = roleColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.SansSerif,
+                    letterSpacing = 0.8.sp,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = timeLabel,
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            // .msg-body
+            bodyContent()
+        }
+    }
+
+    /** Simple body text block matching .msg-body from the mockup. */
+    @Composable
+    private fun ConversationChatBody(
+        text: String,
+    ) {
+        Text(
+            text = text,
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            lineHeight = (14.sp * 1.55f),
+            fontFamily = FontFamily.SansSerif,
+        )
+    }
+
+    /** Inline tool call card matching .tool-call from the mockup. */
+    @Composable
+    private fun ConversationToolCallCard(
+        toolName: String,
+        command: String,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 2.dp),
+                .background(
+                    color = PocketShellColors.Surface,
+                    shape = RoundedCornerShape(10.dp),
+                )
+                .border(
+                    width = 1.dp,
+                    color = PocketShellColors.BorderSoft,
+                    shape = RoundedCornerShape(10.dp),
+                )
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = badge,
-                color = badgeColor,
-                style = PocketShellType.labelMono,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .width(82.dp)
-                    .background(
-                        color = badgeColor.copy(alpha = 0.12f),
-                        shape = RoundedCornerShape(3.dp),
-                    )
-                    .padding(horizontal = 4.dp, vertical = 2.dp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = preview,
-                color = if (highlighted) PocketShellColors.Text else PocketShellColors.TextSecondary,
-                style = if (highlighted) PocketShellType.bodyMono else PocketShellType.bodyDense,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = timestamp,
+                text = "›",
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-                textAlign = TextAlign.End,
-                modifier = Modifier.width(84.dp),
+                fontSize = 14.sp,
+            )
+            Text(
+                text = toolName,
+                color = PocketShellColors.Accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = command,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

@@ -55,6 +55,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -649,7 +651,6 @@ internal fun ConversationPane(
     }
     val filteredEvents = filteredConversation.events
     val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
-    val expandedMessages = remember { mutableStateOf(setOf<String>()) }
     // Issue #176: SystemNote expand state — sticky for the pane lifetime.
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
     val runningToolIds = remember(visibleEvents, toolResultPairing) {
@@ -677,7 +678,7 @@ internal fun ConversationPane(
     Column(
         modifier = modifier
             .background(color = PocketShellColors.Background)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = ChatPaneHPadding, vertical = ChatPaneVPadding),
     ) {
         OutlinedTextField(
             value = effectiveQuery,
@@ -693,18 +694,21 @@ internal fun ConversationPane(
                 .fillMaxWidth()
                 .weight(1f),
         ) {
+            // Issue #561: chat-style conversation scroll area.
+            // Padding at bottom for the bottom bar clearance (72dp per mockup .conv padding-bottom).
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                contentPadding = PaddingValues(start = 0.dp, end = 0.dp, top = 8.dp, bottom = 72.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 if (filteredEvents.isEmpty()) {
                     item {
                         Text(
                             text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
                             color = PocketShellColors.TextSecondary,
-                            fontSize = 13.sp,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(top = 16.dp),
                         )
                     }
                 }
@@ -715,16 +719,6 @@ internal fun ConversationPane(
                         toolResultPairing = toolResultPairing,
                         isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
                             event.id in filteredConversation.searchExpandedToolCallIds,
-                        isMessageExpanded = expandedMessages.value.contains(event.id),
-                        onToggleMessageExpand = { id ->
-                            val current = expandedMessages.value
-                            ConversationDiagnostics.recordRowToggle(
-                                mode = "raw_ssh",
-                                event = event,
-                                expanded = !current.contains(id),
-                            )
-                            expandedMessages.value = if (current.contains(id)) current - id else current + id
-                        },
                         onToggleExpand = { id ->
                             val current = expandedToolCalls.value
                             ConversationDiagnostics.recordRowToggle(
@@ -913,8 +907,6 @@ private fun ConversationEventRow(
     runningToolIds: Set<String>,
     toolResultPairing: ToolResultPairing,
     isExplicitlyExpanded: Boolean,
-    isMessageExpanded: Boolean,
-    onToggleMessageExpand: (String) -> Unit,
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
@@ -924,12 +916,12 @@ private fun ConversationEventRow(
     when (event) {
         is ConversationEvent.Message -> ConversationMessageRow(
             event = event,
-            isExpanded = isMessageExpanded,
-            onToggleExpand = { onToggleMessageExpand(event.id) },
             onRetryFailedSend = onRetryFailedSend,
             onLinkTap = onLinkTap,
         )
-        is ConversationEvent.ToolCall -> ConversationToolCallRow(
+        // Issue #561: tool calls render as inline cards (not standalone rows).
+        // They appear as chat-style tool call cards with chevron + name + command.
+        is ConversationEvent.ToolCall -> ConversationToolCallChatCard(
             toolCall = event,
             result = toolResultPairing.resultsByCallId[event.id],
             isRunning = event.id in runningToolIds,
@@ -952,8 +944,6 @@ private fun ConversationEventRow(
 @Composable
 private fun ConversationMessageRow(
     event: ConversationEvent.Message,
-    isExpanded: Boolean,
-    onToggleExpand: () -> Unit,
     onRetryFailedSend: (String) -> Unit = {},
     onLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
@@ -961,13 +951,17 @@ private fun ConversationMessageRow(
         event = event,
         onRetrySend = onRetryFailedSend,
         onLinkTap = onLinkTap,
-        isExpanded = isExpanded,
-        onToggleExpanded = onToggleExpand,
     )
 }
 
+/**
+ * Issue #561: Chat-style tool call card. Renders as an inline card within
+ * the conversation transcript (not a dense timeline row). The card shows
+ * the tool name, command preview, and an expand chevron. When expanded,
+ * shows input/output sections.
+ */
 @Composable
-private fun ConversationToolCallRow(
+private fun ConversationToolCallChatCard(
     toolCall: ConversationEvent.ToolCall,
     result: ConversationEvent.ToolResult?,
     isRunning: Boolean,
@@ -987,80 +981,61 @@ private fun ConversationToolCallRow(
         result != null -> PocketShellColors.Green
         else -> PocketShellColors.TextMuted
     }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onToggle)
-            .padding(vertical = 2.dp)
+            .padding(bottom = ToolCallChatCardBottomMargin)
             .testTag(SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX + toolCall.id),
     ) {
-        val timestamp = remember(toolCall.atMillis) { toolCall.timelineTimestamp() }
+        // Inline tool call card (matching .tool-call from mockup)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    color = PocketShellColors.Surface,
+                    shape = RoundedCornerShape(ToolCallCardRadius),
+                )
+                .border(
+                    width = 1.dp,
+                    color = PocketShellColors.BorderSoft,
+                    shape = RoundedCornerShape(ToolCallCardRadius),
+                )
+                .clickable(onClick = onToggle)
+                .padding(horizontal = ToolCallCardHPadding, vertical = ToolCallCardVPadding),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ToolCallCardItemGap),
         ) {
-            TimelineBadgeText(
-                label = "TOOL",
-                color = PocketShellColors.TextSecondary,
+            Text(
+                text = if (expanded) "v" else "›",
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+                fontSize = 14.sp,
             )
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp)
-                    .background(
-                        color = PocketShellColors.Surface,
-                        shape = RoundedCornerShape(4.dp),
-                    )
-                    .padding(horizontal = 7.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = if (expanded) "v" else "›",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = toolCall.name,
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.labelMono,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = summary,
-                    color = PocketShellColors.Text,
-                    style = PocketShellType.bodyMono,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (statusGlyph.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = statusGlyph, color = statusColor, style = PocketShellType.labelMono)
-                }
-            }
-            if (timestamp != null) {
-                Text(
-                    text = timestamp,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                    textAlign = TextAlign.End,
-                    modifier = Modifier
-                        .width(84.dp)
-                        .padding(start = 6.dp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Text(
+                text = toolCall.name,
+                color = PocketShellColors.Accent,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = summary,
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.labelMono,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (statusGlyph.isNotEmpty()) {
+                Text(text = statusGlyph, color = statusColor, style = PocketShellType.labelMono)
             }
         }
+        // Expanded detail sections
         if (expanded) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
+                    .padding(top = 4.dp, start = 0.dp, end = 0.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 ToolCallSection(
@@ -1081,12 +1056,9 @@ private fun ConversationToolCallRow(
 }
 
 /**
- * Issue #176: SessionScreen mirror of the tmux variant. Renders an
- * XML-tagged [ConversationEvent.SystemNote] as a muted collapsible row
- * so Claude Code's `<system-reminder>`, `<command-name>`,
- * `<local-command-stdout>`, … blocks no longer compete for attention
- * with user/assistant prose. See [ConversationSystemNoteRow] in
- * `TmuxSessionScreen.kt` for the full design rationale.
+ * Issue #176 / #561: Chat-style system note row. Renders as a muted collapsible
+ * block with a chat-style header (role label + time) and expandable body,
+ * matching the conversation mockup paradigm instead of the old dense timeline.
  */
 @Composable
 private fun ConversationSystemNoteRow(
@@ -1096,109 +1068,98 @@ private fun ConversationSystemNoteRow(
 ) {
     val actorLabel = remember(note.tag) { note.timelineActorLabel() }
     val preview = remember(note.tag, note.content) { note.timelinePreview() }
-    val chevron = if (isExpanded) "v" else "›"
+    val timestamp = remember(note.atMillis) { note.timelineTimestamp() }
+    val timeLabel = timestamp?.let { "· $it" }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onToggle)
-            .padding(vertical = 2.dp)
+            .padding(bottom = SystemNoteBlockBottomPadding)
             .testTag(SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id),
     ) {
-        val timestamp = remember(note.atMillis) { note.timelineTimestamp() }
+        // Chat-style header matching message blocks
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = MessageHeadBottomPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TimelineBadgeText(
-                label = actorLabel,
-                color = PocketShellColors.TextSecondary,
+            Text(
+                text = actorLabel,
+                color = PocketShellColors.TextMuted,
+                style = SystemNoteHeadStyle,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = MessageHeadLetterSpacing,
             )
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Spacer(modifier = Modifier.weight(1f))
+            if (timeLabel != null) {
                 Text(
-                    text = preview,
+                    text = timeLabel,
                     color = PocketShellColors.TextMuted,
                     style = PocketShellType.labelMono,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = chevron,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-            }
-            if (timestamp != null) {
-                Text(
-                    text = timestamp,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
                     textAlign = TextAlign.End,
-                    modifier = Modifier
-                        .width(84.dp)
-                        .padding(start = 6.dp),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
+        // Preview / expanded body
         if (isExpanded && note.content.isNotEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp, start = 90.dp, end = 4.dp),
-            ) {
-                ToolCallSection(
-                    label = "content",
-                    body = note.content,
-                    copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + note.id + ":content",
-                )
-            }
+            ToolCallSection(
+                label = "content",
+                body = note.content,
+                copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + note.id + ":content",
+            )
+        } else {
+            Text(
+                text = preview,
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.bodyDense,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
 
+/**
+ * Issue #561: Chat-style standalone tool result row (unpaired results only).
+ * Renders as a muted card matching the mockup paradigm.
+ */
 @Composable
 private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
+    val timestamp = remember(result.atMillis) { result.timelineTimestamp() }
+    val timeLabel = timestamp?.let { "· $it" }
+    val labelColor = if (result.isError) PocketShellColors.Red else PocketShellColors.TextMuted
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 2.dp),
+            .padding(bottom = ToolCallChatCardBottomMargin),
     ) {
-        val timestamp = remember(result.atMillis) { result.timelineTimestamp() }
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = MessageHeadBottomPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TimelineBadgeText(
-                label = "TOOL",
-                color = if (result.isError) PocketShellColors.Red else PocketShellColors.TextSecondary,
-            )
             Text(
-                text = if (result.isError) "result error" else "result",
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                text = if (result.isError) "ERROR" else "RESULT",
+                color = labelColor,
+                style = SystemNoteHeadStyle,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = MessageHeadLetterSpacing,
             )
-            if (timestamp != null) {
+            Spacer(modifier = Modifier.weight(1f))
+            if (timeLabel != null) {
                 Text(
-                    text = timestamp,
+                    text = timeLabel,
                     color = PocketShellColors.TextMuted,
                     style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
                     textAlign = TextAlign.End,
-                    modifier = Modifier
-                        .width(84.dp)
-                        .padding(start = 6.dp),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1215,29 +1176,6 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
 }
 
 @Composable
-private fun TimelineBadgeText(
-    label: String,
-    color: Color,
-) {
-    Text(
-        text = label,
-        color = color,
-        style = PocketShellType.labelMono,
-        fontWeight = FontWeight.SemiBold,
-        textAlign = TextAlign.Center,
-        modifier = Modifier
-            .width(82.dp)
-            .background(
-                color = color.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(3.dp),
-            )
-            .padding(horizontal = 4.dp, vertical = 2.dp),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
-}
-
-@Composable
 private fun ToolCallSection(
     label: String,
     body: String,
@@ -1249,6 +1187,31 @@ private fun ToolCallSection(
         copyTestTag = copyTestTag,
     )
 }
+
+// --- Issue #561 design tokens from conversation.html mockup ---
+
+/** .conv { padding: 16px 18px 72px } */
+private val ChatPaneHPadding = 18.dp
+private val ChatPaneVPadding = 8.dp
+
+/** .msg { margin-bottom: 22px } */
+private val MessageHeadBottomPadding = 8.dp
+private val MessageHeadLetterSpacing = 0.8.sp
+private val SystemNoteBlockBottomPadding = 22.dp
+
+/** .tool-call card tokens */
+private val ToolCallCardRadius = 10.dp
+private val ToolCallCardHPadding = 12.dp
+private val ToolCallCardVPadding = 10.dp
+private val ToolCallCardItemGap = 8.dp
+private val ToolCallChatCardBottomMargin = 22.dp
+
+/** System note header style (10sp uppercase matching .msg-head) */
+private val SystemNoteHeadStyle = TextStyle(
+    fontFamily = FontFamily.SansSerif,
+    fontSize = 10.sp,
+    fontWeight = FontWeight.Bold,
+)
 
 @Composable
 private fun StatusLine(text: String) {

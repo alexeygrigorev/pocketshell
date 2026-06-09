@@ -339,6 +339,8 @@ public fun TmuxSessionScreen(
     }
 
     val panes by viewModel.panes.collectAsState()
+    // Issue #626: unified pane list for the cross-session pager.
+    val unifiedPanes by viewModel.unifiedPanes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
     // Issue #487: active-forwarding state for the host this session belongs
     // to. `remember(hostId)` re-subscribes if the screen is reused for a
@@ -395,7 +397,7 @@ public fun TmuxSessionScreen(
         )
     }
 
-    val pagerState = rememberPagerState(pageCount = { panes.size })
+    val pagerState = rememberPagerState(pageCount = { unifiedPanes.size })
 
     val density = LocalDensity.current
     val imeBottomPx = WindowInsets.ime.getBottom(density)
@@ -423,7 +425,24 @@ public fun TmuxSessionScreen(
     // chrome-while-typing behaviour and matches issue #184's Layer 2.
     val chromeCompressed = isImeVisible
 
-    val currentPane = panes.getOrNull(pagerState.currentPage)
+    // Issue #626: the unified pager shows panes from all sessions.
+    // currentUnifiedPane is what the pager is actually displaying.
+    val currentUnifiedPane = unifiedPanes.getOrNull(pagerState.currentPage)
+    // Issue #626: determine whether the current unified pane belongs to
+    // the active session or a cached session.
+    val isActiveSessionPane = currentUnifiedPane?.let { viewModel.isActiveSessionPane(it) } ?: true
+    // The active-session pane is used for agent conversations, key bar
+    // input, etc. When viewing a cached-session pane, these features are
+    // disabled until the warm switch completes.
+    val currentPane = if (isActiveSessionPane) currentUnifiedPane else null
+    // Keep a reference to the actual active session pane for cases that
+    // need it regardless of what the pager is showing (e.g. session switch).
+    val activeSessionPane = panes.firstOrNull()
+    // Issue #626: derive session name for the unified pane, used to detect
+    // cross-session swipes.
+    val currentUnifiedPaneSessionName = currentUnifiedPane?.let {
+        viewModel.sessionNameForUnifiedPane(it)
+    }
     val currentAgentConversation = currentPane?.paneId?.let { agentConversations[it] }
     val currentWindowId = currentPane?.windowId
     val windows = remember(panes) { panes.toWindowSummaries() }
@@ -432,7 +451,9 @@ public fun TmuxSessionScreen(
     // Issue #463: the current session's project path (the active pane's
     // working directory) and the short leaf label shown on the header crumb.
     // Null cwd → no crumb (we don't know the project to scope siblings to).
-    val projectPath = currentPane?.cwd?.takeIf { it.isNotBlank() }
+    // Issue #626: fall back to the unified pane's cwd when the active pane
+    // is null (viewing a cached-session pane).
+    val projectPath = (currentPane ?: currentUnifiedPane)?.cwd?.takeIf { it.isNotBlank() }
     val projectLabel = remember(projectPath) { projectPath?.let(::projectCrumbLabel) }
     val haptics = LocalHapticFeedback.current
     val verticalSwipeThresholdPx = with(LocalDensity.current) { VerticalSwipeThreshold.toPx() }
@@ -663,20 +684,22 @@ public fun TmuxSessionScreen(
 
     fun selectWindow(window: WindowSummary) {
         viewModel.selectWindow(window.windowId)
-        val page = panes.indexOfFirst { it.windowId == window.windowId }
+        // Issue #626: search the unified pane list for the page index.
+        val page = unifiedPanes.indexOfFirst { it.windowId == window.windowId }
         if (page >= 0) {
             scope.launch { pagerState.animateScrollToPage(page) }
         }
     }
 
     var consumedInitialWindowTarget by remember(sessionName, initialWindowIndex) { mutableStateOf(false) }
-    LaunchedEffect(panes, initialWindowIndex, consumedInitialWindowTarget) {
+    LaunchedEffect(unifiedPanes, initialWindowIndex, consumedInitialWindowTarget) {
         val requestedIndex = initialWindowIndex ?: return@LaunchedEffect
         if (consumedInitialWindowTarget) return@LaunchedEffect
-        val targetPane = panes.firstOrNull { it.windowIndex == requestedIndex } ?: return@LaunchedEffect
+        val targetPane = unifiedPanes.firstOrNull { it.windowIndex == requestedIndex } ?: return@LaunchedEffect
         consumedInitialWindowTarget = true
         viewModel.selectWindow(targetPane.windowId)
-        val page = panes.indexOfFirst { it.windowId == targetPane.windowId }
+        // Issue #626: search the unified pane list.
+        val page = unifiedPanes.indexOfFirst { it.windowId == targetPane.windowId }
         if (page >= 0) {
             pagerState.scrollToPage(page)
         }
@@ -685,12 +708,30 @@ public fun TmuxSessionScreen(
     // Issue #625: auto-switch to a newly created tmux window.
     // The ViewModel emits the new window's ID after receiving tmux's
     // %window-add notification and reconciling the pane list.
+    // Issue #626: look up the page in the unified pane list since the
+    // pager now spans all sessions.
     LaunchedEffect(Unit) {
         viewModel.windowSwitchRequest.collect { windowId ->
-            val page = panes.indexOfFirst { it.windowId == windowId }
+            val page = unifiedPanes.indexOfFirst { it.windowId == windowId }
             if (page >= 0) {
                 pagerState.animateScrollToPage(page)
             }
+        }
+    }
+
+    // Issue #626: when the unified pager settles on a pane from a
+    // different session, trigger the warm switch via onReplaceTmuxSession.
+    LaunchedEffect(Unit) {
+        viewModel.sessionSwitchRequest.collect { targetSessionName ->
+            onReplaceTmuxSession(targetSessionName)
+        }
+    }
+
+    // Issue #626: detect when the pager settles on a non-active session's
+    // pane and notify the ViewModel so it can emit sessionSwitchRequest.
+    LaunchedEffect(unifiedPanes, sessionName) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            viewModel.onUnifiedPageSettled(page)
         }
     }
 
@@ -1144,15 +1185,27 @@ public fun TmuxSessionScreen(
                             }
                         },
                     )
-                } else if (panes.isEmpty()) {
+                } else if (unifiedPanes.isEmpty()) {
                     EmptyPanesPlaceholder()
                 } else {
                     HorizontalPager(
                         state = pagerState,
-                        key = { pageIndex -> panes[pageIndex].paneId },
+                        key = { pageIndex -> unifiedPanes[pageIndex].paneId },
                         modifier = Modifier.fillMaxSize(),
                     ) { pageIndex ->
-                        val pane = panes[pageIndex]
+                        val pane = unifiedPanes[pageIndex]
+                        // Issue #626: compute session boundary per-page.
+                        val paneSession = viewModel.sessionNameForUnifiedPane(pane)
+                        val prevSession = unifiedPanes.getOrNull(pageIndex - 1)
+                            ?.let { viewModel.sessionNameForUnifiedPane(it) }
+                        val isBoundary = paneSession != null &&
+                            paneSession != prevSession && paneSession != sessionName
+                        // Issue #626: session boundary marker above the
+                        // terminal surface for the first pane of a different
+                        // session.
+                        if (isBoundary && paneSession != null) {
+                            SessionBoundaryDivider(sessionName = paneSession)
+                        }
                         if (pane.surfaceError) {
                             // Issue #423: the local terminal surface kept
                             // failing (IME/resize/render recovery storm) but
@@ -1293,7 +1346,9 @@ public fun TmuxSessionScreen(
             // We only render when there's >1 pane; the indicator is
             // redundant in the single-pane case (which is the common one
             // for a freshly-attached session).
-            if (panes.size > 1) {
+            // Issue #626: use unifiedPanes for the dot indicator count
+            // since the pager now spans all sessions.
+            if (unifiedPanes.size > 1) {
                 Box(
                     modifier = Modifier.verticalSwipeInput(
                         thresholdPx = verticalSwipeThresholdPx,
@@ -1306,7 +1361,7 @@ public fun TmuxSessionScreen(
                     ),
                 ) {
                     PageIndicator(
-                        pageCount = panes.size,
+                        pageCount = unifiedPanes.size,
                         currentPage = pagerState.currentPage,
                     )
                 }
@@ -2979,6 +3034,32 @@ private fun EmptyPanesPlaceholder() {
     ) {
         Text(
             text = "waiting for tmux panes…",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
+        )
+    }
+}
+
+/**
+ * Issue #626: thin horizontal divider + session name label shown above the
+ * first pane that belongs to a different tmux session than the active one.
+ * Provides a visual boundary marker in the unified cross-session pager.
+ */
+@Composable
+private fun SessionBoundaryDivider(sessionName: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        HorizontalDivider(
+            color = PocketShellColors.Border,
+            thickness = 1.dp,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+        Text(
+            text = sessionName,
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyDense,
         )

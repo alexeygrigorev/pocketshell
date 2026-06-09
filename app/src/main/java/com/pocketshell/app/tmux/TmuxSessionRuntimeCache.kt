@@ -99,6 +99,16 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         runtimes.keys.toList()
     }
 
+    /**
+     * Issue #626: return cached runtimes for a given host without removing them.
+     * Used to build the unified pane list that spans all sessions.
+     */
+    internal fun cachedRuntimesForHost(hostId: Long): List<CachedTmuxRuntime> = synchronized(this) {
+        runtimes.entries
+            .filter { it.key.hostId == hostId }
+            .map { it.value.runtime }
+    }
+
     internal fun remove(key: TmuxRuntimeKey): CachedTmuxRuntime? = synchronized(this) {
         runtimes.remove(key)?.runtime
     }

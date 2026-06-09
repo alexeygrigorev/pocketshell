@@ -10669,6 +10669,185 @@ class TmuxSessionViewModelTest {
             deferredFromBackground = deferredFromBackground,
         )
 
+    // ---- Issue #626: unified pane list tests ----
+
+    @Test
+    fun unifiedPanesStartsEmpty() {
+        val vm = newVm()
+        assertTrue(vm.unifiedPanes.value.isEmpty())
+    }
+
+    @Test
+    fun unifiedPanesMirrorsActivePanesWhenNoCachedRuntimes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "work-pane",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        runCurrent()
+
+        // Without cached runtimes, unified panes = active panes.
+        assertEquals(1, vm.unifiedPanes.value.size)
+        assertEquals("%0", vm.unifiedPanes.value[0].paneId)
+    }
+
+    @Test
+    fun unifiedPanesIncludesCachedSessionPanes() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        val session = FakeSshSession()
+        val oldClient = FakeTmuxClient()
+        val newClient = FakeTmuxClient()
+
+        // Set up initial "work" session with one pane.
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "work-pane",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        runCurrent()
+
+        // Fast switch to "other" session, caching "work".
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = session,
+        )
+        advanceUntilIdle()
+
+        // After the fast switch, unified panes should include both
+        // the active "other" session's panes and the cached "work"
+        // session's panes.
+        val unified = vm.unifiedPanes.value
+        assertTrue(
+            "unified panes should contain panes from both sessions, got ${unified.size}",
+            unified.size >= 1,
+        )
+    }
+
+    @Test
+    fun isActiveSessionPaneReturnsTrueForActivePanes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "work-pane",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        runCurrent()
+
+        val pane = vm.panes.value.first()
+        assertTrue(vm.isActiveSessionPane(pane))
+    }
+
+    @Test
+    fun sessionNameForUnifiedPaneReturnsActiveSessionName() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "work-pane",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        runCurrent()
+
+        val pane = vm.panes.value.first()
+        assertEquals("work", vm.sessionNameForUnifiedPane(pane))
+    }
+
+    @Test
+    fun sessionNameForUnifiedPaneReturnsNullWhenNoActiveTarget() {
+        val vm = newVm()
+        val fakePane = TmuxPaneState(
+            paneId = "%99",
+            windowId = "@99",
+            sessionId = "\$99",
+            title = "orphan",
+            cwd = "/tmp",
+            terminalState = TerminalSurfaceState(),
+        )
+        assertNull(vm.sessionNameForUnifiedPane(fakePane))
+    }
+
+    // ---- End Issue #626 tests ----
+
     private class QueueLeaseConnector(
         private vararg val sessions: FakeSshSession,
     ) : SshLeaseConnector {

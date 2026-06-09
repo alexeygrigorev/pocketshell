@@ -249,6 +249,48 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public val panes: StateFlow<List<TmuxPaneState>> = _panes.asStateFlow()
 
+    /**
+     * Issue #626: unified pane list that spans all open tmux sessions on the
+     * same host. Combines the active session's [_panes] with panes from
+     * cached (warm-switched) sessions in [runtimeCache], ordered as:
+     * active-session windows, then cached-session-A windows, cached-session-B
+     * windows, etc. The Screen uses this for a single HorizontalPager so the
+     * user swipes seamlessly across sessions. Panes from non-active sessions
+     * carry their session name in [TmuxPaneState.sessionId] so the pager can
+     * detect session boundaries and trigger a warm switch when the user
+     * settles on a different session's pane.
+     */
+    private val _unifiedPanes: MutableStateFlow<List<TmuxPaneState>> =
+        MutableStateFlow(emptyList())
+    public val unifiedPanes: StateFlow<List<TmuxPaneState>> = _unifiedPanes.asStateFlow()
+
+    /**
+     * Issue #626: one-shot signal emitted when the unified pager settles on
+     * a pane belonging to a different tmux session. The Screen collects this
+     * and calls `onReplaceTmuxSession` to trigger the warm switch.
+     */
+    private val _sessionSwitchRequest: MutableSharedFlow<String> =
+        MutableSharedFlow(extraBufferCapacity = 4)
+    public val sessionSwitchRequest: SharedFlow<String> =
+        _sessionSwitchRequest.asSharedFlow()
+
+    /**
+     * Issue #626: called by the Screen when the unified pager settles on a
+     * page. If the pane belongs to a different session, emit a
+     * [sessionSwitchRequest] so the Screen triggers a warm switch.
+     */
+    public fun onUnifiedPageSettled(pageIndex: Int) {
+        val pane = _unifiedPanes.value.getOrNull(pageIndex) ?: return
+        val active = activeTarget ?: return
+        // Check if this pane belongs to a different session
+        val paneSessionName = sessionNameForUnifiedPane(pane)
+        if (paneSessionName != null && paneSessionName != active.sessionName) {
+            viewModelScope.launch {
+                _sessionSwitchRequest.emit(paneSessionName)
+            }
+        }
+    }
+
     private val _agentConversations: MutableStateFlow<Map<String, AgentConversationUiState>> =
         MutableStateFlow(emptyMap())
 
@@ -766,6 +808,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // [Connected].
         if (!willFastSwitch) {
             _panes.value = emptyList()
+            rebuildUnifiedPanes()
         }
         if (willFastSwitch) {
             recordWarmSwitchMilestone(
@@ -825,6 +868,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
                     if (previousFrame.isNotEmpty()) {
                         _panes.value = previousFrame
+                        rebuildUnifiedPanes()
                     }
                     runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
                 } else {
@@ -1633,6 +1677,7 @@ public class TmuxSessionViewModel @Inject constructor(
             client = null
             paneRuntime = null
             closeCachedRuntimesAsync(runtimeCache.put(runtime))
+            rebuildUnifiedPanes()
             TmuxSessionLatencyTelemetry.record(
                 name = "runtime_prewarm_ready",
                 durationMs = 1L,
@@ -2215,6 +2260,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // dismissed/forwarded.
         _detectedPort.value = null
         _panes.value = emptyList()
+        rebuildUnifiedPanes()
         unregisterCurrentClient()
         activeTarget = null
         activeAttachMilestone = null
@@ -2300,6 +2346,7 @@ public class TmuxSessionViewModel @Inject constructor(
         bindClientObservers(runtime.client)
         rebindRestoredRuntimePaneJobsIfNeeded(runtime.client, runtime.panes)
         _panes.value = runtime.panes
+        rebuildUnifiedPanes()
         restartAgentConversationsForRestoredRuntime(runtime)
         clientRegistration = activeTmuxClients.register(
             hostId = target.hostId,
@@ -2690,6 +2737,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     target.user,
                 )
                 _panes.value = emptyList()
+                rebuildUnifiedPanes()
                 runConnect(target, attempt, trigger)
                 return
             }
@@ -4401,6 +4449,7 @@ public class TmuxSessionViewModel @Inject constructor(
         closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
         if (previousFrame.isNotEmpty()) {
             _panes.value = previousFrame
+            rebuildUnifiedPanes()
         }
         sessionRef = session
         // Inline a simplified runFastSessionSwitch: we cannot call the
@@ -4902,6 +4951,7 @@ public class TmuxSessionViewModel @Inject constructor(
         filterAgentConversationsToPaneIds(nextById.keys)
         paneRows.putAll(nextById)
         _panes.value = nextById.values.toList()
+        rebuildUnifiedPanes()
         return newRows
     }
 
@@ -6989,6 +7039,7 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.value = _panes.value.map { pane ->
             if (pane.paneId == paneId) updated else pane
         }
+        rebuildUnifiedPanes()
     }
 
     /**
@@ -7946,6 +7997,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         paneRows.clear()
         _panes.value = emptyList()
+        rebuildUnifiedPanes()
         // Issue #215: ask tmux to detach this `-CC` control client before
         // we drop the SSH transport. Without the detach round-trip,
         // tmux keeps the client listed in `tmux list-clients` until it
@@ -8057,6 +8109,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         paneRows.clear()
         _panes.value = emptyList()
+        rebuildUnifiedPanes()
         // Close the tmux -CC channel. This tears down only the SSH
         // shell channel inside the live [SshSession] — the session
         // itself stays open for the next [TmuxClient].
@@ -8189,6 +8242,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         paneRows.clear()
         _panes.value = emptyList()
+        rebuildUnifiedPanes()
         // Issue #215: run `detach-client` synchronously over an IO
         // worker before the local close. The `runBlocking` hop matches
         // [RealSshSession.close]'s pattern for non-suspending lifecycle
@@ -8235,6 +8289,70 @@ public class TmuxSessionViewModel @Inject constructor(
         remoteRows = 0
         resetControlClientSizeForAttach()
     }
+
+    // ---- Issue #626: unified pane list helpers ----
+
+    /**
+     * Rebuild the unified pane list from the active session's panes plus
+     * any cached (warm-switched) session panes on the same host.
+     * Called whenever [_panes] changes or when a runtime is cached/evicted.
+     */
+    private fun rebuildUnifiedPanes() {
+        val activePanes = _panes.value
+        val hostId = activeTarget?.hostId ?: run {
+            _unifiedPanes.value = activePanes
+            return
+        }
+        val cached = runtimeCache.cachedRuntimesForHost(hostId)
+        if (cached.isEmpty()) {
+            _unifiedPanes.value = activePanes
+            return
+        }
+        // Build the unified list: active session first, then cached sessions
+        // in cache-insertion order (most recent last, which matches the LRU
+        // order of the LinkedHashMap backing the cache).
+        val allPanes = mutableListOf<TmuxPaneState>()
+        allPanes.addAll(activePanes)
+        for (runtime in cached) {
+            allPanes.addAll(runtime.panes)
+        }
+        _unifiedPanes.value = allPanes
+    }
+
+    /**
+     * Derive the tmux session name for a pane in the unified list.
+     * For the active session's panes, returns [activeTarget.sessionName].
+     * For cached-session panes, looks up the cache entry by matching the
+     * pane's sessionId against cached runtime keys.
+     */
+    internal fun sessionNameForUnifiedPane(pane: TmuxPaneState): String? {
+        val active = activeTarget ?: return null
+        // Active session panes all share the same sessionId from tmux
+        if (_panes.value.any { it.paneId == pane.paneId }) {
+            return active.sessionName
+        }
+        // Look up cached runtime by matching pane sessionId
+        return cachedSessionNameForPane(pane)
+    }
+
+    /**
+     * Look up the session name of a cached runtime that owns the given pane.
+     */
+    private fun cachedSessionNameForPane(pane: TmuxPaneState): String? {
+        val hostId = activeTarget?.hostId ?: return null
+        return runtimeCache.cachedRuntimesForHost(hostId)
+            .firstOrNull { it.panes.any { p -> p.paneId == pane.paneId } }
+            ?.key?.sessionName
+    }
+
+    /**
+     * Check whether a pane in the unified list belongs to the active session.
+     */
+    internal fun isActiveSessionPane(pane: TmuxPaneState): Boolean {
+        return _panes.value.any { it.paneId == pane.paneId }
+    }
+
+    // ---- End Issue #626 helpers ----
 
     /**
      * Parse one row from `list-panes -F ...` output into a

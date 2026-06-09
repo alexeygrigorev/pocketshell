@@ -382,6 +382,11 @@ public fun TmuxSessionScreen(
     // would render in a tight initial-connect-failure window where
     // `reconnect()` would silently no-op.
     val canReconnect by viewModel.canReconnect.collectAsState()
+    // Issue #628: the name of the previously-active tmux session, used to
+    // render the one-tap toggle chip. Filtered to exclude the current
+    // session name (so the chip hides when toggling back to the same name).
+    val rawPreviousSessionName by viewModel.previousSessionName.collectAsState()
+    val previousSessionName = rawPreviousSessionName?.takeIf { it != sessionName }
     LaunchedEffect(status, canReconnect) {
         recordTmuxReconnectUiStateRendered(
             status = status,
@@ -888,6 +893,11 @@ public fun TmuxSessionScreen(
                                 connectionStatus = status.toUiStatus(),
                                 forwardingState = sessionForwardingState,
                                 onOpenPortForwarding = onOpenPortForwarding,
+                                // Issue #628: long-press on session name toggles
+                                // to the previous session.
+                                onTogglePreviousSession = previousSessionName?.let {
+                                    { onReplaceTmuxSession(previousSessionName) }
+                                },
                                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                             )
                             // Issue #192 / #156: per-window nav strip is
@@ -932,6 +942,11 @@ public fun TmuxSessionScreen(
                             connectionStatus = status.toUiStatus(),
                             forwardingState = sessionForwardingState,
                             onOpenPortForwarding = onOpenPortForwarding,
+                            // Issue #628: long-press on compact session name
+                            // toggles to the previous session.
+                            onTogglePreviousSession = previousSessionName?.let {
+                                { onReplaceTmuxSession(previousSessionName) }
+                            },
                             modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                         )
                     }
@@ -1263,6 +1278,12 @@ public fun TmuxSessionScreen(
                     onAgentCommandsTap = if (paletteAgent != null) {
                         { showAgentCommands = true }
                     } else null,
+                    // Issue #628: one-tap toggle to switch back to the
+                    // previous tmux session on this host.
+                    previousSessionName = previousSessionName,
+                    onTogglePreviousSession = previousSessionName?.let {
+                        { onReplaceTmuxSession(previousSessionName) }
+                    },
                     modifier = bottomControlsModifier,
                 )
             }
@@ -4085,6 +4106,10 @@ internal fun ConsolidatedTopChrome(
     forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
         com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
     onOpenPortForwarding: () -> Unit = {},
+    // Issue #628: long-press on session name toggles to the previous session
+    // (IME-up fallback when the chip row is hidden). Null when no previous
+    // session exists.
+    onTogglePreviousSession: (() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier
@@ -4136,6 +4161,26 @@ internal fun ConsolidatedTopChrome(
         // (ellipsising when it would overflow the remaining row space) while
         // the unused slack inside its weighted slot pushes the segmented
         // toggle + kebab flush right, matching the mockup.
+        // Issue #628: long-press on session name crumb toggles to the
+        // previous session (IME-up fallback when chip row is hidden).
+        // Only active when a previous session exists. Uses
+        // combinedClickable so the single-tap behaviour (project
+        // switcher via the parent Row) is not disturbed.
+        @OptIn(ExperimentalFoundationApi::class)
+        val sessionLabelModifier = Modifier
+            .weight(1f, fill = false)
+            .padding(end = 4.dp)
+            .then(
+                if (onTogglePreviousSession != null) {
+                    Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClick = onTogglePreviousSession,
+                    )
+                } else {
+                    Modifier
+                },
+            )
+            .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG)
         Text(
             text = agentName ?: sessionName,
             color = PocketShellColors.Text,
@@ -4143,10 +4188,7 @@ internal fun ConsolidatedTopChrome(
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            modifier = Modifier
-                .weight(1f, fill = false)
-                .padding(end = 4.dp)
-                .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG),
+            modifier = sessionLabelModifier,
         )
         ConnectionStatusPill(connectionStatus)
 
@@ -4437,6 +4479,9 @@ internal fun CompactBreadcrumb(
     forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
         com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
     onOpenPortForwarding: () -> Unit = {},
+    // Issue #628: long-press on session name toggles to the previous session
+    // (IME-up fallback when the chip row is hidden).
+    onTogglePreviousSession: (() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier
@@ -4463,6 +4508,21 @@ internal fun CompactBreadcrumb(
         Spacer(modifier = Modifier.width(4.dp))
         com.pocketshell.uikit.components.StatusDot(status = connectionStatus)
         Spacer(modifier = Modifier.width(6.dp))
+        // Issue #628: long-press on compact session name toggles to
+        // the previous session (IME-up fallback).
+        @OptIn(ExperimentalFoundationApi::class)
+        val compactSessionLabelModifier = Modifier
+            .weight(1f)
+            .then(
+                if (onTogglePreviousSession != null) {
+                    Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClick = onTogglePreviousSession,
+                    )
+                } else {
+                    Modifier
+                },
+            )
         Text(
             text = sessionName,
             color = PocketShellColors.Text,
@@ -4470,7 +4530,7 @@ internal fun CompactBreadcrumb(
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+            modifier = compactSessionLabelModifier,
         )
         ConnectionStatusPill(connectionStatus)
         Spacer(modifier = Modifier.width(4.dp))
@@ -4978,6 +5038,9 @@ private fun TmuxTerminalBottomControlsWithComposerAttachments(
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
     onAgentCommandsTap: (() -> Unit)? = null,
+    // Issue #628: toggle chip for switching back to the previous tmux session.
+    previousSessionName: String? = null,
+    onTogglePreviousSession: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val promptComposerState by promptComposerViewModel.uiState.collectAsState()
@@ -4997,6 +5060,9 @@ private fun TmuxTerminalBottomControlsWithComposerAttachments(
         onShowKeyboardTap = onShowKeyboardTap,
         onAddSnippetTap = onAddSnippetTap,
         onAgentCommandsTap = onAgentCommandsTap,
+        // Issue #628: forward the toggle chip parameters.
+        previousSessionName = previousSessionName,
+        onTogglePreviousSession = onTogglePreviousSession,
         stagedAttachments = promptComposerState.attachments,
         onRemoveStagedAttachment = promptComposerViewModel::removeAttachment,
         modifier = modifier,
@@ -5020,6 +5086,9 @@ internal fun TmuxTerminalBottomControls(
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
     onAgentCommandsTap: (() -> Unit)? = null,
+    // Issue #628: toggle chip for switching back to the previous tmux session.
+    previousSessionName: String? = null,
+    onTogglePreviousSession: (() -> Unit)? = null,
     stagedAttachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
     onRemoveStagedAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -5116,6 +5185,12 @@ internal fun TmuxTerminalBottomControls(
                         // follow-up — see #123 notes on per-pane cwd /
                         // project-root wiring.
                         onProjectNavigationTap = null,
+                        // Issue #628: toggle chip for switching back to
+                        // the previous tmux session. Only shown when
+                        // previousSessionName differs from the current
+                        // session and a callback is provided.
+                        previousSessionName = previousSessionName,
+                        onTogglePreviousSession = onTogglePreviousSession,
                         inputEnabled = sessionLive,
                     )
                 }

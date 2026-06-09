@@ -10755,4 +10755,112 @@ class TmuxSessionViewModelTest {
             closed = true
         }
     }
+
+    // ─── Issue #628: previousSessionName state ───
+
+    @Test
+    fun previousSessionNameStartsNull() {
+        val vm = newVm()
+        assertNull(vm.previousSessionName.value)
+    }
+
+    @Test
+    fun connectSnapshotsPreviousSessionNameWhenSessionChanges() = runTest {
+        val registry = ActiveTmuxClients()
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        // Set up the first session ("work") via replaceClientForTest.
+        val firstClient = FakeTmuxClient().withSinglePane("work", "%0")
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = firstClient,
+            session = session,
+        )
+        assertNull("no previous session before first switch", vm.previousSessionName.value)
+
+        // Now connect to a different session ("other") on the same host.
+        // connect() should snapshot "work" as previousSessionName.
+        val secondClient = FakeTmuxClient().withSinglePane("other", "%1")
+        vm.setTmuxClientFactoryForTest { _, _, _ -> secondClient }
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "other",
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "previous session should be 'work' after switching to 'other'",
+            "work",
+            vm.previousSessionName.value,
+        )
+    }
+
+    @Test
+    fun closeCurrentConnectionResetsPreviousSessionName() = runTest {
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val vm = newVm(
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val firstClient = FakeTmuxClient().withSinglePane("work", "%0")
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = firstClient,
+            session = session,
+        )
+        val secondClient = FakeTmuxClient().withSinglePane("other", "%1")
+        vm.setTmuxClientFactoryForTest { _, _, _ -> secondClient }
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "other",
+        )
+        advanceUntilIdle()
+        assertEquals("work", vm.previousSessionName.value)
+
+        // replaceClientForTest calls closeCurrentConnection() internally,
+        // which must reset previousSessionName to null.
+        val thirdClient = FakeTmuxClient().withSinglePane("third", "%2")
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "third",
+            client = thirdClient,
+        )
+        assertNull(
+            "previousSessionName must be null after closeCurrentConnection (via replaceClientForTest)",
+            vm.previousSessionName.value,
+        )
+    }
 }

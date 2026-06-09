@@ -398,6 +398,17 @@ public class TmuxSessionViewModel @Inject constructor(
     private val _canReconnect: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val canReconnect: StateFlow<Boolean> = _canReconnect.asStateFlow()
 
+    /**
+     * Issue #628: the name of the previously-active tmux session on the
+     * same host. Snapshotted from the current [activeTarget] right before
+     * a connect that changes the session name. Null when there is no
+     * previous session to toggle back to (initial connect, detach, host
+     * change, or VM teardown). The UI uses this to render a one-tap toggle
+     * chip and a long-press crumb shortcut.
+     */
+    private val _previousSessionName: MutableStateFlow<String?> = MutableStateFlow(null)
+    public val previousSessionName: StateFlow<String?> = _previousSessionName.asStateFlow()
+
     // Last on-screen terminal grid reported by Compose. It can arrive
     // before or after the tmux control client attaches; once both are
     // known, the VM reports this size through `refresh-client -C`.
@@ -544,6 +555,15 @@ public class TmuxSessionViewModel @Inject constructor(
             isSameHost(previousActiveTarget, target) &&
             previousActiveTarget.sessionName != target.sessionName
         val effectiveTrigger = if (willFastSwitch) TmuxConnectTrigger.FastSwitch else trigger
+        // Issue #628: snapshot the current session name as "previous" when
+        // we are about to switch to a different session. This drives the
+        // one-tap toggle chip and long-press crumb shortcut in the UI.
+        // Must happen before any teardown that clears activeTarget.
+        if (previousActiveTarget != null &&
+            previousActiveTarget.sessionName != target.sessionName
+        ) {
+            _previousSessionName.value = previousActiveTarget.sessionName
+        }
         val generation = nextConnectGeneration()
         latestConnectIntent = ConnectIntent(
             target = target,
@@ -7924,6 +7944,9 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = connectingTarget?.takeIf { current ->
             preserveConnectingTarget?.let { sameSessionIdentity(current, it) } == true
         }
+        // Issue #628: clear previous-session toggle state on full teardown
+        // (detach, host change, reconnect failure).
+        _previousSessionName.value = null
         refreshReconnectAvailability()
         activeAttachMilestone = null
         // A fresh attach must capture a fresh phone grid and re-run the
@@ -8160,6 +8183,10 @@ public class TmuxSessionViewModel @Inject constructor(
         leaseRef = null
         activeTarget = null
         connectingTarget = null
+        // Issue #628: clear previous-session toggle state on full teardown
+        // (detach, host change, VM cleared). The toggle is only meaningful
+        // while a session is alive.
+        _previousSessionName.value = null
         // Issue #145: a sync teardown (onCleared / test-replacement seam)
         // clears the reconnect availability flag so the screen never
         // re-renders the Reconnect button against a stale target.

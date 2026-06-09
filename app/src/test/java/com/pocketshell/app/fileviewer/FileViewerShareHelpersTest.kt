@@ -65,4 +65,54 @@ class FileViewerShareHelpersTest {
     fun shareFileNameHandlesBlankBasename() {
         assertEquals("file.txt", shareFileName("/some/dir/", "txt"))
     }
+
+    // ---- Issue #623: downloadFileName (Save action helper) ----
+
+    @Test
+    fun downloadFileNameKeepsBasenameAndExtension() {
+        assertEquals("notes.txt", downloadFileName("/home/me/notes.txt"))
+        assertEquals("shot.png", downloadFileName("/tmp/shot.png"))
+    }
+
+    @Test
+    fun downloadFileNameSanitizesUnsafeCharacters() {
+        val name = downloadFileName("/tmp/my report (final).log")
+        assertEquals("my_report__final_.log", name)
+    }
+
+    @Test
+    fun downloadFileNameHandlesBlankBasename() {
+        assertEquals("file", downloadFileName("/some/dir/"))
+    }
+
+    @Test
+    fun downloadFileNameHandlesWindowsStylePath() {
+        assertEquals("data.csv", downloadFileName("C:\\Users\\me\\data.csv"))
+    }
+
+    // ---- Issue #623: formatFileSize (download-only panel helper) ----
+
+    @Test
+    fun formatFileSizeFormatsBytes() {
+        assertEquals("0 B", formatFileSize(0))
+        assertEquals("1 B", formatFileSize(1))
+        assertEquals("512 B", formatFileSize(512))
+    }
+
+    @Test
+    fun formatFileSizeFormatsKilobytes() {
+        assertEquals("1.0 KB", formatFileSize(1024))
+        assertEquals("512.0 KB", formatFileSize(512 * 1024))
+    }
+
+    @Test
+    fun formatFileSizeFormatsMegabytes() {
+        assertEquals("1.0 MB", formatFileSize(1024 * 1024))
+        assertEquals("1.5 MB", formatFileSize(1536 * 1024))
+    }
+
+    @Test
+    fun formatFileSizeFormatsGigabytes() {
+        assertEquals("1.0 GB", formatFileSize(1024L * 1024 * 1024))
+    }
 }

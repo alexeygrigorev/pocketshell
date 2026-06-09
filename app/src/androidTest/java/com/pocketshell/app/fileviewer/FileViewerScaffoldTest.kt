@@ -170,7 +170,8 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        // Header Share + Copy (file URI) actions are present for a previewable file.
+        // Header Save + Share + Copy (file URI) actions are present for a previewable file.
+        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertIsDisplayed()
         compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertIsDisplayed()
         compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertIsDisplayed()
         // The text viewer exposes a one-tap "Copy all".
@@ -231,6 +232,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
+        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertIsDisplayed()
         compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertIsDisplayed()
         compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertIsDisplayed()
         imageFile.delete()
@@ -248,6 +250,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
+        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertDoesNotExist()
         compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertDoesNotExist()
         compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertDoesNotExist()
     }
@@ -267,8 +270,78 @@ class FileViewerScaffoldTest {
                 )
             }
         }
+        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertDoesNotExist()
         compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertDoesNotExist()
         compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertDoesNotExist()
+    }
+
+    // ---- Issue #623: download-only panel for unsupported/binary files ----
+
+    @Test
+    fun cannotPreviewWithCacheShowsDownloadOnlyPanel() {
+        val cacheDir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "file-viewer",
+        ).apply { mkdirs() }
+        val binaryFile = File(cacheDir, "issue623-scaffold-data.tar.gz").apply {
+            if (exists()) delete()
+            writeBytes(ByteArray(4096)) // 4 KB binary file
+        }
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.CannotPreview(
+                        displayPath = "/tmp/data.tar.gz",
+                        message = "Can't preview this file type.",
+                        sizeBytes = binaryFile.length(),
+                        cacheFile = binaryFile,
+                    ),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        // Download-only panel is shown.
+        compose.onNodeWithTag(FILE_VIEWER_DOWNLOAD_ONLY_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_FILE_NAME_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_FILE_SIZE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_DOWNLOAD_BUTTON_TAG).assertIsDisplayed()
+        // Header Save action is visible (shareable with cached file).
+        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertIsDisplayed()
+        // Share and Copy are also available since the file is cached locally.
+        compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertIsDisplayed()
+        binaryFile.delete()
+    }
+
+    @Test
+    fun downloadOnlyPanelShowsFileSize() {
+        val cacheDir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "file-viewer",
+        ).apply { mkdirs() }
+        val binaryFile = File(cacheDir, "issue623-size-test.zip").apply {
+            if (exists()) delete()
+            writeBytes(ByteArray(1536 * 1024)) // 1.5 MB
+        }
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.CannotPreview(
+                        displayPath = "/tmp/archive.zip",
+                        message = "Can't preview this file type.",
+                        sizeBytes = binaryFile.length(),
+                        cacheFile = binaryFile,
+                    ),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        compose.onNodeWithText("1.5 MB").assertIsDisplayed()
+        binaryFile.delete()
     }
 
     /** Minimal valid 1x1 PNG so the image panel decodes a real bitmap. */

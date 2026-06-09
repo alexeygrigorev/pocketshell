@@ -1,5 +1,6 @@
 package com.pocketshell.app.fileviewer
 
+import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
@@ -92,6 +94,15 @@ const val FILE_VIEWER_RETRY_TAG = "fileViewerRetry"
 const val FILE_VIEWER_SHARE_TAG = "fileViewerShare"
 const val FILE_VIEWER_COPY_TAG = "fileViewerCopy"
 const val FILE_VIEWER_COPY_ALL_TAG = "fileViewerCopyAll"
+
+// Issue #623 — "Save" action to download the remote file locally.
+const val FILE_VIEWER_SAVE_TAG = "fileViewerSave"
+
+// Issue #623 — download-only panel for unsupported file types (binary, archives, etc.).
+const val FILE_VIEWER_DOWNLOAD_ONLY_TAG = "fileViewerDownloadOnly"
+const val FILE_VIEWER_DOWNLOAD_BUTTON_TAG = "fileViewerDownloadButton"
+const val FILE_VIEWER_FILE_SIZE_TAG = "fileViewerFileSize"
+const val FILE_VIEWER_FILE_NAME_TAG = "fileViewerFileName"
 
 /**
  * In-app file viewer — issue #497.
@@ -172,10 +183,18 @@ internal fun FileViewerScaffold(
                 is FileViewerUiState.TextContent -> TextPanel(state.content)
                 is FileViewerUiState.Pdf -> PdfPanel(state.cacheFile)
                 is FileViewerUiState.Audio -> AudioPanel(state.cacheFile)
-                is FileViewerUiState.CannotPreview -> CannotPreviewPanel(
-                    message = state.message,
-                    onRetry = onRetry,
-                )
+                is FileViewerUiState.CannotPreview -> if (state.cacheFile != null) {
+                    DownloadOnlyPanel(
+                        displayPath = state.displayPath,
+                        sizeBytes = state.sizeBytes,
+                        cacheFile = state.cacheFile,
+                    )
+                } else {
+                    CannotPreviewPanel(
+                        message = state.message,
+                        onRetry = onRetry,
+                    )
+                }
             }
         }
     }
@@ -193,8 +212,13 @@ private fun FileViewerUiState.displayPath(): String = when (this) {
 /**
  * Issue #559 — what the viewer can hand to the share sheet / clipboard for the
  * currently-opened file. Every previewable state maps to a [Shareable]; the
- * [FileViewerUiState.Loading] and [FileViewerUiState.CannotPreview] states have
- * nothing to act on yet, so the Share/Copy actions are hidden for them.
+ * [FileViewerUiState.Loading] and [FileViewerUiState.CannotPreview] (without a
+ * cached file) states have nothing to act on yet, so the Share/Copy/Save actions
+ * are hidden for them.
+ *
+ * Issue #623 — [CannotPreview] with a cached file (binary/unsupported file that
+ * was downloaded but can't be previewed) produces a [Shareable.FileBacked] so
+ * the header Save button can download it to the Android Downloads directory.
  *
  * Image/PDF/Audio already cached the bytes to a local [File] for their preview,
  * so the URI is built straight from that cache file. Text is held in memory
@@ -238,7 +262,13 @@ internal sealed interface Shareable {
 
 private fun FileViewerUiState.shareable(): Shareable? = when (this) {
     is FileViewerUiState.Loading -> null
-    is FileViewerUiState.CannotPreview -> null
+    is FileViewerUiState.CannotPreview -> cacheFile?.let {
+        Shareable.FileBacked(
+            displayPath = displayPath,
+            cacheFile = it,
+            mimeType = "application/octet-stream",
+        )
+    }
     is FileViewerUiState.Image -> Shareable.FileBacked(
         displayPath = displayPath,
         cacheFile = cacheFile,
@@ -319,6 +349,9 @@ private fun FileViewerAppBar(
     // actions — Share (system share sheet) and Copy (file URI to the
     // clipboard). They appear only once there is something to act on (a
     // previewable state with a cached file or text content).
+    //
+    // Issue #623: Save action added — downloads the file to the Android
+    // Downloads directory via DownloadManager.
     val context = LocalContext.current
     ScreenHeader(
         title = displayPath.substringAfterLast('/').ifEmpty { "File" },
@@ -344,6 +377,11 @@ private fun FileViewerAppBar(
             null
         } else {
             {
+                HeaderAction(
+                    label = "Save",
+                    testTag = FILE_VIEWER_SAVE_TAG,
+                    onClick = { saveFileToLocal(context, shareable) },
+                )
                 HeaderAction(
                     label = "Share",
                     testTag = FILE_VIEWER_SHARE_TAG,
@@ -455,6 +493,54 @@ private fun copyTextToClipboard(context: Context, content: String) {
     }
     clipboard.setPrimaryClip(ClipData.newPlainText("file text", content))
     Toast.makeText(context, "Copied text to clipboard", Toast.LENGTH_SHORT).show()
+}
+
+/**
+ * Issue #623 — save the viewed file to the Android Downloads directory via
+ * [DownloadManager]. The file is registered as a completed download in the
+ * public Downloads folder so the user can access it from any app (Files, file
+ * managers, etc.). A Toast confirms the save location. The call is
+ * fire-and-forget; [DownloadManager.addCompletedDownload] registers the file
+ * with the media scanner and shows a system notification, so the viewer is
+ * never blocked.
+ *
+ * For [Shareable.FileBacked] the already-cached preview file is registered
+ * directly. For [Shareable.Text] the in-memory text is materialised to a
+ * temp file first and then registered.
+ */
+private fun saveFileToLocal(context: Context, shareable: Shareable) {
+    val file = shareable.resolveFile(context)
+    if (file == null || !file.exists()) {
+        Toast.makeText(context, "Nothing to save", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val fileName = downloadFileName(shareable.displayPath)
+    val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+    if (dm == null) {
+        Toast.makeText(context, "Download manager unavailable", Toast.LENGTH_SHORT).show()
+        return
+    }
+    dm.addCompletedDownload(
+        fileName,
+        "Saved from PocketShell",
+        true,
+        shareable.mimeType,
+        file.absolutePath,
+        file.length(),
+        false,
+    )
+    Toast.makeText(context, "Saved to Downloads/$fileName", Toast.LENGTH_SHORT).show()
+}
+
+/**
+ * Derive a filesystem-safe download file name from the remote path. Keeps the
+ * original basename and extension; falls back to "file" when the basename is
+ * empty. Pure — unit-tested.
+ */
+internal fun downloadFileName(displayPath: String): String {
+    val base = displayPath.substringAfterLast('/').substringAfterLast('\\')
+        .ifBlank { "file" }
+    return base.replace(Regex("[^A-Za-z0-9._-]"), "_")
 }
 
 /**
@@ -932,6 +1018,96 @@ internal fun formatAudioTime(positionMs: Int): String {
     } else {
         String.format(Locale.US, "%d:%02d", minutes, seconds)
     }
+}
+
+/**
+ * Download-only panel for unsupported file types (binary, archives, etc.) —
+ * issue #623. Shows the file name, size, and a prominent Download button that
+ * saves the cached file to the Android Downloads directory via
+ * [DownloadManager]. This is shown instead of the "Can't preview" message when
+ * the file was successfully downloaded but can't be previewed (binary type).
+ */
+@Composable
+private fun DownloadOnlyPanel(
+    displayPath: String,
+    sizeBytes: Long,
+    cacheFile: File,
+) {
+    val context = LocalContext.current
+    val fileName = displayPath.substringAfterLast('/').ifEmpty { "file" }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp, vertical = 32.dp)
+            .testTag(FILE_VIEWER_DOWNLOAD_ONLY_TAG),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "This file can't be previewed.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 14.sp,
+        )
+        Spacer(Modifier.height(20.dp))
+        Text(
+            text = fileName,
+            color = PocketShellColors.Text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag(FILE_VIEWER_FILE_NAME_TAG),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = formatFileSize(sizeBytes),
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.testTag(FILE_VIEWER_FILE_SIZE_TAG),
+        )
+        Spacer(Modifier.height(24.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(PocketShellDensity.tapTargetMin)
+                .background(
+                    color = PocketShellColors.Accent,
+                    shape = RoundedCornerShape(8.dp),
+                )
+                .clickable(
+                    role = Role.Button,
+                    onClick = {
+                        val shareable = Shareable.FileBacked(
+                            displayPath = displayPath,
+                            cacheFile = cacheFile,
+                            mimeType = "application/octet-stream",
+                        )
+                        saveFileToLocal(context, shareable)
+                    },
+                )
+                .testTag(FILE_VIEWER_DOWNLOAD_BUTTON_TAG),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "Download",
+                color = PocketShellColors.Background,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+/**
+ * Format a byte count as a human-readable string (e.g. "1.5 MB", "320 KB").
+ * Pure — unit-tested.
+ */
+internal fun formatFileSize(sizeBytes: Long): String {
+    if (sizeBytes < 1024) return "$sizeBytes B"
+    val kb = sizeBytes / 1024.0
+    if (kb < 1024.0) return String.format(Locale.US, "%.1f KB", kb)
+    val mb = kb / 1024.0
+    if (mb < 1024.0) return String.format(Locale.US, "%.1f MB", mb)
+    val gb = mb / 1024.0
+    return String.format(Locale.US, "%.1f GB", gb)
 }
 
 @Composable

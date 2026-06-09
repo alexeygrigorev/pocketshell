@@ -69,10 +69,18 @@ sealed interface FileViewerUiState {
     /**
      * The file can't be previewed — too large, binary-non-image, missing, or
      * the host was unreachable. [message] is user-facing.
+     *
+     * When the file was successfully downloaded but is an unsupported/binary
+     * type, [sizeBytes] and [cacheFile] are populated so the download-only
+     * panel can show the file info and offer a Download action (issue #623).
+     * For other cannot-preview cases (host unreachable, file not found, too
+     * large), these remain null/0 and only the message + retry are shown.
      */
     data class CannotPreview(
         val displayPath: String,
         val message: String,
+        val sizeBytes: Long = 0L,
+        val cacheFile: File? = null,
     ) : FileViewerUiState
 }
 
@@ -179,8 +187,9 @@ class FileViewerViewModel @Inject constructor(
                 }
                 FileViewerType.BINARY -> FileViewerUiState.CannotPreview(
                     displayPath = resolved,
-                    message = "Can't preview this file — it looks like a binary file " +
-                        "that isn't an image (${bytes.size} bytes).",
+                    message = "Can't preview this file type.",
+                    sizeBytes = bytes.size.toLong(),
+                    cacheFile = writeToCache(resolved, bytes),
                 )
             }
         } catch (e: CancellationException) {

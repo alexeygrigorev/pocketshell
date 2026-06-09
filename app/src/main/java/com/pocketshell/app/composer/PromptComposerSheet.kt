@@ -1700,7 +1700,9 @@ private fun SnippetsIconButton(
  *
  * Two visual modes:
  *  - **Active (capturing)** — [active] true: bars animate from the live
- *    amplitude, multiplied by the per-bar envelope.
+ *    amplitude, multiplied by the per-bar envelope and a per-bar phase
+ *    offset so the bars ripple outward from the centre instead of moving
+ *    as a flat block.
  *  - **Pre-speech (waiting)** — [active] false: the bars subtly pulse
  *    between 4dp and 6dp on a 750ms loop so the strip reads as "alive and
  *    waiting" rather than dormant (the static-indicator bug the maintainer
@@ -1725,6 +1727,27 @@ private fun Waveform(
         targetValue = if (active) amplitude else 0f,
         animationSpec = tween(durationMillis = 80, easing = LinearEasing),
         label = "waveform-smooth",
+    )
+
+    // Continuously-running per-bar phase sweep that produces a flowing
+    // wave across the 30 bars. Even at low amplitude the wave motion makes
+    // the strip read as "alive and capturing" rather than a static block
+    // of uniform bars — the maintainer's original complaint. The phase
+    // completes one full cycle every ~1.4s (1400ms / 1000 ticks), which
+    // is slow enough to feel organic but fast enough to be obviously
+    // animated at a glance.
+    val waveTransition = rememberInfiniteTransition(label = "waveform-wave-phase")
+    val wavePhase by waveTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = WAVEFORM_BARS.toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(
+                durationMillis = WAVEFORM_WAVE_PERIOD_MS,
+                easing = LinearEasing,
+            ),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "waveform-wave-phase-value",
     )
 
     // Pre-speech pulse: the bars rest at 4dp, which read as dormant. A
@@ -1755,15 +1778,19 @@ private fun Waveform(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            val bars = 30
-            for (i in 0 until bars) {
+            for (i in 0 until WAVEFORM_BARS) {
                 // Mockup-style envelope: a wide hump centred at index 15
                 // with two smaller side lobes. Multiplied by the live
                 // amplitude so a quiet user sees a flat strip and a loud
                 // one sees full-height bars.
                 val envelope = barEnvelopeHeightDp(i)
+                // Per-bar phase offset: sine wave propagating outward
+                // from the centre. The offset is added to the smoothed
+                // amplitude so bars ripple rather than move in lockstep.
+                val phaseOffset = waveformPhaseOffset(i, wavePhase)
                 val h = when {
-                    active -> (4f + smoothed * envelope).coerceIn(4f, envelope)
+                    active -> (4f + (smoothed + phaseOffset).coerceIn(0f, 1f) * envelope)
+                        .coerceIn(4f, envelope)
                     // Pre-speech: pulse 4..6dp so the strip reads as
                     // "alive and waiting".
                     else -> 4f + idlePulse
@@ -1781,6 +1808,26 @@ private fun Waveform(
         }
     }
 }
+
+/**
+ * Per-bar phase offset for the waveform wave animation.
+ *
+ * Returns a sinusoidal offset in [-0.18, +0.18] for bar [index] at the
+ * current [phase] tick. The sine argument wraps around via modulo so the
+ * wave repeats smoothly. The offset is small enough that at high amplitude
+ * the envelope shape dominates, but at low/zero amplitude it produces a
+ * visible flowing ripple — the key to making the indicator read as "alive"
+ * even when the mic is picking up only ambient noise.
+ */
+internal fun waveformPhaseOffset(index: Int, phase: Float): Float {
+    val angle = ((index + phase) % WAVEFORM_BARS) / WAVEFORM_BARS * TWO_PI
+    return (WAVEFORM_PHASE_AMPLITUDE * kotlin.math.sin(angle)).toFloat()
+}
+
+private const val WAVEFORM_BARS = 30
+private const val WAVEFORM_WAVE_PERIOD_MS = 1400
+private const val WAVEFORM_PHASE_AMPLITUDE = 0.18
+private const val TWO_PI = 2.0 * kotlin.math.PI
 
 /**
  * Per-bar envelope, in dp, used by [Waveform] to vary heights across the

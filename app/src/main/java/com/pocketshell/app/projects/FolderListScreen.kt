@@ -197,6 +197,7 @@ fun FolderListScreen(
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
+    val claudeProfiles by viewModel.claudeProfiles.collectAsState()
     val assistantDictationUiState = remember(assistantDictationViewModel) {
         assistantDictationViewModel?.uiState
             ?: MutableStateFlow(InlineDictationViewModel.UiState())
@@ -402,27 +403,18 @@ fun FolderListScreen(
             folderLabel = target.label,
             onDismiss = { pickerFolder = null },
             suggestStartDirectories = suggestStartDirectories,
+            claudeProfiles = claudeProfiles,
             onCreate = { choice ->
                 pickerFolder = null
                 val newName = derivedSessionName(
                     choice = choice,
-                    // Best-effort remote $HOME so directories under home
-                    // collapse to their tmuxctl home-relative form. The
-                    // authoritative $HOME lives on the remote and isn't
-                    // plumbed into this screen yet (#430/#438 own the
-                    // gateway/viewmodel), so we infer the conventional
-                    // path from the connecting username — correct for the
-                    // maintainer's hosts (`/home/<user>`, `/root`).
                     homeDirectory = conventionalRemoteHome(username),
-                    // Disambiguate against the session names already
-                    // discovered for this host so a genuinely new second
-                    // session in the same directory doesn't collide.
                     existingNames = knownSessionNames(state),
                 )
                 viewModel.createSession(
                     sessionName = newName,
                     cwd = choice.startDirectory,
-                    startCommand = choice.startCommand(),
+                    startCommand = choice.startCommand(claudeProfiles),
                     onResolved = { resolved ->
                         onSessionCreated(resolved, choice.startDirectory)
                     },

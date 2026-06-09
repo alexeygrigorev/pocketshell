@@ -48,6 +48,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Picker for "new session" type — issue #171 round 2.
@@ -74,6 +76,7 @@ fun SessionTypePickerSheet(
     onDismiss: () -> Unit,
     onCreate: (choice: SessionTypeChoice) -> Unit,
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
+    claudeProfiles: List<ClaudeProfile> = emptyList(),
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val autocompleteController = rememberStartDirectoryAutocompleteController(suggestStartDirectories)
@@ -89,6 +92,7 @@ fun SessionTypePickerSheet(
             onCancel = onDismiss,
             onCreate = onCreate,
             autocompleteController = autocompleteController,
+            claudeProfiles = claudeProfiles,
         )
     }
 }
@@ -105,6 +109,7 @@ internal fun SessionTypePickerContent(
     onCancel: () -> Unit,
     onCreate: (choice: SessionTypeChoice) -> Unit,
     autocompleteController: StartDirectoryAutocompleteController? = null,
+    claudeProfiles: List<ClaudeProfile> = emptyList(),
 ) {
     var sessionType by remember { mutableStateOf(SessionType.Agent) }
     var agentKind by remember { mutableStateOf(AgentCli.Claude) }
@@ -112,6 +117,8 @@ internal fun SessionTypePickerContent(
     // agent launched without per-action approval prompts.
     var skipPermissions by remember { mutableStateOf(true) }
     var startDirectory by remember { mutableStateOf(folderPath) }
+    // Issue #627: selected Claude profile. null = default (no config dir override).
+    var claudeProfile by remember { mutableStateOf<String?>(null) }
     val scrollState = rememberScrollState()
 
     Column(
@@ -240,6 +247,33 @@ internal fun SessionTypePickerContent(
                             onToggle = { skipPermissions = !skipPermissions },
                         )
                     }
+
+                    // Issue #627: Claude Code profile selector. Shown only
+                    // when Claude is selected AND the host has more than one
+                    // profile configured (default + at least one custom).
+                    if (agentKind == AgentCli.Claude && claudeProfiles.size > 1) {
+                        Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
+                            SectionHeader(label = "Profile")
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+                                    .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+                                    .selectableGroup()
+                                    .testTag(SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG),
+                            ) {
+                                for (profile in claudeProfiles) {
+                                    SegmentButton(
+                                        label = profile.name,
+                                        selected = claudeProfile == profile.name,
+                                        onClick = { claudeProfile = profile.name },
+                                        testTag = "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:${profile.name}",
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -268,6 +302,11 @@ internal fun SessionTypePickerContent(
                             agent = if (sessionType == SessionType.Agent) agentKind else null,
                             startDirectory = startDirectory.trim().ifBlank { folderPath },
                             skipPermissions = skipPermissions,
+                            claudeProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Claude) {
+                                claudeProfile
+                            } else {
+                                null
+                            },
                         ),
                     )
                 },
@@ -354,6 +393,13 @@ data class SessionTypeChoice(
      * config-driven in `opencode.json`, not a CLI flag).
      */
     val skipPermissions: Boolean = true,
+    /**
+     * The selected Claude Code profile name (issue #627). `null` means
+     * the default profile (no `CLAUDE_CONFIG_DIR` override). Only
+     * relevant when [agent] is [AgentCli.Claude]; ignored for other
+     * agents and for shell sessions.
+     */
+    val claudeProfileName: String? = null,
 ) {
     /**
      * The start command to invoke inside the new tmux pane after
@@ -363,10 +409,14 @@ data class SessionTypeChoice(
      * (issue #428) — including the skip-permissions flag and, for
      * OpenCode, the provider-API-key env strip — so it does not depend
      * on the maintainer's shell aliases being sourced on the remote host.
+     *
+     * For Claude Code (issue #627), the command is env-stripped (same 71
+     * provider API-key vars as OpenCode) and optionally prefixed with
+     * `CLAUDE_CONFIG_DIR=<path>` when a non-default profile is selected.
      */
-    fun startCommand(): String? = when (type) {
+    fun startCommand(profiles: List<ClaudeProfile> = emptyList()): String? = when (type) {
         SessionType.Shell -> null
-        SessionType.Agent -> agent?.launchCommand(skipPermissions)
+        SessionType.Agent -> agent?.launchCommand(skipPermissions, claudeProfileName, profiles)
     }
 }
 
@@ -383,10 +433,12 @@ enum class AgentCli(val command: String) {
      * #428). PocketShell emits the explicit command itself (approach (b)
      * in the issue) rather than invoking a remote shell alias, so the
      * behaviour is identical on any host regardless of whether the
-     * maintainer's dotfiles are sourced.
+     * maintainer's dotfiles are sourced on the remote host.
      *
-     * - Claude (alias `csp`): `claude --dangerously-skip-permissions`
-     *   when [skipPermissions], else bare `claude`.
+     * - Claude (alias `csp`): env-stripped (issue #627, same 71 provider
+     *   API-key vars as OpenCode) and optionally `CLAUDE_CONFIG_DIR=<path>`
+     *   when a non-default profile is selected. `--dangerously-skip-permissions`
+     *   when [skipPermissions].
      * - Codex (alias `cy`): `codex --dangerously-bypass-approvals-and-sandbox`
      *   when [skipPermissions], else bare `codex`.
      * - OpenCode (function `oc`): ALWAYS env-stripped. [skipPermissions]
@@ -396,8 +448,12 @@ enum class AgentCli(val command: String) {
      *   API-key vars forces OpenCode onto the maintainer's subscription
      *   auth instead of a per-token env key.
      */
-    fun launchCommand(skipPermissions: Boolean): String = when (this) {
-        Claude -> if (skipPermissions) "claude --dangerously-skip-permissions" else "claude"
+    fun launchCommand(
+        skipPermissions: Boolean,
+        claudeProfileName: String? = null,
+        profiles: List<ClaudeProfile> = emptyList(),
+    ): String = when (this) {
+        Claude -> claudeLaunchCommand(skipPermissions, claudeProfileName, profiles)
         Codex -> if (skipPermissions) "codex --dangerously-bypass-approvals-and-sandbox" else "codex"
         OpenCode -> openCodeLaunchCommand()
     }
@@ -509,6 +565,36 @@ enum class AgentCli(val command: String) {
             return "env $unsetArgs opencode"
         }
 
+        /**
+         * Env-stripped Claude Code launch (issue #627). Same 71 provider
+         * API-key vars as OpenCode, plus optional `CLAUDE_CONFIG_DIR=<path>`
+         * when a non-default profile is selected. The env strip ensures
+         * Claude Code uses its own credentials from the config directory,
+         * not leaked host env vars.
+         */
+        internal fun claudeLaunchCommand(
+            skipPermissions: Boolean,
+            profileName: String? = null,
+            profiles: List<ClaudeProfile> = emptyList(),
+        ): String {
+            val unsetArgs = OPENCODE_ENV_UNSET_VARS.joinToString(" ") { name ->
+                require(name.matches(ENV_VAR_NAME_REGEX)) {
+                    "Refusing to build Claude env strip: invalid env var name '$name'"
+                }
+                "-u $name"
+            }
+            val configDir = profiles.firstOrNull { it.name == profileName }?.configDir
+                ?.trim()?.takeIf { it.isNotBlank() }
+            val flag = if (skipPermissions) " --dangerously-skip-permissions" else ""
+            return if (configDir != null) {
+                // Shell-quote the config dir path to prevent injection.
+                val quotedDir = "'${configDir.replace("'", "'\\''")}'"
+                "env $unsetArgs CLAUDE_CONFIG_DIR=$quotedDir claude$flag"
+            } else {
+                "env $unsetArgs claude$flag"
+            }
+        }
+
         // Env var names per POSIX: letters, digits, underscore; we also
         // permit a leading digit because the maintainer's list includes
         // `302AI_API_KEY` and `2AI_API_KEY`.
@@ -533,3 +619,53 @@ const val SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG: String = "session-type-picke
 const val SESSION_TYPE_PICKER_CWD_TAG: String = "session-type-picker:cwd"
 const val SESSION_TYPE_PICKER_CANCEL_TAG: String = "session-type-picker:cancel"
 const val SESSION_TYPE_PICKER_CREATE_TAG: String = "session-type-picker:create"
+const val SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG: String = "session-type-picker:claude-profile"
+
+/**
+ * A named Claude Code configuration profile (issue #627).
+ *
+ * Each profile maps to a `CLAUDE_CONFIG_DIR` on the remote host. The
+ * default profile has an empty [configDir] (Claude Code uses its built-in
+ * default `~/.claude`).
+ *
+ * Serialized as a JSON array in [HostEntity.claudeProfilesJson].
+ */
+data class ClaudeProfile(
+    val name: String,
+    /** Remote path for `CLAUDE_CONFIG_DIR`. Empty string = default (no override). */
+    val configDir: String = "",
+) {
+    companion object {
+        /**
+         * Parse a JSON array of `{"name":"...","configDir":"..."}` objects.
+         * Returns an empty list for null/blank input (the common case for
+         * hosts with only the default profile).
+         */
+        fun fromJson(json: String?): List<ClaudeProfile> {
+            if (json.isNullOrBlank()) return emptyList()
+            val array = try { JSONArray(json) } catch (_: Throwable) { return emptyList() }
+            return (0 until array.length()).mapNotNull { i ->
+                val obj = array.optJSONObject(i) ?: return@mapNotNull null
+                val name = obj.optString("name", "").trim()
+                if (name.isEmpty()) return@mapNotNull null
+                ClaudeProfile(
+                    name = name,
+                    configDir = obj.optString("configDir", "").trim(),
+                )
+            }
+        }
+
+        /** Serialize a list of profiles to a JSON array string. */
+        fun toJson(profiles: List<ClaudeProfile>): String? {
+            if (profiles.isEmpty()) return null
+            val array = JSONArray()
+            for (profile in profiles) {
+                val obj = JSONObject()
+                obj.put("name", profile.name)
+                obj.put("configDir", profile.configDir)
+                array.put(obj)
+            }
+            return array.toString()
+        }
+    }
+}

@@ -408,6 +408,7 @@ class AppDatabaseTest {
             assertEquals(true, hosts[0].enabled)
             assertNull(hosts[0].pocketshellDaemonRunning)
             assertNull(hosts[0].pocketshellDaemonEnabled)
+            assertNull(hosts[0].claudeProfilesJson)
 
             val key = migratedDb.sshKeyDao().getById(1)
             assertNotNull(key)
@@ -438,6 +439,50 @@ class AppDatabaseTest {
             val usage = migratedDb.portUsageDao().getByHostId(1).first()
             assertEquals(1, usage.size)
             assertEquals(42L, usage[0].totalBytes)
+        } finally {
+            migratedDb.close()
+        }
+        context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun migrationFromVersionThirteen_preservesUserRowsAndAddsClaudeProfilesJson() = runTest {
+        val databaseName = "v13-to-current-${System.nanoTime()}.db"
+        seedVersionThirteenDatabaseWithUserRows(databaseName)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            val hosts = migratedDb.hostDao().getAll().first()
+            assertEquals(1, hosts.size)
+            assertEquals("prod", hosts[0].name)
+            // The new column should be null after migration (no profiles).
+            assertNull(hosts[0].claudeProfilesJson)
+        } finally {
+            migratedDb.close()
+        }
+        context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun migrationFromVersionThirteen_claudeProfilesJsonRoundTrips() = runTest {
+        val databaseName = "v13-roundtrip-${System.nanoTime()}.db"
+        seedVersionThirteenDatabaseWithUserRows(databaseName)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            val hosts = migratedDb.hostDao().getAll().first()
+            val host = hosts[0]
+            // Update with profiles JSON.
+            val profilesJson = """[{"name":"work","configDir":"/home/.claude-work"}]"""
+            migratedDb.hostDao().update(
+                host.copy(claudeProfilesJson = profilesJson),
+            )
+            val updated = migratedDb.hostDao().getById(host.id)
+            assertEquals(profilesJson, updated!!.claudeProfilesJson)
         } finally {
             migratedDb.close()
         }
@@ -652,6 +697,108 @@ class AppDatabaseTest {
             )
             it.execSQL("PRAGMA user_version = 11")
         }
+    }
+
+    private fun seedVersionThirteenDatabaseWithUserRows(databaseName: String) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            createVersionThirteenSchema(it)
+            it.execSQL(
+                """
+                INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt)
+                VALUES(1, 'deploy-key', '/keys/deploy', 'sha256:v13', 1, 100)
+                """.trimIndent(),
+            )
+            it.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                    pocketshellCliVersion, pocketshellExpectedCliVersion,
+                    pocketshellVersionCompatible, pocketshellDaemonRunning,
+                    pocketshellDaemonEnabled, usageCommandOverride
+                ) VALUES(
+                    1, 'prod', 'example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, '0.3.14', '0.3.14', 1, 1, 1,
+                    'pocketshell usage --json'
+                )
+                """.trimIndent(),
+            )
+            it.execSQL("PRAGMA user_version = 13")
+        }
+    }
+
+    private fun createVersionThirteenSchema(db: SQLiteDatabase) {
+        // Start from the v11 schema (which includes ssh_keys, hosts with
+        // daemon columns, and all host-scoped tables).
+        createVersionElevenSchema(db)
+        // Add the command_templates table from migration 12->13.
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS command_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                commands TEXT NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_command_templates_hostId ON command_templates(hostId)")
+        // Add the daemon columns from migration 11->12 (v11 schema doesn't have them).
+        // Actually createVersionElevenSchema does NOT have daemonRunning/Enabled,
+        // but the v11 schema's hosts table also doesn't have them. They're added
+        // by MIGRATION_11_12. For a v13 seed, the hosts table must include them.
+        // Re-create hosts with all v13 columns.
+        db.execSQL("DROP TABLE IF EXISTS hosts_v13")
+        db.execSQL(
+            """
+            CREATE TABLE hosts_v13 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                tmuxInstalled INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                pocketshellCliVersion TEXT,
+                pocketshellExpectedCliVersion TEXT,
+                pocketshellVersionCompatible INTEGER,
+                pocketshellDaemonRunning INTEGER,
+                pocketshellDaemonEnabled INTEGER,
+                usageCommandOverride TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_v13 SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                pocketshellCliVersion, pocketshellExpectedCliVersion,
+                pocketshellVersionCompatible, NULL, NULL, usageCommandOverride
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_v13 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
     }
 
     private fun createVersionEightSchema(db: SQLiteDatabase) {

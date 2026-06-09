@@ -27,16 +27,18 @@ class SessionTypeChoiceCommandTest {
         )
 
     @Test
-    fun claudeWithSkipPermissionsUsesDangerousFlag() {
-        assertEquals(
-            "claude --dangerously-skip-permissions",
-            agentChoice(AgentCli.Claude, skip = true).startCommand(),
-        )
+    fun claudeWithSkipPermissionsUsesEnvStrippedAndDangerousFlag() {
+        val command = agentChoice(AgentCli.Claude, skip = true).startCommand()!!
+        assertTrue("must start with env -u", command.startsWith("env -u "))
+        assertTrue(command.endsWith(" claude --dangerously-skip-permissions"))
     }
 
     @Test
-    fun claudeWithoutSkipPermissionsIsBareCommand() {
-        assertEquals("claude", agentChoice(AgentCli.Claude, skip = false).startCommand())
+    fun claudeWithoutSkipPermissionsIsEnvStripped() {
+        val command = agentChoice(AgentCli.Claude, skip = false).startCommand()!!
+        assertTrue("must start with env -u", command.startsWith("env -u "))
+        assertTrue(command.endsWith(" claude"))
+        assertFalse(command.contains("--dangerously"))
     }
 
     @Test
@@ -132,7 +134,8 @@ class SessionTypeChoiceCommandTest {
             startDirectory = "/srv/app",
         )
         assertTrue(choice.skipPermissions)
-        assertEquals("claude --dangerously-skip-permissions", choice.startCommand())
+        val command = choice.startCommand()!!
+        assertTrue(command.endsWith(" claude --dangerously-skip-permissions"))
     }
 
     @Test
@@ -146,5 +149,190 @@ class SessionTypeChoiceCommandTest {
         for (varName in AgentCli.OPENCODE_ENV_UNSET_VARS) {
             assertTrue("Unsafe env var name: $varName", identifier.matches(varName))
         }
+    }
+
+    // --- Issue #627: Claude Code env strip + profiles ---
+
+    @Test
+    fun claudeStripsAllSeventyOneProviderVars() {
+        val command = agentChoice(AgentCli.Claude, skip = false).startCommand()!!
+        for (varName in AgentCli.OPENCODE_ENV_UNSET_VARS) {
+            assertTrue(
+                "Claude launch must unset $varName",
+                command.contains("-u $varName "),
+            )
+        }
+    }
+
+    @Test
+    fun claudeWithoutProfileHasNoConfigDir() {
+        val command = agentChoice(AgentCli.Claude, skip = false).startCommand()!!
+        assertFalse(command.contains("CLAUDE_CONFIG_DIR"))
+    }
+
+    @Test
+    fun claudeWithProfileSetsConfigDir() {
+        val profiles = listOf(
+            ClaudeProfile(name = "work", configDir = "/home/user/.claude-work"),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "/srv/app",
+            skipPermissions = true,
+            claudeProfileName = "work",
+        )
+        val command = choice.startCommand(profiles)!!
+        assertTrue(
+            "must contain CLAUDE_CONFIG_DIR",
+            command.contains("CLAUDE_CONFIG_DIR='/home/user/.claude-work'"),
+        )
+        assertTrue(command.endsWith(" claude --dangerously-skip-permissions"))
+    }
+
+    @Test
+    fun claudeWithProfileButMissingProfileFallsBackToDefault() {
+        val profiles = listOf(
+            ClaudeProfile(name = "work", configDir = "/home/user/.claude-work"),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "/srv/app",
+            claudeProfileName = "personal",  // not in profiles
+        )
+        val command = choice.startCommand(profiles)!!
+        assertFalse(command.contains("CLAUDE_CONFIG_DIR"))
+    }
+
+    @Test
+    fun claudeProfileWithEmptyConfigDirDoesNotSetEnvVar() {
+        val profiles = listOf(
+            ClaudeProfile(name = "default", configDir = ""),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "/srv/app",
+            claudeProfileName = "default",
+        )
+        val command = choice.startCommand(profiles)!!
+        assertFalse(command.contains("CLAUDE_CONFIG_DIR"))
+    }
+
+    @Test
+    fun claudeConfigDirIsShellQuoted() {
+        val profiles = listOf(
+            ClaudeProfile(name = "test", configDir = "/path/it's/weird"),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "/srv/app",
+            claudeProfileName = "test",
+        )
+        val command = choice.startCommand(profiles)!!
+        assertTrue(
+            "single quote must be escaped",
+            command.contains("CLAUDE_CONFIG_DIR='/path/it'\\''s/weird'"),
+        )
+    }
+
+    @Test
+    fun claudeProfileIgnoredForOtherAgents() {
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Codex,
+            startDirectory = "/srv/app",
+            claudeProfileName = "work",
+        )
+        val command = choice.startCommand()!!
+        assertFalse(command.contains("CLAUDE_CONFIG_DIR"))
+    }
+
+    @Test
+    fun claudeProfileIgnoredForShellSessions() {
+        val choice = SessionTypeChoice(
+            type = SessionType.Shell,
+            agent = null,
+            startDirectory = "/srv/app",
+            claudeProfileName = "work",
+        )
+        assertNull(choice.startCommand())
+    }
+}
+
+/** Unit tests for [ClaudeProfile] JSON serialization (issue #627). */
+class ClaudeProfileTest {
+
+    @Test
+    fun fromJsonReturnsEmptyListForNull() {
+        assertEquals(emptyList<ClaudeProfile>(), ClaudeProfile.fromJson(null))
+    }
+
+    @Test
+    fun fromJsonReturnsEmptyListForBlank() {
+        assertEquals(emptyList<ClaudeProfile>(), ClaudeProfile.fromJson("  "))
+    }
+
+    @Test
+    fun fromJsonReturnsEmptyListForInvalidJson() {
+        assertEquals(emptyList<ClaudeProfile>(), ClaudeProfile.fromJson("not json"))
+    }
+
+    @Test
+    fun fromJsonParsesValidArray() {
+        val json = """[{"name":"work","configDir":"/home/.claude-work"},{"name":"personal","configDir":""}]"""
+        val profiles = ClaudeProfile.fromJson(json)
+        assertEquals(2, profiles.size)
+        assertEquals("work", profiles[0].name)
+        assertEquals("/home/.claude-work", profiles[0].configDir)
+        assertEquals("personal", profiles[1].name)
+        assertEquals("", profiles[1].configDir)
+    }
+
+    @Test
+    fun fromJsonSkipsEntriesWithBlankName() {
+        val json = """[{"name":"","configDir":"/dir"},{"name":"valid","configDir":""}]"""
+        val profiles = ClaudeProfile.fromJson(json)
+        assertEquals(1, profiles.size)
+        assertEquals("valid", profiles[0].name)
+    }
+
+    @Test
+    fun fromJsonSkipsNonObjectEntries() {
+        val json = """["string",{"name":"ok","configDir":""}]"""
+        val profiles = ClaudeProfile.fromJson(json)
+        assertEquals(1, profiles.size)
+        assertEquals("ok", profiles[0].name)
+    }
+
+    @Test
+    fun toJsonReturnsNullForEmptyList() {
+        assertNull(ClaudeProfile.toJson(emptyList()))
+    }
+
+    @Test
+    fun toJsonProducesValidJsonArray() {
+        val profiles = listOf(
+            ClaudeProfile(name = "work", configDir = "/home/.claude-work"),
+            ClaudeProfile(name = "default", configDir = ""),
+        )
+        val json = ClaudeProfile.toJson(profiles)!!
+        // Round-trip.
+        val parsed = ClaudeProfile.fromJson(json)
+        assertEquals(profiles, parsed)
+    }
+
+    @Test
+    fun roundTripPreservesProfiles() {
+        val profiles = listOf(
+            ClaudeProfile(name = "a", configDir = "/a"),
+            ClaudeProfile(name = "b"),
+            ClaudeProfile(name = "c", configDir = "/path with spaces"),
+        )
+        val json = ClaudeProfile.toJson(profiles)
+        val restored = ClaudeProfile.fromJson(json)
+        assertEquals(profiles, restored)
     }
 }

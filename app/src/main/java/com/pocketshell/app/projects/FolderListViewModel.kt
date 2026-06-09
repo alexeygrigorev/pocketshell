@@ -340,6 +340,15 @@ class FolderListViewModel internal constructor(
         MutableStateFlow(FolderActionStatus.Idle)
     val actionStatus: StateFlow<FolderActionStatus> = _actionStatus.asStateFlow()
 
+    /**
+     * Issue #627: Claude Code profiles for this host, loaded from
+     * [HostEntity.claudeProfilesJson] during [bind]. Empty when the host
+     * has only the default profile (the common case).
+     */
+    private val _claudeProfiles: MutableStateFlow<List<ClaudeProfile>> =
+        MutableStateFlow(emptyList())
+    val claudeProfiles: StateFlow<List<ClaudeProfile>> = _claudeProfiles.asStateFlow()
+
     private val assistant: SessionAssistantController =
         SessionAssistantController(scope = viewModelScope, sessionFactory = ::buildAssistantDeps)
     internal val assistantState: StateFlow<AssistantUiState> = assistant.state
@@ -563,6 +572,12 @@ class FolderListViewModel internal constructor(
         userCollapsedProjectPaths = emptySet()
         _state.value = loadingState()
         restoreCachedSessions(hostId)
+
+        // Issue #627: load Claude Code profiles for this host.
+        viewModelScope.launch {
+            val host = withContext(ioDispatcher) { hostDao.getById(hostId) }
+            _claudeProfiles.value = ClaudeProfile.fromJson(host?.claudeProfilesJson)
+        }
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {

@@ -53,6 +53,13 @@ import androidx.room.PrimaryKey
  * Issue #328 adds [pocketshellDaemonRunning] and
  * [pocketshellDaemonEnabled] so optional jobs-daemon capability can be shown
  * separately from the required tmux + compatible CLI setup cache.
+ *
+ * Issue #627 adds [claudeProfilesJson] for per-host Claude Code profile
+ * configuration. Each profile has a name and an optional config directory
+ * path on the remote host that maps to `CLAUDE_CONFIG_DIR`. The JSON list
+ * is parsed by `ClaudeProfile.fromJson()` in the app module. `null` means
+ * "only the default profile" (no config dir override) — the common case
+ * for hosts with a single Claude Code installation.
  */
 @Entity(
     tableName = "hosts",
@@ -89,4 +96,12 @@ data class HostEntity(
     val pocketshellDaemonRunning: Boolean? = null,
     val pocketshellDaemonEnabled: Boolean? = null,
     val usageCommandOverride: String? = null,
+    /**
+     * JSON-encoded list of Claude Code profiles (issue #627). Each entry
+     * has `name` (display label) and `configDir` (remote path for
+     * `CLAUDE_CONFIG_DIR`; empty/missing for the default profile).
+     * `null` means "only the default profile exists" — no profile
+     * selector is shown in the session type picker.
+     */
+    val claudeProfilesJson: String? = null,
 )

@@ -27,7 +27,7 @@ import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 14
+const val APP_DATABASE_SCHEMA_VERSION = 15
 
 /**
  * Issue #261 left a deliberately unsupported pre-migration v1 shape in the
@@ -172,10 +172,17 @@ val MIGRATION_13_14: Migration = object : Migration(13, 14) {
     }
 }
 
+val MIGRATION_14_15: Migration = object : Migration(14, 15) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN codexProfilesJson TEXT")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_8_10,
     MIGRATION_10_11,
     MIGRATION_11_12,
     MIGRATION_12_13,
     MIGRATION_13_14,
+    MIGRATION_14_15,
 )

@@ -489,6 +489,54 @@ class AppDatabaseTest {
         context.deleteDatabase(databaseName)
     }
 
+    // --- Issue #631: v14 -> v15 migration (codexProfilesJson) ---
+
+    @Test
+    fun migrationFromVersionFourteen_preservesUserRowsAndAddsCodexProfilesJson() = runTest {
+        val databaseName = "v14-to-current-${System.nanoTime()}.db"
+        seedVersionFourteenDatabaseWithUserRows(databaseName)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            val hosts = migratedDb.hostDao().getAll().first()
+            assertEquals(1, hosts.size)
+            assertEquals("prod", hosts[0].name)
+            // claudeProfilesJson preserved from v14.
+            assertNotNull(hosts[0].claudeProfilesJson)
+            // The new column should be null after migration (no Codex profiles).
+            assertNull(hosts[0].codexProfilesJson)
+        } finally {
+            migratedDb.close()
+        }
+        context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun migrationFromVersionFourteen_codexProfilesJsonRoundTrips() = runTest {
+        val databaseName = "v14-roundtrip-${System.nanoTime()}.db"
+        seedVersionFourteenDatabaseWithUserRows(databaseName)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            val hosts = migratedDb.hostDao().getAll().first()
+            val host = hosts[0]
+            // Update with Codex profiles JSON.
+            val profilesJson = """[{"name":"work","configDir":"/home/.codex-work"}]"""
+            migratedDb.hostDao().update(
+                host.copy(codexProfilesJson = profilesJson),
+            )
+            val updated = migratedDb.hostDao().getById(host.id)
+            assertEquals(profilesJson, updated!!.codexProfilesJson)
+        } finally {
+            migratedDb.close()
+        }
+        context.deleteDatabase(databaseName)
+    }
+
     private fun openOnDiskDatabase(databaseName: String): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, databaseName)
             .allowMainThreadQueries()
@@ -799,6 +847,49 @@ class AppDatabaseTest {
         db.execSQL("DROP TABLE hosts")
         db.execSQL("ALTER TABLE hosts_v13 RENAME TO hosts")
         db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+    }
+
+    // --- Issue #631: v14 seed helpers ---
+
+    private fun seedVersionFourteenDatabaseWithUserRows(databaseName: String) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            createVersionFourteenSchema(it)
+            it.execSQL(
+                """
+                INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt)
+                VALUES(1, 'deploy-key', '/keys/deploy', 'sha256:v14', 1, 100)
+                """.trimIndent(),
+            )
+            it.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                    pocketshellCliVersion, pocketshellExpectedCliVersion,
+                    pocketshellVersionCompatible, pocketshellDaemonRunning,
+                    pocketshellDaemonEnabled, usageCommandOverride, claudeProfilesJson
+                ) VALUES(
+                    1, 'prod', 'example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, '0.3.14', '0.3.14', 1, 1, 1,
+                    'pocketshell usage --json',
+                    '[{"name":"work","configDir":"/home/.claude-work"}]'
+                )
+                """.trimIndent(),
+            )
+            it.execSQL("PRAGMA user_version = 14")
+        }
+    }
+
+    private fun createVersionFourteenSchema(db: SQLiteDatabase) {
+        // v14 = v13 schema + claudeProfilesJson column on hosts.
+        createVersionThirteenSchema(db)
+        db.execSQL("ALTER TABLE hosts ADD COLUMN claudeProfilesJson TEXT")
     }
 
     private fun createVersionEightSchema(db: SQLiteDatabase) {

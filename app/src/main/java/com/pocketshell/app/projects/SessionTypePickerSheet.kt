@@ -77,6 +77,7 @@ fun SessionTypePickerSheet(
     onCreate: (choice: SessionTypeChoice) -> Unit,
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     claudeProfiles: List<ClaudeProfile> = emptyList(),
+    codexProfiles: List<CodexProfile> = emptyList(),
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val autocompleteController = rememberStartDirectoryAutocompleteController(suggestStartDirectories)
@@ -93,6 +94,7 @@ fun SessionTypePickerSheet(
             onCreate = onCreate,
             autocompleteController = autocompleteController,
             claudeProfiles = claudeProfiles,
+            codexProfiles = codexProfiles,
         )
     }
 }
@@ -110,6 +112,7 @@ internal fun SessionTypePickerContent(
     onCreate: (choice: SessionTypeChoice) -> Unit,
     autocompleteController: StartDirectoryAutocompleteController? = null,
     claudeProfiles: List<ClaudeProfile> = emptyList(),
+    codexProfiles: List<CodexProfile> = emptyList(),
 ) {
     var sessionType by remember { mutableStateOf(SessionType.Agent) }
     var agentKind by remember { mutableStateOf(AgentCli.Claude) }
@@ -119,6 +122,8 @@ internal fun SessionTypePickerContent(
     var startDirectory by remember { mutableStateOf(folderPath) }
     // Issue #627: selected Claude profile. null = default (no config dir override).
     var claudeProfile by remember { mutableStateOf<String?>(null) }
+    // Issue #631: selected Codex profile. null = default (no config dir override).
+    var codexProfile by remember { mutableStateOf<String?>(null) }
     val scrollState = rememberScrollState()
 
     Column(
@@ -274,6 +279,33 @@ internal fun SessionTypePickerContent(
                             }
                         }
                     }
+
+                    // Issue #631: Codex profile selector. Shown only when
+                    // Codex is selected AND the host has more than one
+                    // profile configured.
+                    if (agentKind == AgentCli.Codex && codexProfiles.size > 1) {
+                        Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
+                            SectionHeader(label = "Profile")
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+                                    .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+                                    .selectableGroup()
+                                    .testTag(SESSION_TYPE_PICKER_CODEX_PROFILE_TAG),
+                            ) {
+                                for (profile in codexProfiles) {
+                                    SegmentButton(
+                                        label = profile.name,
+                                        selected = codexProfile == profile.name,
+                                        onClick = { codexProfile = profile.name },
+                                        testTag = "$SESSION_TYPE_PICKER_CODEX_PROFILE_TAG:${profile.name}",
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -304,6 +336,11 @@ internal fun SessionTypePickerContent(
                             skipPermissions = skipPermissions,
                             claudeProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Claude) {
                                 claudeProfile
+                            } else {
+                                null
+                            },
+                            codexProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Codex) {
+                                codexProfile
                             } else {
                                 null
                             },
@@ -400,6 +437,13 @@ data class SessionTypeChoice(
      * agents and for shell sessions.
      */
     val claudeProfileName: String? = null,
+    /**
+     * The selected Codex profile name (issue #631). `null` means the
+     * default profile (no `CODEX_HOME` override). Only relevant when
+     * [agent] is [AgentCli.Codex]; ignored for other agents and shell
+     * sessions.
+     */
+    val codexProfileName: String? = null,
 ) {
     /**
      * The start command to invoke inside the new tmux pane after
@@ -413,10 +457,20 @@ data class SessionTypeChoice(
      * For Claude Code (issue #627), the command is env-stripped (same 71
      * provider API-key vars as OpenCode) and optionally prefixed with
      * `CLAUDE_CONFIG_DIR=<path>` when a non-default profile is selected.
+     *
+     * For Codex (issue #631), the command is env-stripped (same 71 vars)
+     * and optionally prefixed with `CODEX_HOME=<path>` when a non-default
+     * profile is selected.
      */
-    fun startCommand(profiles: List<ClaudeProfile> = emptyList()): String? = when (type) {
+    fun startCommand(
+        claudeProfiles: List<ClaudeProfile> = emptyList(),
+        codexProfiles: List<CodexProfile> = emptyList(),
+    ): String? = when (type) {
         SessionType.Shell -> null
-        SessionType.Agent -> agent?.launchCommand(skipPermissions, claudeProfileName, profiles)
+        SessionType.Agent -> agent?.launchCommand(
+            skipPermissions, claudeProfileName, claudeProfiles,
+            codexProfileName, codexProfiles,
+        )
     }
 }
 
@@ -439,8 +493,9 @@ enum class AgentCli(val command: String) {
      *   API-key vars as OpenCode) and optionally `CLAUDE_CONFIG_DIR=<path>`
      *   when a non-default profile is selected. `--dangerously-skip-permissions`
      *   when [skipPermissions].
-     * - Codex (alias `cy`): `codex --dangerously-bypass-approvals-and-sandbox`
-     *   when [skipPermissions], else bare `codex`.
+     * - Codex (alias `cy`): env-stripped (issue #631, same 71 vars) and
+     *   optionally `CODEX_HOME=<path>` when a non-default profile is selected.
+     *   `--dangerously-bypass-approvals-and-sandbox` when [skipPermissions].
      * - OpenCode (function `oc`): ALWAYS env-stripped. [skipPermissions]
      *   is a no-op for OpenCode because its per-action permissions are
      *   config-driven in `opencode.json`, not a CLI flag. The env strip
@@ -451,10 +506,12 @@ enum class AgentCli(val command: String) {
     fun launchCommand(
         skipPermissions: Boolean,
         claudeProfileName: String? = null,
-        profiles: List<ClaudeProfile> = emptyList(),
+        claudeProfiles: List<ClaudeProfile> = emptyList(),
+        codexProfileName: String? = null,
+        codexProfiles: List<CodexProfile> = emptyList(),
     ): String = when (this) {
-        Claude -> claudeLaunchCommand(skipPermissions, claudeProfileName, profiles)
-        Codex -> if (skipPermissions) "codex --dangerously-bypass-approvals-and-sandbox" else "codex"
+        Claude -> claudeLaunchCommand(skipPermissions, claudeProfileName, claudeProfiles)
+        Codex -> codexLaunchCommand(skipPermissions, codexProfileName, codexProfiles)
         OpenCode -> openCodeLaunchCommand()
     }
 
@@ -595,6 +652,35 @@ enum class AgentCli(val command: String) {
             }
         }
 
+        /**
+         * Env-stripped Codex launch (issue #631). Same 71 provider API-key
+         * vars as OpenCode, plus optional `CODEX_HOME=<path>` when a
+         * non-default profile is selected. The env strip ensures Codex
+         * uses its own credentials, not leaked host env vars.
+         */
+        internal fun codexLaunchCommand(
+            skipPermissions: Boolean,
+            profileName: String? = null,
+            profiles: List<CodexProfile> = emptyList(),
+        ): String {
+            val unsetArgs = OPENCODE_ENV_UNSET_VARS.joinToString(" ") { name ->
+                require(name.matches(ENV_VAR_NAME_REGEX)) {
+                    "Refusing to build Codex env strip: invalid env var name '$name'"
+                }
+                "-u $name"
+            }
+            val configDir = profiles.firstOrNull { it.name == profileName }?.configDir
+                ?.trim()?.takeIf { it.isNotBlank() }
+            val flag = if (skipPermissions) " --dangerously-bypass-approvals-and-sandbox" else ""
+            return if (configDir != null) {
+                // Shell-quote the config dir path to prevent injection.
+                val quotedDir = "'${configDir.replace("'", "'\\''")}'"
+                "env $unsetArgs CODEX_HOME=$quotedDir codex$flag"
+            } else {
+                "env $unsetArgs codex$flag"
+            }
+        }
+
         // Env var names per POSIX: letters, digits, underscore; we also
         // permit a leading digit because the maintainer's list includes
         // `302AI_API_KEY` and `2AI_API_KEY`.
@@ -620,6 +706,7 @@ const val SESSION_TYPE_PICKER_CWD_TAG: String = "session-type-picker:cwd"
 const val SESSION_TYPE_PICKER_CANCEL_TAG: String = "session-type-picker:cancel"
 const val SESSION_TYPE_PICKER_CREATE_TAG: String = "session-type-picker:create"
 const val SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG: String = "session-type-picker:claude-profile"
+const val SESSION_TYPE_PICKER_CODEX_PROFILE_TAG: String = "session-type-picker:codex-profile"
 
 /**
  * A named Claude Code configuration profile (issue #627).
@@ -657,6 +744,54 @@ data class ClaudeProfile(
 
         /** Serialize a list of profiles to a JSON array string. */
         fun toJson(profiles: List<ClaudeProfile>): String? {
+            if (profiles.isEmpty()) return null
+            val array = JSONArray()
+            for (profile in profiles) {
+                val obj = JSONObject()
+                obj.put("name", profile.name)
+                obj.put("configDir", profile.configDir)
+                array.put(obj)
+            }
+            return array.toString()
+        }
+    }
+}
+
+/**
+ * A named Codex configuration profile (issue #631).
+ *
+ * Each profile maps to a `CODEX_HOME` on the remote host. The default
+ * profile has an empty [configDir] (Codex uses its built-in default).
+ *
+ * Serialized as a JSON array in [HostEntity.codexProfilesJson].
+ */
+data class CodexProfile(
+    val name: String,
+    /** Remote path for `CODEX_HOME`. Empty string = default (no override). */
+    val configDir: String = "",
+) {
+    companion object {
+        /**
+         * Parse a JSON array of `{"name":"...","configDir":"..."}` objects.
+         * Returns an empty list for null/blank input (the common case for
+         * hosts with only the default profile).
+         */
+        fun fromJson(json: String?): List<CodexProfile> {
+            if (json.isNullOrBlank()) return emptyList()
+            val array = try { JSONArray(json) } catch (_: Throwable) { return emptyList() }
+            return (0 until array.length()).mapNotNull { i ->
+                val obj = array.optJSONObject(i) ?: return@mapNotNull null
+                val name = obj.optString("name", "").trim()
+                if (name.isEmpty()) return@mapNotNull null
+                CodexProfile(
+                    name = name,
+                    configDir = obj.optString("configDir", "").trim(),
+                )
+            }
+        }
+
+        /** Serialize a list of profiles to a JSON array string. */
+        fun toJson(profiles: List<CodexProfile>): String? {
             if (profiles.isEmpty()) return null
             val array = JSONArray()
             for (profile in profiles) {

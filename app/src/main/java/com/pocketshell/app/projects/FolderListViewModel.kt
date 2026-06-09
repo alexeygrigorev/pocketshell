@@ -349,6 +349,15 @@ class FolderListViewModel internal constructor(
         MutableStateFlow(emptyList())
     val claudeProfiles: StateFlow<List<ClaudeProfile>> = _claudeProfiles.asStateFlow()
 
+    /**
+     * Issue #631: Codex profiles for this host, loaded from
+     * [HostEntity.codexProfilesJson] during [bind]. Empty when the host
+     * has only the default profile (the common case).
+     */
+    private val _codexProfiles: MutableStateFlow<List<CodexProfile>> =
+        MutableStateFlow(emptyList())
+    val codexProfiles: StateFlow<List<CodexProfile>> = _codexProfiles.asStateFlow()
+
     private val assistant: SessionAssistantController =
         SessionAssistantController(scope = viewModelScope, sessionFactory = ::buildAssistantDeps)
     internal val assistantState: StateFlow<AssistantUiState> = assistant.state
@@ -577,6 +586,12 @@ class FolderListViewModel internal constructor(
         viewModelScope.launch {
             val host = withContext(ioDispatcher) { hostDao.getById(hostId) }
             _claudeProfiles.value = ClaudeProfile.fromJson(host?.claudeProfilesJson)
+        }
+
+        // Issue #631: load Codex profiles for this host.
+        viewModelScope.launch {
+            val host = withContext(ioDispatcher) { hostDao.getById(hostId) }
+            _codexProfiles.value = CodexProfile.fromJson(host?.codexProfilesJson)
         }
 
         warmJob?.cancel()

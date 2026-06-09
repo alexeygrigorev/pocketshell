@@ -60,6 +60,12 @@ import androidx.room.PrimaryKey
  * is parsed by `ClaudeProfile.fromJson()` in the app module. `null` means
  * "only the default profile" (no config dir override) — the common case
  * for hosts with a single Claude Code installation.
+ *
+ * Issue #631 adds [codexProfilesJson] for per-host Codex profile
+ * configuration, mirroring [claudeProfilesJson]. Each Codex profile has a
+ * name and an optional config directory path that maps to `CODEX_HOME`.
+ * `null` means "only the default profile" — the common case for hosts
+ * with a single Codex installation.
  */
 @Entity(
     tableName = "hosts",
@@ -104,4 +110,12 @@ data class HostEntity(
      * selector is shown in the session type picker.
      */
     val claudeProfilesJson: String? = null,
+    /**
+     * JSON-encoded list of Codex profiles (issue #631). Each entry has
+     * `name` (display label) and `configDir` (remote path for `CODEX_HOME`;
+     * empty/missing for the default profile). `null` means "only the
+     * default profile exists" — no profile selector is shown in the
+     * session type picker.
+     */
+    val codexProfilesJson: String? = null,
 )

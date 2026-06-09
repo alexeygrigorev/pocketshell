@@ -42,16 +42,128 @@ class SessionTypeChoiceCommandTest {
     }
 
     @Test
-    fun codexWithSkipPermissionsBypassesApprovalsAndSandbox() {
-        assertEquals(
-            "codex --dangerously-bypass-approvals-and-sandbox",
-            agentChoice(AgentCli.Codex, skip = true).startCommand(),
+    fun codexWithSkipPermissionsUsesEnvStrippedAndBypassesFlag() {
+        val command = agentChoice(AgentCli.Codex, skip = true).startCommand()!!
+        assertTrue("must start with env -u", command.startsWith("env -u "))
+        assertTrue(command.endsWith(" codex --dangerously-bypass-approvals-and-sandbox"))
+    }
+
+    @Test
+    fun codexWithoutSkipPermissionsIsEnvStripped() {
+        val command = agentChoice(AgentCli.Codex, skip = false).startCommand()!!
+        assertTrue("must start with env -u", command.startsWith("env -u "))
+        assertTrue(command.endsWith(" codex"))
+        assertFalse(command.contains("--dangerously"))
+    }
+
+    // --- Issue #631: Codex env strip + profiles ---
+
+    @Test
+    fun codexStripsAllSeventyOneProviderVars() {
+        val command = agentChoice(AgentCli.Codex, skip = false).startCommand()!!
+        for (varName in AgentCli.OPENCODE_ENV_UNSET_VARS) {
+            assertTrue(
+                "Codex launch must unset $varName",
+                command.contains("-u $varName "),
+            )
+        }
+    }
+
+    @Test
+    fun codexWithoutProfileHasNoCodexHome() {
+        val command = agentChoice(AgentCli.Codex, skip = false).startCommand()!!
+        assertFalse(command.contains("CODEX_HOME"))
+    }
+
+    @Test
+    fun codexWithProfileSetsCodexHome() {
+        val profiles = listOf(
+            CodexProfile(name = "work", configDir = "/home/user/.codex-work"),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Codex,
+            startDirectory = "/srv/app",
+            skipPermissions = true,
+            codexProfileName = "work",
+        )
+        val command = choice.startCommand(codexProfiles = profiles)!!
+        assertTrue(
+            "must contain CODEX_HOME",
+            command.contains("CODEX_HOME='/home/user/.codex-work'"),
+        )
+        assertTrue(command.endsWith(" codex --dangerously-bypass-approvals-and-sandbox"))
+    }
+
+    @Test
+    fun codexWithProfileButMissingProfileFallsBackToDefault() {
+        val profiles = listOf(
+            CodexProfile(name = "work", configDir = "/home/user/.codex-work"),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Codex,
+            startDirectory = "/srv/app",
+            codexProfileName = "personal",  // not in profiles
+        )
+        val command = choice.startCommand(codexProfiles = profiles)!!
+        assertFalse(command.contains("CODEX_HOME"))
+    }
+
+    @Test
+    fun codexProfileWithEmptyConfigDirDoesNotSetEnvVar() {
+        val profiles = listOf(
+            CodexProfile(name = "default", configDir = ""),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Codex,
+            startDirectory = "/srv/app",
+            codexProfileName = "default",
+        )
+        val command = choice.startCommand(codexProfiles = profiles)!!
+        assertFalse(command.contains("CODEX_HOME"))
+    }
+
+    @Test
+    fun codexConfigDirIsShellQuoted() {
+        val profiles = listOf(
+            CodexProfile(name = "test", configDir = "/path/it's/weird"),
+        )
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Codex,
+            startDirectory = "/srv/app",
+            codexProfileName = "test",
+        )
+        val command = choice.startCommand(codexProfiles = profiles)!!
+        assertTrue(
+            "single quote must be escaped",
+            command.contains("CODEX_HOME='/path/it'\\''s/weird'"),
         )
     }
 
     @Test
-    fun codexWithoutSkipPermissionsIsBareCommand() {
-        assertEquals("codex", agentChoice(AgentCli.Codex, skip = false).startCommand())
+    fun codexProfileIgnoredForOtherAgents() {
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "/srv/app",
+            codexProfileName = "work",
+        )
+        val command = choice.startCommand()!!
+        assertFalse(command.contains("CODEX_HOME"))
+    }
+
+    @Test
+    fun codexProfileIgnoredForShellSessions() {
+        val choice = SessionTypeChoice(
+            type = SessionType.Shell,
+            agent = null,
+            startDirectory = "/srv/app",
+            codexProfileName = "work",
+        )
+        assertNull(choice.startCommand())
     }
 
     @Test
@@ -333,6 +445,81 @@ class ClaudeProfileTest {
         )
         val json = ClaudeProfile.toJson(profiles)
         val restored = ClaudeProfile.fromJson(json)
+        assertEquals(profiles, restored)
+    }
+}
+
+/** Unit tests for [CodexProfile] JSON serialization (issue #631). */
+class CodexProfileTest {
+
+    @Test
+    fun fromJsonReturnsEmptyListForNull() {
+        assertEquals(emptyList<CodexProfile>(), CodexProfile.fromJson(null))
+    }
+
+    @Test
+    fun fromJsonReturnsEmptyListForBlank() {
+        assertEquals(emptyList<CodexProfile>(), CodexProfile.fromJson("  "))
+    }
+
+    @Test
+    fun fromJsonReturnsEmptyListForInvalidJson() {
+        assertEquals(emptyList<CodexProfile>(), CodexProfile.fromJson("not json"))
+    }
+
+    @Test
+    fun fromJsonParsesValidArray() {
+        val json = """[{"name":"work","configDir":"/home/.codex-work"},{"name":"personal","configDir":""}]"""
+        val profiles = CodexProfile.fromJson(json)
+        assertEquals(2, profiles.size)
+        assertEquals("work", profiles[0].name)
+        assertEquals("/home/.codex-work", profiles[0].configDir)
+        assertEquals("personal", profiles[1].name)
+        assertEquals("", profiles[1].configDir)
+    }
+
+    @Test
+    fun fromJsonSkipsEntriesWithBlankName() {
+        val json = """[{"name":"","configDir":"/dir"},{"name":"valid","configDir":""}]"""
+        val profiles = CodexProfile.fromJson(json)
+        assertEquals(1, profiles.size)
+        assertEquals("valid", profiles[0].name)
+    }
+
+    @Test
+    fun fromJsonSkipsNonObjectEntries() {
+        val json = """["string",{"name":"ok","configDir":""}]"""
+        val profiles = CodexProfile.fromJson(json)
+        assertEquals(1, profiles.size)
+        assertEquals("ok", profiles[0].name)
+    }
+
+    @Test
+    fun toJsonReturnsNullForEmptyList() {
+        assertNull(CodexProfile.toJson(emptyList()))
+    }
+
+    @Test
+    fun toJsonProducesValidJsonArray() {
+        val profiles = listOf(
+            CodexProfile(name = "work", configDir = "/home/.codex-work"),
+            CodexProfile(name = "default", configDir = ""),
+        )
+        val json = CodexProfile.toJson(profiles)!!
+        // Round-trip.
+        val parsed = CodexProfile.fromJson(json)
+        assertEquals(profiles, parsed)
+    }
+
+    @Test
+    fun roundTripPreservesProfiles() {
+        val profiles = listOf(
+            CodexProfile(name = "a", configDir = "/a"),
+            CodexProfile(name = "b"),
+            CodexProfile(name = "c", configDir = "/path with spaces"),
+        )
+        val json = CodexProfile.toJson(profiles)
+        val restored = CodexProfile.fromJson(json)
         assertEquals(profiles, restored)
     }
 }

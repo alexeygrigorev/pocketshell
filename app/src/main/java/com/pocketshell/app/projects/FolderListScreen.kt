@@ -198,6 +198,7 @@ fun FolderListScreen(
     val actionStatus by viewModel.actionStatus.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
     val claudeProfiles by viewModel.claudeProfiles.collectAsState()
+    val codexProfiles by viewModel.codexProfiles.collectAsState()
     val assistantDictationUiState = remember(assistantDictationViewModel) {
         assistantDictationViewModel?.uiState
             ?: MutableStateFlow(InlineDictationViewModel.UiState())
@@ -404,6 +405,7 @@ fun FolderListScreen(
             onDismiss = { pickerFolder = null },
             suggestStartDirectories = suggestStartDirectories,
             claudeProfiles = claudeProfiles,
+            codexProfiles = codexProfiles,
             onCreate = { choice ->
                 pickerFolder = null
                 val newName = derivedSessionName(
@@ -414,7 +416,7 @@ fun FolderListScreen(
                 viewModel.createSession(
                     sessionName = newName,
                     cwd = choice.startDirectory,
-                    startCommand = choice.startCommand(claudeProfiles),
+                    startCommand = choice.startCommand(claudeProfiles, codexProfiles),
                     onResolved = { resolved ->
                         onSessionCreated(resolved, choice.startDirectory)
                     },

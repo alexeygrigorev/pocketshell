@@ -92,6 +92,7 @@ import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -798,8 +799,8 @@ private fun HostDetailAssistantPanel(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.AccentDim, RoundedCornerShape(12.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .border(1.dp, PocketShellColors.AccentDim, PocketShellShapes.medium)
             .padding(10.dp)
             .testTag(FOLDER_LIST_ASSISTANT_PANEL_TAG),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -900,11 +901,11 @@ private fun LoadingPanel(modifier: Modifier = Modifier.fillMaxSize()) {
             modifier = Modifier.testTag(FOLDER_LIST_LOADING_BODY_TAG),
         ) {
             CircularProgressIndicator(color = PocketShellColors.Accent)
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
             Text(
                 text = "Loading workspace tree",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
             )
         }
     }
@@ -1266,7 +1267,7 @@ private fun FolderActionStatusBanner(
         Text(
             text = message,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
         if (status !is FolderActionStatus.Running) {
@@ -1285,8 +1286,8 @@ private fun EmptyState() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.medium)
             .padding(horizontal = 16.dp, vertical = 14.dp)
             .testTag(FOLDER_LIST_EMPTY_TAG),
     ) {
@@ -1408,8 +1409,8 @@ private fun FlatEmptyState() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.medium)
             .padding(horizontal = 16.dp, vertical = 14.dp)
             .testTag(FOLDER_LIST_FLAT_EMPTY_TAG),
     ) {
@@ -2484,7 +2485,7 @@ private fun RenameSessionDialog(
                 Text(
                     text = "Rename $sessionName on this host.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                 )
                 OutlinedTextField(
                     value = newName,
@@ -2545,7 +2546,7 @@ private fun StopSessionDialog(
             Text(
                 text = "This ends the tmux session “$sessionName” on the host.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
             )
         },
         confirmButton = {

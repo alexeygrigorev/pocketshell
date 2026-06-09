@@ -54,6 +54,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -285,8 +286,8 @@ private fun EnvEmptyState() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.medium)
             .padding(horizontal = 16.dp, vertical = 14.dp)
             .testTag(ENV_EMPTY_TAG),
     ) {
@@ -568,8 +569,8 @@ private fun SourceFolderRow(folder: EnvCopySourceFolder, onClick: () -> Unit) {
         subtitle = folder.path,
         onClick = onClick,
         modifier = Modifier
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.extraSmall)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.extraSmall)
             .testTag(envCopySourceTestTag(folder.path)),
     )
 }

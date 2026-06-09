@@ -44,6 +44,7 @@ import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.time.Instant
@@ -162,8 +163,8 @@ fun UsageDashboardStrip(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = PocketShellSpacing.md)
-            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.extraSmall)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = PocketShellSpacing.xs, vertical = PocketShellSpacing.xs),
     ) {
@@ -401,8 +402,8 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.extraSmall)
             .padding(horizontal = 18.dp, vertical = 16.dp),
     ) {
         ListRow(
@@ -411,7 +412,7 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
             trailing = { Pill(label = statusLabel(record), kind = pillKind(record)) },
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
         record.windows.forEachIndexed { index, window ->
             UsageWindowRow(window = window, record = record, now = now)

@@ -47,6 +47,7 @@ import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.time.ZoneId
@@ -301,8 +302,8 @@ private fun DialogScrim(
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.9f)
-                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
-                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+                .background(PocketShellColors.SurfaceElev, PocketShellShapes.medium)
+                .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.medium)
                 // Swallow clicks on the card so they don't dismiss the dialog.
                 .clickable(enabled = false) {}
                 .padding(16.dp),
@@ -357,8 +358,8 @@ private fun CrashReportRow(
         title = crashReportRowTitle(report),
         subtitle = crashReportRowSubtitle(report),
         modifier = Modifier
-            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, border, RoundedCornerShape(8.dp)),
+            .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
+            .border(1.dp, border, PocketShellShapes.extraSmall),
         onClick = onClick,
     )
 }
@@ -373,8 +374,8 @@ private fun CrashReportDetail(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.extraSmall)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.extraSmall)
             .padding(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -440,7 +441,7 @@ private fun EmptyCrashReports(modifier: Modifier = Modifier) {
                 color = PocketShellColors.Text,
                 style = MaterialTheme.typography.titleMedium,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             Text(
                 text = "Uncaught crashes will be saved locally.",
                 color = PocketShellColors.TextSecondary,
@@ -479,7 +480,7 @@ private fun ActionButton(
     Box(
         modifier = modifier
             .height(36.dp)
-            .background(background, RoundedCornerShape(8.dp))
+            .background(background, PocketShellShapes.extraSmall)
             .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
             .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center,

@@ -113,8 +113,10 @@ import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import com.pocketshell.uikit.theme.PocketShellTypography
 
 internal const val SESSION_SCREEN_TAG = "session:screen"
 internal const val SESSION_CONVERSATION_PANE_TAG = "session:conversation"
@@ -707,7 +709,7 @@ internal fun ConversationPane(
                         Text(
                             text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
                             color = PocketShellColors.TextSecondary,
-                            fontSize = 14.sp,
+                            style = PocketShellType.bodyDense,
                             modifier = Modifier.padding(top = 16.dp),
                         )
                     }
@@ -866,20 +868,20 @@ private fun JumpToLatestOverlay(
 private fun JumpToLatestButton(
     onClick: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(20.dp)
+    val shape = PocketShellShapes.large
     Row(
         modifier = Modifier
             .background(color = PocketShellColors.Accent, shape = shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .padding(horizontal = 14.dp, vertical = PocketShellSpacing.sm)
             .testTag(SESSION_CONVERSATION_JUMP_TO_LATEST_TAG),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm - PocketShellSpacing.xs),
     ) {
         Text(
             text = "↓ Latest",
             color = PocketShellColors.Background,
-            fontSize = 12.sp,
+            style = PocketShellTypography.labelSmall,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -1009,8 +1011,7 @@ private fun ConversationToolCallChatCard(
             Text(
                 text = if (expanded) "v" else "›",
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-                fontSize = 14.sp,
+                style = PocketShellType.bodyDense,
             )
             Text(
                 text = toolCall.name,
@@ -1192,18 +1193,18 @@ private fun ToolCallSection(
 
 /** .conv { padding: 16px 18px 72px } */
 private val ChatPaneHPadding = 18.dp
-private val ChatPaneVPadding = 8.dp
+private val ChatPaneVPadding = PocketShellSpacing.sm
 
 /** .msg { margin-bottom: 22px } */
-private val MessageHeadBottomPadding = 8.dp
+private val MessageHeadBottomPadding = PocketShellSpacing.sm
 private val MessageHeadLetterSpacing = 0.8.sp
 private val SystemNoteBlockBottomPadding = 22.dp
 
 /** .tool-call card tokens */
-private val ToolCallCardRadius = 10.dp
-private val ToolCallCardHPadding = 12.dp
+private val ToolCallCardRadius = PocketShellSpacing.sm + PocketShellSpacing.xs
+private val ToolCallCardHPadding = PocketShellSpacing.md
 private val ToolCallCardVPadding = 10.dp
-private val ToolCallCardItemGap = 8.dp
+private val ToolCallCardItemGap = PocketShellSpacing.sm
 private val ToolCallChatCardBottomMargin = 22.dp
 
 /** System note header style (10sp uppercase matching .msg-head) */

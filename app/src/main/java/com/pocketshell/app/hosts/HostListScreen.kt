@@ -22,7 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -77,6 +77,7 @@ import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import com.pocketshell.uikit.theme.PocketShellTypography
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlin.math.PI
@@ -959,15 +960,15 @@ internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
             // Issue #418: the outer vertical padding was dropped — the
             // shared "notices" Column now owns inter-banner spacing, so
             // the banner no longer double-pads above/below itself.
-            .padding(horizontal = 12.dp)
+            .padding(horizontal = PocketShellSpacing.md)
             .background(
                 color = PocketShellColors.AccentSoft,
-                shape = RoundedCornerShape(12.dp),
+                shape = PocketShellShapes.medium,
             )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.Accent,
-                shape = RoundedCornerShape(12.dp),
+                shape = PocketShellShapes.medium,
             )
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -976,18 +977,18 @@ internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
             Text(
                 text = "New version available",
                 color = PocketShellColors.Text,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = info.tagName,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = PocketShellTypography.labelSmall,
             )
         }
 
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(PocketShellSpacing.md))
 
         // Pill-shaped "Update" button. Background uses the solid accent
         // so the tap target reads as primary action on top of the
@@ -997,14 +998,14 @@ internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
                 .clickable(role = Role.Button, onClick = onUpdate)
                 .background(
                     color = PocketShellColors.Accent,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = PocketShellShapes.extraSmall,
                 )
                 .padding(horizontal = 14.dp, vertical = 8.dp),
         ) {
             Text(
                 text = "Update",
                 color = PocketShellColors.OnAccent,
-                fontSize = 12.sp,
+                style = PocketShellTypography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
             )
         }
@@ -1084,17 +1085,17 @@ private fun ForwardingIndicatorPill(
             .height(32.dp)
             .background(
                 color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(16.dp),
+                shape = PocketShellShapes.large,
             )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(16.dp),
+                shape = PocketShellShapes.large,
             )
             .clickable(role = Role.Button, onClick = onClick)
             .semantics { this.contentDescription = state.contentDescription }
             .testTag(FORWARDING_INDICATOR_TAG)
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = PocketShellSpacing.md),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // A small forwarding glyph (two opposed arrows) drawn inline so the
@@ -1104,7 +1105,7 @@ private fun ForwardingIndicatorPill(
         Text(
             text = state.label,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -1404,17 +1405,17 @@ internal fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = message,
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellTypography.labelSmall,
             modifier = Modifier.weight(1f),
         )
         TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
+            Text("Dismiss", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
         }
     }
 }
@@ -1437,23 +1438,23 @@ internal fun UpdateCheckFailedBanner(
         modifier = Modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = "Couldn't check for updates ($reason)",
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellTypography.labelSmall,
             modifier = Modifier.weight(1f),
         )
         TextButton(
             onClick = onRetry,
             modifier = Modifier.testTag(HOST_LIST_UPDATE_CHECK_RETRY_TAG),
         ) {
-            Text("Retry", color = PocketShellColors.Accent, fontSize = 12.sp)
+            Text("Retry", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
         }
         TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
+            Text("Dismiss", color = PocketShellColors.TextSecondary, style = PocketShellTypography.labelSmall)
         }
     }
 }
@@ -1480,7 +1481,7 @@ internal fun AppUpdateWarningBanner(
         modifier = Modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -1492,7 +1493,7 @@ internal fun AppUpdateWarningBanner(
                 else -> warning.message
             },
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellTypography.labelSmall,
             modifier = Modifier.weight(1f),
         )
         if (onUpdate != null) {
@@ -1500,18 +1501,18 @@ internal fun AppUpdateWarningBanner(
                 onClick = onUpdate,
                 modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
             ) {
-                Text("Update", color = PocketShellColors.Accent, fontSize = 12.sp)
+                Text("Update", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
             }
         } else if (warning.releaseResolutionFailure != null) {
             TextButton(
                 onClick = onRetry,
                 modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
             ) {
-                Text("Retry", color = PocketShellColors.Accent, fontSize = 12.sp)
+                Text("Retry", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
             }
         }
         TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
+            Text("Dismiss", color = PocketShellColors.TextSecondary, style = PocketShellTypography.labelSmall)
         }
     }
 }
@@ -1533,11 +1534,11 @@ private fun HostShareDialog(
                     contentDescription = "Host share QR code",
                     modifier = Modifier.size(220.dp),
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 Text(
                     text = "Private keys and passphrases are never included. Import requires a local key with the same name.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = PocketShellTypography.labelSmall,
                 )
             }
         },
@@ -1590,21 +1591,21 @@ private fun ImportConflictDialog(
                 Text(
                     text = "This QR code matches the saved host “${conflict.existing.name}” at $endpoint.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
                 Text(
                     text = "Importing as “${conflict.incoming.name}” " +
                         "(${conflict.incoming.username}@$endpoint).",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = PocketShellTypography.labelSmall,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
                 Text(
                     text = "Update replaces the saved host in place. Add as new keeps both. " +
                         "Already added leaves the saved host unchanged.",
                     color = PocketShellColors.TextMuted,
-                    fontSize = 12.sp,
+                    style = PocketShellTypography.labelSmall,
                 )
             }
         },
@@ -1653,9 +1654,9 @@ private fun SshPassphraseDialog(
                 Text(
                     text = "Enter the passphrase for $keyName. It is used for this connection and is not saved.",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = PocketShellTypography.labelSmall,
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 OutlinedTextField(
                     value = passphrase,
                     onValueChange = onPassphraseChange,
@@ -1665,8 +1666,8 @@ private fun SshPassphraseDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 unlockError?.let {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = it, color = PocketShellColors.Red, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+                    Text(text = it, color = PocketShellColors.Red, style = PocketShellTypography.labelSmall)
                 }
             }
         },

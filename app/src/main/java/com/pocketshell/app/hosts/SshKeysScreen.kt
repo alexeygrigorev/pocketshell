@@ -297,7 +297,7 @@ private fun KeyUnlockPanel(error: String?, inFlight: Boolean, onUnlock: () -> Un
         Text(
             text = "Device unlock gates adding, deleting, and viewing key paths. PocketShell does not store SSH key passphrases yet.",
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
         )
         Spacer(modifier = Modifier.height(16.dp))
         Button(
@@ -450,7 +450,7 @@ private fun KeyRow(
                     .size(32.dp)
                     .background(
                         color = PocketShellColors.SurfaceElev,
-                        shape = RoundedCornerShape(8.dp),
+                        shape = PocketShellShapes.extraSmall,
                     ),
                 contentAlignment = Alignment.Center,
             ) {

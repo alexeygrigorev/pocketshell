@@ -42,6 +42,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.io.File
@@ -199,12 +200,12 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
             .padding(horizontal = 12.dp)
             .background(
                 color = PocketShellColors.Surface,
-                shape = RoundedCornerShape(12.dp),
+                shape = PocketShellShapes.medium,
             )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(12.dp),
+                shape = PocketShellShapes.medium,
             )
             .padding(horizontal = 16.dp, vertical = 12.dp),
         content = content,
@@ -341,7 +342,7 @@ private fun ByDaySection(state: CostsUiState) {
                 }
                 state.dailyGroups.forEachIndexed { index, group ->
                     if (index > 0) {
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
                     }
                     DayGroup(group = group, today = today)
                 }

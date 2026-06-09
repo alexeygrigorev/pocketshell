@@ -1823,11 +1823,11 @@ private fun SessionSwitcherOverlay(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .clickable(onClick = {})
-                    .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+                    .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
                     .border(
                         width = 1.dp,
                         color = PocketShellColors.BorderSoft,
-                        shape = RoundedCornerShape(8.dp),
+                        shape = PocketShellShapes.extraSmall,
                     )
                     .padding(14.dp),
             ) {
@@ -1872,7 +1872,7 @@ private fun SessionSwitcherOverlay(
                             .padding(horizontal = 4.dp)
                             .background(
                                 color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
-                                shape = RoundedCornerShape(8.dp),
+                                shape = PocketShellShapes.extraSmall,
                             )
                             .clickable(
                                 enabled = session.selectable,
@@ -2090,7 +2090,7 @@ private fun TmuxSessionDrawerMessage(text: String) {
         style = PocketShellType.bodyDense,
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.extraSmall)
             .padding(horizontal = 12.dp, vertical = 12.dp),
     )
 }
@@ -2769,7 +2769,7 @@ internal fun ConnectingProgressOverlay(
             Text(
                 text = "Connecting to $user@$host:$port ($sessionLabel)…",
                 color = PocketShellColors.Text,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
                 modifier = Modifier.weight(1f),
             )
             if (showCancel) {
@@ -2786,7 +2786,7 @@ internal fun ConnectingProgressOverlay(
             Text(
                 text = "Still working, this may be slow…",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
+                style = PocketShellType.labelMono,
                 modifier = Modifier.testTag(TMUX_CONNECTING_SLOW_HINT_TAG),
             )
         }
@@ -2824,7 +2824,7 @@ internal fun ReconnectingProgressRow(
                 text = "Reconnecting to ${status.user}@${status.host}:${status.port} " +
                     "($sessionLabel, ${status.attempt}/${status.maxAttempts})…",
                 color = PocketShellColors.Text,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
                 modifier = Modifier.weight(1f),
             )
             TextButton(
@@ -2845,7 +2845,7 @@ internal fun ReconnectingProgressRow(
             Text(
                 text = "Retrying in ${status.retryDelayMs / 1_000}s",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
+                style = PocketShellType.labelMono,
                 modifier = Modifier.testTag(TMUX_CONNECTING_SLOW_HINT_TAG),
             )
         }
@@ -2947,7 +2947,7 @@ private fun EmptyPanesPlaceholder() {
         Text(
             text = "waiting for tmux panes…",
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
         )
     }
 }
@@ -2985,7 +2985,7 @@ private fun TerminalSurfaceErrorState(
                 text = "The connection is still active. Recreate the terminal to " +
                     "keep working in this tmux session.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
             )
             TextButton(
                 onClick = onRecreate,
@@ -3051,11 +3051,11 @@ private fun WindowSwitcherOverlay(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .clickable(onClick = {})
-                    .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+                    .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
                     .border(
                         width = 1.dp,
                         color = PocketShellColors.BorderSoft,
-                        shape = RoundedCornerShape(8.dp),
+                        shape = PocketShellShapes.extraSmall,
                     )
                     .padding(14.dp),
             ) {
@@ -3103,7 +3103,7 @@ private fun WindowSwitcherOverlay(
                             .padding(horizontal = 4.dp)
                             .background(
                                 color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
-                                shape = RoundedCornerShape(8.dp),
+                                shape = PocketShellShapes.extraSmall,
                             )
                             .clickable(
                                 role = androidx.compose.ui.semantics.Role.Tab,
@@ -3386,7 +3386,7 @@ private fun JumpToLatestOverlay(
 private fun JumpToLatestButton(
     onClick: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(20.dp)
+    val shape = PocketShellShapes.large
     Row(
         modifier = Modifier
             .background(color = PocketShellColors.Accent, shape = shape)
@@ -4219,7 +4219,7 @@ private fun ProjectSwitcherCrumb(
                     } else {
                         androidx.compose.ui.graphics.Color.Transparent
                     },
-                    shape = RoundedCornerShape(8.dp),
+                    shape = PocketShellShapes.extraSmall,
                 )
                 .padding(horizontal = if (canSwitch) 8.dp else 0.dp, vertical = 4.dp)
                 .testTag(TMUX_PROJECT_SWITCHER_TAG),
@@ -4238,7 +4238,7 @@ private fun ProjectSwitcherCrumb(
                 Text(
                     text = "▾",
                     color = PocketShellColors.Accent,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                 )
             }
         }
@@ -4284,7 +4284,7 @@ private fun ProjectSwitcherCrumb(
                                         else -> "Available"
                                     },
                                     color = PocketShellColors.TextSecondary,
-                                    fontSize = 11.sp,
+                                    style = PocketShellType.labelMono,
                                 )
                             }
                         }
@@ -4504,12 +4504,12 @@ private fun SessionForwardingChromeButton(
             .defaultMinSize(minWidth = 40.dp)
             .background(
                 color = color.copy(alpha = 0.14f),
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.extraSmall,
             )
             .border(
                 width = 1.dp,
                 color = color.copy(alpha = 0.45f),
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.extraSmall,
             )
             .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
             .semantics { contentDescription = state.contentDescription }
@@ -4669,7 +4669,7 @@ internal fun WindowStrip(
     ) {
         windows.forEachIndexed { index, window ->
             val selected = window.windowId == currentWindowId
-            val pillShape = RoundedCornerShape(8.dp)
+            val pillShape = PocketShellShapes.extraSmall
             Row(
                 modifier = Modifier
                     .background(

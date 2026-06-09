@@ -54,6 +54,9 @@ import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Snippet library management screen — full CRUD for the snippets of a
@@ -257,7 +260,7 @@ public fun SnippetsScreen(
                         Text(
                             text = emptyMessageForTab(selectedTab, snippets.isEmpty()),
                             color = PocketShellColors.TextSecondary,
-                            fontSize = 13.sp,
+                            style = PocketShellType.bodyDense,
                         )
                     }
                 }
@@ -526,7 +529,7 @@ private fun ColumnScope.EmptyLibraryState(title: String, message: String) {
             Text(
                 text = message,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
             )
         }
     }
@@ -707,7 +710,7 @@ internal fun SnippetAddDialog(
                     color = PocketShellColors.TextMuted,
                     fontSize = 11.sp,
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 Text(
                     text = "Kind",
                     color = PocketShellColors.TextSecondary,
@@ -805,7 +808,7 @@ internal fun SnippetEditorDialog(
                     modifier = Modifier.fillMaxWidth(),
                     colors = dialogFieldColors(),
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 Text(
                     text = "Kind",
                     color = PocketShellColors.TextSecondary,
@@ -1006,12 +1009,12 @@ private fun KindToggle(
         modifier = Modifier
             .background(
                 color = if (selected) PocketShellColors.AccentSoft else PocketShellColors.Surface,
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.extraSmall,
             )
             .border(
                 width = 1.dp,
                 color = if (selected) PocketShellColors.AccentDim else PocketShellColors.Border,
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.extraSmall,
             )
             .clickable { onSelect(target) }
             .padding(horizontal = 12.dp, vertical = 6.dp),

@@ -26,7 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -63,6 +63,7 @@ import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.io.File
@@ -179,7 +180,7 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .testTag(SETTINGS_LAZY_COLUMN_TAG),
             contentPadding = PaddingValues(vertical = PocketShellSpacing.md),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.lg + PocketShellSpacing.sm),
         ) {
             // Settings are ordered most-useful-first (issue #486):
             // Terminal (incl. startup) → Voice → Assistant → Usage →
@@ -402,7 +403,7 @@ private fun SectionLabel(text: String, includeTopDivider: Boolean = true) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 22.dp)
+                    .padding(horizontal = PocketShellSpacing.lg + PocketShellSpacing.sm)
                     .height(1.dp)
                     .background(PocketShellColors.BorderSoft),
             )
@@ -422,15 +423,15 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp)
+            .padding(horizontal = PocketShellSpacing.md)
             .background(
                 color = PocketShellColors.Surface,
-                shape = RoundedCornerShape(12.dp),
+                shape = PocketShellShapes.medium,
             )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(12.dp),
+                shape = PocketShellShapes.medium,
             )
             .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md),
         content = content,
@@ -703,7 +704,7 @@ private fun TerminalSection(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
             Text(
                 text = "Background grace",
                 color = PocketShellColors.Text,
@@ -918,7 +919,7 @@ private fun VoiceSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             VoiceProviderOptionRow(
                 title = "OpenAI Whisper",
                 subtitle = "Best for technical prompts; requires an OpenAI key.",
@@ -934,7 +935,7 @@ private fun VoiceSection(
                 onClick = { onTranscriptionProviderSelected(VoiceTranscriptionProvider.AndroidSpeech) },
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             // -- API key row --------------------------------------------
             Text(
@@ -949,7 +950,7 @@ private fun VoiceSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -970,7 +971,7 @@ private fun VoiceSection(
                         .weight(1f)
                         .clickable(role = Role.Button) { showKeyDialog = true }
                         .testTag(VOICE_API_KEY_ROW_TAG)
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = PocketShellSpacing.sm),
                 )
                 if (keyStatus is WhisperKeyStatus.Set) {
                     Text(
@@ -981,12 +982,12 @@ private fun VoiceSection(
                         modifier = Modifier
                             .clickable(role = Role.Button, onClick = onClearApiKey)
                             .testTag(VOICE_API_KEY_CLEAR_TAG)
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm),
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             // -- Language row -------------------------------------------
             Text(
@@ -1001,7 +1002,7 @@ private fun VoiceSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             AppSettings.VOICE_LANGUAGE_OPTIONS.forEach { option ->
                 LanguageOptionRow(
                     option = option,
@@ -1010,7 +1011,7 @@ private fun VoiceSection(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             // -- Silence threshold row ---------------------------------
             Row(
@@ -1038,7 +1039,7 @@ private fun VoiceSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             val totalRangeSeconds =
                 AppSettings.MAX_VOICE_SILENCE_SECONDS - AppSettings.MIN_VOICE_SILENCE_SECONDS
             val steps = (totalRangeSeconds / AppSettings.VOICE_SILENCE_STEP_SECONDS)
@@ -1075,7 +1076,7 @@ private fun VoiceSection(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             // -- AI Costs row -------------------------------------------
             //
@@ -1268,7 +1269,7 @@ private fun AssistantSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             AssistantProviderRow(
                 label = "OpenAI",
                 selected = provider == AssistantProvider.OpenAi,
@@ -1288,7 +1289,7 @@ private fun AssistantSection(
                 testTag = ASSISTANT_PROVIDER_ZAI_TAG,
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             // -- Base URL -----------------------------------------------
             val baseUrl = assistantState.baseUrlFor(provider)
@@ -1310,7 +1311,7 @@ private fun AssistantSection(
                     .testTag(ASSISTANT_BASE_URL_FIELD_TAG),
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
 
             // -- Model --------------------------------------------------
             Text(
@@ -1330,7 +1331,7 @@ private fun AssistantSection(
                     .testTag(ASSISTANT_MODEL_FIELD_TAG),
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
             // -- API key ------------------------------------------------
             Text(
@@ -1345,7 +1346,7 @@ private fun AssistantSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             val keyStatus = assistantState.keyStatusFor(provider)
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1367,7 +1368,7 @@ private fun AssistantSection(
                         .weight(1f)
                         .clickable(role = Role.Button) { showKeyDialog = true }
                         .testTag(ASSISTANT_API_KEY_ROW_TAG)
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = PocketShellSpacing.sm),
                 )
                 if (keyStatus is WhisperKeyStatus.Set) {
                     Text(
@@ -1378,7 +1379,7 @@ private fun AssistantSection(
                         modifier = Modifier
                             .clickable(role = Role.Button) { onClearKey(provider) }
                             .testTag(ASSISTANT_API_KEY_CLEAR_TAG)
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm),
                     )
                 }
             }
@@ -1514,7 +1515,7 @@ private fun UsageSection(
             // threshold so dragging the slider below updates the row
             // tints live.
             if (providerRecords.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 com.pocketshell.app.usage.UsageProviderStateList(
                     records = providerRecords,
                     warnPercent = warnThresholdPercent.toDouble(),
@@ -1528,7 +1529,7 @@ private fun UsageSection(
             // is meaningless (the warning surfaces would have nothing
             // to threshold against).
             if (hasUsageInstalledHost) {
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1554,7 +1555,7 @@ private fun UsageSection(
                     color = PocketShellColors.TextSecondary,
                     style = MaterialTheme.typography.labelSmall,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
                 val sliderRange = AppSettings.MIN_USAGE_WARN_PERCENT.toFloat()..
                     AppSettings.MAX_USAGE_WARN_PERCENT.toFloat()
                 val step = AppSettings.USAGE_WARN_PERCENT_STEP
@@ -1591,20 +1592,20 @@ private fun UsageSection(
             // browser handles the rest; we never silently install or
             // download.
             if (!hasUsageInstalledHost) {
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(
                             color = PocketShellColors.SurfaceElev,
-                            shape = RoundedCornerShape(8.dp),
+                            shape = PocketShellShapes.extraSmall,
                         )
                         .border(
                             width = 1.dp,
                             color = PocketShellColors.BorderSoft,
-                            shape = RoundedCornerShape(8.dp),
+                            shape = PocketShellShapes.extraSmall,
                         )
-                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.md - PocketShellSpacing.xs)
                         .testTag(USAGE_EMPTY_HINT_TAG),
                 ) {
                     Text(
@@ -1686,7 +1687,7 @@ private fun DiagnosticsSection(
                     modifier = Modifier.testTag(DIAGNOSTICS_RECORDING_SWITCH_TAG),
                 )
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
             ListRow(
                 title = "Start fresh diagnostics capture",
                 onClick = onStartFreshCapture,
@@ -1711,7 +1712,7 @@ private fun DiagnosticsSection(
                 onClick = onClearLog,
                 modifier = Modifier.testTag(DIAGNOSTICS_CLEAR_LOG_TAG),
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
             SettingsNavRow(
                 title = "Crash reports",
                 description = "Local-only crash logs you can share manually.",
@@ -1770,7 +1771,7 @@ private fun WorkspaceRootsSection(
                 color = PocketShellColors.TextSecondary,
                 style = MaterialTheme.typography.labelSmall,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             if (hosts.isEmpty()) {
                 Text(
                     text = "Add a host first to configure workspace roots.",
@@ -1803,7 +1804,7 @@ internal fun AboutFooter(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 22.dp, end = 22.dp, top = 4.dp, bottom = 12.dp)
+            .padding(start = PocketShellSpacing.lg + PocketShellSpacing.sm, end = PocketShellSpacing.lg + PocketShellSpacing.sm, top = PocketShellSpacing.xs, bottom = PocketShellSpacing.md)
             .testTag(ABOUT_FOOTER_TAG),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -1820,7 +1821,7 @@ internal fun AboutFooter(
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.testTag(ABOUT_VERSION_TAG),
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
         SettingsUpdateCheckRow(
             state = updateCheckState,
             onCheckForUpdates = onCheckForUpdates,

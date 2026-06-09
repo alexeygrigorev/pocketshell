@@ -165,17 +165,23 @@ class App : Application() {
             // down, so reattach is a no-op and the user sees no
             // reconnect.
             sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_START)
+            // Issue #548: always run the cheap foreground probe even for
+            // within-grace resumes. The probe checks whether the live tmux
+            // control channel is still responsive (a lightweight
+            // `refresh-client` round-trip); if it has gone stale during the
+            // brief background interval the probe triggers a reconnect.
+            // Previously the within-grace branch skipped this probe entirely,
+            // so a stale SSH transport survived the grace window and only
+            // surfaced as a failure on the next user interaction.
+            dispatchTmuxForeground(resumedWithinGrace = resumedWithinGrace)
             val runtimeDiagnostics = terminalRuntimeDiagnostics()
             val networkDecision = terminalNetworkLifecycleGate.onForegroundResumeFinished(
                 resumedWithinGrace = resumedWithinGrace,
                 hasLiveTerminalRuntime = runtimeDiagnostics.hasLiveTerminalRuntime,
             )
+            dispatchTerminalNetworkDecision(networkDecision, runtimeDiagnostics)
             if (!resumedWithinGrace) {
-                dispatchTmuxForeground()
-                dispatchTerminalNetworkDecision(networkDecision, runtimeDiagnostics)
                 terminalNetworkObserver.refresh("process-foreground")
-            } else {
-                dispatchTerminalNetworkDecision(networkDecision, runtimeDiagnostics)
             }
         },
         foregroundDiagnosticFields = { resumedWithinGrace ->
@@ -418,12 +424,13 @@ class App : Application() {
         }
     }
 
-    private fun dispatchTmuxForeground() {
+    private fun dispatchTmuxForeground(resumedWithinGrace: Boolean = false) {
         val hooks = activeTmuxClients.lifecycleHooksSnapshot()
         if (hooks.isEmpty()) return
         Log.i(
             APP_LIFECYCLE_TAG,
-            "tmux-on-start fanout count=${hooks.size}",
+            "tmux-on-start fanout count=${hooks.size} " +
+                "resumedWithinGrace=$resumedWithinGrace",
         )
         DiagnosticEvents.record(
             "app",
@@ -431,13 +438,15 @@ class App : Application() {
             "hookCount" to hooks.size,
             "source" to "background_grace_foreground",
             "trigger" to "process_foreground",
+            "resumedWithinGrace" to resumedWithinGrace,
         )
         ReconnectCauseTrail.record(
             stage = "foreground_reattach",
             outcome = "dispatch",
-            cause = "post_grace_foreground",
+            cause = if (resumedWithinGrace) "within_grace_foreground" else "post_grace_foreground",
             trigger = "process_foreground",
             "hookCount" to hooks.size,
+            "resumedWithinGrace" to resumedWithinGrace,
         )
         for (hook in hooks) {
             tmuxLifecycleScope.launch {

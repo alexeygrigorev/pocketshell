@@ -2039,6 +2039,100 @@ class TmuxSessionViewModelTest {
         assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
     }
 
+    /**
+     * Issue #548: when a network reconnect lands on a stale SSH transport
+     * whose tmux control channel returns EOF on `list-panes`, the
+     * auto-reconnect loop must:
+     *
+     *  1. detect the stale channel symptom and evict the poisoned lease
+     *     ([SshLeaseManager.disconnect]),
+     *  2. retry on a fresh SSH transport,
+     *  3. recover to Connected.
+     *
+     * This proves the reconnect loop self-heals from a transport that
+     * reports isConnected but silently drops tmux commands — the exact
+     * symptom of a TCP reset that the SSH library hasn't noticed yet.
+     */
+    @Test
+    fun networkReconnectRetriesAfterStaleListPanesEofAndRecovers() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val staleSession = FakeSshSession()
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(staleSession, freshSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+
+        // Stale client: connect() succeeds but list-panes throws a
+        // command-timeout exception (closeAndThrowOnCommandPrefix),
+        // which is classified as a stale channel symptom.
+        val staleClient = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "list-panes"
+            closeAndThrowException = TmuxClientException("tmux command timed out")
+        }
+
+        // Fresh client: works normally.
+        val freshClient = FakeTmuxClient().withSinglePane("work", "%1")
+
+        val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = manager,
+        )
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            sessionsSeenByFactory += session
+            if (session === staleSession) staleClient else freshClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+
+        // Trigger network reconnect.
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "wifi-cellular-handoff"),
+        )
+        advanceUntilIdle()
+
+        // Verify two connect attempts: stale (fails) + fresh (recovers).
+        assertEquals(
+            "auto-reconnect must dial twice: stale EOF then fresh recovery",
+            2,
+            connector.connectCount,
+        )
+        assertEquals(2, TMUX_CONNECT_ATTEMPTS.get())
+
+        // Verify the stale SSH session was evicted (closed by disconnect).
+        assertTrue(
+            "stale SSH session must be evicted after list-panes EOF",
+            staleSession.closed,
+        )
+
+        // Verify the factory saw both sessions: stale (failed) then fresh (recovered).
+        assertEquals(listOf(staleSession, freshSession), sessionsSeenByFactory)
+
+        // Verify the VM recovered to Connected with the fresh client.
+        assertSame(freshClient, registry.clients.value[1L]?.client)
+        assertTrue(
+            "expected network reconnect to recover to Connected after stale retry, " +
+                "got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
+    }
+
     @Test
     fun lifecycleReattachEvictsConnectedIdleLeaseBeforeReattaching() = runTest {
         val registry = ActiveTmuxClients()

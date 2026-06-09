@@ -2802,7 +2802,7 @@ class TmuxSessionViewModelTest {
             connector.connectCount,
         )
 
-        vm.onScreenStarted()
+        vm.onScreenStarted(sessionName = "work")
         advanceUntilIdle()
 
         assertEquals(
@@ -2816,6 +2816,135 @@ class TmuxSessionViewModelTest {
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
         assertTrue("automatic foreground reconnect should open the replacement client", reconnectClient.connectCalled)
+    }
+
+    /**
+     * Issue #630: when the user navigates back from session A to the host list
+     * and then selects session B on the same host, the paused reconnect for
+     * session A must NOT fire. [onScreenStarted] must clear the stale
+     * [pausedAutoReconnect] instead of resuming it.
+     */
+    @Test
+    fun onScreenStartedClearsPausedReconnectForDifferentSession() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 60_000L, silentReattachTimeoutMs = 1_000L)
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+
+        // Set up session A ("work") as the active session.
+        val clientA = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = clientA,
+        )
+        runCurrent()
+        assertTrue(
+            "session A should be connected",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+
+        // User navigates back from session A.
+        vm.onScreenStopped()
+
+        // Session A's tmux client disconnects while the screen is stopped.
+        clientA.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderEof,
+                source = "device_background",
+                intent = "unknown",
+            ),
+        )
+        runCurrent()
+
+        // The paused reconnect should target session A.
+        val pausedStatus = vm.connectionStatus.value
+        assertTrue(
+            "expected paused-reconnect status after background disconnect, got $pausedStatus",
+            pausedStatus is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+
+        // User selects session B ("personal") on the same host.
+        // onScreenStarted for session B must clear the stale paused reconnect
+        // instead of resuming it.
+        vm.onScreenStarted(sessionName = "personal")
+        runCurrent()
+
+        // No SSH connect should have been triggered — the paused reconnect
+        // for session A was cleared, and session B's LaunchedEffect connect
+        // is not tested here (it would go through a different code path).
+        assertEquals(
+            "onScreenStarted for a different session must NOT trigger a connect",
+            0,
+            connector.connectCount,
+        )
+    }
+
+    /**
+     * Issue #630: verifies that a legitimate background-to-foreground resume
+     * (same session) still works after the session-mismatch guard is added.
+     */
+    @Test
+    fun onScreenStartedResumesPausedReconnectForSameSession() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 60_000L, silentReattachTimeoutMs = 1_000L)
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+
+        val backgroundDeadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = backgroundDeadClient,
+        )
+        runCurrent()
+
+        vm.onScreenStopped()
+        backgroundDeadClient.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderEof,
+                source = "device_background",
+                intent = "unknown",
+            ),
+        )
+        runCurrent()
+
+        // Resume foreground with the SAME session name — should trigger reconnect.
+        vm.onScreenStarted(sessionName = "work")
+        advanceUntilIdle()
+
+        assertEquals(
+            "same-session foreground resume must trigger auto-reconnect",
+            1,
+            connector.connectCount,
+        )
+        assertTrue(
+            "expected Connected after same-session foreground resume, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
     }
 
     @Test

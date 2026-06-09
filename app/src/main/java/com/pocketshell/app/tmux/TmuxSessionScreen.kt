@@ -302,7 +302,7 @@ public fun TmuxSessionScreen(
     connectTrigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
 ) {
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
-        viewModel.onScreenStarted()
+        viewModel.onScreenStarted(sessionName)
     }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         viewModel.onScreenStopped()

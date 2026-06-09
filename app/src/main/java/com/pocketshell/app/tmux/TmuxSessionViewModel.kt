@@ -1405,11 +1405,29 @@ public class TmuxSessionViewModel @Inject constructor(
      * debounce hole while keeping explicit in-app navigation on the normal
      * foreground close path.
      */
-    public fun onScreenStarted() {
+    public fun onScreenStarted(sessionName: String) {
         screenStartedForCleared = true
         val paused = pausedAutoReconnect
         if (paused != null && pendingReattach == null) {
-            resumePausedAutoReconnect(paused)
+            if (paused.target.sessionName != sessionName) {
+                // Issue #630: the paused reconnect targets a different session
+                // than the one the screen is now composing for. This happens
+                // when the user navigated back from session A to the host list
+                // and then selected session B on the same host. Clear the stale
+                // paused reconnect so it cannot race with the LaunchedEffect
+                // that fires connect(sessionB).
+                ReconnectCauseTrail.record(
+                    stage = "onScreenStarted",
+                    outcome = "cleared_stale_paused_reconnect",
+                    cause = "session_mismatch",
+                    trigger = TmuxConnectTrigger.AutoReconnect.logValue,
+                    "pausedSession" to paused.target.sessionName,
+                    "currentSession" to sessionName,
+                )
+                pausedAutoReconnect = null
+            } else {
+                resumePausedAutoReconnect(paused)
+            }
         }
     }
 
@@ -3381,6 +3399,26 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
         if (target != null && !screenStartedForCleared) {
+            // Issue #630: skip the pause if the screen stopped for an in-app
+            // navigation to a different session rather than app backgrounding.
+            // An active connectJob or a latestConnectIntent targeting a
+            // different session means the user already navigated away to
+            // session B; pausing a reconnect for session A would just create
+            // a stale pausedAutoReconnect that races with session B's connect.
+            val navigatingToDifferentSession = connectJob?.isActive == true ||
+                latestConnectIntent?.let { it.target.sessionName != target.sessionName } == true
+            if (navigatingToDifferentSession) {
+                ReconnectCauseTrail.record(
+                    stage = "handlePassiveClientDisconnect",
+                    outcome = "skipped_pause_in_app_navigation",
+                    cause = "different_session_target",
+                    trigger = TmuxConnectTrigger.AutoReconnect.logValue,
+                    "pausedSession" to target.sessionName,
+                    "intentSession" to latestConnectIntent?.target?.sessionName,
+                    "hasActiveConnectJob" to (connectJob?.isActive == true),
+                )
+                return
+            }
             passiveDisconnectGraceJob?.cancel()
             passiveDisconnectGraceJob = null
             pauseAutoReconnectUntilForeground(

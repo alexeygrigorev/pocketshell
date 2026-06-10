@@ -38,6 +38,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -83,7 +85,6 @@ import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
-import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.ScreenHeader
@@ -1529,19 +1530,13 @@ private fun FolderTreeRootHeader(
             RootCountText(root = root)
         }
         if (hasActions) {
+            // One subtle accent `+` (add project) — the overflow kebab is gone;
+            // root actions stay on the band long-press (`onLongClick`).
             Spacer(modifier = Modifier.width(6.dp))
-            RowOverflowButton(
-                contentDescription = "Root actions",
-                onClick = onRootActions,
-                testTag = folderTreeRootActionsTestTag(root.path),
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            CompactTreeIconButton(
-                label = "+",
+            SubtleAddButton(
                 contentDescription = "Add project",
                 onClick = onCreateInRoot,
                 testTag = folderTreeRootCreateTestTag(root.path),
-                accent = true,
             )
         }
     }
@@ -1807,21 +1802,18 @@ private fun FolderHeader(
                 modifier = Modifier.testTag(folderCountPillTestTag(folder.path)),
             )
         }
-        // Per-row actions — including "New session" — collapse behind a
-        // single overflow kebab (and the row long-press) so the trailing
-        // cluster is just the kebab and the name column keeps its width
-        // (#478: the inline `+` was dropped to match the maintainer's
-        // mockup). Only real folders have a filesystem path to manage; the
-        // synthetic Untracked group has no kebab — its sessions are created
-        // via the screen-level FAB.
+        // The folder's one visible affordance: a subtle accent `+` that opens
+        // the new-session flow for this folder — the frequent, additive action
+        // gets a visible target (maintainer call, 2026-06-09). Rename / env /
+        // import / clone / remove stay on the row long-press
+        // (`onLongClick = onFolderActions`). Untracked has no filesystem path,
+        // so it carries no `+`.
         if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RowOverflowButton(
-                    contentDescription = "Project actions",
-                    onClick = onFolderActions,
-                    testTag = folderDetailActionsTestTag(folder.path),
-                )
-            }
+            SubtleAddButton(
+                contentDescription = "New session in ${folderDisplayLabel(folder.label, folder.path)}",
+                onClick = onFolderActions,
+                testTag = folderDetailActionsTestTag(folder.path),
+            )
         }
     }
 }
@@ -1866,6 +1858,7 @@ private fun FolderTreeSessionChildRow.connectorTestTag(folderPath: String): Stri
         )
     }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkspaceSessionRow(
     folderPath: String,
@@ -1875,13 +1868,22 @@ private fun WorkspaceSessionRow(
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Option A: the session row stays quiet — no inline kebab. Tap opens the
+    // session; long-press opens the action menu (Open / Rename / Stop). The
+    // trailing lane is then ONLY the agent badge, so badges right-align into one
+    // clean column down the list.
+    var menuExpanded by remember { mutableStateOf(false) }
     Row(
         modifier = modifier
             .fillMaxWidth()
             // Compact paint via the density rung, but the interactive row keeps
             // the 48 dp a11y touch floor (#461 §6.1).
             .heightIn(min = PocketShellDensity.tapTargetMin)
-            .clickable(role = Role.Button, onClick = onClick)
+            .combinedClickable(
+                role = Role.Button,
+                onClick = onClick,
+                onLongClick = { menuExpanded = true },
+            )
             .padding(horizontal = 6.dp, vertical = PocketShellDensity.rowPadV)
             .testTag(folderDetailRowTestTag(folderPath, session.sessionName)),
         verticalAlignment = Alignment.CenterVertically,
@@ -1890,13 +1892,7 @@ private fun WorkspaceSessionRow(
             active = session.attached || session.agentKind.isAgent(),
             modifier = Modifier.testTag(folderSessionStatusDotTestTag(folderPath, session.sessionName)),
         )
-        Spacer(modifier = Modifier.width(6.dp))
-        // Terminal tile glyph leads the name alongside the status dot, matching
-        // the flat-view rows and mockup #489 (#522 item 3).
-        SessionTileGlyph(
-            modifier = Modifier.testTag(folderSessionTileTestTag(folderPath, session.sessionName)),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = sessionDisplayTitle(session),
@@ -1921,19 +1917,28 @@ private fun WorkspaceSessionRow(
             session = session,
             modifier = Modifier.testTag(folderSessionBadgeTestTag(folderPath, session.sessionName)),
         )
-        Spacer(modifier = Modifier.width(4.dp))
-        // Session actions live behind an overflow menu: destructive Stop is a
-        // menu item first, then the existing confirmation dialog.
-        SessionActionsKebab(
-            sessionName = session.sessionName,
-            triggerTestTag = folderSessionActionsTestTag(folderPath, session.sessionName),
-            openItemTestTag = folderSessionOpenMenuItemTestTag(folderPath, session.sessionName),
-            renameItemTestTag = folderSessionRenameMenuItemTestTag(folderPath, session.sessionName),
-            stopItemTestTag = folderSessionStopMenuItemTestTag(folderPath, session.sessionName),
-            onOpen = onClick,
-            onRename = onRename,
-            onStop = onStop,
-        )
+        // Zero-size anchor for the long-press action menu at the row's trailing
+        // edge — no visible affordance, so the row stays quiet until pressed.
+        Box {
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+                modifier = Modifier.background(PocketShellColors.SurfaceElev),
+            ) {
+                SubtleMenuItem(
+                    "Open session",
+                    folderSessionOpenMenuItemTestTag(folderPath, session.sessionName),
+                ) { menuExpanded = false; onClick() }
+                SubtleMenuItem(
+                    "Rename session",
+                    folderSessionRenameMenuItemTestTag(folderPath, session.sessionName),
+                ) { menuExpanded = false; onRename() }
+                SubtleMenuItem(
+                    "Stop session",
+                    folderSessionStopMenuItemTestTag(folderPath, session.sessionName),
+                ) { menuExpanded = false; onStop() }
+            }
+        }
     }
 }
 
@@ -1975,19 +1980,50 @@ private fun SessionActionsKebab(
     )
 }
 
+/**
+ * The shared "add a child here" affordance — a subtle accent `+` glyph with no
+ * filled circular chrome, so the root and folder rows read as text + light
+ * chrome rather than heavy buttons. `+` means the same thing at every level:
+ * root `+` adds a project, folder `+` starts a new session. Full 48dp touch
+ * target via the transparent [Box].
+ */
 @Composable
-private fun RowOverflowButton(
+private fun SubtleAddButton(
     contentDescription: String,
     onClick: () -> Unit,
     testTag: String,
     modifier: Modifier = Modifier,
 ) {
-    KebabTrigger(
-        contentDescription = contentDescription,
-        triggerTestTag = testTag,
-        triggerSize = PocketShellDensity.tapTargetMin,
+    Box(
+        modifier = modifier
+            .size(PocketShellDensity.tapTargetMin)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { this.contentDescription = contentDescription }
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "+",
+            color = PocketShellColors.Accent,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/** One row in the session long-press action menu. */
+@Composable
+private fun SubtleMenuItem(label: String, testTag: String, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = {
+            Text(
+                text = label,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+            )
+        },
         onClick = onClick,
-        modifier = modifier,
+        modifier = Modifier.testTag(testTag),
     )
 }
 

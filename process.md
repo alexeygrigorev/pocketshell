@@ -762,7 +762,11 @@ Release build steps:
    - `scripts/phone-walkthrough.sh setup-detection`
    - visual-audit screenshot capture, then inspect the screenshots
 7. Prefer the wrapper that runs that sequence and writes the required summary:
-   `scripts/release-emulator-validation.sh`.
+   `scripts/release-emulator-validation.sh`. (For the local pre-merge loop on a
+   small, single-area change, `scripts/dev-fast-gate.sh` scopes the emulator
+   stages by changed area — a developer convenience that NEVER substitutes for
+   this release gate and cannot produce a taggable summary; see
+   [docs/testing.md](docs/testing.md#developer-fast-path-scoped-by-changed-area).)
 8. For terminal/tmux-heavy releases, opt into the long-running evidence before
    tagging:
    `TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh`.

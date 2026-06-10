@@ -405,6 +405,40 @@ Use `--visual-audit-inspected` only after reviewing the visual-audit
 screenshots. Physical phone testing is final user acceptance only; it does not
 replace the emulator/Docker release blockers above.
 
+#### Developer fast path (scoped by changed area)
+
+For the local pre-merge loop on a small, single-area change, the developer-only
+fast path runs only the emulator stages relevant to what changed:
+
+```bash
+scripts/dev-fast-gate.sh --dry-run            # classify + print the plan, no emulator
+scripts/dev-fast-gate.sh                       # run the scoped stages
+scripts/dev-fast-gate.sh --profile fish-user-local-path   # scope setup-detection
+```
+
+It diffs the branch against the `origin/main` merge base, maps the changed
+paths to a minimal stage set, and calls the existing building blocks directly
+(`scripts/phone-walkthrough.sh <scenarios>` and/or
+`scripts/pre-release-confidence-gate.sh`). Mapping (default-to-full when in
+doubt):
+
+| Changed area | Stages run |
+|---|---|
+| UI-only (`shared/ui-kit/**`, `app/src/main/**/projects/**`) | `visual-audit` + `terminal-lab` |
+| bootstrap / setup-detection (`**/bootstrap/**`, `tests/docker/**bootstrap**`) | `setup-detection` (or `setup-detection:<profile>` via `--profile`) |
+| terminal / SSH / tmux (`shared/core-terminal/**`, `core-ssh`, `core-tmux`, terminal render path) | `terminal-lab` + `tmux-existing-session` |
+| Room schema / migrations / install-update | `pre-release-confidence-gate` |
+| build files (`*.gradle*`, `gradle/**`, `gradle.properties`, `settings.gradle*`), `scripts/**`, `.github/**`, any DB/migration file, an unmatched path, or a multi-area diff | **full set** (every building block) |
+
+**`dev-fast-gate.sh` is NOT a release gate.** It never invokes
+`scripts/release-emulator-validation.sh` and never writes a
+`build/release-emulator-validation/<run-id>/summary.md`, so it cannot produce a
+taggable summary. Release tags still require the full
+`scripts/release-emulator-validation.sh` run and `scripts/push-release-tag.sh`
+(which checks the summary's `Commit SHA` and `Automated status: PASS` against
+the tagged `origin/main` SHA). Use the fast path to iterate; never as release
+evidence.
+
 #### AVD lock for parallel-worktree contention
 
 The release-gate scripts that touch the shared local Android emulator

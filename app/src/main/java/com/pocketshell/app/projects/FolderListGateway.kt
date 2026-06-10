@@ -462,7 +462,7 @@ class SshFolderListGateway internal constructor(
             // the same ConnectError dead-end (the host-detail "open failed"
             // screen the maintainer hit). Evicting it makes the NEXT poll /
             // Retry open a fresh transport that recovers the tree.
-            poisonedTransport = isChannelOpenFailure(t)
+            poisonedTransport = isChannelOpenFailure(t) || isTransportDisconnected(t)
             Result.failure(t)
         } finally {
             withContext(NonCancellable) {
@@ -492,6 +492,46 @@ class SshFolderListGateway internal constructor(
                     )
             ) {
                 return true
+            }
+            current = current.cause
+        }
+        return false
+    }
+
+    /**
+     * Issue #665 / #636: true when [cause] is the transport-DEAD variant — the
+     * pooled SSH transport silently died, so the folder-tree probe's exec fails
+     * not with an "open failed" channel error but with a sshj
+     * `net.schmizz.sshj.transport.TransportException` carrying disconnect reason
+     * `BY_APPLICATION` ("Disconnected"). Same gap as
+     * [com.pocketshell.app.tmux.TmuxSessionViewModel.isStaleChannelSymptom]:
+     * without this the dead lease is released back (not evicted), the next poll
+     * re-grabs the corpse, and the host-detail "open failed" dead-end never
+     * recovers. Evicting it makes the next poll / Retry open a fresh transport.
+     *
+     * Matched on class simple name + reason/message text (no sshj compile-time
+     * dep), walking the cause chain.
+     */
+    private fun isTransportDisconnected(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            if (current.javaClass.simpleName == "TransportException") {
+                val reasonName = runCatching {
+                    current!!.javaClass.getMethod("getDisconnectReason").invoke(current)?.toString()
+                }.getOrNull()
+                if (reasonName != null && reasonName.contains("BY_APPLICATION", ignoreCase = true)) {
+                    return true
+                }
+                val message = current.message
+                if (message != null &&
+                    (
+                        message.contains("BY_APPLICATION", ignoreCase = true) ||
+                            message.contains("Disconnected", ignoreCase = true)
+                        )
+                ) {
+                    return true
+                }
             }
             current = current.cause
         }

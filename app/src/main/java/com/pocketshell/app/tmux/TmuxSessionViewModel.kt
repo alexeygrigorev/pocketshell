@@ -3262,8 +3262,98 @@ public class TmuxSessionViewModel @Inject constructor(
             !trigger.isReconnectTrigger &&
             staleLeaseAutoRecoverAttempts < STALE_LEASE_AUTO_RECOVER_MAX
 
-    private fun isStaleChannelSymptom(cause: Throwable?): Boolean =
-        isChannelOpenFailure(cause) || isTmuxCommandTimeout(cause) || isTmuxEofWriteFailure(cause)
+    @androidx.annotation.VisibleForTesting
+    internal fun isStaleChannelSymptom(cause: Throwable?): Boolean =
+        isChannelOpenFailure(cause) ||
+            isTmuxCommandTimeout(cause) ||
+            isTmuxEofWriteFailure(cause) ||
+            isTransportDisconnected(cause)
+
+    /**
+     * Issue #665 / #636: true when [cause] is the transport-DEAD variant of the
+     * stale-lease symptom — the pooled SSH transport silently died (sshj's
+     * `isConnected` lies until its keepalive trips), so the attach's `tmux -CC`
+     * spawn fails not with an "open failed" channel error but with a
+     * `net.schmizz.sshj.transport.TransportException` carrying disconnect reason
+     * `BY_APPLICATION` ("Disconnected"). On the attach/switch path that surfaces
+     * as `TmuxClientException("failed to spawn tmux -CC: Disconnected", <that
+     * TransportException>)` (see [com.pocketshell.core.tmux.TmuxClient]).
+     *
+     * The merged #621 heal only matched "open failed" / EOF-write /
+     * command-timeout, so this variant slipped through: the dead lease was never
+     * evicted + re-dialled and the switch stranded on `status=Failed` showing the
+     * PREVIOUS session's content (the v0.3.30 wrong/stale-session regression).
+     *
+     * Scoped tightly to the attach/spawn failure path so a deliberate
+     * user-initiated disconnect is NOT auto-recovered: a `TransportException`
+     * alone is not enough — it must be wrapped by the `tmux -CC` spawn failure
+     * (matched on the "failed to spawn tmux -CC" message the attach throws) OR be
+     * a sshj `TransportException` whose disconnect reason is `BY_APPLICATION`,
+     * which is the dead-transport-during-attach shape and not how the explicit
+     * close/detach reader path reports a user disconnect
+     * ([com.pocketshell.core.tmux.TmuxDisconnectReason.ExplicitClose] /
+     * `ExplicitDetach`, which never reach this connect-attempt cause chain).
+     *
+     * Matched on class simple name + message text (mirroring
+     * [isNonRetryableConnectFailure]) so the app module need not import the sshj
+     * transport hierarchy, walking the cause chain so a deeper wrap still
+     * matches.
+     */
+    private fun isTransportDisconnected(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        var sawSpawnFailure = false
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                message.contains("failed to spawn tmux -CC", ignoreCase = true)
+            ) {
+                sawSpawnFailure = true
+            }
+            if (isTransportDisconnectException(current)) {
+                return true
+            }
+            // `failed to spawn tmux -CC: Disconnected` carries the disconnect
+            // reason inline in the spawn-failure message even when the wrapped
+            // TransportException's own message is bare; treat that as the
+            // dead-transport attach symptom too.
+            if (sawSpawnFailure &&
+                message != null &&
+                message.contains("Disconnected", ignoreCase = true)
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
+
+    /**
+     * True when [throwable] is a sshj `TransportException`-family error reporting
+     * a `BY_APPLICATION` / "Disconnected" teardown — the dead-transport shape an
+     * attach hits when the pooled lease silently expired. Matched without
+     * importing the sshj type: the class simple name plus the reason/message
+     * text the exception carries.
+     */
+    private fun isTransportDisconnectException(throwable: Throwable): Boolean {
+        if (throwable.javaClass.simpleName != "TransportException") return false
+        // sshj's TransportException exposes a `getDisconnectReason()`; its name /
+        // the exception message is `BY_APPLICATION` / "Disconnected" for the
+        // application-initiated teardown that an attach over a silently-dead
+        // lease surfaces. Read it reflectively to avoid an sshj compile-time dep.
+        val reasonName = runCatching {
+            throwable.javaClass.getMethod("getDisconnectReason").invoke(throwable)?.toString()
+        }.getOrNull()
+        if (reasonName != null && reasonName.contains("BY_APPLICATION", ignoreCase = true)) {
+            return true
+        }
+        val message = throwable.message
+        return message != null &&
+            (
+                message.contains("BY_APPLICATION", ignoreCase = true) ||
+                    message.contains("Disconnected", ignoreCase = true)
+                )
+    }
 
     private fun isTmuxEofWriteFailure(cause: Throwable?): Boolean {
         var current: Throwable? = cause

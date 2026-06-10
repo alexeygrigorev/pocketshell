@@ -1,5 +1,8 @@
 package com.pocketshell.app.session
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
@@ -13,6 +16,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.composerAttachmentChipTestTag
+import com.pocketshell.app.composer.composerAttachmentRemoveTestTag
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -79,13 +83,14 @@ class RawSessionBottomControlsUiTest {
     }
 
     @Test
-    fun keyboardOpenAccessoryShowsRawHotkeysOnlyIncludingEnter() {
+    fun keyboardOpenAccessoryShowsRawHotkeysAndKeepsStagedAttachmentRemovable() {
         val keyTaps = mutableListOf<String>()
         var keyboardTaps = 0
         val attachment = PromptComposerViewModel.StagedAttachment(
             remotePath = "~/.pocketshell/attachments/raw-host/shot.png",
             displayName = "shot.png",
         )
+        var staged by mutableStateOf(listOf(attachment))
 
         compose.setContent {
             PocketShellTheme {
@@ -99,10 +104,28 @@ class RawSessionBottomControlsUiTest {
                     onShowKeyboardTap = { keyboardTaps++ },
                     onAddSnippetTap = {},
                     onProjectNavigationTap = {},
-                    stagedAttachments = listOf(attachment),
+                    stagedAttachments = staged,
+                    onRemoveStagedAttachment = { remotePath ->
+                        staged = staged.filterNot { it.remotePath == remotePath }
+                    },
                 )
             }
         }
+
+        // Mirrors the tmux terminal accessory (TmuxSessionVoiceSurfaceUiTest):
+        // with the IME up, the raw hotkey accessory keeps the staged attachment
+        // grid visible and removable so the user can manage attachments while
+        // typing into the terminal. The composer launcher / chips stay absent.
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
+            .assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
 
         compose.onNodeWithText("Esc").assertIsDisplayed()
         compose.onNodeWithText("Ctrl-C").assertIsDisplayed()
@@ -117,8 +140,6 @@ class RawSessionBottomControlsUiTest {
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath)).assertDoesNotExist()
         compose.onNodeWithText("show keyboard").assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("Prompt").assertDoesNotExist()
@@ -126,6 +147,7 @@ class RawSessionBottomControlsUiTest {
         compose.onNodeWithText("Ready").assertDoesNotExist()
         compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
 
+        // Only the dedicated ⏎ key reached the pane — Esc was never tapped here.
         assertEquals(listOf(SessionKeyBarEnterLabel), keyTaps)
         assertEquals(0, keyboardTaps)
     }

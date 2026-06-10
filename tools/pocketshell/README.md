@@ -53,6 +53,7 @@ pocketshell sessions list [--by activity]   # tmux session summaries
 pocketshell jobs ...                        # tmux recurring jobs
 pocketshell agent-log ...                   # agent conversation logs
 pocketshell repos list ...                  # local / GitHub repositories
+pocketshell github status [--json]          # gh install / auth state
 pocketshell env ...                         # .env / .envrc management
 pocketshell hooks ...                       # Claude/Codex/OpenCode hooks
 pocketshell logs ...                        # server-side trace sink
@@ -135,6 +136,36 @@ discoverability hint mentioning `--remote`.
 Daemon mode caches `repos.list_local` for 10 s and `repos.list_remote`
 for 5 min. `--no-daemon` forces the in-process path; `--no-cache`
 forces the daemon to re-run upstream on the next call.
+
+### `pocketshell github status`
+
+Reports whether the GitHub CLI (`gh`) is installed and authenticated, as
+structured JSON the app consumes to gate GitHub features and prompt the
+user to configure `gh` when it is missing (epic #644, slice #645).
+
+```bash
+pocketshell github status          # human-readable summary
+pocketshell github status --json   # machine-readable JSON (consumed by the app)
+```
+
+Schema:
+
+```json
+{
+  "installed": true,             // shutil.which("gh") found the binary
+  "authenticated": true,         // `gh auth status` exited 0
+  "account": "alexeygrigorev",   // logged-in username, or null
+  "hint": null                   // actionable hint when something is missing
+}
+```
+
+The command always exits 0 — "gh missing" and "not authenticated" are
+normal, reportable states (not probe failures), so the app can poll the
+status without treating it as an error. When `gh` is absent the `hint` tells
+the user to install it and run `gh auth login`; when present but
+unauthenticated the `hint` tells them to run `gh auth login`. The only
+network access is whatever `gh auth status` itself performs (a token-validity
+check); the command does NOT call the GitHub API.
 
 ### `pocketshell qr-share`
 

@@ -201,11 +201,18 @@ sealed interface FolderActionStatus {
  * Active/idle split of the flat host-detail session list (#489).
  *
  * The flat view groups every session into an **Active** and an **Idle**
- * section instead of by folder. A session reads *active* when it is attached or
- * is running an agent (Claude / Codex / OpenCode / probing / exited-agent) — the
+ * section instead of by folder. A session reads *active* purely when it is
+ * running an agent (Claude / Codex / OpenCode / probing / exited-agent) — the
  * same green-dot condition the row [com.pocketshell.uikit.components.StatusDot]
  * paints, so the section a row lands in always agrees with its dot colour.
- * Everything else (plain idle shells) is *idle* (amber).
+ * Everything else (plain shells, attached or not) is *idle* (amber).
+ *
+ * The split deliberately does NOT key on
+ * [FolderSessionEntry.attached] (#663): `attached` flips true the instant the
+ * user opens a session, which would jump a plain shell from Idle to Active and
+ * reorder the list under the user's finger, causing mis-taps. Agent activity is
+ * the only thing that moves a row between sections; opening/attaching a plain
+ * shell leaves its row in exactly the same section and index.
  *
  * Order inside each section is preserved from the already-sorted `flatSessions`
  * input (agents first, then most-recent activity, then name — see
@@ -221,13 +228,15 @@ data class FlatSessionGroups(
 
     companion object {
         /**
-         * Partition [sessions] into the Active / Idle sections (#489). A session
-         * is active when [FolderSessionEntry.attached] is set or its
-         * [FolderSessionEntry.agentKind] is an agent kind. Relative order within
-         * each section is the input order (already sorted upstream).
+         * Partition [sessions] into the Active / Idle sections (#489, #663). A
+         * session is active when its [FolderSessionEntry.agentKind] is an agent
+         * kind — agent activity only, NOT [FolderSessionEntry.attached], so
+         * opening/attaching a plain shell never moves its row between sections.
+         * Relative order within each section is the input order (already sorted
+         * upstream).
          */
         fun from(sessions: List<FolderSessionEntry>): FlatSessionGroups {
-            val (active, idle) = sessions.partition { it.attached || it.agentKind.isFlatActiveAgent() }
+            val (active, idle) = sessions.partition { it.agentKind.isFlatActiveAgent() }
             return FlatSessionGroups(active = active, idle = idle)
         }
 

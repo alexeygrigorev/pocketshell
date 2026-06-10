@@ -23,10 +23,13 @@ class FlatSessionGroupsTest {
     )
 
     @Test
-    fun attachedShellLandsInActive() {
+    fun attachedShellStaysInIdle() {
+        // #663: a plain shell is Idle whether or not the user has it attached.
+        // `attached` is the user's own viewing action, not agent activity, so it
+        // must never move the row to Active.
         val groups = FlatSessionGroups.from(listOf(session("s", attached = true)))
-        assertEquals(listOf("s"), groups.active.map { it.sessionName })
-        assertEquals(emptyList<String>(), groups.idle.map { it.sessionName })
+        assertEquals(emptyList<String>(), groups.active.map { it.sessionName })
+        assertEquals(listOf("s"), groups.idle.map { it.sessionName })
     }
 
     @Test
@@ -34,6 +37,71 @@ class FlatSessionGroupsTest {
         val groups = FlatSessionGroups.from(listOf(session("s", attached = false)))
         assertEquals(emptyList<String>(), groups.active.map { it.sessionName })
         assertEquals(listOf("s"), groups.idle.map { it.sessionName })
+    }
+
+    /**
+     * Regression for #663: opening (attaching) a plain shell must NOT change its
+     * section or its index in the list. Before vs after the `attached` flip the
+     * partition puts the same shell in the same place, so the row never jumps
+     * under the user's finger and they don't mis-tap.
+     */
+    @Test
+    fun attachingPlainShellDoesNotMoveItsRowOrReorderTheList() {
+        val before = listOf(
+            session("claude-main", attached = false, kind = SessionAgentKind.Claude),
+            session("build-shell", attached = false, kind = SessionAgentKind.Shell),
+            session("notes-shell", attached = false, kind = SessionAgentKind.Shell),
+        )
+        // Same list, but the user has now opened (attached) the middle shell.
+        val after = listOf(
+            session("claude-main", attached = false, kind = SessionAgentKind.Claude),
+            session("build-shell", attached = true, kind = SessionAgentKind.Shell),
+            session("notes-shell", attached = false, kind = SessionAgentKind.Shell),
+        )
+
+        val groupsBefore = FlatSessionGroups.from(before)
+        val groupsAfter = FlatSessionGroups.from(after)
+
+        // The agent stays Active; both plain shells stay Idle — identical before
+        // and after the attach. The attached shell did NOT jump to Active.
+        assertEquals(listOf("claude-main"), groupsBefore.active.map { it.sessionName })
+        assertEquals(listOf("claude-main"), groupsAfter.active.map { it.sessionName })
+        assertEquals(
+            listOf("build-shell", "notes-shell"),
+            groupsBefore.idle.map { it.sessionName },
+        )
+        assertEquals(
+            listOf("build-shell", "notes-shell"),
+            groupsAfter.idle.map { it.sessionName },
+        )
+
+        // The just-attached shell keeps the same section AND the same relative
+        // index within that section (Idle index 0, ahead of notes-shell).
+        assertEquals(
+            "attached shell must keep its Idle index",
+            groupsBefore.idle.indexOfFirst { it.sessionName == "build-shell" },
+            groupsAfter.idle.indexOfFirst { it.sessionName == "build-shell" },
+        )
+        assertEquals(
+            "attached shell stays at the front of Idle",
+            0,
+            groupsAfter.idle.indexOfFirst { it.sessionName == "build-shell" },
+        )
+        assertEquals(
+            "attached shell must stay in Idle (not move to Active)",
+            -1,
+            groupsAfter.active.indexOfFirst { it.sessionName == "build-shell" },
+        )
+
+        // Section membership and order are byte-for-byte stable across the flip.
+        assertEquals(
+            groupsBefore.active.map { it.sessionName },
+            groupsAfter.active.map { it.sessionName },
+        )
+        assertEquals(
+            groupsBefore.idle.map { it.sessionName },
+            groupsAfter.idle.map { it.sessionName },
+        )
     }
 
     @Test
@@ -63,12 +131,14 @@ class FlatSessionGroupsTest {
         )
         val groups = FlatSessionGroups.from(input)
 
-        // Active section: every attached-or-agent session, in input order.
+        // Active section: agent sessions only (#663 — attached does NOT count),
+        // in input order.
         assertEquals(
             listOf("claude-main", "codex-llm", "detached-agent"),
             groups.active.map { it.sessionName },
         )
-        // Idle section: the plain detached shells, in input order.
+        // Idle section: the plain shells, in input order — including the one the
+        // user happens to have attached.
         assertEquals(
             listOf("build-shell", "old-shell"),
             groups.idle.map { it.sessionName },
@@ -76,12 +146,29 @@ class FlatSessionGroupsTest {
     }
 
     @Test
+    fun attachedPlainShellAmongAgentsStaysIdle() {
+        // #663: even when an attached shell sits between agents, it stays Idle.
+        val input = listOf(
+            session("claude-main", attached = false, kind = SessionAgentKind.Claude),
+            session("attached-shell", attached = true, kind = SessionAgentKind.Shell),
+            session("codex-llm", attached = false, kind = SessionAgentKind.Codex),
+        )
+        val groups = FlatSessionGroups.from(input)
+        assertEquals(
+            listOf("claude-main", "codex-llm"),
+            groups.active.map { it.sessionName },
+        )
+        assertEquals(listOf("attached-shell"), groups.idle.map { it.sessionName })
+    }
+
+    @Test
     fun countsReflectTheSplit() {
+        // Two agents → Active; two plain shells (one of them attached) → Idle.
         val groups = FlatSessionGroups.from(
             listOf(
                 session("a", kind = SessionAgentKind.Claude),
-                session("b", attached = true),
-                session("c"),
+                session("b", kind = SessionAgentKind.Codex),
+                session("c", attached = true),
                 session("d"),
             ),
         )
@@ -103,8 +190,8 @@ class FlatSessionGroupsTest {
         val groups = FlatSessionGroups.from(
             listOf(
                 session("a", kind = SessionAgentKind.Claude),
-                session("b", attached = true),
-                session("c"),
+                session("b", kind = SessionAgentKind.Codex),
+                session("c", attached = true),
                 session("d"),
             ),
         )

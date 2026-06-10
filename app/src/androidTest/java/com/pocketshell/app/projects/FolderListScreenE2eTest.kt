@@ -249,12 +249,20 @@ class FolderListScreenE2eTest {
             .performClick()
 
         compose.waitUntil(timeoutMillis = 5_000) { fakeGateway.callCount.get() >= 2 }
+        // Issue #607: the manual Refresh Sessions action keeps the user on the
+        // host-detail screen and reloads the session list in place.
         compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertIsDisplayed()
         compose.onNodeWithText("alpha", useUnmergedTree = true).assertExists()
-        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
-            .performScrollToNode(hasTestTag(FOLDER_LIST_ACTION_STATUS_TAG))
-        compose.onNodeWithTag(FOLDER_LIST_ACTION_STATUS_TAG).assertExists()
-        compose.onNodeWithText("Sessions refreshed").assertExists()
+        // Issue #656: a *successful* refresh emits NO status banner — the
+        // reloaded list (and the non-displacing progress bar clearing) is the
+        // feedback. The action-status overlay only ever appears for a failure,
+        // so it must be absent here. Asserting its absence is what stops this
+        // E2E from silently passing against a displacing success banner.
+        compose.onAllNodesWithTag(FOLDER_LIST_ACTION_STATUS_TAG)
+            .fetchSemanticsNodes()
+            .also {
+                assertTrue("a successful Refresh Sessions must not show a status banner (#656)", it.isEmpty())
+            }
         assertEquals(false, openedSettings)
         assertEquals(false, openedWorkspaceSettings)
     }
@@ -547,10 +555,15 @@ class FolderListScreenE2eTest {
             .assertExists()
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) { fakeGateway.callCount.get() >= 2 }
-        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
-            .performScrollToNode(hasTestTag(FOLDER_LIST_ACTION_STATUS_TAG))
-        compose.onNodeWithTag(FOLDER_LIST_ACTION_STATUS_TAG).assertExists()
-        compose.onNodeWithText("Sessions refreshed").assertExists()
+        // Issue #607: refresh reloads in place and keeps the user on the host
+        // screen. Issue #656: a successful refresh emits NO status banner — the
+        // action-status overlay only appears for a failure, so it must be absent.
+        compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertIsDisplayed()
+        compose.onAllNodesWithTag(FOLDER_LIST_ACTION_STATUS_TAG)
+            .fetchSemanticsNodes()
+            .also {
+                assertTrue("a successful Refresh Sessions must not show a status banner (#656)", it.isEmpty())
+            }
         compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_USAGE_TAG).assertExists()

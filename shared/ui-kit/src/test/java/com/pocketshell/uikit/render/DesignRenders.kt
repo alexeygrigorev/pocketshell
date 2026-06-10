@@ -669,6 +669,81 @@ class DesignRenders {
     }
 
     /**
+     * Issue #607: the host-detail overflow (kebab) menu, opened, showing the
+     * manual `Refresh Sessions` action alongside the other header actions. The
+     * real menu lives in the app module's `FolderListOverflowMenu`, anchored by
+     * the shared [com.pocketshell.uikit.components.Kebab] [DropdownMenu]. A
+     * `DropdownMenu` renders into a popup window that Roborazzi's single
+     * composition snapshot does not capture, so this fixture mirrors the same
+     * `SurfaceElev` panel + `bodyDense` rows the live `Kebab` paints, in the
+     * exact item order, to give a fast visual check of the menu copy and the
+     * in-flight `Refreshing Sessions` (disabled) variant.
+     */
+    @Test
+    fun hostDetailOverflowMenu() = render("host-detail-overflow-menu") {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            KebabMenuPanel(
+                title = "Idle",
+                items = listOf(
+                    "Host assistant" to true,
+                    "Browse repos" to true,
+                    "Refresh Sessions" to true,
+                    "Usage" to true,
+                    "App settings" to true,
+                    "Workspace settings" to true,
+                ),
+            )
+            KebabMenuPanel(
+                title = "Refreshing",
+                items = listOf(
+                    "Host assistant" to true,
+                    "Browse repos" to true,
+                    "Refreshing Sessions" to false,
+                    "Usage" to true,
+                    "App settings" to true,
+                    "Workspace settings" to true,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Static mirror of the shared `Kebab` opened-menu chrome: a [SurfaceElev]
+     * rounded panel of [PocketShellType.bodyDense] rows, the disabled row dimmed
+     * the same way [DropdownMenuItem]`(enabled = false)` dims its text.
+     */
+    @Composable
+    private fun KebabMenuPanel(title: String, items: List<Pair<String, Boolean>>) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = title,
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+                modifier = Modifier.padding(start = 12.dp),
+            )
+            Surface(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                    items.forEach { (label, enabled) ->
+                        Text(
+                            text = label,
+                            color = if (enabled) {
+                                PocketShellColors.Text
+                            } else {
+                                PocketShellColors.TextSecondary
+                            },
+                            style = PocketShellType.bodyDense,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Renders [content] wrapped in the real [PocketShellTheme] on the app's dark
      * background and snapshots the composition to `build/renders/<name>.png`.
      */

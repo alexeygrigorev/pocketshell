@@ -190,10 +190,20 @@ sealed interface FolderListUiState {
     data object ToolUnavailable : FolderListUiState
 }
 
+/**
+ * Host-detail action feedback surface (#656).
+ *
+ * For a routine **success** there is deliberately no status state at all — the
+ * list updating (a session disappearing on Stop, appearing on Create) IS the
+ * feedback, so a success never produces a banner that would push the list down.
+ * Only a [Failed] action carries a message (the user must know it did not
+ * work), and the screen surfaces that as a NON-displacing overlay rather than a
+ * top-of-list row. In-progress feedback for the manual refresh rides the
+ * non-displacing refresh progress bar ([FolderListUiState.Ready.isRefreshing],
+ * #639), not a status banner.
+ */
 sealed interface FolderActionStatus {
     data object Idle : FolderActionStatus
-    data class Running(val label: String) : FolderActionStatus
-    data class Succeeded(val message: String) : FolderActionStatus
     data class Failed(val message: String) : FolderActionStatus
 }
 
@@ -658,13 +668,14 @@ class FolderListViewModel internal constructor(
     /**
      * Manual host-detail overflow action for issue #607. Reuses the same
      * session/folder discovery path as [refresh], but keeps the current Ready
-     * snapshot visible if the remote refresh fails and reports that failure in
-     * the existing lightweight action banner.
+     * snapshot visible if the remote refresh fails and reports that failure via
+     * the non-displacing failure affordance. In-progress feedback rides the
+     * non-displacing refresh progress bar ([FolderListUiState.Ready.isRefreshing],
+     * #639), so no displacing "Refreshing sessions" banner is emitted (#656).
      */
     fun refreshSessions() {
         if (_state.value is FolderListUiState.Ready) {
             refreshSessionsRequested = true
-            _actionStatus.value = FolderActionStatus.Running("Refreshing sessions")
         }
         refresh()
     }
@@ -734,7 +745,6 @@ class FolderListViewModel internal constructor(
         val target = sessionName.trim()
         if (target.isEmpty()) return
         viewModelScope.launch {
-            _actionStatus.value = FolderActionStatus.Running("Stopping $target")
             val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _actionStatus.value = FolderActionStatus.Failed("Host not found.")
                 return@launch
@@ -747,8 +757,9 @@ class FolderListViewModel internal constructor(
             )
             result.fold(
                 onSuccess = {
-                    _actionStatus.value = FolderActionStatus.Succeeded("Stopped $target")
-                    // Reuse the existing kill reconcile path (issue #464):
+                    // Issue #656: a successful stop emits no banner — the row
+                    // dropping from the list below is the feedback. Reuse the
+                    // existing kill reconcile path (issue #464):
                     // optimistic local drop + the shared lifecycle broadcast
                     // so every view model converges on the dead session being
                     // gone. onSessionKilled also kicks an authoritative
@@ -776,7 +787,6 @@ class FolderListViewModel internal constructor(
         val newTarget = newName.trim()
         if (oldTarget.isEmpty() || newTarget.isEmpty() || oldTarget == newTarget) return
         viewModelScope.launch {
-            _actionStatus.value = FolderActionStatus.Running("Renaming $oldTarget")
             val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _actionStatus.value = FolderActionStatus.Failed("Host not found.")
                 return@launch
@@ -790,7 +800,8 @@ class FolderListViewModel internal constructor(
             )
             result.fold(
                 onSuccess = {
-                    _actionStatus.value = FolderActionStatus.Succeeded("Renamed $oldTarget to $newTarget")
+                    // Issue #656: a successful rename emits no banner — the
+                    // renamed row in the list is the feedback.
                     renameSessionSnapshot(oldTarget = oldTarget, newTarget = newTarget)
                     refresh()
                 },
@@ -829,7 +840,6 @@ class FolderListViewModel internal constructor(
     ) {
         val params = bound ?: return
         viewModelScope.launch {
-            _actionStatus.value = FolderActionStatus.Running("Creating $folderName")
             val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _actionStatus.value = FolderActionStatus.Failed("Host not found.")
                 return@launch
@@ -843,9 +853,10 @@ class FolderListViewModel internal constructor(
             )
             result.fold(
                 onSuccess = { path ->
+                    // Issue #656: a successful create emits no banner — the new
+                    // folder appearing in the list is the feedback.
                     lastCreatedFolders = lastCreatedFolders + (canonicalisePath(path) to defaultLabelForPath(path))
                     emitReady()
-                    _actionStatus.value = FolderActionStatus.Succeeded("Created $path")
                     onCreated(path)
                     refresh()
                 },
@@ -861,7 +872,6 @@ class FolderListViewModel internal constructor(
     fun importFileIntoFolder(folderPath: String, payload: FolderImportPayload) {
         val params = bound ?: return
         viewModelScope.launch {
-            _actionStatus.value = FolderActionStatus.Running("Importing ${payload.remoteName}")
             val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _actionStatus.value = FolderActionStatus.Failed("Host not found.")
                 return@launch
@@ -874,11 +884,12 @@ class FolderListViewModel internal constructor(
                 payload = payload,
             )
             result.fold(
-                onSuccess = { remotePath ->
+                onSuccess = { _ ->
+                    // Issue #656: a successful import emits no banner — the
+                    // imported file landing in the folder is the feedback.
                     lastCreatedFolders = lastCreatedFolders +
                         (canonicalisePath(folderPath) to defaultLabelForPath(folderPath))
                     emitReady()
-                    _actionStatus.value = FolderActionStatus.Succeeded("Imported $remotePath")
                 },
                 onFailure = { error ->
                     _actionStatus.value = FolderActionStatus.Failed(
@@ -1165,7 +1176,11 @@ class FolderListViewModel internal constructor(
     private fun completeManualRefresh() {
         if (!refreshSessionsRequested) return
         refreshSessionsRequested = false
-        _actionStatus.value = FolderActionStatus.Succeeded("Sessions refreshed")
+        // Issue #656: a successful manual refresh emits no banner — the
+        // refreshed list (and the non-displacing progress bar clearing) is the
+        // feedback. Clear any stale refresh-failure message so a prior failure
+        // does not linger after a subsequent success.
+        clearRefreshFailure()
     }
 
     private fun clearRefreshFailure() {

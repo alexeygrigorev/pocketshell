@@ -240,11 +240,12 @@ class FolderListViewModelOpenFailedRecoveryTest {
                 setOf("alpha", "beta"),
                 readySessionNames(vm),
             )
-            val actionStatus = vm.actionStatus.value
-            when (actionStatus) {
-                is FolderActionStatus.Succeeded -> assertEquals("Sessions refreshed", actionStatus.message)
-                else -> fail("expected refresh success banner, got $actionStatus")
-            }
+            assertEquals(
+                "Issue #656: a successful manual refresh emits NO displacing banner — " +
+                    "the reloaded list (and the cleared progress bar) is the feedback",
+                FolderActionStatus.Idle,
+                vm.actionStatus.value,
+            )
         } finally {
             vm.stopPolling()
         }
@@ -273,11 +274,12 @@ class FolderListViewModelOpenFailedRecoveryTest {
                 refreshingState.flatSessions.map { it.sessionName }.toSet(),
             )
             assertTrue("manual refresh should mark the ready snapshot as refreshing", refreshingState.isRefreshing)
-            val runningStatus = vm.actionStatus.value
-            when (runningStatus) {
-                is FolderActionStatus.Running -> assertEquals("Refreshing sessions", runningStatus.label)
-                else -> fail("expected refresh running banner, got $runningStatus")
-            }
+            assertEquals(
+                "Issue #656: the in-flight refresh feedback is the non-displacing " +
+                    "progress bar (isRefreshing), NOT a displacing status banner",
+                FolderActionStatus.Idle,
+                vm.actionStatus.value,
+            )
 
             refreshResult.complete(
                 FolderListResult.Sessions(rows = listOf(sessionRow("alpha"), sessionRow("beta"))),
@@ -287,11 +289,11 @@ class FolderListViewModelOpenFailedRecoveryTest {
             val refreshedState = vm.state.value as FolderListUiState.Ready
             assertFalse(refreshedState.isRefreshing)
             assertEquals(setOf("alpha", "beta"), refreshedState.flatSessions.map { it.sessionName }.toSet())
-            val actionStatus = vm.actionStatus.value
-            when (actionStatus) {
-                is FolderActionStatus.Succeeded -> assertEquals("Sessions refreshed", actionStatus.message)
-                else -> fail("expected refresh success banner, got $actionStatus")
-            }
+            assertEquals(
+                "Issue #656: a successful manual refresh emits NO displacing banner",
+                FolderActionStatus.Idle,
+                vm.actionStatus.value,
+            )
         } finally {
             vm.stopPolling()
         }

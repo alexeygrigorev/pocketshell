@@ -134,6 +134,89 @@ class FolderListRefreshIndicatorScreenshotTest {
         )
     }
 
+    /**
+     * Issue #656 — a host-detail action FAILURE must surface without pushing the
+     * list down, and a routine SUCCESS surfaces no banner at all. This drives the
+     * real [FolderListContent]:
+     *
+     *  - Captures the first row's top Y with action status Idle (success path:
+     *    no banner), flips to [FolderActionStatus.Failed], and asserts the first
+     *    row's top Y is UNCHANGED — the failure overlay is pinned to the bottom
+     *    edge and occupies zero layout slot in the list, so nothing displaces.
+     *  - Asserts the failure affordance is actually displayed (the user must know
+     *    the action did not work).
+     */
+    @Test
+    fun actionFailureDoesNotDisplaceTheList() {
+        var status by mutableStateOf<FolderActionStatus>(FolderActionStatus.Idle)
+
+        compose.setContent {
+            PocketShellTheme {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background),
+                ) {
+                    FolderListContent(
+                        hostName = "demo-host",
+                        folders = listOf(
+                            FolderRow(
+                                path = "/home/alexey/git/pocketshell",
+                                label = "pocketshell",
+                                sessions = sessions,
+                                isWatched = false,
+                            ),
+                        ),
+                        treeRoots = emptyList(),
+                        flatSessions = sessions,
+                        expandedProjectPaths = emptySet(),
+                        isRefreshing = false,
+                        portForwarding = HostPortForwardingSummary(),
+                        showFlatFolderList = true,
+                        actionStatus = status,
+                        onDismissActionStatus = {},
+                        onOpenPortForwarding = {},
+                        onCreateTopLevelSession = {},
+                        onSessionClick = { _, _, _ -> },
+                        onRenameSession = {},
+                        onStopSession = {},
+                        onFolderActions = {},
+                        onCreateInRoot = {},
+                        onRootActions = {},
+                        onToggleProjectExpanded = {},
+                    )
+                }
+            }
+        }
+
+        compose.waitForIdle()
+        SystemClock.sleep(200)
+
+        // --- Before: success path (Idle) — no banner at all. ---
+        val firstRowTag = folderListFlatRowTestTag("claude-pocketshell")
+        compose.onNodeWithTag(firstRowTag).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_LIST_ACTION_STATUS_TAG).assertDoesNotExist()
+        val topBefore = compose.onNodeWithTag(firstRowTag)
+            .fetchSemanticsNode().boundsInRoot.top
+        capture("issue-656-action-success-no-banner.png")
+
+        // --- After: failure surfaces as a non-displacing bottom overlay. ---
+        status = FolderActionStatus.Failed("Couldn't stop codex-zoomcamp: timeout")
+        compose.waitForIdle()
+        SystemClock.sleep(200)
+
+        compose.onNodeWithTag(FOLDER_LIST_ACTION_STATUS_TAG).assertIsDisplayed()
+        val topAfter = compose.onNodeWithTag(firstRowTag)
+            .fetchSemanticsNode().boundsInRoot.top
+        capture("issue-656-action-failure-overlay.png")
+
+        assertEquals(
+            "A failure overlay must not displace the first row (no jump)",
+            topBefore,
+            topAfter,
+        )
+    }
+
     /** Visible session rows sorted by their on-screen top, by name. */
     private fun visibleRowOrder(): List<String> =
         sessions

@@ -196,6 +196,12 @@ class FolderListViewModelKillSessionTest {
                 "kill must broadcast via SessionLifecycleSignals so siblings converge",
                 killed.any { it.hostId == HOST.id && it.sessionName == "beta" },
             )
+            assertEquals(
+                "Issue #656: a successful stop emits NO displacing banner — the " +
+                    "row dropping from the list is the feedback",
+                FolderActionStatus.Idle,
+                vm.actionStatus.value,
+            )
         } finally {
             collector.cancel()
             vm.stopPolling()
@@ -269,9 +275,11 @@ class FolderListViewModelKillSessionTest {
                 setOf("alpha", "renamed"),
                 readySessionNames(vm),
             )
-            assertTrue(
-                "rename success should surface a visible action status",
-                vm.actionStatus.value is FolderActionStatus.Succeeded,
+            assertEquals(
+                "Issue #656: a successful rename emits NO displacing banner — the " +
+                    "renamed row in the list is the feedback",
+                FolderActionStatus.Idle,
+                vm.actionStatus.value,
             )
         } finally {
             vm.stopPolling()

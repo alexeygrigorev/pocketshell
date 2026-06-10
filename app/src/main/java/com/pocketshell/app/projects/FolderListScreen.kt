@@ -1010,14 +1010,11 @@ internal fun FolderListContent(
         ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (actionStatus !is FolderActionStatus.Idle) {
-            item {
-                FolderActionStatusBanner(
-                    status = actionStatus,
-                    onDismiss = onDismissActionStatus,
-                )
-            }
-        }
+        // Issue #656: the action status no longer renders as a top-of-list row.
+        // A routine success emits no status at all (the list change is the
+        // feedback) and a failure surfaces as a non-displacing overlay pinned to
+        // the bottom of this Box (see [FolderActionFailureBanner] below), so no
+        // action ever pushes the list down.
         if (showFlatFolderList) {
             // Flat view (#485 render fix, #489 visual polish): EVERY session on the
             // host, grouped by status into ACTIVE and IDLE sections instead of by
@@ -1159,6 +1156,20 @@ internal fun FolderListContent(
                 modifier = Modifier.align(Alignment.TopCenter),
             )
         }
+        // Issue #656: failures surface as a non-displacing snackbar-style
+        // overlay pinned to the bottom edge of the content. Like the #639
+        // refresh bar it occupies zero layout slot in the list, so a failed
+        // action never pushes a row down. Successes emit no status at all, so
+        // this overlay only ever appears for [FolderActionStatus.Failed].
+        (actionStatus as? FolderActionStatus.Failed)?.let { failure ->
+            FolderActionFailureBanner(
+                message = failure.message,
+                onDismiss = onDismissActionStatus,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+            )
+        }
     }
 }
 
@@ -1256,24 +1267,25 @@ private fun PortForwardingSummaryRow(
     )
 }
 
+/**
+ * Issue #656: non-displacing failure affordance for host-detail actions. Pinned
+ * as an overlay to the bottom edge of the content [Box], it occupies zero layout
+ * slot in the list (mirroring the #639 refresh progress bar), so a failed action
+ * is visible without pushing any list row down. Only failures render — a routine
+ * success emits no [FolderActionStatus] at all, so the list change alone is the
+ * feedback and nothing displaces the list.
+ */
 @Composable
-private fun FolderActionStatusBanner(
-    status: FolderActionStatus,
+private fun FolderActionFailureBanner(
+    message: String,
     onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val message = when (status) {
-        FolderActionStatus.Idle -> return
-        is FolderActionStatus.Running -> status.label
-        is FolderActionStatus.Succeeded -> status.message
-        is FolderActionStatus.Failed -> status.message
-    }
-    val color = when (status) {
-        is FolderActionStatus.Failed -> PocketShellColors.Red
-        else -> PocketShellColors.Accent
-    }
+    val color = PocketShellColors.Red
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
             .background(color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
             .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp)
@@ -1286,13 +1298,11 @@ private fun FolderActionStatusBanner(
             style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
-        if (status !is FolderActionStatus.Running) {
-            TextButton(
-                onClick = onDismiss,
-                modifier = Modifier.testTag(FOLDER_LIST_ACTION_STATUS_DISMISS_TAG),
-            ) {
-                Text("Dismiss", color = color, fontSize = 12.sp)
-            }
+        TextButton(
+            onClick = onDismiss,
+            modifier = Modifier.testTag(FOLDER_LIST_ACTION_STATUS_DISMISS_TAG),
+        ) {
+            Text("Dismiss", color = color, fontSize = 12.sp)
         }
     }
 }

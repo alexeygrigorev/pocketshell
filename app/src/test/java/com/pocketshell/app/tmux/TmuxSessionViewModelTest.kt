@@ -9918,6 +9918,172 @@ class TmuxSessionViewModelTest {
             assertEquals("failed", probeTrail.fields["outcome"])
             assertEquals("foreground_runtime_probe", probeTrail.fields["cause"])
             assertEquals(1L, probeTrail.fields["hostId"])
+            assertEquals(
+                "an explicit probe write/IO failure must be classified as error, not a ride-through timeout",
+                "error",
+                probeTrail.fields["failReason"],
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    /**
+     * Issue #635 / #636 (Slice 1): a within-grace foreground resume runs the
+     * tmux control-channel health probe. When the probe *times out* on a
+     * transport that is still `isConnected` (socket open, sshj keepalive not
+     * yet expired) the link is slow/recovering — NOT dead. The probe must
+     * ride it through: keep the live session, stay `Connected`, and never
+     * fire a `connect(LifecycleReattach)`. sshj's 60s keepalive is the death
+     * oracle, not a 750ms probe window. This is the #1 dogfood blocker fix:
+     * stepping away and returning must not force a reconnect.
+     *
+     * RED on the prior code, which treated a 750ms timeout as proof-of-death
+     * and reconnected.
+     */
+    @Test
+    fun foregroundProbeTimeoutOnLiveSocketRidesThroughWithoutReconnect() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val registry = ActiveTmuxClients()
+            val liveSession = FakeSshSession()
+            // Connector must never be touched: a ride-through opens no fresh
+            // SSH transport.
+            val connector = QueueLeaseConnector(FakeSshSession())
+            val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+            val vm = newVm(registry = registry, sshLeaseManager = manager)
+
+            // The probe `display-message` hangs forever; `withTimeoutOrNull`
+            // returns null at the virtual 750ms budget (plus a single
+            // short-delay retry that also times out). The socket stays
+            // isConnected the whole time — exactly the metro-tunnel /
+            // recovering-link case.
+            val liveClient = FakeTmuxClient().apply {
+                suspendForeverOnCommandPrefix = "display-message -p '#{session_name}'"
+            }
+            var factoryInvoked = false
+            vm.setTmuxClientFactoryForTest { _, _, _ ->
+                factoryInvoked = true
+                FakeTmuxClient().withSinglePane("work", "%1")
+            }
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = liveClient,
+                session = liveSession,
+            )
+            runCurrent()
+
+            vm.onAppForegrounded()
+            advanceUntilIdle()
+
+            assertFalse(
+                "a probe timeout on a still-isConnected socket must NOT tear down the live tmux client",
+                liveClient.closed,
+            )
+            assertFalse(
+                "a probe timeout must not evict the still-live SSH session",
+                liveSession.closed,
+            )
+            assertEquals(
+                "ride-through must not open a fresh SSH transport",
+                0,
+                connector.connectCount,
+            )
+            assertFalse(
+                "ride-through must not build a reconnect tmux client",
+                factoryInvoked,
+            )
+            assertSame(
+                "the original live client must remain registered",
+                liveClient,
+                registry.clients.value[1L]?.client,
+            )
+            assertTrue(
+                "within-grace resume over a slow link must stay Connected, got ${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            val probeTrail = diagnostics.eventsNamed("cause_trail")
+                .single { it.fields["stage"] == "tmux_probe_result" }
+            assertEquals("ride_through", probeTrail.fields["outcome"])
+            assertEquals("foreground_runtime_probe", probeTrail.fields["cause"])
+            assertEquals(
+                "a timeout ride-through must be tagged so field logs separate it from genuine death",
+                "timeout",
+                probeTrail.fields["failReason"],
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    /**
+     * Issue #635 / #636 (Slice 1): the ride-through fix must NOT regress
+     * genuine-death detection. When the probe sees a transport that is no
+     * longer connected (`session.isConnected == false`), that is a confirmed
+     * death — the within-grace resume must reconnect on a fresh SSH
+     * transport, recover to Connected, and tag the failure `not_connected`.
+     */
+    @Test
+    fun foregroundProbeReconnectsWhenTransportIsGenuinelyDead() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val registry = ActiveTmuxClients()
+            val deadSession = FakeSshSession(isConnectedValue = false)
+            val freshSession = FakeSshSession()
+            val connector = QueueLeaseConnector(freshSession)
+            val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+            val vm = newVm(registry = registry, sshLeaseManager = manager)
+
+            val deadClient = FakeTmuxClient()
+            val freshClient = FakeTmuxClient().withSinglePane("work", "%1")
+            val sessionsSeenByFactory = mutableListOf<com.pocketshell.core.ssh.SshSession>()
+            vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+                assertEquals("work", sessionName)
+                sessionsSeenByFactory += session
+                freshClient
+            }
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = deadClient,
+                session = deadSession,
+            )
+            runCurrent()
+
+            vm.onAppForegrounded()
+            advanceUntilIdle()
+
+            assertEquals(
+                "a genuinely dead transport must still reconnect on a fresh SSH session",
+                1,
+                connector.connectCount,
+            )
+            assertEquals(listOf(freshSession), sessionsSeenByFactory)
+            assertSame(freshClient, registry.clients.value[1L]?.client)
+            assertTrue(
+                "genuine-death reconnect must recover to Connected, got ${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertEquals(TmuxConnectTrigger.LifecycleReattach, vm.latestRestoreIntentSnapshot()?.trigger)
+            val probeTrail = diagnostics.eventsNamed("cause_trail")
+                .single { it.fields["stage"] == "tmux_probe_result" }
+            assertEquals("failed", probeTrail.fields["outcome"])
+            assertEquals(
+                "a not-connected transport must be classified as genuine death",
+                "not_connected",
+                probeTrail.fields["failReason"],
+            )
         } finally {
             diagnostics.close()
         }

@@ -1364,17 +1364,51 @@ public class TmuxSessionViewModel @Inject constructor(
         if (foregroundRuntimeProbeJob?.isActive == true) return true
         val generation = connectGeneration
         val probeJob = viewModelScope.launch {
-            val healthy = currentRuntimeControlChannelHealthy(client, session)
+            var verdict = probeRuntimeControlChannel(client, session)
+            // Issue #635 / #636 (Slice 1): a probe *timeout* on a still-live
+            // socket means the link is slow/recovering, not dead. Retry once
+            // after a short delay to give a still-recovering link a chance to
+            // answer before we ride it through; we still never reconnect on a
+            // timeout — sshj's 60s keepalive is the real death oracle.
+            if (verdict == RuntimeHealthVerdict.TIMEOUT &&
+                appActive &&
+                connectGeneration == generation &&
+                clientRef === client &&
+                sessionRef === session
+            ) {
+                delay(RUNTIME_HEALTH_PROBE_RETRY_DELAY_MS)
+                verdict = probeRuntimeControlChannel(client, session)
+            }
+            val healthy = verdict == RuntimeHealthVerdict.HEALTHY
+            // A timeout is a ride-through: keep the live session and let the
+            // SSH keepalive decide death. Only a confirmed dead transport
+            // (disconnected / not-connected) or an explicit protocol/IO error
+            // justifies tearing down and reconnecting.
+            val rideThrough = verdict == RuntimeHealthVerdict.TIMEOUT
             ReconnectCauseTrail.record(
                 stage = "tmux_probe_result",
-                outcome = if (healthy) "healthy" else "failed",
+                outcome = when {
+                    healthy -> "healthy"
+                    rideThrough -> "ride_through"
+                    else -> "failed"
+                },
                 cause = "foreground_runtime_probe",
                 trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
                 "hostId" to target.hostId,
                 "generation" to generation,
                 "clientHash" to System.identityHashCode(client),
+                "failReason" to verdict.failReason,
             )
-            if (healthy) return@launch
+            if (healthy || rideThrough) {
+                if (rideThrough) {
+                    Log.i(
+                        ISSUE_235_LIFECYCLE_TAG,
+                        "tmux-foreground-runtime-probe-timeout ride-through " +
+                            "generation=$generation " + targetLogFields(target),
+                    )
+                }
+                return@launch
+            }
             if (
                 !appActive ||
                 connectGeneration != generation ||
@@ -1393,6 +1427,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     "clientStillCurrent" to (clientRef === client),
                     "sessionStillCurrent" to (sessionRef === session),
                     "appActive" to appActive,
+                    "failReason" to verdict.failReason,
                 )
                 return@launch
             }
@@ -1413,6 +1448,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "user" to target.user,
                 "session" to target.sessionName,
                 "clientHash" to System.identityHashCode(client),
+                "failReason" to verdict.failReason,
                 *shortAppSwitchReconnectFields(
                     trigger = TmuxConnectTrigger.LifecycleReattach,
                     target = target,
@@ -2188,21 +2224,46 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private suspend fun cachedRuntimeControlChannelHealthy(runtime: CachedTmuxRuntime): Boolean {
-        return currentRuntimeControlChannelHealthy(runtime.client, runtime.session)
+        // Switch-path activation needs a fast verdict: a slow cached runtime
+        // is treated as a miss so the connect path falls back to a fresh
+        // attach. Here a timeout is a fall-back signal, unlike the
+        // within-grace foreground probe which must ride it through.
+        return probeRuntimeControlChannel(runtime.client, runtime.session) == RuntimeHealthVerdict.HEALTHY
     }
 
-    private suspend fun currentRuntimeControlChannelHealthy(
+    /**
+     * Probe the live tmux control channel and classify the result.
+     *
+     * Issue #635 / #636 (Slice 1): the within-grace foreground resume must
+     * NOT treat a probe *timeout* as proof of death. `SshSession.isConnected`
+     * only reflects whether the socket object is open — for a silently
+     * dropped TCP path it stays `true` until sshj's keepalive miss-counter
+     * trips (15s × 4 = 60s, deliberately matched to the 60s background
+     * grace). A `display-message` round-trip that takes longer than the
+     * 750ms probe budget on a still-`isConnected` transport means the link
+     * is slow/recovering, not dead. Returning a distinct
+     * [RuntimeHealthVerdict.TIMEOUT] lets the foreground probe ride that
+     * through and defer the death verdict to sshj's keepalive oracle, while
+     * the switch-path activation still falls back on any non-healthy result.
+     */
+    private suspend fun probeRuntimeControlChannel(
         client: TmuxClient,
         session: SshSession?,
-    ): Boolean {
-        if (client.disconnected.value) return false
-        if (session?.isConnected != true) return false
-        val response = runCatching {
+    ): RuntimeHealthVerdict {
+        if (client.disconnected.value) return RuntimeHealthVerdict.DISCONNECTED
+        if (session?.isConnected != true) return RuntimeHealthVerdict.NOT_CONNECTED
+        val outcome = runCatching {
             withTimeoutOrNull(RUNTIME_HEALTH_PROBE_TIMEOUT_MS) {
                 client.sendBestEffortCommand("display-message -p '#{session_name}'")
             }
-        }.getOrNull() ?: return false
-        return !response.isError
+        }
+        val response = outcome.getOrElse {
+            // A thrown write/read failure (e.g. a TCP reset the SSH library
+            // surfaced as an exception) is a genuine transport error, not a
+            // ride-through-able slowness.
+            return RuntimeHealthVerdict.ERROR
+        } ?: return RuntimeHealthVerdict.TIMEOUT
+        return if (response.isError) RuntimeHealthVerdict.ERROR else RuntimeHealthVerdict.HEALTHY
     }
 
     private fun deactivateCurrentRuntimeToCache(): List<CachedTmuxRuntime> {
@@ -9006,7 +9067,36 @@ internal const val ATTACH_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val SEND_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val SEND_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
+
+/**
+ * Issue #635 / #636 (Slice 1): short delay between the first foreground
+ * health probe and a single retry when the first probe *times out* on a
+ * still-`isConnected` transport. Gives a slow/recovering link a moment to
+ * answer before we ride it through. A retry timeout is still NOT death — the
+ * within-grace resume keeps the live session and defers the death verdict to
+ * sshj's 60s keepalive oracle.
+ */
+internal const val RUNTIME_HEALTH_PROBE_RETRY_DELAY_MS: Long = 250L
 internal const val CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = RUNTIME_HEALTH_PROBE_TIMEOUT_MS
+
+/**
+ * Classification of a foreground tmux control-channel health probe.
+ *
+ * Issue #635 / #636 (Slice 1): the within-grace foreground resume must
+ * distinguish a transient probe [TIMEOUT] (slow/recovering link — ride it
+ * through, no reconnect) from a confirmed-dead transport ([DISCONNECTED] /
+ * [NOT_CONNECTED]) or an explicit protocol/IO [ERROR] (genuine failure —
+ * reconnect). The [failReason] tag is emitted on the `tmux_probe_result`
+ * reconnect-cause trail so field logs can tell case-2 (timeout on a
+ * recovering link) apart from case-3 (genuinely dead).
+ */
+internal enum class RuntimeHealthVerdict(val failReason: String) {
+    HEALTHY("none"),
+    DISCONNECTED("disconnected"),
+    NOT_CONNECTED("not_connected"),
+    TIMEOUT("timeout"),
+    ERROR("error"),
+}
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
 internal const val TMUX_SESSION_PREWARM_MAX_TARGETS: Int = 2
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"

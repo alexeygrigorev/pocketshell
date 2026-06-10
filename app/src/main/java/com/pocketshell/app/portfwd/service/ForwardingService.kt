@@ -74,7 +74,34 @@ class ForwardingService : Service() {
 
     companion object {
         private const val TAG = "PsForwardingService"
-        private const val CHANNEL_ID = "pocketshell_forwarding_status_v2"
+
+        // Issue #487 (reopened 2026-06-10): the maintainer swiped the tray
+        // "clear all" and the forwarding notification went away with the
+        // ordinary push notifications. He wants the Recorder/Spotify "ongoing
+        // status" feel: a quiet, persistent, sweep-resistant status — NOT an
+        // alert that buzzes or pops a heads-up every time a forward starts.
+        //
+        // The genuinely-good fix is FLAG_NO_CLEAR + FLAG_ONGOING_EVENT (set via
+        // setOngoing(true)): that alone blocks the "clear all" sweep at ANY
+        // channel importance. Recorder/Spotify pair that with a SILENT channel
+        // (IMPORTANCE_LOW, no sound, no vibration) so the status is visible and
+        // persistent without ever alerting. A previous round raised the channel
+        // to IMPORTANCE_HIGH for sweep-resistance — that was wrong: it added the
+        // buzz/heads-up the maintainer explicitly didn't want, and HIGH was
+        // never needed for sweep-resistance.
+        //
+        // Notification-channel importance is IMMUTABLE after first creation, so
+        // changing it requires a NEW channel id. Hard-cut per D22: we create
+        // `_v4` at LOW (silent) and delete the stale `_v3`/`_v2`/legacy channels
+        // so no install keeps the buzzing HIGH presentation or the old
+        // swipe-away one.
+        private const val CHANNEL_ID = "pocketshell_forwarding_status_v4"
+        private val LEGACY_CHANNEL_IDS = listOf(
+            "pocketshell_forwarding_status_v3",
+            "pocketshell_forwarding_status_v2",
+            "pocketshell_forwarding_status",
+            "pocketshell_forwarding",
+        )
         private const val NOTIFICATION_ID = 0x70_46_53_56 // "pFSV" — unique within app
 
         const val ACTION_START = "com.pocketshell.app.portfwd.action.START_FORWARDING"
@@ -420,7 +447,7 @@ class ForwardingService : Service() {
         // active background process the user controls.
         val contentText = "Running in the background · $detail"
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             // Issue #521: title explicitly says it's running (not just
             // "active"), matching Recorder's persistent-status headline.
             .setContentTitle("Port forwarding running")
@@ -445,8 +472,16 @@ class ForwardingService : Service() {
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
+            // Silence the notification itself (pre-O priority + sound/vibration)
+            // to match the silent `_v4` channel. The sweep-resistance comes from
+            // the ongoing/NO_CLEAR flags below, not from importance, so there is
+            // no reason to alert — Recorder/Spotify-style quiet persistent status.
+            .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            // Issue #487 (reopened): LOW priority pairs with the LOW-importance
+            // silent channel so the status is quiet (no heads-up, no buzz) while
+            // staying persistent and sweep-resistant via the NO_CLEAR flag below.
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
@@ -455,19 +490,49 @@ class ForwardingService : Service() {
                 stopPendingIntent,
             )
             .build()
+
+        // Issue #487 (reopened): make the non-clearable contract explicit on the
+        // raw notification. NotificationCompat.setOngoing(true) already sets both
+        // FLAG_ONGOING_EVENT and FLAG_NO_CLEAR, but setting them directly here
+        // documents the intent, is asserted by the unit test, and guards against
+        // a future builder change silently dropping the sweep-resistance the
+        // maintainer asked for. FLAG_NO_CLEAR is what keeps a tray "clear all"
+        // from removing the notification while a tunnel is active.
+        notification.flags = notification.flags or
+            Notification.FLAG_ONGOING_EVENT or
+            Notification.FLAG_NO_CLEAR
+        return notification
     }
 
     @androidx.annotation.VisibleForTesting
     internal fun createNotificationChannel() {
+        val manager = getSystemService(NotificationManager::class.java)
+        // Hard-cut (D22): drop the stale channels so no install keeps the old
+        // swipe-away (DEFAULT) or buzzing (HIGH) presentation. Channel importance
+        // is immutable once created, which is why the visible channel id is
+        // bumped instead of mutated; deleting the old ids keeps the app's channel
+        // settings list clean and prevents a stale "Port forwarding" entry.
+        LEGACY_CHANNEL_IDS.forEach { runCatching { manager.deleteNotificationChannel(it) } }
         val channel = NotificationChannel(
             CHANNEL_ID,
             "Port forwarding",
-            NotificationManager.IMPORTANCE_DEFAULT,
+            // Issue #487 (reopened): LOW — a SILENT channel (no sound, no
+            // heads-up, no buzz) so the ongoing status behaves like Recorder's /
+            // Spotify's quiet persistent status. Sweep-resistance is provided by
+            // the NO_CLEAR/ongoing flags on the notification, NOT by importance,
+            // so there is no reason to alert. (HIGH was the wrong fix — it buzzed
+            // and popped a heads-up on every forward-start.)
+            NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Prominent ongoing status while SSH port forwarding is active"
+            description = "Quiet ongoing status while SSH port forwarding is active"
             setShowBadge(false)
+            // Belt-and-braces: explicitly silence the channel. IMPORTANCE_LOW is
+            // already non-alerting, but null sound + vibration off guarantees the
+            // channel never buzzes or rings even if the platform default changes.
+            setSound(null, null)
+            enableVibration(false)
+            enableLights(false)
         }
-        val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
     }
 }

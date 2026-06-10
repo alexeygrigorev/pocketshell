@@ -10,6 +10,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.portfwd.service.ForwardingService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -472,6 +473,11 @@ class ForwardingControllerTest {
             "notification must be ongoing (non-swipeable while forwarding)",
             notification.flags and android.app.Notification.FLAG_ONGOING_EVENT != 0,
         )
+        assertTrue(
+            "notification must be non-clearable (FLAG_NO_CLEAR) so a tray clear-all " +
+                "does not sweep the ongoing forwarding status away (issue #487 reopen)",
+            notification.flags and android.app.Notification.FLAG_NO_CLEAR != 0,
+        )
         assertNotNull(
             "notification must be tappable to open the panel",
             notification.contentIntent,
@@ -483,7 +489,7 @@ class ForwardingControllerTest {
     }
 
     @Test
-    fun `notification uses default-importance status channel that is not configured silent`() {
+    fun `notification uses a silent low-importance status channel that does not buzz`() {
         val service = Robolectric.buildService(ForwardingService::class.java).get()
         service.createNotificationChannel()
         val notification = service.buildNotification(
@@ -494,23 +500,45 @@ class ForwardingControllerTest {
         val manager = context.getSystemService(NotificationManager::class.java)
         val channel = manager.getNotificationChannel(notification.channelId)
 
-        assertEquals("pocketshell_forwarding_status_v2", notification.channelId)
+        assertEquals("pocketshell_forwarding_status_v4", notification.channelId)
         assertNotNull("foreground-service notification channel must be registered", channel)
         val forwardingChannel = requireNotNull(channel)
+        // Issue #487 (reopened): the maintainer asked for a QUIET persistent
+        // status (Recorder/Spotify-style), "not an alert that buzzes". The
+        // channel must be LOW importance (silent, no heads-up, no buzz) — NOT
+        // HIGH. Sweep-resistance comes from the NO_CLEAR/ongoing flags (asserted
+        // separately), not from importance.
         assertEquals(
-            "channel must not be low-importance, or Android can collapse it into the tiny silent row",
-            NotificationManager.IMPORTANCE_DEFAULT,
+            "channel must be LOW importance so the ongoing status is silent — no " +
+                "heads-up, no buzz — like Recorder/Spotify (issue #487 reopen)",
+            NotificationManager.IMPORTANCE_LOW,
             forwardingChannel.importance,
         )
         assertEquals(
-            "pre-O notification priority should match the default-importance channel",
-            NotificationCompat.PRIORITY_DEFAULT,
+            "pre-O notification priority should match the low-importance silent channel",
+            NotificationCompat.PRIORITY_LOW,
             @Suppress("DEPRECATION")
             notification.priority,
         )
-        assertNotNull(
-            "forwarding channel must not be configured silent; keep Android's default alert sound",
+        assertNull(
+            "forwarding channel must be silent — no sound — so it does not buzz when " +
+                "a forward starts (issue #487 reopen)",
             forwardingChannel.sound,
+        )
+        assertFalse(
+            "forwarding channel must not vibrate so it does not buzz on forward-start",
+            forwardingChannel.shouldVibrate(),
+        )
+        // Issue #487 (reopened): the stale higher/lower-importance channels must
+        // be deleted so no install keeps the buzzing HIGH (_v3) or swipe-away
+        // DEFAULT (_v2) presentation.
+        assertNull(
+            "the stale v3 (HIGH/buzzing) channel must be removed so it can't linger",
+            manager.getNotificationChannel("pocketshell_forwarding_status_v3"),
+        )
+        assertNull(
+            "the legacy v2 channel must be removed so it can't linger at DEFAULT importance",
+            manager.getNotificationChannel("pocketshell_forwarding_status_v2"),
         )
         runCatching {
             android.app.Notification::class.java

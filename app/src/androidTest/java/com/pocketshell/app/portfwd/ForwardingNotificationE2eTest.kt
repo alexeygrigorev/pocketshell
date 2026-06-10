@@ -12,6 +12,7 @@ import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import dagger.hilt.android.EntryPointAccessors
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -155,6 +156,14 @@ class ForwardingNotificationE2eTest {
             "forwarding notification must be ongoing (FLAG_ONGOING_EVENT)",
             flags and android.app.Notification.FLAG_ONGOING_EVENT != 0,
         )
+        // Issue #487 (reopened): FLAG_NO_CLEAR is what keeps a tray "clear all"
+        // sweep from removing the ongoing status the maintainer asked to always
+        // see while forwarding is active.
+        assertTrue(
+            "forwarding notification must be non-clearable (FLAG_NO_CLEAR) so a " +
+                "tray clear-all does not sweep it away",
+            flags and android.app.Notification.FLAG_NO_CLEAR != 0,
+        )
         // Issue #521: dedicated status-bar icon (not the old generic
         // ic_dialog_info), so the status bar shows a recognizable mark.
         assertEquals(
@@ -166,18 +175,34 @@ class ForwardingNotificationE2eTest {
         val channel = notificationManager.getNotificationChannel(posted.notification.channelId)
         assertEquals(
             "foreground notification should use the upgrade-safe status channel",
-            "pocketshell_forwarding_status_v2",
+            "pocketshell_forwarding_status_v4",
             posted.notification.channelId,
         )
         assertNotNull("foreground notification channel must be registered", channel)
+        // Issue #487 (reopened): LOW importance so the ongoing status is SILENT
+        // (no heads-up, no buzz) — the Recorder/Spotify quiet-status feel the
+        // maintainer asked for. Sweep-resistance comes from FLAG_NO_CLEAR
+        // (asserted above), NOT from importance.
         assertEquals(
-            "foreground notification channel must be visible in the main shade",
-            NotificationManager.IMPORTANCE_DEFAULT,
+            "foreground notification channel must be LOW importance so it is silent " +
+                "(no heads-up, no buzz) like Recorder/Spotify",
+            NotificationManager.IMPORTANCE_LOW,
             requireNotNull(channel).importance,
         )
-        assertNotNull(
-            "foreground notification channel must not be configured silent",
+        assertNull(
+            "foreground notification channel must be silent — no sound — so it does " +
+                "not buzz when a forward starts",
             channel.sound,
+        )
+        assertFalse(
+            "foreground notification channel must not vibrate on forward-start",
+            channel.shouldVibrate(),
+        )
+        // Issue #487 (reopened): the stale v3 (HIGH/buzzing) channel must be gone
+        // so no install keeps the alerting presentation.
+        assertNull(
+            "the stale v3 (HIGH/buzzing) channel must be deleted on upgrade",
+            notificationManager.getNotificationChannel("pocketshell_forwarding_status_v3"),
         )
         // Issue #521: body says it's running in the background + the host +
         // tunnel count (Recorder "Recording now" feel).

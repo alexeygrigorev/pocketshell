@@ -164,7 +164,7 @@ class TmuxResizeSessionE2eTest {
         compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
             .performClick()
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("Kill session", useUnmergedTree = true)
+            compose.onAllNodesWithText("Stop session", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }

@@ -186,11 +186,17 @@ class FolderListKillSessionDockerTest {
         awaitSession(folderVm, doomed)
 
         // 3. Attach a real session view model to the doomed session and
-        //    confirm a Kill session. Both view models share the singleton
-        //    Hilt wires in production.
+        //    confirm a Stop session. Both view models share the singleton
+        //    Hilt wires in production. Issue #655: the in-session Stop now
+        //    kills over the SAME verified gateway SSH-exec path the
+        //    host-detail Stop uses, so the production VM must be given the
+        //    real gateway + host DAO Hilt injects (not the old
+        //    control-channel-only constructor).
         val tmuxVm = TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = ActiveTmuxClients(),
+            hostDao = db.hostDao(),
+            folderListGateway = SshFolderListGateway(),
             sessionLifecycleSignals = signals,
         )
         try {
@@ -206,7 +212,7 @@ class FolderListKillSessionDockerTest {
             )
             waitForTmuxConnected(tmuxVm)
 
-            // The kill the user confirms from the session dropdown.
+            // The Stop the user confirms from the session dropdown.
             tmuxVm.killCurrentSession()
 
             // 4. The folder tree drops the doomed row promptly, the kept
@@ -218,13 +224,43 @@ class FolderListKillSessionDockerTest {
             )
 
             // Force a fresh authoritative probe and confirm the doomed
-            // session never resurrects (no phantom row).
+            // session never resurrects (no phantom row) — i.e. it cannot be
+            // reopened from the list.
             folderVm.refresh()
             delay(1_500L)
             assertTrue(
                 "doomed session must stay gone after an authoritative re-probe; " +
                     "state=${folderVm.state.value}",
                 !hasSession(folderVm, doomed),
+            )
+
+            // Issue #655: the in-session Stop must ACTUALLY stop the remote
+            // tmux session (the v0.3.30 bug was the control-channel kill
+            // racing its own teardown and never landing). Verify directly
+            // over a FRESH SSH-exec connection that `tmux has-session` for
+            // the doomed session now fails (non-zero exit == gone), while
+            // the kept session survives.
+            val (doomedGone, keepAlive) = withTimeout(15_000) {
+                SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    user = DEFAULT_USER,
+                    key = sshKey,
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 10_000,
+                ).getOrThrow().use { session ->
+                    val doomedExit = session.exec("tmux has-session -t $doomed 2>/dev/null").exitCode
+                    val keepExit = session.exec("tmux has-session -t $keep 2>/dev/null").exitCode
+                    (doomedExit != 0) to (keepExit == 0)
+                }
+            }
+            assertTrue(
+                "doomed tmux session must be gone on the remote after the in-session Stop",
+                doomedGone,
+            )
+            assertTrue(
+                "kept tmux session must still be alive on the remote",
+                keepAlive,
             )
             // The kill really landed on the remote — drop it from cleanup.
             createdSessions.remove(doomed)

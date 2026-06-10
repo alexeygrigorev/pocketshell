@@ -6,6 +6,8 @@ import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.projects.FolderListGateway
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
@@ -107,10 +109,14 @@ class TmuxSessionViewModelTest {
             idleTtlMillis = 0L,
         ),
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
+        folderListGateway: FolderListGateway? = null,
+        hostDao: HostDao? = null,
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = registry,
+            hostDao = hostDao,
+            folderListGateway = folderListGateway,
             runtimeCache = runtimeCache,
             agentSessionMemory = agentSessionMemory,
             sshLeaseManager = sshLeaseManager,
@@ -152,8 +158,18 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun killCurrentSessionBroadcastsSignalOnConfirmedKill() = runTest {
+        // Issue #655: the in-session Stop now routes through the SAME verified
+        // gateway SSH-exec path the host-detail Stop uses (#518), NOT the
+        // control channel it is attached to. A gateway-confirmed kill (the
+        // session is gone) broadcasts the lifecycle signal so the tree drops
+        // the row.
         val signals = SessionLifecycleSignals()
-        val vm = newVm(sessionLifecycleSignals = signals)
+        val gateway = RecordingStopGateway(killSucceeds = true)
+        val vm = newVm(
+            sessionLifecycleSignals = signals,
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,
@@ -171,28 +187,35 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         vm.killCurrentSession()
-        runCurrent()
-        // tmux acknowledges the teardown.
-        client.emittedEvents.emit(ControlEvent.SessionsChanged)
         advanceUntilIdle()
 
         val event = killed.await()
         assertEquals(7L, event.hostId)
         assertEquals("doomed", event.sessionName)
         assertTrue(
-            "expected kill-session command, got ${client.sentCommands}",
-            client.sentCommands.any { it.startsWith("kill-session -t 'doomed'") },
+            "expected the gateway kill to target 'doomed', got ${gateway.killedSessionNames}",
+            gateway.killedSessionNames.contains("doomed"),
+        )
+        // The Stop must NOT race its own teardown over the control channel.
+        assertFalse(
+            "in-session Stop must not kill over the control channel; sent=${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("kill-session") },
         )
     }
 
     @Test
-    fun killCurrentSessionDoesNotBroadcastWhenTmuxReportsError() = runTest {
+    fun killCurrentSessionDoesNotBroadcastWhenGatewayKillFails() = runTest {
+        // Issue #655: a gateway-verified failure (the session is STILL running
+        // after the kill, e.g. `tmux has-session` still exits 0) must NOT
+        // broadcast, so the tree keeps the still-live row.
         val signals = SessionLifecycleSignals()
-        val vm = newVm(sessionLifecycleSignals = signals)
-        val client = FakeTmuxClient().apply {
-            // tmux rejects the kill (e.g. session already gone / bad target).
-            responses += CommandResponse(number = 1L, output = listOf("can't find session"), isError = true)
-        }
+        val gateway = RecordingStopGateway(killSucceeds = false)
+        val vm = newVm(
+            sessionLifecycleSignals = signals,
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val client = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,
             hostName = "docker",
@@ -212,7 +235,7 @@ class TmuxSessionViewModelTest {
         vm.killCurrentSession()
         advanceUntilIdle()
 
-        assertNull("a tmux %error kill must not broadcast a lifecycle signal", broadcast)
+        assertNull("a failed (unverified) kill must not broadcast a lifecycle signal", broadcast)
         collector.cancel()
     }
 
@@ -11483,5 +11506,93 @@ class TmuxSessionViewModelTest {
             "previousSessionName must be null after closeCurrentConnection (via replaceClientForTest)",
             vm.previousSessionName.value,
         )
+    }
+
+    /**
+     * Issue #655: minimal [FolderListGateway] that records the session names
+     * `killSession` was asked to stop. Drives the in-session Stop's unified
+     * verified-kill path without a live SSH/tmux server. [killSucceeds]
+     * toggles the gateway's confirmed-gone vs still-running outcome so the
+     * "broadcast only on confirmed kill" contract can be asserted both ways.
+     */
+    private class RecordingStopGateway(
+        private val killSucceeds: Boolean,
+    ) : FolderListGateway {
+        val killedSessionNames = mutableListOf<String>()
+
+        override suspend fun listSessionsWithFolder(
+            host: com.pocketshell.core.storage.entity.HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            watchedRoots: List<com.pocketshell.core.storage.entity.ProjectRootEntity>,
+        ): com.pocketshell.app.projects.FolderListResult =
+            com.pocketshell.app.projects.FolderListResult.Sessions(rows = emptyList())
+
+        override suspend fun createSession(
+            host: com.pocketshell.core.storage.entity.HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+            cwd: String,
+            startCommand: String?,
+        ): Result<String> = error("not used")
+
+        override suspend fun createEmptyProject(
+            host: com.pocketshell.core.storage.entity.HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            parentPath: String,
+            folderName: String,
+        ): Result<String> = error("not used")
+
+        override suspend fun importFile(
+            host: com.pocketshell.core.storage.entity.HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            folderPath: String,
+            payload: com.pocketshell.app.projects.FolderImportPayload,
+        ): Result<String> = error("not used")
+
+        override suspend fun killSession(
+            host: com.pocketshell.core.storage.entity.HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+        ): Result<Unit> {
+            if (!killSucceeds) {
+                return Result.failure(
+                    RuntimeException("tmux session '$sessionName' is still running."),
+                )
+            }
+            killedSessionNames += sessionName
+            return Result.success(Unit)
+        }
+    }
+
+    /**
+     * Issue #655: host DAO that returns one host for [hostId] so the
+     * in-session Stop can resolve the [HostEntity] it hands the gateway.
+     */
+    private class StopHostDao(private val hostId: Long) : HostDao {
+        private val host = com.pocketshell.core.storage.entity.HostEntity(
+            id = hostId,
+            name = "docker",
+            hostname = "10.0.2.2",
+            port = 2222,
+            username = "alex",
+            keyId = 1L,
+        )
+
+        override fun getAll() = kotlinx.coroutines.flow.flowOf(listOf(host))
+        override suspend fun getById(id: Long): com.pocketshell.core.storage.entity.HostEntity? =
+            host.takeIf { it.id == id }
+        override fun getEnabled() = kotlinx.coroutines.flow.flowOf(listOf(host))
+        override suspend fun insert(host: com.pocketshell.core.storage.entity.HostEntity): Long =
+            error("not used")
+        override suspend fun update(host: com.pocketshell.core.storage.entity.HostEntity) =
+            error("not used")
+        override suspend fun delete(host: com.pocketshell.core.storage.entity.HostEntity) =
+            error("not used")
+        override suspend fun deleteById(id: Long) = error("not used")
     }
 }

@@ -69,7 +69,7 @@ import java.io.FileOutputStream
  *
  * Since #192 the per-window kill affordance lives back on the
  * [WindowStrip] pill (an explicit ✕ on the active pill plus a
- * long-press menu); the kebab `Kill window` entry remains and always
+ * long-press menu); the kebab `Stop window` entry remains and always
  * targets the CURRENT window. This test drives the kebab path because
  * the user-reported bug was "any window kill silently fails", and
  * killing the currently-active window is sufficient to exercise the
@@ -83,11 +83,11 @@ import java.io.FileOutputStream
  *
  *  1. Seeds three windows in the `opencode-lab` session.
  *  2. Attaches the app — the in-app current window is Window 1.
- *  3. Opens the kebab and confirms `Switch window` + `Kill window`
+ *  3. Opens the kebab and confirms `Switch window` + `Stop window`
  *     entries appear (proving `multipleWindows = true`, i.e. the view
  *     model reconciled to a 3-window state).
  *  4. Captures the pre-kill viewport for the artifact bundle.
- *  5. Taps `Kill window` and asserts the dialog targets the in-app
+ *  5. Taps `Stop window` and asserts the dialog targets the in-app
  *     current window's `@<id>` (positive proof that the kill is wired
  *     to the right window).
  *  6. Polls remote `tmux list-windows` until the count drops to 2 and
@@ -104,7 +104,7 @@ import java.io.FileOutputStream
  * Artifacts written under
  * `<media>/additional_test_output/issue188-kill-window/`:
  *  - `01-before-kill-window1-viewport.png` (kebab open over Window 1
- *    terminal pane, just before tapping `Kill window`)
+ *    terminal pane, just before tapping `Stop window`)
  *  - `02-after-kill-window1-viewport.png` (overlay open showing the 2
  *    surviving pages)
  *  - `timings.txt`
@@ -192,7 +192,7 @@ class KillWindowE2eTest {
         Log.i(LOG_TAG, "seeded windows: $seededWindows; win1=$win1WindowId")
 
         // --- (3) Wait for the kebab to mount. Confirm both `Switch
-        // window` AND `Kill window` entries are present — the former
+        // window` AND `Stop window` entries are present — the former
         // proves `multipleWindows = true` (i.e. the view model
         // reconciled to a multi-window state), the latter is what we
         // tap next.
@@ -207,19 +207,19 @@ class KillWindowE2eTest {
             compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty() &&
-                compose.onAllNodesWithText("Kill window", useUnmergedTree = true)
+                compose.onAllNodesWithText("Stop window", useUnmergedTree = true)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
         }
         captureFullDevice("01-before-kill-window1")
 
-        // --- (4) Tap `Kill window`. The current window is Window 1
+        // --- (4) Tap `Stop window`. The current window is Window 1
         // (per pane_index sort), so the dialog targets `@<win1_id>`. We
-        // assert the dialog text names that id before tapping Kill —
+        // assert the dialog text names that id before tapping Stop —
         // that closes the loop between "app's current window is win1"
-        // and "kill targeted win1".
+        // and "stop targeted win1".
         val killWindowTapAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText("Kill window").performClick()
+        compose.onNodeWithText("Stop window").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText(
                 "This will close $win1WindowId",
@@ -227,10 +227,10 @@ class KillWindowE2eTest {
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
-        // The kill button reads "Kill" — single text node inside the
+        // The stop button reads "Stop" — single text node inside the
         // dialog at this point. onLast() guards against any incidental
         // earlier match.
-        compose.onAllNodesWithText("Kill", useUnmergedTree = true)
+        compose.onAllNodesWithText("Stop", useUnmergedTree = true)
             .onLast()
             .performClick()
 

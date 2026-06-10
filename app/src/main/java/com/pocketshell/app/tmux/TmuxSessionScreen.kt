@@ -804,7 +804,7 @@ public fun TmuxSessionScreen(
             },
             onKillSession = {
                 moreExpanded = false
-                dialogMode = TmuxDialogMode.KillSession
+                dialogMode = TmuxDialogMode.StopSession
             },
             onSwitchSession = {
                 moreExpanded = false
@@ -848,7 +848,7 @@ public fun TmuxSessionScreen(
             },
             onKillWindow = {
                 moreExpanded = false
-                dialogMode = TmuxDialogMode.KillWindow
+                dialogMode = TmuxDialogMode.StopWindow
             },
             onSwitchWindow = {
                 moreExpanded = false
@@ -1006,7 +1006,7 @@ public fun TmuxSessionScreen(
                                     onSelectWindow = ::selectWindow,
                                     onOpenWindowMenu = { window -> windowMenuFor = window },
                                     onKillWindow = { window ->
-                                        dialogMode = TmuxDialogMode.KillWindowFor(window.windowId)
+                                        dialogMode = TmuxDialogMode.StopWindowFor(window.windowId)
                                     },
                                     onNewWindow = { viewModel.newWindow() },
                                 )
@@ -1440,7 +1440,7 @@ public fun TmuxSessionScreen(
                 },
                 onKill = {
                     windowMenuFor = null
-                    dialogMode = TmuxDialogMode.KillWindowFor(window.windowId)
+                    dialogMode = TmuxDialogMode.StopWindowFor(window.windowId)
                 },
             )
         }
@@ -1470,7 +1470,7 @@ public fun TmuxSessionScreen(
                             viewModel.renameCurrentSession(name)
                             if (name.isNotEmpty()) onReplaceTmuxSession(name)
                         }
-                        TmuxDialogMode.KillSession -> {
+                        TmuxDialogMode.StopSession -> {
                             viewModel.killCurrentSession()
                             onBack()
                         }
@@ -1480,10 +1480,10 @@ public fun TmuxSessionScreen(
                         is TmuxDialogMode.RenameWindowFor -> {
                             viewModel.renameWindow(currentMode.windowId, dialogText)
                         }
-                        TmuxDialogMode.KillWindow -> {
+                        TmuxDialogMode.StopWindow -> {
                             viewModel.killWindow(currentWindowId.orEmpty())
                         }
-                        is TmuxDialogMode.KillWindowFor -> {
+                        is TmuxDialogMode.StopWindowFor -> {
                             viewModel.killWindow(currentMode.windowId)
                         }
                     }
@@ -2502,11 +2502,11 @@ internal fun settleSessionSwitchTarget(
 private sealed interface TmuxDialogMode {
     data object CreateSession : TmuxDialogMode
     data object RenameSession : TmuxDialogMode
-    data object KillSession : TmuxDialogMode
+    data object StopSession : TmuxDialogMode
     data object RenameWindow : TmuxDialogMode
     data class RenameWindowFor(val windowId: String) : TmuxDialogMode
-    data object KillWindow : TmuxDialogMode
-    data class KillWindowFor(val windowId: String) : TmuxDialogMode
+    data object StopWindow : TmuxDialogMode
+    data class StopWindowFor(val windowId: String) : TmuxDialogMode
 }
 
 private val VerticalSwipeThreshold = 72.dp
@@ -4111,7 +4111,7 @@ internal fun TmuxMoreMenu(
             enabled = currentWindowId != null,
         )
         DropdownMenuItem(
-            text = { Text("Kill window") },
+            text = { Text("Stop window") },
             onClick = onKillWindow,
             enabled = currentWindowId != null,
         )
@@ -4120,7 +4120,7 @@ internal fun TmuxMoreMenu(
         DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
         DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
         DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
-        DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
+        DropdownMenuItem(text = { Text("Stop session") }, onClick = onKillSession)
         // Issue #445 (epic #432 slice A): per-host port-forward panel is a
         // host-scoped affordance, so it lives in the "On this host" group.
         // Navigating away pushes onto the hand-rolled back-stack; back
@@ -4183,7 +4183,7 @@ internal fun TmuxMoreMenu(
         // killing the session. Placed at the top of the cross-host
         // section so it sits next to the back-to-host-list mental
         // model (Detach -> sessions dashboard) without crowding the
-        // destructive Kill session item.
+        // destructive Stop session item.
         DropdownMenuItem(
             text = { Text("Detach") },
             onClick = onDetach,
@@ -5060,7 +5060,7 @@ private fun WindowContextMenu(
             // long-pressing the strip's "Window N" pill, so the label
             // here must match what they tapped.
             DropdownMenuItem(text = { Text("Rename ${window.title}") }, onClick = onRename)
-            DropdownMenuItem(text = { Text("Kill ${window.title}") }, onClick = onKill)
+            DropdownMenuItem(text = { Text("Stop ${window.title}") }, onClick = onKill)
         }
     }
 }
@@ -5081,17 +5081,17 @@ private fun TmuxLifecycleDialog(
     val title = when (mode) {
         TmuxDialogMode.CreateSession -> "New session"
         TmuxDialogMode.RenameSession -> "Rename session"
-        TmuxDialogMode.KillSession -> "Kill session"
+        TmuxDialogMode.StopSession -> "Stop session"
         TmuxDialogMode.RenameWindow -> "Rename window"
         is TmuxDialogMode.RenameWindowFor -> "Rename window"
-        TmuxDialogMode.KillWindow -> "Kill window"
-        is TmuxDialogMode.KillWindowFor -> "Kill window"
+        TmuxDialogMode.StopWindow -> "Stop window"
+        is TmuxDialogMode.StopWindowFor -> "Stop window"
     }
     val confirm = when (mode) {
-        TmuxDialogMode.KillSession,
-        TmuxDialogMode.KillWindow,
-        is TmuxDialogMode.KillWindowFor,
-        -> "Kill"
+        TmuxDialogMode.StopSession,
+        TmuxDialogMode.StopWindow,
+        is TmuxDialogMode.StopWindowFor,
+        -> "Stop"
         else -> "Save"
     }
     val isRenameWindowMode = mode == TmuxDialogMode.RenameWindow ||
@@ -5144,9 +5144,9 @@ private fun TmuxLifecycleDialog(
                 )
             } else {
                 val target = when (mode) {
-                    TmuxDialogMode.KillSession -> sessionName
-                    TmuxDialogMode.KillWindow -> currentWindowId.orEmpty()
-                    is TmuxDialogMode.KillWindowFor -> mode.windowId
+                    TmuxDialogMode.StopSession -> sessionName
+                    TmuxDialogMode.StopWindow -> currentWindowId.orEmpty()
+                    is TmuxDialogMode.StopWindowFor -> mode.windowId
                     else -> ""
                 }
                 Text("This will close $target.")

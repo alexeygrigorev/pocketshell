@@ -265,6 +265,47 @@ class PromptComposerSmokeTest {
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
     }
 
+    @Test
+    fun micSwipeUpStartingSlightlyOffMicStartsRecordingAndLocks() {
+        // Issue #585 (reopen): a hold-and-pull-up on the small mic disc often
+        // lands the contact point a few px outside the tight rect. The start
+        // slop must still arm the gesture: recording STARTS at gesture time
+        // and the upward pull locks it — without a prior tap-to-start.
+        var micTaps = 0
+        var lockCalls = 0
+        var state by mutableStateOf(PromptComposerViewModel.UiState())
+        renderInteractiveComposer(
+            state = { state },
+            onStateChange = { state = it },
+            onMicTapCount = { micTaps += 1 },
+            onLockRecording = {
+                lockCalls += 1
+                if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
+                    state = state.copy(recordingLocked = true)
+                }
+            },
+        )
+
+        // Press just below the bottom edge of the mic disc (inside the start
+        // slop), then pull straight up and release.
+        compose.onNodeWithTag(COMPOSER_MIC_TAG)
+            .assertIsDisplayed()
+            .performTouchInput {
+                down(Offset(x = center.x, y = bottom + 8f))
+                moveBy(Offset(x = 0f, y = -220f))
+                up()
+            }
+
+        compose.waitForIdle()
+
+        assertEquals(1, micTaps)
+        assertEquals(1, lockCalls)
+        assertEquals(PromptComposerViewModel.RecordingState.Recording, state.recording)
+        assertTrue(state.recordingLocked)
+        compose.onNodeWithTag(COMPOSER_RECORDING_LOCKED_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+    }
+
     private fun renderInteractiveComposer(
         state: () -> PromptComposerViewModel.UiState,
         onStateChange: (PromptComposerViewModel.UiState) -> Unit,

@@ -79,12 +79,14 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.ContentScale
@@ -629,6 +631,7 @@ internal fun SheetContent(
         imeScope.launch { keyboardController?.hide() }
     }
     val lockThresholdPx = with(LocalDensity.current) { MIC_LOCK_SWIPE_THRESHOLD_DP.dp.toPx() }
+    val micStartSlopPx = with(LocalDensity.current) { MIC_GESTURE_START_SLOP_DP.dp.toPx() }
     val currentOnMicTap by rememberUpdatedState(onMicTap)
     val currentOnLockRecording by rememberUpdatedState(onLockRecording)
     val micGestureEnabled by rememberUpdatedState(
@@ -856,6 +859,7 @@ internal fun SheetContent(
                 .fillMaxWidth()
                 .micSwipeUpLockGesture(
                     lockThresholdPx = lockThresholdPx,
+                    startSlopPx = micStartSlopPx,
                     enabled = { micGestureEnabled },
                     startBounds = { micBoundsInControlsRow },
                     onPressStart = { currentOnMicTap() },
@@ -1335,30 +1339,52 @@ private fun MicTriggerButton(
 
 private fun Modifier.micSwipeUpLockGesture(
     lockThresholdPx: Float,
+    startSlopPx: Float,
     enabled: () -> Boolean,
     startBounds: () -> Rect?,
     onPressStart: () -> Unit,
     onLockRecording: () -> Unit,
 ): Modifier {
-    return pointerInput(lockThresholdPx) {
+    return pointerInput(lockThresholdPx, startSlopPx) {
         awaitEachGesture {
+            // requireUnconsumed = false so we still see the down even when a
+            // parent (the ModalBottomSheet drag-to-dismiss nested scroll) has
+            // a claim on vertical motion; we then aggressively own the pointer
+            // so a fast hold-and-pull-up cannot be reinterpreted as a sheet
+            // drag before recording starts (#585).
             val down = awaitFirstDown(requireUnconsumed = false)
             val bounds = startBounds()
-            if (!enabled() || bounds == null || !bounds.contains(down.position)) {
+            // Issue #585: the mic disc is a small 44dp target at the far
+            // bottom-right; a real hold-and-pull-up frequently lands the
+            // contact point a few px outside the tight rect. Inflating the
+            // start bounds by a touch-slop margin means an intentional press
+            // on/near the mic still arms the gesture instead of silently
+            // doing nothing (the maintainer's "it doesn't start recording"
+            // symptom).
+            if (!enabled() || !micGestureStartsAt(bounds, down.position, startSlopPx)) {
                 return@awaitEachGesture
             }
             val tracker = MicSwipeUpLockGestureTracker(lockThresholdPx)
             if (tracker.onPressStart() == MicSwipeUpLockGestureEvent.StartRecording) {
                 onPressStart()
             }
+            // Consume the down so the bottom sheet's nested-scroll / drag
+            // handle does not also treat this press as the start of a
+            // drag-to-dismiss.
             down.consume()
             while (true) {
                 val event = awaitPointerEvent()
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 val drag = change.position - down.position
+                // Consume every move belonging to our pointer so the upward
+                // pull stays with the mic gesture (and the sheet cannot win
+                // the vertical drag). Without this, a quick swipe-up reads as
+                // a sheet drag on a real device and the lock never fires.
+                if (change.positionChanged()) {
+                    change.consume()
+                }
                 if (tracker.onDrag(drag.x, drag.y) == MicSwipeUpLockGestureEvent.LockRecording) {
                     onLockRecording()
-                    change.consume()
                 }
                 if (change.changedToUpIgnoreConsumed()) {
                     tracker.onRelease()
@@ -1407,6 +1433,23 @@ internal fun micSwipeCrossedLockThreshold(
     dragY: Float,
     lockThresholdPx: Float,
 ): Boolean = dragY <= -lockThresholdPx && abs(dragY) >= abs(dragX)
+
+/**
+ * Issue #585: decide whether a pointer-down at [position] should arm the mic
+ * swipe-up gesture. [bounds] is the tight mic-disc rect (relative to the
+ * controls row); we accept a press within [startSlopPx] of that rect so a
+ * slightly-off hold-and-pull-up on the small disc still starts recording
+ * instead of silently doing nothing. Returns false when bounds are not yet
+ * measured (mic not laid out / not in the Idle row).
+ */
+internal fun micGestureStartsAt(
+    bounds: Rect?,
+    position: Offset,
+    startSlopPx: Float,
+): Boolean {
+    val rect = bounds ?: return false
+    return rect.inflate(startSlopPx).contains(position)
+}
 
 /**
  * Issue #566: compact ChatGPT/Claude-style staged attachment tiles. Each
@@ -2316,7 +2359,16 @@ internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recor
  * already-captured transcription cancel path.
  */
 internal const val COMPOSER_CANCEL_TRANSCRIPTION_TAG = "prompt-composer-cancel-transcription"
-private const val MIC_LOCK_SWIPE_THRESHOLD_DP = 40
+// Issue #585: a deliberate upward pull should lock recording "from the
+// gesture" — kept just above the system touch-slop (~18dp) so a tap doesn't
+// accidentally lock, but small enough that any real swipe-up immediately
+// transitions to live+locked rather than requiring a long drag.
+private const val MIC_LOCK_SWIPE_THRESHOLD_DP = 24
+
+// Issue #585: how far outside the tight mic-disc rect a press still counts as
+// "on the mic" for arming the swipe-up gesture. The disc is 44dp; this slop
+// makes a slightly-off hold-and-pull-up still start recording.
+private const val MIC_GESTURE_START_SLOP_DP = 24
 private const val PromptComposerRestingHeightFraction = 0.65f
 private const val PromptComposerImeVisibleHeightFraction = 1f
 

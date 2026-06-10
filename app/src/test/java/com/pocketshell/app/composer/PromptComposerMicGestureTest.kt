@@ -1,11 +1,47 @@
 package com.pocketshell.app.composer
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PromptComposerMicGestureTest {
+
+    // Issue #585: a small mic-disc rect like the real far-bottom-right target.
+    private val micRect = Rect(left = 200f, top = 0f, right = 244f, bottom = 44f)
+
+    @Test
+    fun pressInsideMicRectStartsGesture() {
+        assertTrue(
+            micGestureStartsAt(micRect, Offset(x = 222f, y = 22f), startSlopPx = 24f),
+        )
+    }
+
+    @Test
+    fun pressSlightlyOutsideMicRectStillStartsGestureWithinSlop() {
+        // 18px below/right of the disc — a realistic slightly-off hold on the
+        // tiny target. Without slop this would silently do nothing; #585's
+        // "it doesn't start recording" symptom.
+        assertTrue(
+            micGestureStartsAt(micRect, Offset(x = 262f, y = 62f), startSlopPx = 24f),
+        )
+    }
+
+    @Test
+    fun pressFarOutsideMicRectDoesNotStartGesture() {
+        assertFalse(
+            micGestureStartsAt(micRect, Offset(x = 20f, y = 22f), startSlopPx = 24f),
+        )
+    }
+
+    @Test
+    fun unmeasuredBoundsDoNotStartGesture() {
+        assertFalse(
+            micGestureStartsAt(bounds = null, position = Offset(x = 222f, y = 22f), startSlopPx = 24f),
+        )
+    }
 
     @Test
     fun upwardDragPastThresholdLocks() {

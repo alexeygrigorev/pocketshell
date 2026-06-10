@@ -624,6 +624,30 @@ work, the reviewer must see input reach the terminal and output appear in the
 app UI. For performance-sensitive work, the reviewer must include timing
 evidence.
 
+### Session-switch / reconnect / SSH journeys (mandatory — #638)
+
+The v0.3.30 dogfood wave (epic #636: every-switch EOF, blank-after-switch,
+wrong/stale session, step-out reconnect) shipped because reviewers ran scripted
+happy-path scenarios, not the messy real journeys. For ANY change touching
+session switching, tmux attach/reattach, SSH lease/transport, reconnect, or the
+foreground/background lifecycle, a single happy-path run is NOT sufficient. The
+reviewer MUST, on the emulator + Docker:
+
+- **Switch between ≥2 live sessions repeatedly** (A→B→C→A) and, after each
+  switch, confirm from authoritative artifacts: the CORRECT (non-stale) session
+  is shown, no `Disconnected`/EOF band, the pane content is re-seeded (not
+  blank), no spurious reconnect, and input routes to the shown session.
+- **Background→foreground within the grace window** and confirm it reattaches
+  WITHOUT a reconnect (and that beyond-grace still reconnects cleanly) — use the
+  `#552` toxiproxy link-cut harness where timing/staleness is involved.
+- Base approval on the connection-lifecycle logs (`PsTmuxReconnect`,
+  `PsTmuxLifecycle`, `ReconnectCauseTrail tmux_probe_result`) + viewport
+  artifacts from the SAME run, not a passing assertion alone.
+
+Code-read + one happy-path screenshot is grounds to return `CHANGES REQUESTED`
+for these flows. The load-bearing journey tests must run in regular CI, not only
+the release gate (#638), so these regressions are caught at PR time.
+
 ## Fast Design Renders (Roborazzi)
 
 For UI/design work, the JVM render harness (#555) is the **fast first visual

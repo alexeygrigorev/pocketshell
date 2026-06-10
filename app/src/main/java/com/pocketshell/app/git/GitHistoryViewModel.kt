@@ -42,6 +42,12 @@ sealed interface GitHistoryUiState {
          * overview probe failed even though history loaded.
          */
         val overview: GitRepoOverview? = null,
+        /**
+         * Canonical `https://github.com/<owner>/<repo>` web URL when `origin`
+         * points at GitHub (issue #648), else null — null hides the
+         * "Open on GitHub" action.
+         */
+        val gitHubUrl: String? = null,
     ) : GitHistoryUiState
 
     /** [dir] is not inside a git working tree. */
@@ -112,11 +118,17 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
                     // Overview is best-effort: a failure here (e.g. a transient
                     // git error) must not hide the history that already loaded.
                     val overview = gateway.repoOverview(req.dir).getOrNull()
+                    // Best-effort GitHub detection (#648): a failure here must
+                    // not hide the history/overview that already loaded.
+                    val gitHubUrl = runCatching {
+                        GitHubRemote.webUrl(gateway.originRemoteUrl(req.dir))
+                    }.getOrNull()
                     GitHistoryUiState.Ready(
                         dir = req.dir,
                         commits = commits,
                         truncated = commits.size >= COMMIT_LIMIT,
                         overview = overview,
+                        gitHubUrl = gitHubUrl,
                     )
                 },
                 onFailure = { error ->

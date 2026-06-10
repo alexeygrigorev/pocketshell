@@ -26,7 +26,11 @@ class GitHistoryScaffoldTest {
     private fun commit(hash: String, subject: String) =
         GitCommit(hash, "Ada Lovelace", "2 hours ago", subject)
 
-    private fun setState(state: GitHistoryUiState, onRetry: () -> Unit = {}) {
+    private fun setState(
+        state: GitHistoryUiState,
+        onRetry: () -> Unit = {},
+        onOpenGitHub: (String) -> Unit = {},
+    ) {
         compose.setContent {
             PocketShellTheme {
                 GitHistoryScaffold(
@@ -34,6 +38,7 @@ class GitHistoryScaffoldTest {
                     state = state,
                     onBack = {},
                     onRetry = onRetry,
+                    onOpenGitHub = onOpenGitHub,
                 )
             }
         }
@@ -102,6 +107,39 @@ class GitHistoryScaffoldTest {
         compose.onNodeWithTag(GIT_BRANCH_ROW_TAG_PREFIX + "feature/x").assertIsDisplayed()
         compose.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + "/home/u/git/proj").assertIsDisplayed()
         compose.onNodeWithText("Dirty").assertIsDisplayed()
+    }
+
+    @Test
+    fun openOnGitHubShownAndFiresUrlWhenGitHubRepo() {
+        var opened: String? = null
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+                gitHubUrl = "https://github.com/owner/repo",
+            ),
+            onOpenGitHub = { opened = it },
+        )
+        // Overview is the default landing tab; the action sits at the top.
+        compose.onNodeWithTag(GIT_OPEN_ON_GITHUB_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(GIT_OPEN_ON_GITHUB_TAG).performClick()
+        assertEquals("https://github.com/owner/repo", opened)
+    }
+
+    @Test
+    fun openOnGitHubHiddenWhenNotGitHubRepo() {
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+                gitHubUrl = null,
+            ),
+        )
+        compose.onNodeWithTag(GIT_OPEN_ON_GITHUB_TAG).assertDoesNotExist()
     }
 
     @Test

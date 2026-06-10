@@ -1,5 +1,7 @@
 package com.pocketshell.app.git
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,6 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -63,6 +66,9 @@ const val GIT_OVERVIEW_STATUS_TAG = "gitOverviewStatus"
 const val GIT_OVERVIEW_STATUS_UNAVAILABLE_TAG = "gitOverviewStatusUnavailable"
 const val GIT_BRANCH_ROW_TAG_PREFIX = "gitBranchRow:"
 const val GIT_WORKTREE_ROW_TAG_PREFIX = "gitWorktreeRow:"
+
+// "Open on GitHub" action (issue #648) — only shown when origin is a GitHub repo.
+const val GIT_OPEN_ON_GITHUB_TAG = "gitOpenOnGitHub"
 
 /**
  * Git commit-history / timeline view for a project directory — issue #646
@@ -99,11 +105,17 @@ fun GitHistoryScreen(
         )
     }
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
     GitHistoryScaffold(
         hostName = hostName,
         state = state,
         onBack = onBack,
         onRetry = viewModel::retry,
+        onOpenGitHub = { url ->
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            }
+        },
         modifier = modifier,
     )
 }
@@ -119,6 +131,7 @@ internal fun GitHistoryScaffold(
     state: GitHistoryUiState,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    onOpenGitHub: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -135,7 +148,7 @@ internal fun GitHistoryScaffold(
             )
             when (state) {
                 is GitHistoryUiState.Loading -> LoadingPanel()
-                is GitHistoryUiState.Ready -> ReadyPanel(state)
+                is GitHistoryUiState.Ready -> ReadyPanel(state, onOpenGitHub)
                 is GitHistoryUiState.NotARepo -> NotARepoPanel(state.dir)
                 is GitHistoryUiState.Failed -> ErrorPanel(
                     message = state.message,
@@ -157,7 +170,10 @@ private enum class GitTab(val label: String) {
 }
 
 @Composable
-private fun ReadyPanel(state: GitHistoryUiState.Ready) {
+private fun ReadyPanel(
+    state: GitHistoryUiState.Ready,
+    onOpenGitHub: (String) -> Unit,
+) {
     // Default to Overview so the at-a-glance "what's happening" view (status,
     // branches, worktrees) is what the user lands on; History is one tap away.
     var tab by rememberSaveable { mutableStateOf(GitTab.Overview) }
@@ -182,7 +198,7 @@ private fun ReadyPanel(state: GitHistoryUiState.Ready) {
                 .testTag(GIT_TAB_TOGGLE_TAG),
         )
         when (tab) {
-            GitTab.Overview -> OverviewPanel(state)
+            GitTab.Overview -> OverviewPanel(state, onOpenGitHub)
             GitTab.History -> HistoryPanel(state)
         }
     }
@@ -284,12 +300,32 @@ private fun HistoryPanel(state: GitHistoryUiState.Ready) {
  * "unavailable" row rather than a hard error.
  */
 @Composable
-private fun OverviewPanel(state: GitHistoryUiState.Ready) {
+private fun OverviewPanel(
+    state: GitHistoryUiState.Ready,
+    onOpenGitHub: (String) -> Unit,
+) {
     val overview = state.overview
+    val gitHubUrl = state.gitHubUrl
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
     ) {
+        // GitHub repo detected (issue #648): an "Open on GitHub" row that fires
+        // an ACTION_VIEW intent to the canonical repo page. Only present when
+        // origin points at GitHub.
+        if (gitHubUrl != null) {
+            item(key = "__github_header__") { SectionHeader(label = "Remote") }
+            item(key = "__github_row__") {
+                ListRow(
+                    title = "Open on GitHub",
+                    subtitle = gitHubUrl.removePrefix("https://"),
+                    leading = { GlyphCell("↗") },
+                    onClick = { onOpenGitHub(gitHubUrl) },
+                    modifier = Modifier.testTag(GIT_OPEN_ON_GITHUB_TAG),
+                )
+            }
+        }
+
         if (overview == null) {
             item(key = "__status_header__") { SectionHeader(label = "Status") }
             item(key = "__status_unavailable__") {

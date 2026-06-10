@@ -4,6 +4,7 @@ import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -185,6 +186,60 @@ class GitHistoryDockerTest {
         composeRule.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + repo).assertExists()
         composeRule.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + "$root/proj-feature").assertExists()
         WalkthroughScreenshotArtifacts.capture("issue647-git-overview")
+    }
+
+    @Test
+    fun gitHubOriginShowsOpenOnGitHubAction(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val root = "/tmp/issue648-$suffix"
+        val repo = "$root/proj"
+        seededRoot = root
+
+        // Seed a repo whose origin points at GitHub over SSH, so the gateway's
+        // `git remote get-url origin` returns a GitHub remote and the screen
+        // surfaces "Open on GitHub". The remote URL is parsed, not fetched, so
+        // the URL not resolving to a real repo is fine for this test.
+        withTimeout(30_000) {
+            connect()?.use { session ->
+                val script = listOf(
+                    "mkdir -p '$repo'",
+                    "cd '$repo'",
+                    "git init -q",
+                    "git config user.email tester@example.com",
+                    "git config user.name 'PocketShell Tester'",
+                    "git remote add origin git@github.com:pocketshell/demo.git",
+                    "printf 'one\\n' > a.txt",
+                    "git add a.txt",
+                    "git commit -q -m 'Add a.txt'",
+                    "echo ok",
+                ).joinToString(" && ")
+                val exit = session.exec(script)
+                assertEquals("seed exit (stderr=${exit.stderr})", 0, exit.exitCode)
+            } ?: error("could not connect to seed github-origin repo")
+        }
+
+        composeRule.setContent {
+            GitHistoryScreen(
+                hostName = "proj",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                dir = repo,
+                onBack = {},
+                viewModel = GitHistoryViewModel(),
+            )
+        }
+
+        // Overview is the default tab; the "Open on GitHub" row appears with the
+        // canonical web URL derived from the github.com SSH remote.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_OPEN_ON_GITHUB_TAG)
+        }
+        composeRule.onNodeWithTag(GIT_OPEN_ON_GITHUB_TAG).assertExists()
+        composeRule.onNodeWithText("github.com/pocketshell/demo").assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue648-open-on-github")
     }
 
     @Test

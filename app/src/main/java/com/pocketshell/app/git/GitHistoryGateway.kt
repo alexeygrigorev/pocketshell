@@ -125,6 +125,29 @@ class GitHistoryGateway(private val session: SshSession) {
         )
     }
 
+    /**
+     * Read the `origin` remote URL for [dir] over SSH — issue #648 (epic #644
+     * slice 4). Best-effort: returns null when [dir] isn't a working tree, has
+     * no `origin` remote, or the command otherwise fails, so the caller simply
+     * doesn't offer the "Open on GitHub" action rather than erroring.
+     *
+     * The raw URL is returned as-is; [GitHubRemote.webUrl] turns it into a
+     * canonical GitHub page (or null for non-GitHub remotes).
+     */
+    suspend fun originRemoteUrl(dir: String): String? {
+        val quoted = quoteSingle(dir)
+        val probe = runCatching {
+            session.exec("git -C $quoted rev-parse --is-inside-work-tree 2>/dev/null")
+        }.getOrNull() ?: return null
+        if (probe.exitCode != 0 || probe.stdout.trim() != "true") return null
+
+        val remote = runCatching {
+            session.exec("git -C $quoted remote get-url origin 2>/dev/null")
+        }.getOrNull() ?: return null
+        if (remote.exitCode != 0) return null
+        return remote.stdout.trim().ifBlank { null }
+    }
+
     companion object {
         const val DEFAULT_LIMIT: Int = 100
 

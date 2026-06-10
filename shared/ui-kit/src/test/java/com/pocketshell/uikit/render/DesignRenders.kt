@@ -502,6 +502,9 @@ class DesignRenders {
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
+            // Issue #648: "Open on GitHub" appears first when origin is a GitHub repo.
+            SectionHeader(label = "Remote")
+            ListRow(title = "Open on GitHub", subtitle = "github.com/owner/repo", onClick = {})
             SectionHeader(label = "Status")
             ListRow(
                 title = "main",

@@ -321,28 +321,29 @@ public class PromptComposerViewModel @Inject constructor(
                     // structured tile list, de-duplicating by remote path so
                     // re-attaching the same file does not double a tile. The
                     // draft text is intentionally left untouched.
-                    _uiState.update { current ->
-                        val existing = current.attachments.map { it.remotePath }.toSet()
-                        val uniquePaths = paths
-                            .filter { it.isNotBlank() && it !in existing }
-                            .distinct()
-                        val added = uniquePaths.map { path ->
-                            val preview = previews.getOrNull(paths.indexOf(path))
-                            StagedAttachment(
-                                remotePath = path,
-                                displayName = attachmentDisplayName(path),
-                                previewUri = preview?.uri,
-                                mimeType = preview?.mimeType,
-                            )
-                        }
-                        current.copy(
-                            attachments = current.attachments + added,
-                            attachmentUpload = AttachmentUploadState.Idle,
-                            error = null,
-                        )
-                    }
+                    mergeStagedPaths(paths, previews, error = null)
                 },
                 onFailure = { error ->
+                    // Issue #570: a partial multi-file failure still carries
+                    // the files that DID upload. Attach those survivors as
+                    // tiles AND surface the failure, instead of discarding
+                    // every upload because one image stalled/failed.
+                    val partial = error as? PartialAttachmentUploadException
+                    if (partial != null && partial.uploadedPaths.isNotEmpty()) {
+                        DiagnosticEvents.record(
+                            "action",
+                            "attachment_stage_partial",
+                            "requestedCount" to count,
+                            "stagedCount" to partial.uploadedPaths.count { it.isNotBlank() },
+                            "failedCount" to partial.failedCount,
+                        )
+                        mergeStagedPaths(
+                            partial.uploadedPaths,
+                            previews,
+                            error = partial.message,
+                        )
+                        return@fold
+                    }
                     DiagnosticEvents.record(
                         "action",
                         "attachment_stage_fail",
@@ -357,6 +358,40 @@ public class PromptComposerViewModel @Inject constructor(
                         )
                     }
                 },
+            )
+        }
+    }
+
+    /**
+     * Issue #544/#570: merge newly staged remote paths into the tile list,
+     * de-duplicating by remote path. Used by both the all-success and the
+     * partial-failure branches so survivors are attached identically. The
+     * draft text is never touched; [error] is set verbatim (null on full
+     * success, the partial-failure banner otherwise).
+     */
+    private fun mergeStagedPaths(
+        paths: List<String>,
+        previews: List<AttachmentPreview>,
+        error: String?,
+    ) {
+        _uiState.update { current ->
+            val existing = current.attachments.map { it.remotePath }.toSet()
+            val uniquePaths = paths
+                .filter { it.isNotBlank() && it !in existing }
+                .distinct()
+            val added = uniquePaths.map { path ->
+                val preview = previews.getOrNull(paths.indexOf(path))
+                StagedAttachment(
+                    remotePath = path,
+                    displayName = attachmentDisplayName(path),
+                    previewUri = preview?.uri,
+                    mimeType = preview?.mimeType,
+                )
+            }
+            current.copy(
+                attachments = current.attachments + added,
+                attachmentUpload = AttachmentUploadState.Idle,
+                error = error,
             )
         }
     }

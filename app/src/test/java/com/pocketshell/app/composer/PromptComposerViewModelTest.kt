@@ -595,6 +595,54 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun attachFilesPartialFailureKeepsSurvivorsAndShowsError() = runTest {
+        // Issue #570: when one of several images fails to upload, the ones
+        // that DID upload must still attach as tiles and the composer must
+        // re-enable (Idle) with a per-batch error — never discard everything
+        // or wedge on the failed file.
+        val vm = newVm()
+        vm.onDraftChange("Review these shots")
+        val first = "~/.pocketshell/attachments/host-1/20260606-120000-01-first.png"
+        val third = "~/.pocketshell/attachments/host-1/20260606-120000-03-third.png"
+
+        vm.attachFiles(count = 3) {
+            Result.failure(
+                PartialAttachmentUploadException(
+                    uploadedPaths = listOf(first, third),
+                    failedCount = 1,
+                    message = "Attached 2 of 3 files; 1 failed (upload timed out).",
+                ),
+            )
+        }
+        advanceUntilIdle()
+
+        // Survivors are attached; the failed file is absent.
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = first,
+                    displayName = "20260606-120000-01-first.png",
+                ),
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = third,
+                    displayName = "20260606-120000-03-third.png",
+                ),
+            ),
+            vm.uiState.value.attachments,
+        )
+        // Draft untouched, composer re-enabled, per-batch error visible.
+        assertEquals("Review these shots", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Idle,
+            vm.uiState.value.attachmentUpload,
+        )
+        val error = vm.uiState.value.error
+        assertNotNull(error)
+        assertTrue(error!!.contains("Attached 2 of 3"))
+        assertTrue(error.contains("1 failed"))
+    }
+
+    @Test
     fun attachFilesInFlightDoesNotBlockDraftEdits() = runTest {
         // Issue #570: staging/uploading attachments must not globally block
         // text composition. The upload can stay busy, but the draft path

@@ -12,6 +12,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
+/**
+ * Issue #570: a multi-file attachment stage that partially failed (some
+ * files uploaded, at least one did not) throws this so the caller can
+ * still attach the survivors AND surface a per-batch error, instead of
+ * discarding everything.
+ *
+ * [uploadedPaths] are the display paths that DID upload (non-empty by
+ * construction — a total failure uses a plain [SshException] instead). The
+ * message describes how many of how many failed.
+ */
+internal class PartialAttachmentUploadException(
+    val uploadedPaths: List<String>,
+    val failedCount: Int,
+    message: String,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)
+
 internal class PromptAttachmentStager(
     private val resolver: ContentResolver,
     private val cacheDir: File,
@@ -33,8 +50,27 @@ internal class PromptAttachmentStager(
         val displayDir = "~/$remoteDir"
         try {
             ensureRemoteDirectory(session, remoteDir)
-            val timestamp = ShareUploader.formatTimestamp(now())
-            val paths = uris.mapIndexed { index, uri ->
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (t: Throwable) {
+            // The remote directory could not be created — nothing can be
+            // uploaded, so this is a clean total failure.
+            return@withContext Result.failure(
+                if (t is SshException) t else SshException("Attachment upload failed: ${t.message}", t),
+            )
+        }
+
+        val timestamp = ShareUploader.formatTimestamp(now())
+        // Issue #570: upload each file independently so a single stalling /
+        // failing image among N never discards the ones that DID upload (the
+        // multi-image wedge/discard the maintainer hit). Successful display
+        // paths are collected as they land; per-file failures are recorded
+        // and aggregated after the loop.
+        val uploadedPaths = mutableListOf<String>()
+        var firstFailure: Throwable? = null
+        var failedCount = 0
+        uris.forEachIndexed { index, uri ->
+            try {
                 val item = describe(uri)
                 val sanitised = FilenameSanitiser.sanitise(
                     item.displayName ?: uri.lastPathSegment,
@@ -43,15 +79,53 @@ internal class PromptAttachmentStager(
                 val remoteName = composeAttachmentName(timestamp, index, sanitised)
                 val remotePath = "$remoteDir/$remoteName"
                 uploadUri(session, uri, item.size, remotePath, remoteName)
-                "$displayDir/$remoteName"
+                uploadedPaths += "$displayDir/$remoteName"
+            } catch (cancelled: CancellationException) {
+                // A cancellation (sheet dismissed, send-while-uploading
+                // override, or the [withTimeout] in the ViewModel) must
+                // unwind the whole stage — never swallow it into a partial.
+                throw cancelled
+            } catch (t: Throwable) {
+                failedCount++
+                if (firstFailure == null) firstFailure = t
             }
-            attachmentPruner.prune(session, remoteDir)
-            Result.success(paths)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (t: Throwable) {
-            Result.failure(if (t is SshException) t else SshException("Attachment upload failed: ${t.message}", t))
         }
+
+        // Best-effort prune runs whenever at least one upload landed — the
+        // remote dir now has fresh files worth trimming. A prune failure is
+        // already swallowed inside the pruner; never let it fail the stage.
+        if (uploadedPaths.isNotEmpty()) {
+            runCatching { attachmentPruner.prune(session, remoteDir) }
+        }
+
+        when {
+            failedCount == 0 -> Result.success(uploadedPaths)
+            uploadedPaths.isEmpty() -> {
+                val cause = firstFailure
+                Result.failure(
+                    if (cause is SshException) {
+                        cause
+                    } else {
+                        SshException("Attachment upload failed: ${cause?.message}", cause)
+                    },
+                )
+            }
+            else -> Result.failure(
+                PartialAttachmentUploadException(
+                    uploadedPaths = uploadedPaths,
+                    failedCount = failedCount,
+                    message = partialFailureMessage(uploadedPaths.size, failedCount, firstFailure),
+                    cause = firstFailure,
+                ),
+            )
+        }
+    }
+
+    private fun partialFailureMessage(uploaded: Int, failed: Int, cause: Throwable?): String {
+        val total = uploaded + failed
+        val detail = cause?.message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+        val suffix = if (detail.isNotBlank()) " ($detail)" else ""
+        return "Attached $uploaded of $total files; $failed failed$suffix."
     }
 
     private suspend fun ensureRemoteDirectory(session: SshSession, remoteDir: String) {

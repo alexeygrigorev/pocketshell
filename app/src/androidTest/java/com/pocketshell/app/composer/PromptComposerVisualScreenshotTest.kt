@@ -160,6 +160,45 @@ class PromptComposerVisualScreenshotTest {
         WalkthroughScreenshotArtifacts.capture("05c-composer-attachment-chips")
     }
 
+    @Test
+    fun capturesPartialMultiImageFailureRecovery() {
+        // Issue #570: the composer end state after attaching 3 images where one
+        // upload failed — the two survivors attached as tiles, the composer
+        // re-enabled (no "Uploading" greyout), Send tappable, and a per-batch
+        // error banner. Proves the multi-image wedge is gone (the user can
+        // still send the files that DID upload).
+        var state by mutableStateOf(
+            PromptComposerViewModel.UiState(
+                draft = "Look at these two",
+                recording = PromptComposerViewModel.RecordingState.Idle,
+                attachmentUpload = PromptComposerViewModel.AttachmentUploadState.Idle,
+                attachments = listOf(
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = "~/.pocketshell/attachments/host-1/20260606-120000-01-first.png",
+                        displayName = "20260606-120000-01-first.png",
+                    ),
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = "~/.pocketshell/attachments/host-1/20260606-120000-03-third.png",
+                        displayName = "20260606-120000-03-third.png",
+                    ),
+                ),
+                error = "Attached 2 of 3 files; 1 failed (upload timed out).",
+            ),
+        )
+        renderComposer { state }
+
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertExists()
+        // Warm-up draw cycle so the first PixelCopy lands on a drawn frame.
+        compose.runOnIdle { state = state.copy(draft = state.draft + " ") }
+        compose.waitForIdle()
+        compose.runOnIdle { state = state.copy(draft = state.draft.trimEnd()) }
+        compose.onNodeWithText("Attached 2 of 3 files; 1 failed (upload timed out).")
+            .assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsDisplayed()
+        compose.waitForIdle()
+        WalkthroughScreenshotArtifacts.capture("05d-composer-partial-attachment-recovery")
+    }
+
     private fun renderComposer(state: () -> PromptComposerViewModel.UiState) {
         compose.activityRule.scenario.onActivity { activity ->
             val dark = PocketShellColors.Background.toArgb()

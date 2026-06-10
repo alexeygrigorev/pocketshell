@@ -434,6 +434,72 @@ class PromptComposerSmokeTest {
     }
 
     @Test
+    fun partialMultiImageFailureKeepsSurvivorsEnablesSendAndShowsError() {
+        // Issue #570: attaching 2-3 images where one upload fails must NOT
+        // wedge/grey the composer. The end state the fix produces — the two
+        // survivors as tiles, the composer re-enabled (no "Uploading" banner),
+        // Send tappable, and a per-batch error — must be fully usable.
+        val first = "~/.pocketshell/attachments/host-1/20260606-120000-01-first.png"
+        val third = "~/.pocketshell/attachments/host-1/20260606-120000-03-third.png"
+        val firstPreview = writeTinyPreviewPng("partial-first.png")
+        val thirdPreview = writeTinyPreviewPng("partial-third.png")
+        var sendTaps = 0
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(520.dp),
+                ) {
+                    SheetContent(
+                        // Exactly the UiState PromptComposerViewModel.attachFiles
+                        // lands in after a PartialAttachmentUploadException: the two
+                        // uploaded images attached, upload reset to Idle, error set.
+                        state = PromptComposerViewModel.UiState(
+                            attachmentUpload = PromptComposerViewModel.AttachmentUploadState.Idle,
+                            attachments = listOf(
+                                PromptComposerViewModel.StagedAttachment(
+                                    remotePath = first,
+                                    displayName = "20260606-120000-01-first.png",
+                                    previewUri = firstPreview,
+                                    mimeType = "image/png",
+                                ),
+                                PromptComposerViewModel.StagedAttachment(
+                                    remotePath = third,
+                                    displayName = "20260606-120000-03-third.png",
+                                    previewUri = thirdPreview,
+                                    mimeType = "image/png",
+                                ),
+                            ),
+                            error = "Attached 2 of 3 files; 1 failed (upload timed out).",
+                        ),
+                        onClose = {},
+                        onDraftChange = {},
+                        onMicTap = {},
+                        onSend = { sendTaps += 1 },
+                        onAttachFiles = {},
+                    )
+                }
+            }
+        }
+
+        // Survivors render as tiles; the composer is NOT greyed.
+        compose.onNodeWithTag(composerAttachmentChipTestTag(first)).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(third)).assertIsDisplayed()
+        // The per-batch error is visible (failed upload surfaced, not swallowed).
+        compose.onNodeWithText("Attached 2 of 3 files; 1 failed (upload timed out).")
+            .assertIsDisplayed()
+        // Attach button re-enabled (no longer attachmentBusy).
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed()
+        // Send is enabled (attachments present) and actually fires.
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsDisplayed().performClick()
+        compose.runOnIdle {
+            assertEquals(1, sendTaps)
+        }
+    }
+
+    @Test
     fun longDraftScrollsInsideComposerAndKeepsControlsTappable() {
         val longDraft = (1..80).joinToString(separator = "\n") { line ->
             "line $line: keep writing the prompt without hiding controls"

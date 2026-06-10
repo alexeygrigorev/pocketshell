@@ -2,21 +2,17 @@ package com.pocketshell.app.projects
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -35,17 +31,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
-import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import org.json.JSONArray
@@ -171,70 +165,42 @@ internal fun SessionTypePickerContent(
                 )
             }
 
-            // Segmented control: Shell vs Agent.
+            // Segmented control: Shell vs Agent. Uses the shared ui-kit
+            // SegmentedToggle (the locked cyan-fill "pick one of N" control,
+            // #479/#481) so the picker reads identically to every other
+            // segmented switch in the app.
             Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
                 SectionHeader(label = "Session type")
-                Row(
+                SegmentedToggle(
+                    labels = SESSION_TYPE_LABELS,
+                    selectedIndex = if (sessionType == SessionType.Shell) 0 else 1,
+                    onSelected = {
+                        sessionType = if (it == 0) SessionType.Shell else SessionType.Agent
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(PICKER_SEGMENT_HEIGHT)
-                        .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
-                        .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
-                        .selectableGroup(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    SegmentButton(
-                        label = "Shell",
-                        selected = sessionType == SessionType.Shell,
-                        onClick = { sessionType = SessionType.Shell },
-                        testTag = SESSION_TYPE_PICKER_SHELL_TAG,
-                        modifier = Modifier.weight(1f),
-                    )
-                    SegmentButton(
-                        label = "Agent",
-                        selected = sessionType == SessionType.Agent,
-                        onClick = { sessionType = SessionType.Agent },
-                        testTag = SESSION_TYPE_PICKER_AGENT_TAG,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+                        .heightIn(min = PICKER_SEGMENT_HEIGHT),
+                    fillSegments = true,
+                    segmentTag = { index ->
+                        if (index == 0) SESSION_TYPE_PICKER_SHELL_TAG else SESSION_TYPE_PICKER_AGENT_TAG
+                    },
+                )
             }
 
             // Conditional agent CLI sub-picker.
             if (sessionType == SessionType.Agent) {
                 Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
                     SectionHeader(label = "Agent CLI")
-                    Row(
+                    SegmentedToggle(
+                        labels = AGENT_CLI_LABELS,
+                        selectedIndex = agentKind.ordinal,
+                        onSelected = { agentKind = AgentCli.entries[it] },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(PICKER_SEGMENT_HEIGHT)
-                            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
-                            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
-                            .selectableGroup(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        SegmentButton(
-                            label = "claude",
-                            selected = agentKind == AgentCli.Claude,
-                            onClick = { agentKind = AgentCli.Claude },
-                            testTag = SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG,
-                            modifier = Modifier.weight(1f),
-                        )
-                        SegmentButton(
-                            label = "codex",
-                            selected = agentKind == AgentCli.Codex,
-                            onClick = { agentKind = AgentCli.Codex },
-                            testTag = SESSION_TYPE_PICKER_AGENT_CODEX_TAG,
-                            modifier = Modifier.weight(1f),
-                        )
-                        SegmentButton(
-                            label = "opencode",
-                            selected = agentKind == AgentCli.OpenCode,
-                            onClick = { agentKind = AgentCli.OpenCode },
-                            testTag = SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
+                            .heightIn(min = PICKER_SEGMENT_HEIGHT),
+                        fillSegments = true,
+                        segmentTag = { index -> AGENT_CLI_SEGMENT_TAGS[index] },
+                    )
                     Text(
                         text = "The CLI will auto-start in the new pane.",
                         color = PocketShellColors.TextMuted,
@@ -259,24 +225,21 @@ internal fun SessionTypePickerContent(
                     if (agentKind == AgentCli.Claude && claudeProfiles.size > 1) {
                         Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
                             SectionHeader(label = "Profile")
-                            Row(
+                            SegmentedToggle(
+                                labels = claudeProfiles.map { it.name },
+                                selectedIndex = claudeProfiles
+                                    .indexOfFirst { it.name == claudeProfile }
+                                    .coerceAtLeast(0),
+                                onSelected = { claudeProfile = claudeProfiles[it].name },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
-                                    .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
-                                    .selectableGroup()
+                                    .heightIn(min = PICKER_SEGMENT_HEIGHT)
                                     .testTag(SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG),
-                            ) {
-                                for (profile in claudeProfiles) {
-                                    SegmentButton(
-                                        label = profile.name,
-                                        selected = claudeProfile == profile.name,
-                                        onClick = { claudeProfile = profile.name },
-                                        testTag = "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:${profile.name}",
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                }
-                            }
+                                fillSegments = true,
+                                segmentTag = { index ->
+                                    "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:${claudeProfiles[index].name}"
+                                },
+                            )
                         }
                     }
 
@@ -286,24 +249,21 @@ internal fun SessionTypePickerContent(
                     if (agentKind == AgentCli.Codex && codexProfiles.size > 1) {
                         Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
                             SectionHeader(label = "Profile")
-                            Row(
+                            SegmentedToggle(
+                                labels = codexProfiles.map { it.name },
+                                selectedIndex = codexProfiles
+                                    .indexOfFirst { it.name == codexProfile }
+                                    .coerceAtLeast(0),
+                                onSelected = { codexProfile = codexProfiles[it].name },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
-                                    .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
-                                    .selectableGroup()
+                                    .heightIn(min = PICKER_SEGMENT_HEIGHT)
                                     .testTag(SESSION_TYPE_PICKER_CODEX_PROFILE_TAG),
-                            ) {
-                                for (profile in codexProfiles) {
-                                    SegmentButton(
-                                        label = profile.name,
-                                        selected = codexProfile == profile.name,
-                                        onClick = { codexProfile = profile.name },
-                                        testTag = "$SESSION_TYPE_PICKER_CODEX_PROFILE_TAG:${profile.name}",
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                }
-                            }
+                                fillSegments = true,
+                                segmentTag = { index ->
+                                    "$SESSION_TYPE_PICKER_CODEX_PROFILE_TAG:${codexProfiles[index].name}"
+                                },
+                            )
                         }
                     }
                 }
@@ -357,37 +317,6 @@ internal fun SessionTypePickerContent(
                 Text("Create")
             }
         }
-    }
-}
-
-@Composable
-private fun SegmentButton(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    testTag: String,
-    modifier: Modifier = Modifier,
-) {
-    val bg = if (selected) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev
-    val fg = if (selected) PocketShellColors.Accent else PocketShellColors.TextSecondary
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(PICKER_SEGMENT_HEIGHT)
-            .padding(PocketShellSpacing.xs / 2)
-            .background(bg, PocketShellShapes.small)
-            .clickable(role = Role.Tab, onClick = onClick)
-            .testTag(testTag),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = fg,
-            style = PocketShellType.bodyDense,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
@@ -707,6 +636,17 @@ const val SESSION_TYPE_PICKER_CANCEL_TAG: String = "session-type-picker:cancel"
 const val SESSION_TYPE_PICKER_CREATE_TAG: String = "session-type-picker:create"
 const val SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG: String = "session-type-picker:claude-profile"
 const val SESSION_TYPE_PICKER_CODEX_PROFILE_TAG: String = "session-type-picker:codex-profile"
+
+// Segment labels and per-segment tags for the shared SegmentedToggle controls.
+// AGENT_CLI_* lists are ordered to match AgentCli.entries (Claude, Codex,
+// OpenCode), so the segment index maps straight onto the enum ordinal.
+private val SESSION_TYPE_LABELS = listOf("Shell", "Agent")
+private val AGENT_CLI_LABELS = listOf("claude", "codex", "opencode")
+private val AGENT_CLI_SEGMENT_TAGS = listOf(
+    SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG,
+    SESSION_TYPE_PICKER_AGENT_CODEX_TAG,
+    SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG,
+)
 
 /**
  * A named Claude Code configuration profile (issue #627).

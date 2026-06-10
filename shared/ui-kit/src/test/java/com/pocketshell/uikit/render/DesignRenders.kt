@@ -3,6 +3,7 @@ package com.pocketshell.uikit.render
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,12 +25,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.TextButton
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.HostStatus
@@ -249,6 +257,127 @@ class DesignRenders {
                     )
                 },
             )
+        }
+    }
+
+    /**
+     * Issue #614: the "new session" type picker body, reconstructed from the
+     * same ui-kit primitives the real [SessionTypePickerSheet] now composes
+     * (`SectionHeader`, the shared cyan-fill `SegmentedToggle`, and a
+     * `ListRow` skip-permissions row). The app-level sheet itself cannot be
+     * imported into this ui-kit harness, so this fixture proves the
+     * design-system look of the rebuilt picker — aligned full-width segments,
+     * consistent section rhythm, no awkward vertical-list compression.
+     */
+    @Test
+    fun sessionTypePicker() = render("session-type-picker") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "New session",
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "in ai-shipping-labs-workshops-raw",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Start folder")
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+                        .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = "/home/alexey/git/ai-shipping-labs-workshops-raw",
+                        color = PocketShellColors.Text,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Session type")
+                SegmentedToggle(
+                    labels = listOf("Shell", "Agent"),
+                    selectedIndex = 1,
+                    onSelected = {},
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    fillSegments = true,
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Agent CLI")
+                SegmentedToggle(
+                    labels = listOf("claude", "codex", "opencode"),
+                    selectedIndex = 0,
+                    onSelected = {},
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    fillSegments = true,
+                )
+                Text(
+                    text = "The CLI will auto-start in the new pane.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                ListRow(
+                    title = "Skip permissions",
+                    subtitle = "No per-action approval prompts.",
+                    leading = {
+                        Checkbox(
+                            checked = true,
+                            onCheckedChange = {},
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = PocketShellColors.Accent,
+                                uncheckedColor = PocketShellColors.TextSecondary,
+                            ),
+                        )
+                    },
+                    onClick = {},
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, PocketShellColors.BorderSoft)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = {}) {
+                    Text("Cancel", color = PocketShellColors.TextSecondary)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = {},
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PocketShellColors.Accent,
+                        contentColor = PocketShellColors.OnAccent,
+                    ),
+                ) {
+                    Text("Create")
+                }
+            }
         }
     }
 

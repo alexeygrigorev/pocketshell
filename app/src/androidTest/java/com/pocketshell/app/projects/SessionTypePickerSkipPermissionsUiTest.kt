@@ -82,9 +82,10 @@ class SessionTypePickerSkipPermissionsUiTest {
         compose.waitForIdle()
         assertTrue(lastChoice?.skipPermissions == true)
         assertTrue(lastChoice?.agent == AgentCli.Claude)
-        assertTrue(
-            lastChoice?.startCommand() == "claude --dangerously-skip-permissions",
-        )
+        // Claude launches env-stripped (issue #627): `env -u … claude …`.
+        val skipOnCommand = lastChoice?.startCommand()
+        assertTrue(skipOnCommand?.startsWith("env -u ") == true)
+        assertTrue(skipOnCommand?.endsWith(" claude --dangerously-skip-permissions") == true)
 
         // Switch to OpenCode -> the checkbox is hidden (no-op for OpenCode).
         compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG).performClick()
@@ -113,7 +114,10 @@ class SessionTypePickerSkipPermissionsUiTest {
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
         compose.waitForIdle()
         assertTrue(lastChoice?.skipPermissions == false)
-        assertTrue(lastChoice?.startCommand() == "claude")
+        // Claude launches env-stripped (issue #627): `env -u … claude` (no flag).
+        val bareCommand = lastChoice?.startCommand()
+        assertTrue(bareCommand?.startsWith("env -u ") == true)
+        assertTrue(bareCommand?.endsWith(" claude") == true)
     }
 
     @Test

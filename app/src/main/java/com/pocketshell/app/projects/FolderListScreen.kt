@@ -40,6 +40,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -55,7 +56,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
@@ -926,8 +926,10 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
     }
 }
 
+// Issue #639: internal (was private) so the refresh-indicator + stable-order
+// screenshot test can drive the real content composable directly.
 @Composable
-private fun FolderListContent(
+internal fun FolderListContent(
     hostName: String,
     folders: List<FolderRow>,
     treeRoots: List<FolderTreeRoot>,
@@ -972,6 +974,13 @@ private fun FolderListContent(
     // already-sorted `flatSessions` (no re-sort) so each section preserves the
     // upstream order and a row's section always agrees with its status-dot colour.
     val flatGroups = remember(flatSessions) { FlatSessionGroups.from(flatSessions) }
+    // Issue #639: the refresh indicator must NOT displace the list. A routine
+    // refresh fires on every session switch, so a top in-list row that pushes
+    // every row down makes the whole list jump under the user's finger. Instead
+    // the indicator is a thin top progress bar overlaid on the content (it
+    // reflows nothing) — see [FolderRefreshProgressBar] pinned to the top of
+    // this Box below.
+    Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -990,11 +999,6 @@ private fun FolderListContent(
                     status = actionStatus,
                     onDismiss = onDismissActionStatus,
                 )
-            }
-        }
-        if (isRefreshing) {
-            item {
-                FolderRefreshStatusRow()
             }
         }
         if (showFlatFolderList) {
@@ -1128,31 +1132,31 @@ private fun FolderListContent(
             )
         }
     }
+        // Issue #639: non-displacing refresh affordance. A thin indeterminate
+        // progress bar pinned to the top edge of the content overlays the list
+        // (it occupies zero layout slot, so no row shifts when it appears or
+        // disappears). The previous in-list "Refreshing sessions" row pushed
+        // every row down on every session switch.
+        if (isRefreshing) {
+            FolderRefreshProgressBar(
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
+    }
 }
 
 @Composable
-private fun FolderRefreshStatusRow() {
-    Row(
-        modifier = Modifier
+private fun FolderRefreshProgressBar(modifier: Modifier = Modifier) {
+    LinearProgressIndicator(
+        modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .height(3.dp)
             .testTag(FOLDER_LIST_REFRESHING_TAG),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CircularProgressIndicator(
-            color = PocketShellColors.Accent,
-            strokeWidth = 2.dp,
-            modifier = Modifier.size(16.dp),
-        )
-        Text(
-            text = "Refreshing sessions",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            maxLines = 1,
-        )
-    }
+        color = PocketShellColors.Accent,
+        // A faint track keeps the bar legible against the dark background while
+        // staying a thin, non-displacing affordance (issue #639).
+        trackColor = PocketShellColors.Accent.copy(alpha = 0.18f),
+    )
 }
 
 private val HostPortForwardingSummary.shouldShowSummary: Boolean

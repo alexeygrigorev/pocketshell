@@ -390,6 +390,21 @@ class FolderListViewModel internal constructor(
     private var sessionRefreshInFlight: Boolean = false
 
     /**
+     * Issue #639: the frozen display order of sessions, by name. A routine
+     * refresh fires on every session switch and returns the SAME session set
+     * with shifted `lastActivity` timestamps; re-sorting on recency made rows
+     * jump and the user mis-tapped the row that moved under their finger.
+     *
+     * This list records the order sessions were first laid out in. Every
+     * rebuild re-orders the current sessions by their index in here ([stabilise]),
+     * so a refresh that returns the same set keeps every tap target exactly
+     * where it was. Genuinely new sessions are sorted in by the recency/agent
+     * rule and appended; sessions that disappear drop out. The order is reset
+     * to empty on a new [bind] so it never leaks across hosts.
+     */
+    private var stableSessionOrder: List<String> = emptyList()
+
+    /**
      * Issue #471: folder paths the user has *explicitly collapsed*. This is
      * the memory that makes auto-expand respect manual collapse.
      *
@@ -575,6 +590,9 @@ class FolderListViewModel internal constructor(
         lastHistoryProjectFoldersByRoot = emptyMap()
         lastResolvedWatchedRootPaths = emptyMap()
         sessionRefreshInFlight = false
+        // Issue #639: a new host starts with no frozen order so the first probe
+        // establishes a fresh layout and a prior host's order can't leak across.
+        stableSessionOrder = emptyList()
         // Issue #471: a new host starts with no expansion memory so auto-expand
         // applies fresh and a prior host's collapse choices don't leak across.
         expandedProjectPaths = emptySet()
@@ -1188,20 +1206,34 @@ class FolderListViewModel internal constructor(
     private fun emitReady() {
         if (bound == null) return
         if (!hasSessionProbeSnapshot) return
-        val folders = groupSessionsIntoFolders(
+        // Issue #639: freeze the display order. The stable order keeps every
+        // existing session in its established slot (so a routine refresh that
+        // returns the same set does not move a tap target) and only sorts in
+        // genuinely new sessions / drops removed ones. Recompute it once here
+        // from the current sessions, then every downstream sort keys off it.
+        stableSessionOrder = stabiliseSessionOrder(
+            previousOrder = stableSessionOrder,
             sessions = lastSessions,
+        )
+        val orderRank = stableSessionOrder.withIndex()
+            .associate { (index, name) -> name to index }
+        val orderedSessions = lastSessions.sortedBy { orderRank[it.sessionName] ?: Int.MAX_VALUE }
+        val folders = groupSessionsIntoFolders(
+            sessions = orderedSessions,
             sessionFolderPaths = lastSessionFolderPaths,
             watchedFolders = lastWatchedFolders,
             extraFolders = lastCreatedFolders,
+            sessionOrderRank = orderRank,
         )
         val treeRoots = buildFolderTree(
-            sessions = lastSessions,
+            sessions = orderedSessions,
             sessionFolderPaths = lastSessionFolderPaths,
             watchedFolders = lastWatchedFolders,
             scannedProjectFoldersByRoot = lastScannedProjectFoldersByRoot,
             historyProjectFoldersByRoot = lastHistoryProjectFoldersByRoot,
             resolvedWatchedRootPaths = lastResolvedWatchedRootPaths,
             extraFolders = lastCreatedFolders,
+            sessionOrderRank = orderRank,
         )
         val visibleFolders = treeRoots.flatMap { root -> root.folders }
         val visibleProjectPaths = visibleFolders
@@ -1229,10 +1261,11 @@ class FolderListViewModel internal constructor(
         _state.value = FolderListUiState.Ready(
             folders = folders,
             treeRoots = treeRoots,
-            flatSessions = lastSessions.sortedWith(
-                compareByDescending<FolderSessionEntry> { it.lastActivity ?: 0L }
-                    .thenBy { it.sessionName },
-            ),
+            // Issue #639: flat-view rows follow the frozen stable order so a
+            // refresh that returns the same sessions never reorders the list.
+            // The Active/Idle partition (#489) is applied on top of this order
+            // downstream, so grouping semantics are unaffected.
+            flatSessions = orderedSessions,
             expandedProjectPaths = expandedProjectPaths,
             isRefreshing = sessionRefreshInFlight,
             portForwarding = forwardingSummary(),
@@ -1483,6 +1516,12 @@ class FolderListViewModel internal constructor(
             sessionFolderPaths: Map<String, String>,
             watchedFolders: List<ProjectRootEntity>,
             extraFolders: Map<String, String> = emptyMap(),
+            // Issue #639: frozen session→display-index map. When supplied, both
+            // the within-folder session order AND the folder order key off it so
+            // a routine refresh that returns the same set does not reorder rows.
+            // Empty falls back to the recency sort (direct callers / unit tests
+            // that don't exercise stability).
+            sessionOrderRank: Map<String, Int> = emptyMap(),
         ): List<FolderRow> {
             val watchedByPath = watchedFolders
                 .associate { canonicalisePath(it.path) to it }
@@ -1491,10 +1530,7 @@ class FolderListViewModel internal constructor(
             val groupedSessions: Map<String, List<FolderSessionEntry>> = sessions
                 .groupBy { sessionFolderPaths[it.sessionName] ?: UNTRACKED_PATH }
                 .mapValues { (_, list) ->
-                    list.sortedWith(
-                        compareByDescending<FolderSessionEntry> { it.lastActivity ?: 0L }
-                            .thenBy { it.sessionName },
-                    )
+                    list.sortedWith(sessionEntrySort(sessionOrderRank))
                 }
 
             val allPaths = groupedSessions.keys + watchedByPath.keys + extraByPath.keys
@@ -1521,10 +1557,7 @@ class FolderListViewModel internal constructor(
             // Partition into active / empty-watched / untracked so we
             // can apply distinct sort rules per bucket.
             val active = rows.filter { it.sessions.isNotEmpty() && it.path != UNTRACKED_PATH }
-                .sortedWith(
-                    compareByDescending<FolderRow> { it.mostRecentActivity }
-                        .thenBy { it.label.lowercase() },
-                )
+                .sortedWith(folderRowSort(sessionOrderRank))
             val watchedEmpty = rows.filter { it.sessions.isEmpty() && it.path != UNTRACKED_PATH }
                 .sortedBy { it.label.lowercase() }
             val untracked = rows.filter { it.path == UNTRACKED_PATH }
@@ -1539,6 +1572,10 @@ class FolderListViewModel internal constructor(
             historyProjectFoldersByRoot: Map<String, List<String>> = emptyMap(),
             resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
             extraFolders: Map<String, String> = emptyMap(),
+            // Issue #639: frozen session→display-index map; see
+            // [groupSessionsIntoFolders]. Threaded into every session/folder
+            // sort below so the tree view stays stable across a routine refresh.
+            sessionOrderRank: Map<String, Int> = emptyMap(),
         ): List<FolderTreeRoot> {
             val resolvedByWatchedPath = resolvedWatchedRootPaths
                 .mapKeys { (path, _) -> canonicalisePath(path) }
@@ -1614,9 +1651,10 @@ class FolderListViewModel internal constructor(
                                 sessions = sessionProjectPaths[path].orEmpty(),
                                 watchedFolders = watchedFolders,
                                 extraByPath = extraByPath,
+                                sessionOrderRank = sessionOrderRank,
                             )
                         }
-                        .sortedForTree(),
+                        .sortedForTree(sessionOrderRank),
                     addSheetProjects = buildRootProjectCandidates(
                         projectPaths = sheetProjectPaths,
                         activeSessionsByProjectPath = sessionProjectPaths,
@@ -1632,17 +1670,18 @@ class FolderListViewModel internal constructor(
                     FolderRow(
                         path = path,
                         label = defaultLabelForPath(path),
-                        sessions = entries.sortedWith(sessionEntrySort()),
+                        sessions = entries.sortedWith(sessionEntrySort(sessionOrderRank)),
                         isWatched = false,
                     )
                 }
-                .sortedForTree()
+                .sortedForTree(sessionOrderRank)
             val flatFallbackRows = if (watchedRoots.isEmpty()) {
                 groupSessionsIntoFolders(
                     sessions = sessions,
                     sessionFolderPaths = sessionFolderPaths,
                     watchedFolders = watchedFolders,
                     extraFolders = extraFolders,
+                    sessionOrderRank = sessionOrderRank,
                 )
             } else {
                 emptyList()
@@ -1674,6 +1713,7 @@ class FolderListViewModel internal constructor(
             sessions: List<FolderSessionEntry>,
             watchedFolders: List<ProjectRootEntity>,
             extraByPath: Map<String, String>,
+            sessionOrderRank: Map<String, Int> = emptyMap(),
         ): FolderRow {
             val watched = watchedFolders.firstOrNull { canonicalisePath(it.path) == path }
             val label = when {
@@ -1687,7 +1727,7 @@ class FolderListViewModel internal constructor(
             return FolderRow(
                 path = path,
                 label = label,
-                sessions = sessions.sortedWith(sessionEntrySort()),
+                sessions = sessions.sortedWith(sessionEntrySort(sessionOrderRank)),
                 isWatched = watched != null,
             )
         }
@@ -1830,21 +1870,96 @@ class FolderListViewModel internal constructor(
             }.thenBy { it.label.lowercase() }
                 .thenBy { it.path.lowercase() }
 
-        private fun sessionEntrySort(): Comparator<FolderSessionEntry> =
+        /**
+         * Default (rank-free) within-folder session order: agents first, then
+         * most-recent activity, then name. Used both for direct callers/tests
+         * and — inside [stabiliseSessionOrder] — to position genuinely NEW
+         * sessions when they first appear.
+         */
+        private val recencySessionSort: Comparator<FolderSessionEntry> =
             compareByDescending<FolderSessionEntry> { it.agentKind.isAgentSession() }
                 .thenByDescending { it.lastActivity ?: 0L }
                 .thenBy { it.sessionName }
 
-        private fun List<FolderRow>.sortedForTree(): List<FolderRow> {
+        /**
+         * Within-folder session order. With a frozen [sessionOrderRank] (#639)
+         * every session sorts purely by its stable display index, so a routine
+         * refresh that returns the same set keeps each row in place. Without a
+         * rank (direct callers / unit tests), falls back to the agent/recency/
+         * name rule.
+         */
+        private fun sessionEntrySort(
+            sessionOrderRank: Map<String, Int> = emptyMap(),
+        ): Comparator<FolderSessionEntry> =
+            if (sessionOrderRank.isEmpty()) {
+                recencySessionSort
+            } else {
+                compareBy<FolderSessionEntry> { sessionOrderRank[it.sessionName] ?: Int.MAX_VALUE }
+                    .then(recencySessionSort)
+            }
+
+        /**
+         * Stable display rank of a folder (#639): the smallest stable index
+         * among its sessions, so the folder containing the earliest-established
+         * session keeps its slot across a refresh. Folders with no ranked
+         * session sort last (then by label).
+         */
+        private fun folderStableRank(row: FolderRow, sessionOrderRank: Map<String, Int>): Int =
+            row.sessions.minOfOrNull { sessionOrderRank[it.sessionName] ?: Int.MAX_VALUE }
+                ?: Int.MAX_VALUE
+
+        /**
+         * Order of active folder rows within a group. With a frozen rank (#639)
+         * folders sort by [folderStableRank] so they don't reshuffle on a
+         * routine refresh; without one, by recency (original behaviour). Ties
+         * break on label so two folders never swap arbitrarily.
+         */
+        private fun folderRowSort(
+            sessionOrderRank: Map<String, Int> = emptyMap(),
+        ): Comparator<FolderRow> =
+            if (sessionOrderRank.isEmpty()) {
+                compareByDescending<FolderRow> { it.mostRecentActivity }
+                    .thenBy { it.label.lowercase() }
+            } else {
+                compareBy<FolderRow> { folderStableRank(it, sessionOrderRank) }
+                    .thenBy { it.label.lowercase() }
+            }
+
+        private fun List<FolderRow>.sortedForTree(
+            sessionOrderRank: Map<String, Int> = emptyMap(),
+        ): List<FolderRow> {
             val active = filter { it.sessions.isNotEmpty() && it.path != UNTRACKED_PATH }
-                .sortedWith(
-                    compareByDescending<FolderRow> { it.mostRecentActivity }
-                        .thenBy { it.label.lowercase() },
-                )
+                .sortedWith(folderRowSort(sessionOrderRank))
             val empty = filter { it.sessions.isEmpty() && it.path != UNTRACKED_PATH }
                 .sortedBy { it.label.lowercase() }
             val untracked = filter { it.path == UNTRACKED_PATH }
             return active + empty + untracked
+        }
+
+        /**
+         * Issue #639: produce the frozen display order for [sessions] given the
+         * [previousOrder]. Sessions present in both keep their previous relative
+         * order (so a routine refresh never moves a tap target); genuinely new
+         * sessions are sorted in by [recencySessionSort] and appended after the
+         * surviving ones; sessions that disappeared are dropped. The result is a
+         * list of session names that downstream sorts key off.
+         */
+        fun stabiliseSessionOrder(
+            previousOrder: List<String>,
+            sessions: List<FolderSessionEntry>,
+        ): List<String> {
+            val currentNames = sessions.map { it.sessionName }.toSet()
+            // Surviving sessions keep their established order.
+            val survivors = previousOrder.filter { it in currentNames }
+            val survivorSet = survivors.toSet()
+            // New sessions (not previously displayed) sorted by the recency rule
+            // so a freshly created/discovered session lands sensibly, then
+            // appended so it never displaces an existing tap target.
+            val newNames = sessions
+                .filterNot { it.sessionName in survivorSet }
+                .sortedWith(recencySessionSort)
+                .map { it.sessionName }
+            return survivors + newNames
         }
 
         private fun SessionAgentKind.isAgentSession(): Boolean = when (this) {

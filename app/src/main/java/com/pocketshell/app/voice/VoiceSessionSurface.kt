@@ -876,12 +876,20 @@ internal const val SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION: String = "Open
 internal const val SESSION_MIC_FAB_TAG: String = SESSION_COMPOSER_LAUNCHER_TAG
 
 /**
- * Issue #612: D/1-derived composer launcher mark. It keeps the selected
- * pocket-terminal silhouette from the launcher icon, then adds a compact
- * prompt/cursor cue so the bottom control still reads as "open composer"
- * rather than dictation. Microphone glyphs stay reserved for real recording
- * controls. The path stays inside 6..18 of the 24dp viewport so circular
- * button masks and dense toolbar previews leave visible breathing room.
+ * Issue #610: the bottom composer-launcher glyph. Tapping this control opens
+ * the full Prompt Composer (text + voice + attachments), so the icon must read
+ * as "compose / write a prompt", NOT as a dictation-only microphone.
+ *
+ * Earlier rounds tried a pocket-terminal-with-chevron mark, but at the small
+ * toolbar size its busy interior was hard to parse and still didn't clearly
+ * say "compose". This is now the familiar Material **edit / compose pencil**
+ * silhouette: a diagonal pencil writing on a short underline. A pencil is the
+ * universal "write / compose" affordance, instantly distinct from a mic.
+ * Microphone glyphs ([DictateDotIcon]) stay reserved for real recording
+ * controls inside the composer.
+ *
+ * The path stays inside roughly 5.5..18.5 of the 24dp viewport so the circular
+ * button mask and dense toolbar previews leave visible breathing room.
  */
 internal val ComposerLauncherIcon: ImageVector = ImageVector.Builder(
     name = "ComposerLauncher",
@@ -896,49 +904,32 @@ internal val ComposerLauncherIcon: ImageVector = ImageVector.Builder(
 private fun ImageVector.Builder.addComposerLauncherPath(fill: SolidColor): ImageVector.Builder {
     val builder = PathBuilder()
 
-    // Pocket-terminal frame, built from filled bars for stable 24dp rendering.
-    builder.moveTo(6f, 5.4f)
-    builder.lineToRelative(12f, 0f)
-    builder.lineToRelative(0f, 1.8f)
-    builder.lineToRelative(-12f, 0f)
+    // Pencil shaft — a diagonal bar running from lower-left to upper-right,
+    // built as a closed quad so it renders solidly at 24dp without stroking.
+    builder.moveTo(7f, 14.4f)
+    builder.lineTo(13.8f, 7.6f)
+    builder.lineTo(16.4f, 10.2f)
+    builder.lineTo(9.6f, 17f)
     builder.close()
 
-    builder.moveTo(6f, 6.4f)
-    builder.lineToRelative(1.8f, 0f)
-    builder.lineToRelative(0f, 11.2f)
-    builder.lineToRelative(-1.8f, 0f)
+    // Pencil tip — a small triangle at the writing (lower-left) end.
+    builder.moveTo(6.4f, 15f)
+    builder.lineTo(9f, 17.6f)
+    builder.lineTo(5.6f, 18.4f)
     builder.close()
 
-    builder.moveTo(16.2f, 6.4f)
-    builder.lineToRelative(1.8f, 0f)
-    builder.lineToRelative(0f, 11.2f)
-    builder.lineToRelative(-1.8f, 0f)
+    // Eraser / ferrule cap — a stub at the upper-right end of the shaft.
+    builder.moveTo(14.4f, 7f)
+    builder.lineTo(15.6f, 5.8f)
+    builder.lineTo(18.2f, 8.4f)
+    builder.lineTo(17f, 9.6f)
     builder.close()
 
-    builder.moveTo(6f, 16.8f)
-    builder.lineToRelative(12f, 0f)
-    builder.lineToRelative(0f, 1.8f)
-    builder.lineToRelative(-12f, 0f)
-    builder.close()
-
-    // Prompt chevron.
-    builder.moveTo(8f, 9.4f)
-    builder.lineToRelative(1.4f, -1.2f)
-    builder.lineToRelative(3.8f, 3.8f)
-    builder.lineToRelative(-1.4f, 1.2f)
-    builder.close()
-
-    builder.moveTo(9.4f, 15.8f)
-    builder.lineToRelative(-1.4f, -1.2f)
-    builder.lineToRelative(3.8f, -3.8f)
-    builder.lineToRelative(1.4f, 1.2f)
-    builder.close()
-
-    // Cursor block.
-    builder.moveTo(13.6f, 14.8f)
-    builder.lineToRelative(3f, 0f)
-    builder.lineToRelative(0f, 1.6f)
-    builder.lineToRelative(-3f, 0f)
+    // Underline — a short baseline so the mark reads as "writing on a line".
+    builder.moveTo(5.6f, 19.4f)
+    builder.lineToRelative(12.8f, 0f)
+    builder.lineToRelative(0f, 1.4f)
+    builder.lineToRelative(-12.8f, 0f)
     builder.close()
 
     addPath(pathData = builder.nodes, fill = fill)

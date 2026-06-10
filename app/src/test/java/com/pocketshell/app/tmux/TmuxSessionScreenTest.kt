@@ -15,6 +15,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -89,6 +90,66 @@ class TmuxSessionScreenTest {
             listOf(1, 0),
             windows.map { it.windowIndex },
         )
+    }
+
+    // --- Issue #652: tap-A-must-open-A under a unified-pager reorder. ---
+
+    @Test
+    fun settleOnStaleIndexAfterSwitchDoesNotSwitchBackToOtherSession() {
+        // Regression for #652: user taps session A. `connect(A)` makes A active
+        // and `unifiedPanes` reorders to [A-panes..., B-panes(cached)...]. The
+        // pager still holds its pre-switch index, which now resolves to a B pane
+        // (a DIFFERENT, unrelated project). Until the pager realigns to the
+        // freshly-tapped target, that stale settle must be ignored — otherwise
+        // the app warm-switches into B and routes the next prompt to B.
+        val switchTo = settleSessionSwitchTarget(
+            settledPaneSession = "project-b",
+            navTargetSession = "project-a",
+            pagerAlignedToNavTarget = false,
+        )
+
+        assertNull(
+            "a stale settled index before realignment must NOT trigger a switch",
+            switchTo,
+        )
+    }
+
+    @Test
+    fun settleOnAlignedTargetSessionDoesNotSelfSwitch() {
+        // Once the pager is aligned and sitting on the nav target's own pane,
+        // settling there is a no-op (we're already in the right session).
+        val switchTo = settleSessionSwitchTarget(
+            settledPaneSession = "project-a",
+            navTargetSession = "project-a",
+            pagerAlignedToNavTarget = true,
+        )
+
+        assertNull(switchTo)
+    }
+
+    @Test
+    fun settleOnDifferentSessionWhenAlignedIsAGenuineUserSwipe() {
+        // A real cross-session swipe: pager already aligned to A, user swipes
+        // onto a B pane. THIS is the legitimate #626 warm-switch trigger.
+        val switchTo = settleSessionSwitchTarget(
+            settledPaneSession = "project-b",
+            navTargetSession = "project-a",
+            pagerAlignedToNavTarget = true,
+        )
+
+        assertEquals("project-b", switchTo)
+    }
+
+    @Test
+    fun settleWithUnresolvableSessionDuringRebuildIsIgnored() {
+        // Mid-rebuild the settled pane may not resolve to any session yet.
+        val switchTo = settleSessionSwitchTarget(
+            settledPaneSession = null,
+            navTargetSession = "project-a",
+            pagerAlignedToNavTarget = true,
+        )
+
+        assertNull(switchTo)
     }
 
     @Test

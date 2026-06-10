@@ -727,11 +727,62 @@ public fun TmuxSessionScreen(
         }
     }
 
-    // Issue #626: detect when the pager settles on a non-active session's
-    // pane and notify the ViewModel so it can emit sessionSwitchRequest.
+    // Issue #652 (epic #636): the pager remembers its page index across a
+    // session switch, but `unifiedPanes` reorders when the active session
+    // changes (active session always heads the list — see
+    // [TmuxSessionViewModel.rebuildUnifiedPanes]). A deliberate tap on session A
+    // makes A the nav target + active session; until the pager re-aligns to A's
+    // first page, a stale settled index can resolve to a DIFFERENT session and
+    // (pre-fix) auto-fire `onReplaceTmuxSession(thatOther)`, yanking the user
+    // into the wrong project and routing their next prompt there. We track
+    // whether the pager has realigned to the current nav target and suppress
+    // settle-driven switches until it has, so the explicit tap always wins.
+    var pagerAlignedSession by remember { mutableStateOf<String?>(null) }
+    // A new nav target invalidates the previous alignment immediately (before
+    // the list even rebuilds) so the settle collector below suppresses any
+    // stale-index event from the moment the tap is observed.
+    LaunchedEffect(sessionName) {
+        if (pagerAlignedSession != sessionName) {
+            pagerAlignedSession = null
+        }
+    }
+    LaunchedEffect(sessionName, unifiedPanes) {
+        // Snap the pager to the nav target's first page. The active session
+        // always heads `unifiedPanes` (see
+        // [TmuxSessionViewModel.rebuildUnifiedPanes]), so for a freshly-opened
+        // session this is page 0. We keep re-snapping until the page the pager
+        // actually sits on resolves to the nav-target session — that is the
+        // signal the pager has caught up with the deliberate choice, at which
+        // point cross-session swipe detection is safe to re-arm.
+        val targetPage = unifiedPanes.indexOfFirst {
+            viewModel.sessionNameForUnifiedPane(it) == sessionName
+        }
+        if (targetPage < 0) return@LaunchedEffect
+        val currentSession = unifiedPanes.getOrNull(pagerState.currentPage)
+            ?.let { viewModel.sessionNameForUnifiedPane(it) }
+        if (currentSession != sessionName) {
+            pagerState.scrollToPage(targetPage)
+        }
+        pagerAlignedSession = sessionName
+    }
+
+    // Issue #626/#652: detect a genuine user-driven cross-session swipe and
+    // notify the ViewModel so it can emit sessionSwitchRequest. Settles that
+    // arrive before the pager has realigned to the nav target are stale-index
+    // artifacts of a just-completed switch and are ignored.
     LaunchedEffect(unifiedPanes, sessionName) {
         snapshotFlow { pagerState.settledPage }.collect { page ->
-            viewModel.onUnifiedPageSettled(page)
+            val aligned = pagerAlignedSession == sessionName
+            val settledSession = unifiedPanes.getOrNull(page)
+                ?.let { viewModel.sessionNameForUnifiedPane(it) }
+            val switchTo = settleSessionSwitchTarget(
+                settledPaneSession = settledSession,
+                navTargetSession = sessionName,
+                pagerAlignedToNavTarget = aligned,
+            )
+            if (switchTo != null) {
+                viewModel.onUnifiedPageSettled(page)
+            }
         }
     }
 
@@ -2406,6 +2457,47 @@ internal fun List<TmuxPaneState>.toWindowSummaries(): List<WindowSummary> =
                 windowIndex = pane.windowIndex,
             )
         }
+
+/**
+ * Issue #652 (epic #636): decide whether a unified-pager settle event should
+ * trigger a cross-session warm switch.
+ *
+ * The unified pager (#626) spans every open session on the host: the ACTIVE
+ * session's panes come first, then each cached session's panes. The pager
+ * remembers its page index across recompositions and across a session switch.
+ * When the user deliberately opens session A (tap a row → nav target session
+ * becomes A → `connect(A)` makes A active → `rebuildUnifiedPanes()` reorders
+ * the list so A heads it), the pager can still be sitting on a *stale* index
+ * that now resolves to a DIFFERENT session's pane. The settle collector would
+ * then fire `onReplaceTmuxSession(thatOtherSession)`, yanking the user out of
+ * the session they just tapped and routing their next prompt to the wrong
+ * project — the data-loss regression reported in #652.
+ *
+ * A settle is a genuine user-driven cross-session swipe ONLY when the pager is
+ * already aligned with the deliberate nav target ([navTargetSession]); i.e. the
+ * page the user is actually looking at agrees with the session the navigation
+ * asked for. Until the pager re-aligns to a freshly-tapped target, settle
+ * events are suppressed so the explicit tap always wins over a stale index.
+ *
+ * @param settledPaneSession the session name owning the pane the pager settled
+ *   on (`null` when it can't be resolved — e.g. the list is mid-rebuild).
+ * @param navTargetSession the session the current navigation destination asked
+ *   to open (the user's explicit choice).
+ * @param pagerAlignedToNavTarget whether the pager has already realigned to
+ *   [navTargetSession] since the last nav-target change. Settles before
+ *   realignment are stale-index artifacts and must not switch sessions.
+ * @return the session to warm-switch to, or `null` to ignore the settle.
+ */
+internal fun settleSessionSwitchTarget(
+    settledPaneSession: String?,
+    navTargetSession: String,
+    pagerAlignedToNavTarget: Boolean,
+): String? {
+    if (!pagerAlignedToNavTarget) return null
+    if (settledPaneSession == null) return null
+    if (settledPaneSession == navTargetSession) return null
+    return settledPaneSession
+}
 
 private sealed interface TmuxDialogMode {
     data object CreateSession : TmuxDialogMode

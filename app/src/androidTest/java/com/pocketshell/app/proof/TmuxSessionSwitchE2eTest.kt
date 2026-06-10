@@ -28,7 +28,9 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
@@ -217,6 +219,138 @@ class TmuxSessionSwitchE2eTest {
         Unit
     }
 
+    /**
+     * Issue #652 (epic #636): the SEVERE wrong-project regression. The
+     * maintainer navigated back, tapped the CORRECT project row, but landed in
+     * a DIFFERENT project and sent a prompt to it.
+     *
+     * Root cause: the unified pager (#626) spans every session on the host and
+     * remembers its page index across a switch. When the user is in B, goes
+     * back to the folder list, and taps A, `connect(A)` reorders `unifiedPanes`
+     * so A heads it — but the pager still sat on a stale index that now resolves
+     * to a B pane, and the settle collector auto-fired
+     * `onReplaceTmuxSession(B)`, dragging the user back into B and routing their
+     * next prompt there.
+     *
+     * This test reproduces the exact journey on the Docker `agents` fixture and
+     * asserts that tap-A-after-being-in-B lands in A: A's own marker (written
+     * before the detour) is visible, B's marker is NOT, and a fresh command
+     * typed now reaches A.
+     */
+    @Test
+    fun backThenTapSessionRowLandsInThatSessionNotAnotherOne() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSessions(key)
+
+        val hostRowTag = seedDockerHost(key, "Issue652 Wrong Project")
+        forceFlatHostDetailViewMode()
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        // ---- (1) Host -> attach to claude-main, write its own marker.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady()
+        waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
+        compose.onNodeWithText(SESSION_CLAUDE).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+
+        val claudeMarker = "claude-only-$MARKER"
+        sendCommandThroughTerminalInput("printf '$claudeMarker\\n'", "claude marker")
+        waitForVisibleTerminal("claude marker effect") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                claudeMarker,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        captureViewport("issue652-01-attached-claude-main")
+
+        // ---- (2) Warm-switch to codex via the drawer so its runtime is cached
+        // and the unified pager now holds panes from BOTH sessions. Write a
+        // distinct marker so we can prove input routing later.
+        openMoreMenu()
+        compose.onNodeWithText("Switch session").performClick()
+        waitForText(SESSION_CODEX, timeoutMs = 20_000)
+        performSessionPagerPageClick(SESSION_CODEX)
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        val codexMarker = "codex-only-$MARKER"
+        sendCommandThroughTerminalInput("printf '$codexMarker\\n'", "codex marker")
+        waitForVisibleTerminal("codex marker effect") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                codexMarker,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        captureViewport("issue652-02-switched-to-codex")
+
+        // ---- (3) The #652 trigger: go BACK to the folder list, then tap the
+        // claude-main ROW. Pre-fix, the stale unified-pager index dragged the
+        // user back into codex.
+        pressInSessionBack()
+        waitForFolderListReady()
+        waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
+        val tapClaudeRowAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText(SESSION_CLAUDE).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        recordTiming("tap_claude_row_ms", SystemClock.elapsedRealtime() - tapClaudeRowAt)
+
+        // ---- (4) We MUST be in claude-main: its marker is visible, and the
+        // codex-only marker must NOT be (that would mean we landed in codex).
+        waitForVisibleTerminal("claude marker after row tap") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                claudeMarker,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        val transcript = visibleTerminalText()
+        assertTrue(
+            "tapped claude-main but its marker is missing — wrong session shown. " +
+                "transcript=\n$transcript",
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                claudeMarker,
+                terminalCols = terminalGridSize().columns,
+            ),
+        )
+        assertTrue(
+            "codex-only marker leaked into the claude-main view — landed in the " +
+                "WRONG session (#652). transcript=\n$transcript",
+            !TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                codexMarker,
+                terminalCols = terminalGridSize().columns,
+            ),
+        )
+        captureViewport("issue652-03-landed-in-claude-main")
+
+        // ---- (5) Input routing: a fresh command typed now must reach
+        // claude-main (the SHOWN session), not codex.
+        val routedMarker = "routed-to-claude-$MARKER"
+        sendCommandThroughTerminalInput("printf '$routedMarker\\n'", "routed marker")
+        waitForVisibleTerminal("routed marker reaches claude-main") { t ->
+            TerminalTextMatcher.containsWrapTolerant(
+                t,
+                routedMarker,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        captureViewport("issue652-04-input-routed-to-claude-main")
+
+        writeTimings()
+        Unit
+    }
+
     // ---------------------------------------------------------------- Helpers
 
     private fun readFixtureKey(): String =
@@ -347,6 +481,24 @@ class TmuxSessionSwitchE2eTest {
             .edit()
             .putString("host_detail_view_mode", "Flat")
             .commit()
+    }
+
+    private fun pressInSessionBack() {
+        // The session screen renders either the compact or full chrome back
+        // button depending on IME/chrome state; tap whichever is present so
+        // back routes through the hand-rolled navigator (FolderList → tap row),
+        // the exact #652 journey.
+        val backTags = listOf(
+            TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
+            TMUX_FULL_CHROME_BACK_BUTTON_TAG,
+        ).filter { tag ->
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        val tag = backTags.firstOrNull()
+            ?: error("no tmux back button present to return to the folder list")
+        compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
     }
 
     private fun openMoreMenu() {

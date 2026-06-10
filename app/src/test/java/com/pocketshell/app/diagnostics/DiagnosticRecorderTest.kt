@@ -33,7 +33,21 @@ class DiagnosticRecorderTest {
     }
 
     @Test
-    fun `recorder is on by default and exports ndjson events`() = runTest {
+    fun `recorder is off by default and records nothing until enabled`() = runTest {
+        // Issue #549: opt-in. A fresh install records nothing until the user
+        // flips the Settings → Diagnostics toggle.
+        assertEquals(false, settingsRepository.settings.value.diagnosticsRecordingEnabled)
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+
+        recorder.record("connection", "connect_start", mapOf("host" to "dev"))
+
+        assertEquals(null, recorder.exportSnapshot())
+        assertEquals(emptyList<DiagnosticsEvent>(), recorder.readEvents())
+    }
+
+    @Test
+    fun `recorder exports ndjson events once enabled in settings`() = runTest {
+        settingsRepository.setDiagnosticsRecordingEnabled(true)
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
         recorder.record("connection", "connect_start", mapOf("host" to "dev"))
@@ -68,6 +82,7 @@ class DiagnosticRecorderTest {
 
     @Test
     fun `readEvents returns recorded events in sequence order`() = runTest {
+        settingsRepository.setDiagnosticsRecordingEnabled(true)
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
         recorder.record("app", "created")
@@ -81,6 +96,7 @@ class DiagnosticRecorderTest {
 
     @Test
     fun `clear resets exported sequence window`() = runTest {
+        settingsRepository.setDiagnosticsRecordingEnabled(true)
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
         recorder.record("app", "created")
@@ -95,6 +111,7 @@ class DiagnosticRecorderTest {
 
     @Test
     fun `clearAndRecord resets exported sequence window and appends marker`() = runTest {
+        settingsRepository.setDiagnosticsRecordingEnabled(true)
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
         recorder.record("app", "created")
@@ -109,6 +126,7 @@ class DiagnosticRecorderTest {
 
     @Test
     fun `readEvents can return recent matching events`() = runTest {
+        settingsRepository.setDiagnosticsRecordingEnabled(true)
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
         recorder.record("app", "created")
@@ -154,6 +172,7 @@ class DiagnosticRecorderTest {
 
     @Test
     fun `recorder redacts sensitive metadata before export`() = runTest {
+        settingsRepository.setDiagnosticsRecordingEnabled(true)
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
         recorder.record(

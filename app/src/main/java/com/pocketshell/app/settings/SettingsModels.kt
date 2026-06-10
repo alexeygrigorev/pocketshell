@@ -270,7 +270,13 @@ data class AppSettings(
         const val MAX_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 1000
         const val DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 150
 
-        const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = true
+        // Issue #549: opt-in by default. The recorder stays silent until the
+        // user turns it on in Settings → Diagnostics, then records a short
+        // targeted session. The single gate in DiagnosticRecorder.record()
+        // reads this through SettingsRepository, so flipping the default to
+        // false makes the whole app default to not recording (hard-cut, D22 —
+        // no always-on fallback branch anywhere).
+        const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = false
         const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
 
         const val BACKGROUND_GRACE_30_SECONDS_MS: Long = 30_000L

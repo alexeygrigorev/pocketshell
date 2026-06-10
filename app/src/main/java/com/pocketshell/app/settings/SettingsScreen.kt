@@ -1661,15 +1661,30 @@ private fun DiagnosticsSection(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Diagnostics flight recorder",
-                        color = PocketShellColors.Text,
-                        style = PocketShellType.bodyDense,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Diagnostics flight recorder",
+                            color = PocketShellColors.Text,
+                            style = PocketShellType.bodyDense,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (recordingEnabled) {
+                            Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+                            RecordingBadge()
+                        }
+                    }
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Always-on bounded JSONL metadata. Command contents, prompts, secrets, and keystrokes are not recorded.",
+                        text = if (recordingEnabled) {
+                            "Recording now. Bounded JSONL metadata only — command contents, " +
+                                "prompts, secrets, and keystrokes are never recorded. " +
+                                "Share the log, then turn this off."
+                        } else {
+                            "Off by default. Turn on to record a short diagnostics flight log " +
+                                "you can export and share, then turn off. Bounded JSONL metadata " +
+                                "only — command contents, prompts, secrets, and keystrokes are " +
+                                "never recorded."
+                        },
                         color = PocketShellColors.TextSecondary,
                         style = MaterialTheme.typography.labelSmall,
                     )
@@ -1720,6 +1735,38 @@ private fun DiagnosticsSection(
                 testTag = DIAGNOSTICS_CRASHES_TAG,
             )
         }
+    }
+}
+
+/**
+ * Issue #549: a small, unobtrusive "REC" badge shown beside the Diagnostics
+ * section title while recording is enabled, so the user can always tell the
+ * flight recorder is actively capturing during a targeted session.
+ */
+@Composable
+private fun RecordingBadge() {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .testTag(DIAGNOSTICS_RECORDING_INDICATOR_TAG)
+            .background(
+                color = PocketShellColors.Red.copy(alpha = 0.15f),
+                shape = CircleShape,
+            )
+            .padding(horizontal = PocketShellSpacing.sm, vertical = 2.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .background(color = PocketShellColors.Red, shape = CircleShape),
+        )
+        Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
+        Text(
+            text = "REC",
+            color = PocketShellColors.Red,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -1953,6 +2000,7 @@ internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"
 internal const val DEFAULT_HOST_EMPTY_TAG = "settings:startup:default-host:empty"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
 internal const val DIAGNOSTICS_RECORDING_SWITCH_TAG = "settings:diagnostics:recording-switch"
+internal const val DIAGNOSTICS_RECORDING_INDICATOR_TAG = "settings:diagnostics:recording-indicator"
 internal const val DIAGNOSTICS_START_CAPTURE_TAG = "settings:diagnostics:start-capture"
 internal const val DIAGNOSTICS_SHARE_LOG_TAG = "settings:diagnostics:share-log"
 internal const val DIAGNOSTICS_CLEAR_LOG_TAG = "settings:diagnostics:clear-log"

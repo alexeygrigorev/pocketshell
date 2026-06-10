@@ -12,25 +12,40 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -47,6 +62,7 @@ import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -78,6 +94,17 @@ const val GIT_ISSUES_HINT_TAG = "gitIssuesHint"
 const val GIT_ISSUES_EMPTY_TAG = "gitIssuesEmpty"
 const val GIT_ISSUES_UNAVAILABLE_TAG = "gitIssuesUnavailable"
 const val GIT_ISSUE_ROW_TAG_PREFIX = "gitIssueRow:"
+
+// Create-issue form (issue #650): the "New issue" affordance + entry sheet.
+const val GIT_NEW_ISSUE_TAG = "gitNewIssue"
+const val GIT_CREATE_ISSUE_SHEET_TAG = "gitCreateIssueSheet"
+const val GIT_CREATE_ISSUE_TITLE_TAG = "gitCreateIssueTitle"
+const val GIT_CREATE_ISSUE_BODY_TAG = "gitCreateIssueBody"
+const val GIT_CREATE_ISSUE_SUBMIT_TAG = "gitCreateIssueSubmit"
+const val GIT_CREATE_ISSUE_CANCEL_TAG = "gitCreateIssueCancel"
+const val GIT_CREATE_ISSUE_ERROR_TAG = "gitCreateIssueError"
+const val GIT_CREATE_ISSUE_SUCCESS_TAG = "gitCreateIssueSuccess"
+const val GIT_CREATE_ISSUE_OPEN_TAG = "gitCreateIssueOpen"
 
 /**
  * Git commit-history / timeline view for a project directory — issue #646
@@ -114,17 +141,23 @@ fun GitHistoryScreen(
         )
     }
     val state by viewModel.state.collectAsState()
+    val createState by viewModel.createState.collectAsState()
     val context = LocalContext.current
+    val openUrl: (String) -> Unit = { url ->
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }
+    }
     GitHistoryScaffold(
         hostName = hostName,
         state = state,
+        createState = createState,
         onBack = onBack,
         onRetry = viewModel::retry,
-        onOpenGitHub = { url ->
-            runCatching {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            }
-        },
+        onOpenGitHub = openUrl,
+        onSubmitNewIssue = viewModel::createIssue,
+        onDismissCreateIssue = viewModel::dismissCreateIssue,
+        onOpenIssueUrl = openUrl,
         modifier = modifier,
     )
 }
@@ -140,9 +173,14 @@ internal fun GitHistoryScaffold(
     state: GitHistoryUiState,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    createState: CreateIssueUiState = CreateIssueUiState.Idle,
     onOpenGitHub: (String) -> Unit = {},
+    onSubmitNewIssue: (String, String) -> Unit = { _, _ -> },
+    onDismissCreateIssue: () -> Unit = {},
+    onOpenIssueUrl: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    var showCreateSheet by rememberSaveable { mutableStateOf(false) }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -157,7 +195,14 @@ internal fun GitHistoryScaffold(
             )
             when (state) {
                 is GitHistoryUiState.Loading -> LoadingPanel()
-                is GitHistoryUiState.Ready -> ReadyPanel(state, onOpenGitHub)
+                is GitHistoryUiState.Ready -> ReadyPanel(
+                    state = state,
+                    onOpenGitHub = onOpenGitHub,
+                    onNewIssue = {
+                        onDismissCreateIssue()
+                        showCreateSheet = true
+                    },
+                )
                 is GitHistoryUiState.NotARepo -> NotARepoPanel(state.dir)
                 is GitHistoryUiState.Failed -> ErrorPanel(
                     message = state.message,
@@ -166,6 +211,18 @@ internal fun GitHistoryScaffold(
                 )
             }
         }
+    }
+
+    if (showCreateSheet) {
+        CreateIssueSheet(
+            createState = createState,
+            onSubmit = onSubmitNewIssue,
+            onOpenUrl = onOpenIssueUrl,
+            onDismiss = {
+                showCreateSheet = false
+                onDismissCreateIssue()
+            },
+        )
     }
 }
 
@@ -183,6 +240,7 @@ private enum class GitTab(val label: String) {
 private fun ReadyPanel(
     state: GitHistoryUiState.Ready,
     onOpenGitHub: (String) -> Unit,
+    onNewIssue: () -> Unit,
 ) {
     // Default to Overview so the at-a-glance "what's happening" view (status,
     // branches, worktrees) is what the user lands on; History is one tap away.
@@ -211,7 +269,7 @@ private fun ReadyPanel(
         when (tab) {
             GitTab.Overview -> OverviewPanel(state, onOpenGitHub)
             GitTab.History -> HistoryPanel(state)
-            GitTab.Issues -> IssuesPanel(state)
+            GitTab.Issues -> IssuesPanel(state, onNewIssue = onNewIssue)
         }
     }
 }
@@ -316,13 +374,30 @@ private fun HistoryPanel(state: GitHistoryUiState.Ready) {
  * no hint), a neutral "unavailable" row is shown.
  */
 @Composable
-private fun IssuesPanel(state: GitHistoryUiState.Ready) {
+private fun IssuesPanel(
+    state: GitHistoryUiState.Ready,
+    onNewIssue: () -> Unit,
+) {
     val ghHint = state.ghHint
     val issues = state.issues
+    // The "New issue" affordance is gated on gh being configured (#645/#649):
+    // only offered when there's no configure-gh hint to show.
+    val canCreate = ghHint == null
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
     ) {
+        if (canCreate) {
+            item(key = "__new_issue__") {
+                ListRow(
+                    title = "New issue",
+                    subtitle = "Create a GitHub issue in this repository.",
+                    leading = { GlyphCell("+") },
+                    onClick = onNewIssue,
+                    modifier = Modifier.testTag(GIT_NEW_ISSUE_TAG),
+                )
+            }
+        }
         if (ghHint != null) {
             item(key = "__issues_hint_header__") { SectionHeader(label = "GitHub issues") }
             item(key = "__issues_hint__") {
@@ -630,3 +705,189 @@ private fun ErrorPanel(
         }
     }
 }
+
+/**
+ * Create-issue entry sheet (issue #650, epic #644 slice 6).
+ *
+ * A Material3 [ModalBottomSheet] with a title + body field and a confirm
+ * button. While [CreateIssueUiState.Submitting] the fields and confirm are
+ * disabled and the button shows a spinner. On [CreateIssueUiState.Success] the
+ * form is replaced by a success row carrying the new issue URL and an "Open"
+ * action ([onOpenUrl], the #648 ACTION_VIEW pattern). On
+ * [CreateIssueUiState.Failure] an inline error row is shown above the still-
+ * editable form so the user can fix the input and retry.
+ *
+ * Confirm is enabled only when the title is non-blank — gh rejects an empty
+ * title, and [GitHistoryGateway.createIssue] fails fast on a blank one.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreateIssueSheet(
+    createState: CreateIssueUiState,
+    onSubmit: (String, String) -> Unit,
+    onOpenUrl: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var title by rememberSaveable { mutableStateOf("") }
+    var body by rememberSaveable { mutableStateOf("") }
+    val titleFocus = remember { FocusRequester() }
+    val submitting = createState is CreateIssueUiState.Submitting
+    val success = createState as? CreateIssueUiState.Success
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = PocketShellColors.Surface,
+        modifier = Modifier.testTag(GIT_CREATE_ISSUE_SHEET_TAG),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+        ) {
+            Text(
+                text = "New GitHub issue",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            if (success != null) {
+                CreateIssueSuccess(url = success.url, onOpenUrl = onOpenUrl, onClose = onDismiss)
+                return@Column
+            }
+
+            LaunchedEffect(Unit) { titleFocus.requestFocus() }
+
+            (createState as? CreateIssueUiState.Failure)?.let { failure ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+                        .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+                        .padding(PocketShellSpacing.md)
+                        .testTag(GIT_CREATE_ISSUE_ERROR_TAG),
+                ) {
+                    Text(
+                        text = "Couldn't create issue: ${failure.message}",
+                        color = PocketShellColors.Red,
+                        style = PocketShellType.bodyDense,
+                    )
+                }
+            }
+
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it },
+                singleLine = true,
+                enabled = !submitting,
+                label = { Text("Title") },
+                colors = issueFieldColors(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(titleFocus)
+                    .testTag(GIT_CREATE_ISSUE_TITLE_TAG),
+            )
+            OutlinedTextField(
+                value = body,
+                onValueChange = { body = it },
+                enabled = !submitting,
+                label = { Text("Body (optional)") },
+                colors = issueFieldColors(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 120.dp)
+                    .testTag(GIT_CREATE_ISSUE_BODY_TAG),
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
+                TextButton(
+                    onClick = onDismiss,
+                    enabled = !submitting,
+                    modifier = Modifier.testTag(GIT_CREATE_ISSUE_CANCEL_TAG),
+                ) {
+                    Text(
+                        "Cancel",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
+                    )
+                }
+                Button(
+                    onClick = { onSubmit(title.trim(), body.trim()) },
+                    enabled = !submitting && title.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PocketShellColors.Accent,
+                        contentColor = PocketShellColors.Background,
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(GIT_CREATE_ISSUE_SUBMIT_TAG),
+                ) {
+                    if (submitting) {
+                        CircularProgressIndicator(
+                            color = PocketShellColors.Background,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    } else {
+                        Text("Create issue", style = PocketShellType.bodyDense)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CreateIssueSuccess(
+    url: String,
+    onOpenUrl: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+            .testTag(GIT_CREATE_ISSUE_SUCCESS_TAG),
+    ) {
+        ListRow(
+            title = "Issue created",
+            subtitle = url.removePrefix("https://"),
+            leading = { GlyphCell("✓") },
+            onClick = { onOpenUrl(url) },
+            trailing = { Badge(label = "Open", role = BadgeRole.Active, mono = false) },
+            modifier = Modifier.testTag(GIT_CREATE_ISSUE_OPEN_TAG),
+        )
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
+        TextButton(
+            onClick = onClose,
+            modifier = Modifier.testTag(GIT_CREATE_ISSUE_CANCEL_TAG),
+        ) {
+            Text(
+                "Done",
+                color = PocketShellColors.Accent,
+                style = PocketShellType.bodyDense,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun issueFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = PocketShellColors.Text,
+    unfocusedTextColor = PocketShellColors.Text,
+    disabledTextColor = PocketShellColors.TextSecondary,
+    focusedBorderColor = PocketShellColors.Accent,
+    unfocusedBorderColor = PocketShellColors.BorderSoft,
+    focusedLabelColor = PocketShellColors.Accent,
+    unfocusedLabelColor = PocketShellColors.TextSecondary,
+    cursorColor = PocketShellColors.Accent,
+)

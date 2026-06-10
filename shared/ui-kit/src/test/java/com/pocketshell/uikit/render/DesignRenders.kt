@@ -29,6 +29,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.TextButton
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.pocketshell.uikit.components.Badge
@@ -591,6 +594,77 @@ class DesignRenders {
                 subtitle = "install gh (https://cli.github.com) and run `gh auth login`",
                 trailing = { Badge(label = "Setup", role = BadgeRole.Idle, mono = false) },
             )
+        }
+    }
+
+    /**
+     * Fast first-look render of the create-issue form (#650). The real form is an
+     * app-level composable (`CreateIssueSheet` in `:app`) that the ui-kit harness
+     * can't import, so this mirrors its structure with the same ui-kit/Material3
+     * primitives under the real theme: title + body fields and a Cancel / Create
+     * confirm row. Use it to eyeball spacing + the accent confirm button; the
+     * emulator test drives the actual sheet.
+     */
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Test
+    fun gitCreateIssueForm() = render("git-create-issue-form") {
+        val fieldColors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = PocketShellColors.Text,
+            unfocusedTextColor = PocketShellColors.Text,
+            focusedBorderColor = PocketShellColors.Accent,
+            unfocusedBorderColor = PocketShellColors.BorderSoft,
+            focusedLabelColor = PocketShellColors.Accent,
+            unfocusedLabelColor = PocketShellColors.TextSecondary,
+            cursorColor = PocketShellColors.Accent,
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(
+                text = "New GitHub issue",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            OutlinedTextField(
+                value = "Voice: trailing words dropped",
+                onValueChange = {},
+                singleLine = true,
+                label = { Text("Title") },
+                colors = fieldColors,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = "Steps to reproduce:\n1. Open the composer\n2. Dictate a long note",
+                onValueChange = {},
+                label = { Text("Body (optional)") },
+                colors = fieldColors,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(132.dp),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TextButton(onClick = {}) {
+                    Text(
+                        "Cancel",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
+                    )
+                }
+                Button(
+                    onClick = {},
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PocketShellColors.Accent,
+                        contentColor = PocketShellColors.Background,
+                    ),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Create issue", style = PocketShellType.bodyDense)
+                }
+            }
         }
     }
 

@@ -2,10 +2,12 @@ package com.pocketshell.app.git
 
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
@@ -30,6 +32,10 @@ class GitHistoryScaffoldTest {
         state: GitHistoryUiState,
         onRetry: () -> Unit = {},
         onOpenGitHub: (String) -> Unit = {},
+        createState: CreateIssueUiState = CreateIssueUiState.Idle,
+        onSubmitNewIssue: (String, String) -> Unit = { _, _ -> },
+        onDismissCreateIssue: () -> Unit = {},
+        onOpenIssueUrl: (String) -> Unit = {},
     ) {
         compose.setContent {
             PocketShellTheme {
@@ -38,11 +44,27 @@ class GitHistoryScaffoldTest {
                     state = state,
                     onBack = {},
                     onRetry = onRetry,
+                    createState = createState,
                     onOpenGitHub = onOpenGitHub,
+                    onSubmitNewIssue = onSubmitNewIssue,
+                    onDismissCreateIssue = onDismissCreateIssue,
+                    onOpenIssueUrl = onOpenIssueUrl,
                 )
             }
         }
     }
+
+    private fun configuredReady(
+        issues: List<GitHubIssue>? = emptyList(),
+        ghHint: String? = null,
+    ) = GitHistoryUiState.Ready(
+        dir = "/home/u/git/proj",
+        commits = listOf(commit("a1b2c3d", "Add timeline view")),
+        truncated = false,
+        overview = overview(),
+        issues = issues,
+        ghHint = ghHint,
+    )
 
     @Test
     fun loadingStateShowsSpinner() {
@@ -262,6 +284,85 @@ class GitHistoryScaffoldTest {
         )
         compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
         compose.onNodeWithTag(GIT_ISSUES_UNAVAILABLE_TAG).assertIsDisplayed()
+    }
+
+    // ---- create-issue form (issue #650) ------------------------------------
+
+    @Test
+    fun newIssueAffordanceShownWhenGhConfigured() {
+        setState(configuredReady(issues = emptyList()))
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun newIssueAffordanceHiddenWhenGhNotConfigured() {
+        setState(
+            configuredReady(
+                issues = null,
+                ghHint = "install gh (https://cli.github.com) and run `gh auth login`",
+            ),
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        // Gated: no "New issue" row, only the configure-gh hint.
+        compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(GIT_ISSUES_HINT_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun newIssueOpensFormAndSubmitsTrimmedTitleAndBody() {
+        var submitted: Pair<String, String>? = null
+        setState(
+            configuredReady(issues = emptyList()),
+            onSubmitNewIssue = { t, b -> submitted = t to b },
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).performClick()
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_SHEET_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_TITLE_TAG).performTextInput("  My title  ")
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_BODY_TAG).performTextInput("  body text  ")
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_SUBMIT_TAG).performClick()
+        assertEquals("My title" to "body text", submitted)
+    }
+
+    @Test
+    fun submitDisabledWhileTitleBlank() {
+        setState(configuredReady(issues = emptyList()))
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).performClick()
+        // No title typed yet → confirm is disabled.
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_SUBMIT_TAG).assertIsNotEnabled()
+    }
+
+    @Test
+    fun successStateShowsUrlAndOpensIt() {
+        var opened: String? = null
+        setState(
+            configuredReady(issues = emptyList()),
+            createState = CreateIssueUiState.Success(
+                "https://github.com/owner/repo/issues/701",
+            ),
+            onOpenIssueUrl = { opened = it },
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).performClick()
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_SUCCESS_TAG).assertIsDisplayed()
+        compose.onNodeWithText("github.com/owner/repo/issues/701").assertIsDisplayed()
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_OPEN_TAG).performClick()
+        assertEquals("https://github.com/owner/repo/issues/701", opened)
+    }
+
+    @Test
+    fun failureStateShowsErrorAboveForm() {
+        setState(
+            configuredReady(issues = emptyList()),
+            createState = CreateIssueUiState.Failure("Could not resolve to a Repository"),
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).performClick()
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_ERROR_TAG).assertIsDisplayed()
+        // The form is still present so the user can fix and retry.
+        compose.onNodeWithTag(GIT_CREATE_ISSUE_TITLE_TAG).assertIsDisplayed()
     }
 
     @Test

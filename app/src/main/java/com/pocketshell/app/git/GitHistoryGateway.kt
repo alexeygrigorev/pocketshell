@@ -211,6 +211,49 @@ class GitHistoryGateway(private val session: SshSession) {
         return Result.success(GitHubIssueParser.parse(result.stdout))
     }
 
+    /**
+     * Create a GitHub issue in [dir]'s repo via `gh issue create` over SSH —
+     * issue #650 (epic #644 slice 6). The caller is expected to have gated on
+     * [ghStatus]; this assumes gh is usable.
+     *
+     * **Shell safety is the load-bearing concern.** [title] and [body] are
+     * arbitrary user free-text and could contain quotes, `$()`, backticks,
+     * `;`, `&&`, newlines, etc. They are NOT string-interpolated into the
+     * command line — every argument (the repo dir, title, body) is wrapped with
+     * [quoteSingle], which single-quotes the value and escapes any embedded
+     * single quote as `'\''`. Inside a single-quoted POSIX shell word every
+     * other character (including `$`, backtick, `;`, `&`, newline) is literal,
+     * so a malicious title/body can never break out of its argument or inject a
+     * second command. See [buildCreateIssueCommand] (pure, unit-tested).
+     *
+     * On success gh prints the new issue's URL on stdout; [parseCreatedIssueUrl]
+     * pulls it out. A blank title fails fast (gh would reject it anyway) with a
+     * [GitCommandException]; a non-zero exit or a success with no parseable URL
+     * also yields a [GitCommandException] so the screen shows the failure state.
+     */
+    suspend fun createIssue(dir: String, title: String, body: String): Result<String> {
+        if (title.isBlank()) {
+            return Result.failure(GitCommandException("Issue title can't be empty"))
+        }
+        val cmd = buildCreateIssueCommand(dir, title, body)
+        val result = runCatching { session.exec(cmd) }
+            .getOrElse { return Result.failure(it) }
+        if (result.exitCode != 0) {
+            return Result.failure(
+                GitCommandException(result.stderr.trim().ifBlank { "gh issue create failed" }),
+            )
+        }
+        val url = parseCreatedIssueUrl(result.stdout)
+            ?: return Result.failure(
+                GitCommandException(
+                    result.stderr.trim().ifBlank {
+                        "gh issue create succeeded but returned no URL"
+                    },
+                ),
+            )
+        return Result.success(url)
+    }
+
     companion object {
         const val DEFAULT_LIMIT: Int = 100
 
@@ -385,6 +428,40 @@ class GitHistoryGateway(private val session: SshSession) {
         /** Single-quote a path for safe interpolation into a remote shell command. */
         internal fun quoteSingle(value: String): String =
             "'" + value.replace("'", "'\\''") + "'"
+
+        /**
+         * Build the `gh issue create` command line for [dir] — issue #650. Pure
+         * so the shell-safety of arbitrary [title] / [body] is unit-tested
+         * without a live session.
+         *
+         * Every user-controlled argument (the repo dir, the `--title` value, the
+         * `--body` value) is passed through [quoteSingle]. Because each value is
+         * a single-quoted POSIX word, embedded quotes, `$()`, backticks, `;`,
+         * `&&`, pipes, and newlines are all literal — they can't break out of
+         * the argument or inject a second command. `cd <dir>` lets gh resolve
+         * the GitHub repo from the directory's origin remote, matching
+         * [listIssues].
+         */
+        internal fun buildCreateIssueCommand(dir: String, title: String, body: String): String =
+            "cd " + quoteSingle(dir) +
+                " && gh issue create" +
+                " --title " + quoteSingle(title) +
+                " --body " + quoteSingle(body)
+
+        // A GitHub issue URL, e.g. https://github.com/owner/repo/issues/650.
+        private val ISSUE_URL_REGEX =
+            Regex("""https?://\S*?/issues/\d+""")
+
+        /**
+         * Pull the created issue's URL out of `gh issue create` stdout — issue
+         * #650. Pure — unit-tested. gh prints the new issue's URL (last line on
+         * success); we scan for the last `…/issues/<n>` URL so any preamble gh
+         * may emit (e.g. a "Creating issue in …" line) doesn't fool the parse.
+         * Returns null when no issue URL is present so the caller can surface a
+         * failure rather than a bogus success.
+         */
+        internal fun parseCreatedIssueUrl(raw: String): String? =
+            ISSUE_URL_REGEX.findAll(raw).lastOrNull()?.value?.trim()?.ifBlank { null }
 
         /**
          * Parse the `pocketshell github status --json` envelope

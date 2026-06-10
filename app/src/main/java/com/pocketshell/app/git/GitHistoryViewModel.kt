@@ -74,6 +74,24 @@ sealed interface GitHistoryUiState {
 }
 
 /**
+ * State of the "New issue" create form (#650), separate from the screen's main
+ * load state so opening/submitting the sheet doesn't disturb the list/overview.
+ */
+sealed interface CreateIssueUiState {
+    /** No submission in flight; the form is editable. */
+    data object Idle : CreateIssueUiState
+
+    /** `gh issue create` is running. */
+    data object Submitting : CreateIssueUiState
+
+    /** The issue was created; [url] is the new issue's GitHub URL. */
+    data class Success(val url: String) : CreateIssueUiState
+
+    /** Creation failed; [message] is the gh/transport error to show. */
+    data class Failure(val message: String) : CreateIssueUiState
+}
+
+/**
  * Backs [GitHistoryScreen] — issues #646 + #647.
  *
  * Opens one persistent [SshSession] for the host (mirroring the credentials the
@@ -90,9 +108,14 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
     )
     val state: StateFlow<GitHistoryUiState> = _state.asStateFlow()
 
+    /** Create-issue form state (#650), independent of the main screen state. */
+    private val _createState = MutableStateFlow<CreateIssueUiState>(CreateIssueUiState.Idle)
+    val createState: StateFlow<CreateIssueUiState> = _createState.asStateFlow()
+
     private var request: Request? = null
     private var session: SshSession? = null
     private var loadJob: Job? = null
+    private var createJob: Job? = null
 
     /**
      * Bind host credentials + the project directory and load it. Idempotent for
@@ -106,6 +129,50 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
 
     /** Re-read the log (wired to Retry on the failed panel). */
     fun retry() = load()
+
+    /**
+     * Submit a new GitHub issue (#650) for the bound repo dir over the existing
+     * SSH session, then — on success — refresh the issues list (#649) so the new
+     * issue appears. No-op while a previous submission is still in flight.
+     *
+     * The result is surfaced on [createState]: [CreateIssueUiState.Submitting]
+     * while gh runs, then [CreateIssueUiState.Success] with the new issue URL or
+     * [CreateIssueUiState.Failure] with the error message. The shell-safety of
+     * [title] / [body] is handled by [GitHistoryGateway.createIssue].
+     */
+    fun createIssue(title: String, body: String) {
+        val req = request ?: return
+        if (_createState.value is CreateIssueUiState.Submitting) return
+        createJob?.cancel()
+        _createState.value = CreateIssueUiState.Submitting
+        createJob = viewModelScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                val live = ensureSession(req)
+                    ?: return@withContext CreateIssueUiState.Failure(
+                        "Couldn't reach ${req.username}@${req.hostname}.",
+                    )
+                val gateway = GitHistoryGateway(live)
+                gateway.createIssue(req.dir, title, body).fold(
+                    onSuccess = { url -> CreateIssueUiState.Success(url) },
+                    onFailure = { error ->
+                        if (error is CancellationException) throw error
+                        CreateIssueUiState.Failure(
+                            error.message ?: error.javaClass.simpleName,
+                        )
+                    },
+                )
+            }
+            _createState.value = outcome
+            // Reflect the new issue in the list immediately on success.
+            if (outcome is CreateIssueUiState.Success) load()
+        }
+    }
+
+    /** Reset the create-issue form back to idle (sheet dismissed / re-opened). */
+    fun dismissCreateIssue() {
+        createJob?.cancel()
+        _createState.value = CreateIssueUiState.Idle
+    }
 
     private fun load() {
         val req = request ?: return
@@ -219,6 +286,7 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
     override fun onCleared() {
         super.onCleared()
         loadJob?.cancel()
+        createJob?.cancel()
         runCatching { session?.close() }
         session = null
     }

@@ -666,7 +666,7 @@ class TerminalKeyboardStressTest {
     }
 
     private fun waitForVisibleTerminalText(label: String, predicate: (String) -> Boolean) {
-        // CI-aware deadline: same rationale as the other emulator-smoke
+        // CI-aware deadline: same rationale as the other nightly-extensive
         // terminal waits (`EmulatorWorkflowE2eTest`, `TerminalLabInteractiveInputTest`).
         // Local: 60 s. CI: 180 s. Predicate polls every 75 ms and exits
         // as soon as it matches, so local runs are unaffected.

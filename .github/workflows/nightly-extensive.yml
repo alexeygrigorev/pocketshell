@@ -1,0 +1,274 @@
+name: Nightly Extensive Tests
+
+# Issue #659 (epic #657): a NIGHTLY, CONDITIONAL, EXTENSIVE emulator + Docker
+# journey/E2E run. This is NOT a per-push gate — the per-push unit + Docker
+# integration jobs stay in tests.yml. This workflow exists so the user-journey
+# regressions (reconnect / terminal repaint / share-auth / tmux-switch /
+# network-fault) that merge green on the cheap per-push gate are caught the
+# next morning instead of at release time.
+#
+# Key behaviours:
+#   1. Scheduled nightly via cron.
+#   2. A guard step skips the expensive emulator/Docker suite entirely when
+#      there are NO new commits on `main` in the last 24h (so an idle repo
+#      does not burn a long, flaky emulator runner). A manual run via
+#      workflow_dispatch always bypasses the guard (force-run).
+#   3. When it runs, it executes the FULL connected journey/E2E suite on the
+#      emulator + Docker `agents:2222`, PLUS the toxiproxy network-fault proofs
+#      (network-fault-proxy / packet-loss-proxy) un-gated so they actually run
+#      here — release-validation-level coverage.
+#
+# This subsumes the old "Emulator Smoke" nightly job and #660 (the standalone
+# network-fault job folds in here).
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: Run the extensive suite even with no new commits in 24h.
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    # Nightly at 02:17 UTC (kept from the previous Emulator Smoke cron so the
+    # nightly slot does not move).
+    - cron: "17 2 * * *"
+
+# Never let two nightly extensive runs (e.g. a cron run and a manual force-run)
+# fight over the long emulator job at the same time.
+concurrency:
+  group: nightly-extensive
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Guard: decide whether the expensive suite should run at all. This job is
+  # cheap (checkout + a couple of git commands, no JDK/Docker/emulator) so an
+  # idle repo costs ~seconds rather than spinning up a long emulator runner.
+  # ---------------------------------------------------------------------------
+  guard:
+    name: Guard (new commits in last 24h?)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      reason: ${{ steps.decide.outputs.reason }}
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v6
+        with:
+          # The guard counts commits in a time window, so it needs real
+          # history, not the default depth-1 shallow checkout.
+          fetch-depth: 0
+          ref: main
+
+      - name: Decide whether to run the extensive suite
+        id: decide
+        env:
+          # A manual workflow_dispatch always force-runs unless the operator
+          # explicitly unticks force_run. Scheduled runs leave this empty and
+          # fall through to the 24h-new-commits check.
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.force_run }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$FORCE_RUN" == "true" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=manual force-run (workflow_dispatch, force_run=true)" >> "$GITHUB_OUTPUT"
+            echo "Manual force-run requested; bypassing the 24h-new-commits guard."
+            exit 0
+          fi
+
+          # Count commits landed on the checked-out main HEAD within the last
+          # 24h. `git rev-list --count --since` is deterministic and does not
+          # depend on the GitHub API or its rate limits.
+          recent_count="$(git rev-list --count --since='24 hours ago' HEAD)"
+          head_sha="$(git rev-parse HEAD)"
+          echo "main HEAD = $head_sha"
+          echo "commits on main in the last 24h = $recent_count"
+
+          if [[ "$recent_count" -gt 0 ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=$recent_count new commit(s) on main in the last 24h" >> "$GITHUB_OUTPUT"
+            echo "New commits detected; the extensive suite will run."
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no new commits on main in the last 24h" >> "$GITHUB_OUTPUT"
+            echo "No new commits on main in the last 24h; skipping the expensive suite."
+          fi
+
+      - name: Publish guard decision
+        run: |
+          {
+            echo "# Nightly Extensive — guard decision"
+            echo
+            echo "- event: \`${{ github.event_name }}\`"
+            echo "- should_run: \`${{ steps.decide.outputs.should_run }}\`"
+            echo "- reason: ${{ steps.decide.outputs.reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Extensive suite: full emulator + Docker journey/E2E run + un-gated
+  # toxiproxy network-fault proofs. Only runs when the guard says so.
+  # ---------------------------------------------------------------------------
+  extensive:
+    name: Extensive emulator + Docker journey/E2E + network-fault proofs
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    # Long and historically flaky; keep it non-blocking so a single flaky
+    # emulator boot does not poison the nightly signal. Failures still show in
+    # the run summary and uploaded artifacts.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew + suite script executable
+        run: chmod +x ./gradlew scripts/nightly-extensive-suite.sh
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build SSH base image
+        run: docker compose -f tests/docker/docker-compose.yml build sshd
+
+      # The extensive run brings up the journey fixtures (agents, flaky-agent,
+      # tmux) AND the toxiproxy proxies (network-fault-proxy, packet-loss-proxy)
+      # that the per-push and smoke jobs deliberately leave down. The proxies
+      # forward to `agents`, so they `depends_on: agents` in compose.
+      - name: Start Docker fixtures (agents, flaky-agent, tmux + toxiproxy)
+        run: |
+          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps \
+            agents flaky-agent tmux network-fault-proxy packet-loss-proxy
+
+      - name: Wait for fixture containers to report healthy
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
+          cat /tmp/agents-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml flaky-agent /tmp/flaky-agent-health.log 60
+          cat /tmp/flaky-agent-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml tmux /tmp/tmux-health.log 60
+          cat /tmp/tmux-health.log
+
+      # toxiproxy / packet-loss-proxy do not expose a Docker healthcheck, so
+      # poll their listening ports directly before handing off to the emulator.
+      - name: Wait for toxiproxy proxies to accept connections
+        run: |
+          set -euo pipefail
+          # Toxiproxy HTTP control API (8474) + the SSH forward (2228), and the
+          # packet-loss proxy SSH forward (2229).
+          for hostport in 127.0.0.1:8474 127.0.0.1:2228 127.0.0.1:2229; do
+            host="${hostport%:*}"
+            port="${hostport#*:}"
+            echo "Waiting for $host:$port ..."
+            for attempt in $(seq 1 60); do
+              if timeout 1 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
+                echo "  $host:$port is accepting connections (attempt $attempt)"
+                break
+              fi
+              if [[ "$attempt" -eq 60 ]]; then
+                echo "  timed out waiting for $host:$port" >&2
+                docker compose -f tests/docker/docker-compose.yml ps
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+
+      - name: Verify agent SSH target tool surface
+        run: |
+          chmod 600 tests/docker/test_key
+          ssh -i tests/docker/test_key -p 2222 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=2 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
+
+      - name: Run extensive connected journey/E2E + network-fault proofs
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-boot-timeout: 900
+          script: scripts/nightly-extensive-suite.sh
+
+      - name: Collect Docker logs
+        if: always()
+        run: |
+          mkdir -p artifacts/docker
+          docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log
+          docker compose -f tests/docker/docker-compose.yml logs --no-color flaky-agent > artifacts/docker/flaky-agent.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color tmux > artifacts/docker/tmux.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy > artifacts/docker/network-fault-proxy.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color packet-loss-proxy > artifacts/docker/packet-loss-proxy.log 2>/dev/null || true
+          docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
+
+      - name: Publish extensive suite summary
+        if: always()
+        run: |
+          if [[ -f artifacts/nightly-extensive/summary.md ]]; then
+            cat artifacts/nightly-extensive/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Nightly Extensive — suite summary"
+              echo
+              echo "No suite summary was written (the suite script may have aborted before writing it)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Android test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-extensive-android-test-reports
+          path: |
+            **/build/reports/androidTests/
+            **/build/outputs/androidTest-results/
+            **/build/outputs/connected_android_test_additional_output/
+            artifacts/nightly-extensive/
+          if-no-files-found: ignore
+
+      - name: Upload Docker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-extensive-docker-logs
+          path: artifacts/docker/
+          if-no-files-found: ignore
+
+      - name: Stop Docker fixtures
+        if: always()
+        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans

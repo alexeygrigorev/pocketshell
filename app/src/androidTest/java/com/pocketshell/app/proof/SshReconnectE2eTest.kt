@@ -107,7 +107,7 @@ import java.io.File
  *
  * The flaky fixture is owned by `tests/docker/flaky-agent/`; the host
  * port (2226) is set by `tests/docker/docker-compose.yml`'s `flaky-agent`
- * service and brought up by `.github/workflows/emulator-smoke.yml`. Run
+ * service and brought up by `.github/workflows/nightly-extensive.yml`. Run
  * the fixture before this test:
  *
  * ```bash

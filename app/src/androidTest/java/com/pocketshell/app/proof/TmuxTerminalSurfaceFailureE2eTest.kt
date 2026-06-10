@@ -58,7 +58,7 @@ import java.io.FileOutputStream
  *
  * This connected E2E drives the production `MainActivity` host-tap → tmux
  * route to a live session on the deterministic Docker `agents` fixture
- * (port 2222, already brought up by the emulator-smoke workflow). It then:
+ * (port 2222, already brought up by the nightly-extensive workflow). It then:
  *
  *  1. Types a large multi-line prompt into the pane (the dictation-sized
  *     input that precedes the failure in the field report).
@@ -90,7 +90,7 @@ import java.io.FileOutputStream
  * # CI compatibility
  *
  * Uses the default `agents` Docker service on port 2222, brought up by the
- * emulator-smoke workflow for sibling connected tests
+ * nightly-extensive workflow for sibling connected tests
  * (`TmuxBracketedPasteDictationE2eTest`, `TmuxSessionWindowNavigationE2eTest`).
  * No extra fixture or port is required.
  */

@@ -31,12 +31,17 @@ sealed interface GitHistoryUiState {
     /** Fetching the log for [dir]. */
     data class Loading(override val dir: String) : GitHistoryUiState
 
-    /** Commits were read. [commits] are newest-first (git log order). */
+    /** Commits + repo overview were read. [commits] are newest-first (git log order). */
     data class Ready(
         override val dir: String,
         val commits: List<GitCommit>,
         /** True when the listing hit the count cap. */
         val truncated: Boolean,
+        /**
+         * Branches / worktrees / status overview (issue #647), or null when the
+         * overview probe failed even though history loaded.
+         */
+        val overview: GitRepoOverview? = null,
     ) : GitHistoryUiState
 
     /** [dir] is not inside a git working tree. */
@@ -51,12 +56,13 @@ sealed interface GitHistoryUiState {
 }
 
 /**
- * Backs [GitHistoryScreen] — issue #646.
+ * Backs [GitHistoryScreen] — issues #646 + #647.
  *
  * Opens one persistent [SshSession] for the host (mirroring the credentials the
  * live session already holds, passed via [start]) and reads recent commit
- * history for a project directory through [GitHistoryGateway]. Read-only: no
- * write/checkout operations here (branches/worktrees/stats are slice #647).
+ * history plus a read-only repository overview (branches, worktrees, status) for
+ * a project directory through [GitHistoryGateway]. Read-only: no write/checkout
+ * operations here.
  */
 @HiltViewModel
 class GitHistoryViewModel @Inject constructor() : ViewModel() {
@@ -103,10 +109,14 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
             val result = gateway.recentCommits(req.dir, limit = COMMIT_LIMIT)
             result.fold(
                 onSuccess = { commits ->
+                    // Overview is best-effort: a failure here (e.g. a transient
+                    // git error) must not hide the history that already loaded.
+                    val overview = gateway.repoOverview(req.dir).getOrNull()
                     GitHistoryUiState.Ready(
                         dir = req.dir,
                         commits = commits,
                         truncated = commits.size >= COMMIT_LIMIT,
+                        overview = overview,
                     )
                 },
                 onFailure = { error ->

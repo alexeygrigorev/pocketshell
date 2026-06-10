@@ -45,6 +45,27 @@ class GitHistoryScaffoldTest {
         compose.onNodeWithTag(GIT_HISTORY_LOADING_TAG).assertIsDisplayed()
     }
 
+    private fun overview() = GitRepoOverview(
+        status = GitRepoStatus(
+            currentBranch = "main",
+            upstream = "origin/main",
+            ahead = 1,
+            behind = 0,
+            dirty = true,
+            changedFiles = 2,
+            lastCommit = "a1b2c3d Add timeline view",
+            hasNoCommits = false,
+        ),
+        branches = listOf(
+            GitBranch("main", current = true, upstream = "origin/main", subject = "Add timeline"),
+            GitBranch("feature/x", current = false, upstream = null, subject = "WIP"),
+        ),
+        worktrees = listOf(
+            GitWorktree("/home/u/git/proj", branch = "main", head = "a1b2c3d", bare = false, detached = false),
+            GitWorktree("/home/u/git/proj-feature", branch = "feature/x", head = "9f8e7d6", bare = false, detached = false),
+        ),
+    )
+
     @Test
     fun readyStateListsCommits() {
         setState(
@@ -55,11 +76,45 @@ class GitHistoryScaffoldTest {
                     commit("9f8e7d6", "Fix parser edge case"),
                 ),
                 truncated = false,
+                overview = overview(),
             ),
         )
+        // Default tab is Overview — switch to History first.
+        compose.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
         compose.onNodeWithTag(GIT_HISTORY_ROW_TAG_PREFIX + "a1b2c3d").assertIsDisplayed()
         compose.onNodeWithText("Add timeline view").assertIsDisplayed()
         compose.onNodeWithTag(GIT_HISTORY_ROW_TAG_PREFIX + "9f8e7d6").assertIsDisplayed()
+    }
+
+    @Test
+    fun overviewTabShowsStatusBranchesAndWorktrees() {
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+            ),
+        )
+        // Overview is the default landing tab.
+        compose.onNodeWithTag(GIT_OVERVIEW_STATUS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(GIT_BRANCH_ROW_TAG_PREFIX + "main").assertIsDisplayed()
+        compose.onNodeWithTag(GIT_BRANCH_ROW_TAG_PREFIX + "feature/x").assertIsDisplayed()
+        compose.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + "/home/u/git/proj").assertIsDisplayed()
+        compose.onNodeWithText("Dirty").assertIsDisplayed()
+    }
+
+    @Test
+    fun overviewUnavailableWhenNullOverview() {
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = null,
+            ),
+        )
+        compose.onNodeWithTag(GIT_OVERVIEW_STATUS_UNAVAILABLE_TAG).assertIsDisplayed()
     }
 
     @Test
@@ -71,6 +126,7 @@ class GitHistoryScaffoldTest {
                 truncated = false,
             ),
         )
+        compose.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
         compose.onNodeWithTag(GIT_HISTORY_EMPTY_TAG).assertIsDisplayed()
     }
 
@@ -83,6 +139,7 @@ class GitHistoryScaffoldTest {
                 truncated = true,
             ),
         )
+        compose.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
         compose.onNodeWithTag(GIT_HISTORY_TRUNCATED_TAG).assertIsDisplayed()
     }
 

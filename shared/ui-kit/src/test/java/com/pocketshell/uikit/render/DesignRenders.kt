@@ -482,6 +482,46 @@ class DesignRenders {
     }
 
     /**
+     * Issue #647: fast PNG target for the Git Overview tab (branches, worktrees,
+     * status). The real `OverviewPanel` lives in the `app` module so this fixture
+     * approximates it from the same shared ui-kit primitives — the segmented
+     * Overview|History switch, SectionHeaders, status row with a Dirty/Clean
+     * badge, branch rows, and worktree rows — to verify the design holds under the
+     * real theme. The emulator `GitHistoryDockerTest` is the acceptance check.
+     */
+    @Test
+    fun gitOverviewTab() = render("git-overview-tab") {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            ScreenHeader(title = "Git history", subtitle = "agents")
+            SegmentedToggle(
+                labels = listOf("Overview", "History"),
+                selectedIndex = 0,
+                onSelected = {},
+                fillSegments = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+            SectionHeader(label = "Status")
+            ListRow(
+                title = "main",
+                subtitle = "↑1 vs origin/main · 2 uncommitted changes\na1b2c3d Add overview tab",
+                trailing = { Badge(label = "Dirty", role = BadgeRole.Error, mono = false) },
+            )
+            SectionHeader(label = "Branches", count = 2)
+            ListRow(
+                title = "main",
+                subtitle = "Add overview tab",
+                trailing = { Badge(label = "Current", role = BadgeRole.Active, mono = false) },
+            )
+            ListRow(title = "feature/x", subtitle = "tracks origin/feature/x")
+            SectionHeader(label = "Worktrees", count = 2)
+            ListRow(title = "/home/u/git/proj", subtitle = "main")
+            ListRow(title = "/home/u/git/proj-feature", subtitle = "feature/x")
+        }
+    }
+
+    /**
      * Renders [content] wrapped in the real [PocketShellTheme] on the app's dark
      * background and snapshots the composition to `build/renders/<name>.png`.
      */

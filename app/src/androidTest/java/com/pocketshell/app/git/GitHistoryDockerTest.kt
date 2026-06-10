@@ -4,6 +4,7 @@ import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -114,12 +115,76 @@ class GitHistoryDockerTest {
             )
         }
 
+        // Wait for the repo to load, then switch from the default Overview tab to
+        // the History tab where the commits render.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_HISTORY_TAB_TAG)
+        }
+        composeRule.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
+
         // Both seeded commit subjects render (newest first).
         composeRule.waitUntil(timeoutMillis = 30_000) {
             composeRule.onAllNodesWithTextExists("Add b.txt") &&
                 composeRule.onAllNodesWithTextExists("Add a.txt")
         }
         WalkthroughScreenshotArtifacts.capture("issue646-git-history")
+    }
+
+    @Test
+    fun rendersBranchesWorktreesAndStatusOverview(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val root = "/tmp/issue647-$suffix"
+        val repo = "$root/proj"
+        seededRoot = root
+
+        // Seed a repo with two branches and a linked worktree, then leave the
+        // working tree dirty so the Status row reports it.
+        withTimeout(40_000) {
+            connect()?.use { session ->
+                val script = listOf(
+                    "mkdir -p '$repo'",
+                    "cd '$repo'",
+                    "git init -q",
+                    "git config user.email tester@example.com",
+                    "git config user.name 'PocketShell Tester'",
+                    "printf 'one\\n' > a.txt",
+                    "git add a.txt",
+                    "git commit -q -m 'Add a.txt'",
+                    "git branch feature-x",
+                    "git worktree add -q '$root/proj-feature' feature-x",
+                    // dirty the main working tree
+                    "printf 'dirty\\n' > dirty.txt",
+                    "echo ok",
+                ).joinToString(" && ")
+                val exit = session.exec(script)
+                assertEquals("seed exit (stderr=${exit.stderr})", 0, exit.exitCode)
+            } ?: error("could not connect to seed multi-branch git repo")
+        }
+
+        composeRule.setContent {
+            GitHistoryScreen(
+                hostName = "proj",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                dir = repo,
+                onBack = {},
+                viewModel = GitHistoryViewModel(),
+            )
+        }
+
+        // Overview is the default tab: both branches and the worktree paths render.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_BRANCH_ROW_TAG_PREFIX + "master") ||
+                composeRule.onAllNodesWithTagExists(GIT_BRANCH_ROW_TAG_PREFIX + "main")
+        }
+        composeRule.onNodeWithTag(GIT_OVERVIEW_STATUS_TAG).assertExists()
+        composeRule.onNodeWithTag(GIT_BRANCH_ROW_TAG_PREFIX + "feature-x").assertExists()
+        composeRule.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + repo).assertExists()
+        composeRule.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + "$root/proj-feature").assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue647-git-overview")
     }
 
     @Test

@@ -274,15 +274,19 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     /**
-     * Issue #641: the exact dogfood state — a shell pane where an agent was
-     * detected (so the `/ commands` palette chip is sticky-present) but
-     * detection is currently null (so it renders as a SHELL band with
-     * `snippets`). With `/ commands` + `Enter` + `show keyboard` + `snippets`
-     * all in the non-scrolling primary cluster, the composer launcher (rendered
-     * last with no weight) was pushed off the right edge and clipped — exactly
-     * what the screenshot shows (only the four chips, launcher absent). The
-     * launcher must stay fully on-screen and clickable regardless of how many
-     * primary chips precede it.
+     * Issue #641 (reopened): the exact dogfood state — a shell pane where an
+     * agent was detected (so the `/ commands` palette chip is sticky-present)
+     * but detection is currently null (so it renders as a SHELL band with
+     * `snippets`). All four primary chips (`/ commands` + `Enter` +
+     * `show keyboard` + `snippets`) plus the launcher are present.
+     *
+     * Round 1 fixed the launcher being pushed OFF the right edge. The reopened
+     * symptom is that the rightmost primary chip (`snippets`) was left
+     * HALF-CLIPPED at the cluster's cap boundary — partly hidden behind the
+     * launcher. This test asserts the strict acceptance bar: EVERY primary chip
+     * AND the launcher are fully inside the viewport (both edges, the FULL
+     * unclipped bounds visible), and the `snippets` chip's right edge does not
+     * cross the launcher's left edge — i.e. nothing hides behind the launcher.
      */
     @Test
     fun shellBandWithAllPrimaryChipsKeepsComposerLauncherOnScreen() {
@@ -308,10 +312,11 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("issue641-shell-band-all-primary-chips.png")
 
+        val rootBounds = compose.onRoot().getUnclippedBoundsInRoot()
+
         // The composer launcher must be FULLY on-screen (both edges inside the
         // root) and tappable — not pushed off the right edge by the four primary
-        // chips. The pre-fix layout left only a sliver of the launcher visible.
-        val rootBounds = compose.onRoot().getUnclippedBoundsInRoot()
+        // chips.
         val launcherBounds = compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
             .assertIsDisplayed()
             .assertHasClickAction()
@@ -322,6 +327,39 @@ class TmuxSessionVoiceSurfaceUiTest {
                 "root=[${rootBounds.left}..${rootBounds.right}]",
             launcherBounds.left >= rootBounds.left && launcherBounds.right <= rootBounds.right,
         )
+
+        // Every primary chip must be FULLY visible (unclipped bounds inside the
+        // root) and tappable — the reopened symptom was a half-clipped chip
+        // hidden behind the launcher.
+        listOf(
+            SESSION_AGENT_COMMANDS_CHIP_TAG,
+            SESSION_ENTER_CHIP_TAG,
+            SHOW_KEYBOARD_CHIP_TAG,
+            SESSION_ADD_SNIPPET_CHIP_TAG,
+        ).forEach { tag ->
+            val bounds = compose.onNodeWithTag(tag)
+                .assertIsDisplayed()
+                .assertHasClickAction()
+                .getUnclippedBoundsInRoot()
+            assertTrue(
+                "primary chip '$tag' must be fully inside the viewport, not clipped; " +
+                    "chip=[${bounds.left}..${bounds.right}] root=[${rootBounds.left}..${rootBounds.right}]",
+                bounds.left >= rootBounds.left && bounds.right <= rootBounds.right,
+            )
+        }
+
+        // The rightmost primary chip (`snippets`) must NOT overlap the launcher —
+        // it cannot be hidden behind / under the composer button. This is the
+        // load-bearing assertion for the reopened occlusion symptom.
+        val snippetsBounds = compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG)
+            .getUnclippedBoundsInRoot()
+        assertTrue(
+            "snippets chip must not be occluded behind the launcher; its right edge " +
+                "(${snippetsBounds.right}) must be at or before the launcher's left edge " +
+                "(${launcherBounds.left})",
+            snippetsBounds.right <= launcherBounds.left,
+        )
+
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).performClick()
         assertEquals(1, dictateTaps)
     }

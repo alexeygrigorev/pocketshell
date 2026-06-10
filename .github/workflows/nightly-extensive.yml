@@ -15,8 +15,11 @@ name: Nightly Extensive Tests
 #      workflow_dispatch always bypasses the guard (force-run).
 #   3. When it runs, it executes the FULL connected journey/E2E suite on the
 #      emulator + Docker `agents:2222`, PLUS the toxiproxy network-fault proofs
-#      (network-fault-proxy / packet-loss-proxy) un-gated so they actually run
-#      here — release-validation-level coverage.
+#      (network-fault-proxy / packet-loss-proxy) un-gated, PLUS a trimmed
+#      bootstrap setup-scenario matrix (issue #667: ready + uvInstall +
+#      appUpdateRequired against bootstrap-*:2230/2231/2236) so the first-run
+#      install / app-update setup journeys are guarded nightly, not only by the
+#      release gate — release-validation-level coverage.
 #
 # This subsumes the old "Emulator Smoke" nightly job and #660 (the standalone
 # network-fault job folds in here).
@@ -109,10 +112,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Extensive suite: full emulator + Docker journey/E2E run + un-gated
-  # toxiproxy network-fault proofs. Only runs when the guard says so.
+  # toxiproxy network-fault proofs + trimmed bootstrap setup-scenario matrix.
+  # Only runs when the guard says so.
   # ---------------------------------------------------------------------------
   extensive:
-    name: Extensive emulator + Docker journey/E2E + network-fault proofs
+    name: Extensive emulator + Docker journey/E2E + network-fault + bootstrap
     needs: guard
     if: needs.guard.outputs.should_run == 'true'
     runs-on: ubuntu-latest
@@ -161,10 +165,17 @@ jobs:
       # tmux) AND the toxiproxy proxies (network-fault-proxy, packet-loss-proxy)
       # that the per-push and smoke jobs deliberately leave down. The proxies
       # forward to `agents`, so they `depends_on: agents` in compose.
-      - name: Start Docker fixtures (agents, flaky-agent, tmux + toxiproxy)
+      #
+      # It ALSO brings up the bootstrap setup fixtures the trimmed scenario
+      # matrix needs (issue #667): bootstrap-ready (2230), bootstrap-uv-install
+      # (2231), and bootstrap-uv-upgrade (2236, reused by the appUpdateRequired
+      # scenario). HostBootstrapScenarioSuiteTest connects to these by host port
+      # (10.0.2.2:2230/2231/2236), so they must be up before the emulator runs.
+      - name: Start Docker fixtures (agents, flaky-agent, tmux + toxiproxy + bootstrap)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps \
-            agents flaky-agent tmux network-fault-proxy packet-loss-proxy
+            agents flaky-agent tmux network-fault-proxy packet-loss-proxy \
+            bootstrap-ready bootstrap-uv-install bootstrap-uv-upgrade
 
       - name: Wait for fixture containers to report healthy
         run: |
@@ -175,6 +186,13 @@ jobs:
           cat /tmp/flaky-agent-health.log
           wait_for_container_healthy tests/docker/docker-compose.yml tmux /tmp/tmux-health.log 60
           cat /tmp/tmux-health.log
+          # Bootstrap setup fixtures for the trimmed scenario matrix (issue #667).
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-ready /tmp/bootstrap-ready-health.log 60
+          cat /tmp/bootstrap-ready-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-uv-install /tmp/bootstrap-uv-install-health.log 60
+          cat /tmp/bootstrap-uv-install-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-uv-upgrade /tmp/bootstrap-uv-upgrade-health.log 60
+          cat /tmp/bootstrap-uv-upgrade-health.log
 
       # toxiproxy / packet-loss-proxy do not expose a Docker healthcheck, so
       # poll their listening ports directly before handing off to the emulator.
@@ -212,7 +230,7 @@ jobs:
             testuser@127.0.0.1 \
             'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
 
-      - name: Run extensive connected journey/E2E + network-fault proofs
+      - name: Run extensive connected journey/E2E + network-fault + bootstrap scenarios
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -234,6 +252,9 @@ jobs:
           docker compose -f tests/docker/docker-compose.yml logs --no-color tmux > artifacts/docker/tmux.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy > artifacts/docker/network-fault-proxy.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color packet-loss-proxy > artifacts/docker/packet-loss-proxy.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-ready > artifacts/docker/bootstrap-ready.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-install > artifacts/docker/bootstrap-uv-install.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-upgrade > artifacts/docker/bootstrap-uv-upgrade.log 2>/dev/null || true
           docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
 
       - name: Publish extensive suite summary

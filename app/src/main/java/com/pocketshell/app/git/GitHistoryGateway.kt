@@ -1,6 +1,9 @@
 package com.pocketshell.app.git
 
+import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.ssh.SshSession
+import org.json.JSONException
+import org.json.JSONObject
 
 /**
  * Reads recent commit history for a remote directory over an existing SSH
@@ -148,8 +151,82 @@ class GitHistoryGateway(private val session: SshSession) {
         return remote.stdout.trim().ifBlank { null }
     }
 
+    /**
+     * Check whether the GitHub CLI (`gh`) is installed AND authenticated on the
+     * remote — issue #649 (epic #644 slice 5), gated on slice 1 (#645).
+     *
+     * Runs `pocketshell github status --json` through the PATH-robust
+     * [PocketshellCommand.wrap] resolver (so a `pocketshell` in `~/.local/bin`
+     * that the non-interactive SSH `PATH` misses is still found) and parses the
+     * `{installed, authenticated, account, hint}` envelope. Returns
+     * [GhConfigStatus.Configured] only when gh is both installed and
+     * authenticated; otherwise [GhConfigStatus.NotConfigured] carries the hint
+     * so the screen can prompt the user to configure gh.
+     *
+     * When `pocketshell` itself is missing (exit 127) we still return a
+     * not-configured hint pointing at the gh setup, since the issue list can't
+     * be fetched either way.
+     */
+    suspend fun ghStatus(): GhConfigStatus {
+        val result = runCatching {
+            session.exec(PocketshellCommand.wrap("github status --json"))
+        }.getOrElse {
+            return GhConfigStatus.NotConfigured(DEFAULT_GH_HINT)
+        }
+        if (result.exitCode == 127) {
+            return GhConfigStatus.NotConfigured(POCKETSHELL_MISSING_HINT)
+        }
+        return parseGhStatus(result.stdout)
+    }
+
+    /**
+     * List the current repo's GitHub issues via `gh issue list --json …` over
+     * SSH — issue #649 (epic #644 slice 5).
+     *
+     * Runs `gh issue list` inside [dir] (gh resolves the repo from the working
+     * directory) requesting the `number,title,state,labels,updatedAt` fields,
+     * capped at [limit]. The caller is expected to have already gated on
+     * [ghStatus]; this method assumes gh is usable.
+     *
+     * Returns a [Result] so the caller can distinguish a transport error from a
+     * gh failure (e.g. not a GitHub repo, no network) — a [GitCommandException]
+     * carries gh's stderr. A clean empty listing (`[]`) succeeds with an empty
+     * list so the screen can show its empty state.
+     */
+    suspend fun listIssues(dir: String, limit: Int = DEFAULT_ISSUE_LIMIT): Result<List<GitHubIssue>> {
+        val quoted = quoteSingle(dir)
+        val safeLimit = limit.coerceIn(1, MAX_ISSUE_LIMIT)
+        // `cd` into the repo so gh resolves the GitHub repo from the directory's
+        // origin remote; `--json` emits a top-level array we parse directly.
+        val cmd = "cd $quoted && gh issue list " +
+            "--json number,title,state,labels,updatedAt " +
+            "--state all --limit $safeLimit"
+        val result = runCatching { session.exec(cmd) }
+            .getOrElse { return Result.failure(it) }
+        if (result.exitCode != 0) {
+            return Result.failure(
+                GitCommandException(result.stderr.trim().ifBlank { "gh issue list failed" }),
+            )
+        }
+        return Result.success(GitHubIssueParser.parse(result.stdout))
+    }
+
     companion object {
         const val DEFAULT_LIMIT: Int = 100
+
+        /** Default issue listing cap — keeps a giant project's list manageable. */
+        const val DEFAULT_ISSUE_LIMIT: Int = 50
+
+        /** Hard ceiling on the issue listing limit passed to `gh issue list`. */
+        const val MAX_ISSUE_LIMIT: Int = 200
+
+        /** Fallback hint when the gh-status probe can't run at all. */
+        internal const val DEFAULT_GH_HINT: String =
+            "install gh (https://cli.github.com) and run `gh auth login`"
+
+        /** Hint when `pocketshell` (the status helper) itself isn't installed. */
+        internal const val POCKETSHELL_MISSING_HINT: String =
+            "install pocketshell + gh on the server, then run `gh auth login`"
 
         // ASCII control delimiters — never appear in real commit metadata.
         private const val UNIT = ""
@@ -308,7 +385,45 @@ class GitHistoryGateway(private val session: SshSession) {
         /** Single-quote a path for safe interpolation into a remote shell command. */
         internal fun quoteSingle(value: String): String =
             "'" + value.replace("'", "'\\''") + "'"
+
+        /**
+         * Parse the `pocketshell github status --json` envelope
+         * (`{installed, authenticated, account, hint}`) into a [GhConfigStatus].
+         * Pure — unit-tested. Malformed / empty output is treated as
+         * not-configured with the default hint so the screen degrades to the
+         * configure-gh prompt rather than erroring.
+         */
+        internal fun parseGhStatus(raw: String): GhConfigStatus {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return GhConfigStatus.NotConfigured(DEFAULT_GH_HINT)
+            val obj = try {
+                JSONObject(trimmed)
+            } catch (_: JSONException) {
+                return GhConfigStatus.NotConfigured(DEFAULT_GH_HINT)
+            }
+            val installed = obj.optBoolean("installed", false)
+            val authenticated = obj.optBoolean("authenticated", false)
+            if (installed && authenticated) {
+                val account = obj.optString("account", "").trim().ifBlank { null }
+                return GhConfigStatus.Configured(account)
+            }
+            val hint = obj.optString("hint", "").trim().ifBlank { DEFAULT_GH_HINT }
+            return GhConfigStatus.NotConfigured(hint)
+        }
     }
+}
+
+/**
+ * Whether the GitHub CLI is ready to use on the remote — issue #649. Gates the
+ * in-app Issues view: [Configured] surfaces the issue list, [NotConfigured]
+ * surfaces a "configure gh" hint instead.
+ */
+sealed interface GhConfigStatus {
+    /** gh is installed and authenticated. [account] is the logged-in user, if known. */
+    data class Configured(val account: String?) : GhConfigStatus
+
+    /** gh is missing or unauthenticated. [hint] tells the user how to fix it. */
+    data class NotConfigured(val hint: String) : GhConfigStatus
 }
 
 /** The target directory is not inside a git working tree. */

@@ -243,6 +243,62 @@ class GitHistoryDockerTest {
     }
 
     @Test
+    fun issuesTabShowsConfigureGhHintWhenGhNotConfigured(): Unit = runBlocking {
+        // The deterministic `agents` fixture has no authenticated `gh` (and most
+        // likely no `pocketshell` either), so the Issues tab must degrade to the
+        // "configure gh" hint rather than show a list — issue #649's gated path.
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val root = "/tmp/issue649-$suffix"
+        val repo = "$root/proj"
+        seededRoot = root
+
+        withTimeout(30_000) {
+            connect()?.use { session ->
+                val script = listOf(
+                    "mkdir -p '$repo'",
+                    "cd '$repo'",
+                    "git init -q",
+                    "git config user.email tester@example.com",
+                    "git config user.name 'PocketShell Tester'",
+                    "git remote add origin git@github.com:pocketshell/demo.git",
+                    "printf 'one\\n' > a.txt",
+                    "git add a.txt",
+                    "git commit -q -m 'Add a.txt'",
+                    "echo ok",
+                ).joinToString(" && ")
+                val exit = session.exec(script)
+                assertEquals("seed exit (stderr=${exit.stderr})", 0, exit.exitCode)
+            } ?: error("could not connect to seed issue-649 repo")
+        }
+
+        composeRule.setContent {
+            GitHistoryScreen(
+                hostName = "proj",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                dir = repo,
+                onBack = {},
+                viewModel = GitHistoryViewModel(),
+            )
+        }
+
+        // Wait for load, switch to the Issues tab, and confirm the configure-gh
+        // hint renders (gh is not authenticated on the fixture).
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_ISSUES_TAB_TAG)
+        }
+        composeRule.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_ISSUES_HINT_TAG)
+        }
+        composeRule.onNodeWithTag(GIT_ISSUES_HINT_TAG).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue649-configure-gh-hint")
+    }
+
+    @Test
     fun nonGitDirectoryShowsNotARepoState(): Unit = runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue646-plain-$suffix"

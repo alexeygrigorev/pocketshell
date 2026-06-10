@@ -48,6 +48,18 @@ sealed interface GitHistoryUiState {
          * "Open on GitHub" action.
          */
         val gitHubUrl: String? = null,
+        /**
+         * GitHub issues for the repo (issue #649), newest-updated first as gh
+         * returns them. Null when gh isn't configured (then [ghHint] is set), or
+         * the listing failed. An empty list is a real "no open issues" state.
+         */
+        val issues: List<GitHubIssue>? = null,
+        /**
+         * When gh is NOT installed/authenticated on the remote, the actionable
+         * "configure gh" hint to show on the Issues tab instead of a list. Null
+         * when gh is configured.
+         */
+        val ghHint: String? = null,
     ) : GitHistoryUiState
 
     /** [dir] is not inside a git working tree. */
@@ -123,12 +135,19 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
                     val gitHubUrl = runCatching {
                         GitHubRemote.webUrl(gateway.originRemoteUrl(req.dir))
                     }.getOrNull()
+                    // GitHub issues (#649), gated on gh being configured (#645).
+                    // Best-effort: a probe/listing failure must not hide the
+                    // history that already loaded — the Issues tab degrades to
+                    // a hint or an empty state.
+                    val (issues, ghHint) = fetchIssues(gateway, req.dir)
                     GitHistoryUiState.Ready(
                         dir = req.dir,
                         commits = commits,
                         truncated = commits.size >= COMMIT_LIMIT,
                         overview = overview,
                         gitHubUrl = gitHubUrl,
+                        issues = issues,
+                        ghHint = ghHint,
                     )
                 },
                 onFailure = { error ->
@@ -150,6 +169,36 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
                 dir = req.dir,
                 message = "Couldn't read git history: ${t.message ?: t.javaClass.simpleName}",
             )
+        }
+    }
+
+    /**
+     * Fetch GitHub issues for [dir], gated on gh being configured (#645/#649).
+     *
+     * Returns `(issues, ghHint)`:
+     *  - gh configured → `(list, null)` (the list may be empty for "no issues").
+     *  - gh NOT configured → `(null, hint)` so the Issues tab shows the prompt.
+     *  - listing failed despite gh being configured → `(null, null)` so the tab
+     *    shows a neutral "couldn't load" state rather than a misleading hint.
+     *
+     * All failures are swallowed (best-effort) so they never hide the history /
+     * overview that already loaded.
+     */
+    private suspend fun fetchIssues(
+        gateway: GitHistoryGateway,
+        dir: String,
+    ): Pair<List<GitHubIssue>?, String?> {
+        val status = runCatching { gateway.ghStatus() }.getOrElse {
+            return null to GitHistoryGateway.DEFAULT_GH_HINT
+        }
+        return when (status) {
+            is GhConfigStatus.NotConfigured -> null to status.hint
+            is GhConfigStatus.Configured -> {
+                val issues = runCatching {
+                    gateway.listIssues(dir, limit = ISSUE_LIMIT).getOrNull()
+                }.getOrNull()
+                issues to null
+            }
         }
     }
 
@@ -215,5 +264,8 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
     companion object {
         /** Cap the history so a giant repo doesn't blow up the listing. */
         const val COMMIT_LIMIT: Int = GitHistoryGateway.DEFAULT_LIMIT
+
+        /** Cap the in-app GitHub issue listing (#649). */
+        const val ISSUE_LIMIT: Int = GitHistoryGateway.DEFAULT_ISSUE_LIMIT
     }
 }

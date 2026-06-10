@@ -43,6 +43,8 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -69,6 +71,13 @@ const val GIT_WORKTREE_ROW_TAG_PREFIX = "gitWorktreeRow:"
 
 // "Open on GitHub" action (issue #648) — only shown when origin is a GitHub repo.
 const val GIT_OPEN_ON_GITHUB_TAG = "gitOpenOnGitHub"
+
+// Issues tab (issue #649): the repo's GitHub issues via `gh issue list`.
+const val GIT_ISSUES_TAB_TAG = "gitTabIssues"
+const val GIT_ISSUES_HINT_TAG = "gitIssuesHint"
+const val GIT_ISSUES_EMPTY_TAG = "gitIssuesEmpty"
+const val GIT_ISSUES_UNAVAILABLE_TAG = "gitIssuesUnavailable"
+const val GIT_ISSUE_ROW_TAG_PREFIX = "gitIssueRow:"
 
 /**
  * Git commit-history / timeline view for a project directory — issue #646
@@ -167,6 +176,7 @@ internal fun GitHistoryScaffold(
 private enum class GitTab(val label: String) {
     Overview("Overview"),
     History("History"),
+    Issues("Issues"),
 }
 
 @Composable
@@ -187,6 +197,7 @@ private fun ReadyPanel(
                 when (GitTab.entries[index]) {
                     GitTab.Overview -> GIT_OVERVIEW_TAB_TAG
                     GitTab.History -> GIT_HISTORY_TAB_TAG
+                    GitTab.Issues -> GIT_ISSUES_TAB_TAG
                 }
             },
             modifier = Modifier
@@ -200,6 +211,7 @@ private fun ReadyPanel(
         when (tab) {
             GitTab.Overview -> OverviewPanel(state, onOpenGitHub)
             GitTab.History -> HistoryPanel(state)
+            GitTab.Issues -> IssuesPanel(state)
         }
     }
 }
@@ -291,6 +303,104 @@ private fun HistoryPanel(state: GitHistoryUiState.Ready) {
             }
         }
     }
+}
+
+/**
+ * Issues tab (issue #649): the repo's GitHub issues via `gh issue list`.
+ *
+ * Gated on gh being configured on the remote (slice 1, #645). When gh is not
+ * installed/authenticated, [GitHistoryUiState.Ready.ghHint] is set and we show a
+ * single "configure gh" hint row instead of a list. When gh is configured the
+ * list renders (number, title, open/closed dot, labels); an empty list shows an
+ * empty state. When the listing failed despite gh being configured (issues null,
+ * no hint), a neutral "unavailable" row is shown.
+ */
+@Composable
+private fun IssuesPanel(state: GitHistoryUiState.Ready) {
+    val ghHint = state.ghHint
+    val issues = state.issues
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
+    ) {
+        if (ghHint != null) {
+            item(key = "__issues_hint_header__") { SectionHeader(label = "GitHub issues") }
+            item(key = "__issues_hint__") {
+                ListRow(
+                    title = "Configure gh to see issues",
+                    subtitle = ghHint,
+                    leading = { GlyphCell("gh") },
+                    trailing = { Badge(label = "Setup", role = BadgeRole.Idle, mono = false) },
+                    modifier = Modifier.testTag(GIT_ISSUES_HINT_TAG),
+                )
+            }
+            return@LazyColumn
+        }
+
+        if (issues == null) {
+            item(key = "__issues_unavailable_header__") { SectionHeader(label = "GitHub issues") }
+            item(key = "__issues_unavailable__") {
+                ListRow(
+                    title = "Issues unavailable",
+                    subtitle = "Couldn't list GitHub issues for this repository.",
+                    leading = { GlyphCell("--") },
+                    modifier = Modifier.testTag(GIT_ISSUES_UNAVAILABLE_TAG),
+                )
+            }
+            return@LazyColumn
+        }
+
+        item(key = "__issues_header__") {
+            SectionHeader(label = "GitHub issues", count = issues.size)
+        }
+        if (issues.isEmpty()) {
+            item(key = "__issues_empty__") {
+                ListRow(
+                    title = "No issues",
+                    subtitle = "This repository has no GitHub issues.",
+                    leading = { GlyphCell("--") },
+                    modifier = Modifier.testTag(GIT_ISSUES_EMPTY_TAG),
+                )
+            }
+        }
+        items(issues, key = { "issue:${it.number}" }) { issue ->
+            val subtitle = buildString {
+                append("#").append(issue.number)
+                if (issue.labels.isNotEmpty()) {
+                    append(" · ").append(issue.labels.joinToString(", "))
+                }
+            }
+            ListRow(
+                title = issue.title.ifBlank { "(no title)" },
+                subtitle = subtitle,
+                leading = {
+                    Box(
+                        modifier = Modifier.width(64.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        StatusDot(status = issue.state.connectionStatus())
+                    }
+                },
+                trailing = {
+                    when (issue.state) {
+                        GitHubIssueState.Open ->
+                            Badge(label = "Open", role = BadgeRole.Active, mono = false)
+                        GitHubIssueState.Closed ->
+                            Badge(label = "Closed", role = BadgeRole.Idle, mono = false)
+                        GitHubIssueState.Unknown -> Unit
+                    }
+                },
+                modifier = Modifier.testTag(GIT_ISSUE_ROW_TAG_PREFIX + issue.number),
+            )
+        }
+    }
+}
+
+/** Map an issue's open/closed state onto the shared status-dot vocabulary. */
+private fun GitHubIssueState.connectionStatus(): ConnectionStatus = when (this) {
+    GitHubIssueState.Open -> ConnectionStatus.Connected
+    GitHubIssueState.Closed -> ConnectionStatus.Idle
+    GitHubIssueState.Unknown -> ConnectionStatus.Idle
 }
 
 /**

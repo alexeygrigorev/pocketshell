@@ -525,6 +525,76 @@ class DesignRenders {
     }
 
     /**
+     * Issue #649: fast PNG target for the Git Issues tab (`gh issue list`). The
+     * real `IssuesPanel` lives in the `app` module, so this fixture approximates
+     * it from the same shared ui-kit primitives — the three-way Overview|History|
+     * Issues switch, a SectionHeader with a count, and issue rows carrying a
+     * leading open/closed StatusDot, the `#number · labels` subtitle, and an
+     * Open/Closed badge. The emulator `GitHistoryDockerTest` is the acceptance
+     * check.
+     */
+    @Test
+    fun gitIssuesTab() = render("git-issues-tab") {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            ScreenHeader(title = "Git history", subtitle = "pocketshell")
+            SegmentedToggle(
+                labels = listOf("Overview", "History", "Issues"),
+                selectedIndex = 2,
+                onSelected = {},
+                fillSegments = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+            SectionHeader(label = "GitHub issues", count = 3)
+            ListRow(
+                title = "view GitHub issues in-app (gh issue list)",
+                subtitle = "#649 · enhancement",
+                leading = { StatusDot(status = ConnectionStatus.Connected) },
+                trailing = { Badge(label = "Open", role = BadgeRole.Active, mono = false) },
+            )
+            ListRow(
+                title = "Open on GitHub action",
+                subtitle = "#648 · enhancement, slice-4",
+                leading = { StatusDot(status = ConnectionStatus.Idle) },
+                trailing = { Badge(label = "Closed", role = BadgeRole.Idle, mono = false) },
+            )
+            ListRow(
+                title = "Read-only repo overview tab",
+                subtitle = "#647",
+                leading = { StatusDot(status = ConnectionStatus.Idle) },
+                trailing = { Badge(label = "Closed", role = BadgeRole.Idle, mono = false) },
+            )
+        }
+    }
+
+    /**
+     * Issue #649: the gated "configure gh" hint shown on the Issues tab when gh
+     * is NOT installed/authenticated on the remote (slice 1, #645).
+     */
+    @Test
+    fun gitIssuesConfigureGhHint() = render("git-issues-configure-gh-hint") {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            ScreenHeader(title = "Git history", subtitle = "pocketshell")
+            SegmentedToggle(
+                labels = listOf("Overview", "History", "Issues"),
+                selectedIndex = 2,
+                onSelected = {},
+                fillSegments = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+            SectionHeader(label = "GitHub issues")
+            ListRow(
+                title = "Configure gh to see issues",
+                subtitle = "install gh (https://cli.github.com) and run `gh auth login`",
+                trailing = { Badge(label = "Setup", role = BadgeRole.Idle, mono = false) },
+            )
+        }
+    }
+
+    /**
      * Renders [content] wrapped in the real [PocketShellTheme] on the app's dark
      * background and snapshots the composition to `build/renders/<name>.png`.
      */

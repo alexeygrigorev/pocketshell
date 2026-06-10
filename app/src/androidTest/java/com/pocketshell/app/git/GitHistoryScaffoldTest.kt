@@ -182,6 +182,89 @@ class GitHistoryScaffoldTest {
     }
 
     @Test
+    fun issuesTabRendersConfiguredIssueList() {
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+                issues = listOf(
+                    GitHubIssue(
+                        number = 649,
+                        title = "view GitHub issues in-app",
+                        state = GitHubIssueState.Open,
+                        labels = listOf("enhancement"),
+                        updatedAt = "2026-06-09T10:11:12Z",
+                    ),
+                    GitHubIssue(
+                        number = 648,
+                        title = "Open on GitHub action",
+                        state = GitHubIssueState.Closed,
+                        labels = emptyList(),
+                        updatedAt = "2026-06-08T08:00:00Z",
+                    ),
+                ),
+                ghHint = null,
+            ),
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_ISSUE_ROW_TAG_PREFIX + "649").assertIsDisplayed()
+        compose.onNodeWithText("view GitHub issues in-app").assertIsDisplayed()
+        compose.onNodeWithTag(GIT_ISSUE_ROW_TAG_PREFIX + "648").assertIsDisplayed()
+    }
+
+    @Test
+    fun issuesTabShowsConfigureGhHintWhenNotConfigured() {
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+                issues = null,
+                ghHint = "install gh (https://cli.github.com) and run `gh auth login`",
+            ),
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_ISSUES_HINT_TAG).assertIsDisplayed()
+        compose.onNodeWithText("install gh (https://cli.github.com) and run `gh auth login`")
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun issuesTabShowsEmptyStateWhenConfiguredAndNoIssues() {
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+                issues = emptyList(),
+                ghHint = null,
+            ),
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_ISSUES_EMPTY_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun issuesTabShowsUnavailableWhenListingFailedDespiteConfigured() {
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+                issues = null,
+                ghHint = null,
+            ),
+        )
+        compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_ISSUES_UNAVAILABLE_TAG).assertIsDisplayed()
+    }
+
+    @Test
     fun notARepoShowsGuidance() {
         setState(GitHistoryUiState.NotARepo("/home/u/notrepo"))
         compose.onNodeWithTag(GIT_HISTORY_NOT_A_REPO_TAG).assertIsDisplayed()

@@ -1,5 +1,26 @@
 #!/usr/bin/env bash
 
+# Derive a per-serial AVD lock file path so that independent shards, each
+# targeting a *distinct* emulator (`ANDROID_SERIAL`), can hold their own lock
+# concurrently instead of serialising on the single global `build/.avd-lock`.
+#
+# Callers that don't opt in keep the single-lock default: nothing here changes
+# the behaviour of `pocketshell_acquire_avd_lock` unless the caller explicitly
+# exports `POCKETSHELL_AVD_LOCK_FILE` (which a shard does, via this helper).
+#
+# Usage: lock_path="$(pocketshell_avd_lock_file_for_serial "$root_dir" "$serial")"
+pocketshell_avd_lock_file_for_serial() {
+  local root_dir="$1"
+  local serial="$2"
+  # Sanitise the serial into a filename-safe token (e.g. emulator-5556 ->
+  # emulator-5556; host:port style serials lose the colon).
+  local token="${serial//[^A-Za-z0-9._-]/_}"
+  if [[ -z "$token" ]]; then
+    token="default"
+  fi
+  printf '%s/build/.avd-lock-%s\n' "$root_dir" "$token"
+}
+
 pocketshell_acquire_avd_lock() {
   local root_dir="$1"
   local help_arg="${2:-}"

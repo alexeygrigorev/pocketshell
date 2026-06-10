@@ -638,10 +638,29 @@ run_required \
   "build/phone-walkthrough/$RUN_ID-tmux-existing-session/" \
   env RUN_ID="$RUN_ID-tmux-existing-session" scripts/phone-walkthrough.sh tmux-existing-session
 
-run_required \
-  "setup-detection phone walkthrough matrix" \
-  "build/phone-walkthrough/$RUN_ID-setup-detection/" \
-  env RUN_ID="$RUN_ID-setup-detection" scripts/phone-walkthrough.sh setup-detection
+# Issue #632 (slice 2): the setup-detection matrix is the easiest gate block to
+# parallelize because its 7 profiles bind disjoint Docker ports 2230-2236.
+# Default is the unchanged single-AVD sequential path. Opt in to fan it out
+# across N emulators with SETUP_DETECTION_SHARDS=N (each shard gets a distinct
+# ANDROID_SERIAL, a per-serial AVD lock, and its own COMPOSE_PROJECT_NAME);
+# provide the emulator serials via SETUP_DETECTION_SERIALS="<s1> <s2> ...".
+SETUP_DETECTION_SHARDS="${SETUP_DETECTION_SHARDS:-1}"
+if [[ "$SETUP_DETECTION_SHARDS" =~ ^[1-9][0-9]*$ && "$SETUP_DETECTION_SHARDS" -gt 1 ]]; then
+  declare -a setup_detection_parallel_args=(--shards "$SETUP_DETECTION_SHARDS")
+  if [[ -n "${SETUP_DETECTION_SERIALS:-}" ]]; then
+    setup_detection_parallel_args+=(--serials "$SETUP_DETECTION_SERIALS")
+  fi
+  run_required \
+    "setup-detection phone walkthrough matrix (parallel x$SETUP_DETECTION_SHARDS)" \
+    "build/parallel-setup-detection/$RUN_ID-setup-detection/" \
+    env RUN_ID="$RUN_ID-setup-detection" \
+      scripts/parallel-setup-detection.sh "${setup_detection_parallel_args[@]}"
+else
+  run_required \
+    "setup-detection phone walkthrough matrix" \
+    "build/phone-walkthrough/$RUN_ID-setup-detection/" \
+    env RUN_ID="$RUN_ID-setup-detection" scripts/phone-walkthrough.sh setup-detection
+fi
 
 run_required \
   "visual-audit screenshot capture" \

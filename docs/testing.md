@@ -351,6 +351,54 @@ scripts/phone-walkthrough.sh setup-detection
 scripts/phone-walkthrough.sh setup-detection:uv-install
 ```
 
+##### Parallel setup-detection across multiple emulators (issue #632)
+
+The 7 setup-detection profiles bind **disjoint** Docker ports (`2230`-`2236`),
+so the matrix can be sharded across several emulators and run concurrently
+instead of serially. `scripts/parallel-setup-detection.sh` is a fan-out/join
+wrapper that does exactly that:
+
+```bash
+# Two emulators, full matrix; profiles split round-robin across the two serials.
+scripts/parallel-setup-detection.sh --serials "emulator-5554 emulator-5556"
+
+# Print the shard plan only (serial / lock / compose project per shard) — no
+# emulator or Docker is touched.
+scripts/parallel-setup-detection.sh --dry-run --serials "emulator-5554 emulator-5556"
+
+# Subset of profiles, capped shard count.
+scripts/parallel-setup-detection.sh --serials "a b c" --shards 2 ready unsupported
+```
+
+Each shard is isolated so concurrent shards never collide:
+
+- **emulator** — a distinct `ANDROID_SERIAL` per shard.
+- **AVD lock** — a per-serial lock file
+  (`build/.avd-lock-<serial>`, via `pocketshell_avd_lock_file_for_serial` in
+  `scripts/lib/avd-lock.sh`) instead of the single global `build/.avd-lock`, so
+  shards do not serialise against each other. Callers that don't opt in keep the
+  single-lock default.
+- **Docker** — a per-shard `COMPOSE_PROJECT_NAME`
+  (`pocketshell-setup-detection-shard<i>`). The 7 bootstrap services in
+  `tests/docker/docker-compose.yml` deliberately carry **no** `container_name:`
+  so compose namespaces their containers per project
+  (`<project>_bootstrap-<scenario>_<n>`); a fixed name would be global to the
+  daemon and defeat the per-shard project. Fixtures are addressed by host port,
+  never by container name.
+
+The APKs are built **once** before fan-out (shards run with `BUILD_APKS=0` and
+`PHONE_WALKTHROUGH_CLEAN_GENERATED=0`) so no two shards race on the shared
+`app/build/` directory. The wrapper aggregates per-profile pass/fail into
+`build/parallel-setup-detection/<run-id>/summary.txt`, writes the same
+per-profile artifacts the sequential path produces under each
+`shard<i>/phone-walkthrough/setup-detection/`, and exits non-zero if any
+profile failed. With a single serial it collapses to one sequential shard — the
+existing single-AVD behaviour, no regression.
+
+The release gate (`scripts/release-emulator-validation.sh`) opts in via
+`SETUP_DETECTION_SHARDS=N` (default `1` = the unchanged sequential path);
+provide the serials with `SETUP_DETECTION_SERIALS="<s1> <s2> ..."`.
+
 For release visual review without a physical phone, run:
 
 ```bash

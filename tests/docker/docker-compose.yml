@@ -73,6 +73,15 @@ services:
       - "2222:22"
     healthcheck: *ssh-healthcheck
 
+  # Issue #632 (slice 2): the 7 bootstrap setup-detection fixtures bind disjoint
+  # host ports 2230-2236, so they can be sharded across multiple emulators and
+  # brought up concurrently under DISTINCT compose projects
+  # (COMPOSE_PROJECT_NAME). They deliberately carry NO `container_name:` — a
+  # fixed container name is global to the Docker daemon and ignores the compose
+  # project, which would make two concurrent `docker compose up` invocations
+  # collide on the same name. Without it, compose namespaces each container as
+  # `<project>_bootstrap-<scenario>_<n>`, so parallel shards don't conflict.
+  # Callers address these fixtures by host port, never by container name.
   bootstrap-ready:
     build:
       context: .
@@ -80,7 +89,6 @@ services:
       args:
         SCENARIO: ready
     image: pocketshell-test:bootstrap-ready
-    container_name: pocketshell-test-bootstrap-ready
     ports:
       - "2230:22"
     healthcheck: *ssh-healthcheck
@@ -92,7 +100,6 @@ services:
       args:
         SCENARIO: uv-install
     image: pocketshell-test:bootstrap-uv-install
-    container_name: pocketshell-test-bootstrap-uv-install
     ports:
       - "2231:22"
     healthcheck: *ssh-healthcheck
@@ -104,7 +111,6 @@ services:
       args:
         SCENARIO: uv-upgrade
     image: pocketshell-test:bootstrap-uv-upgrade
-    container_name: pocketshell-test-bootstrap-uv-upgrade
     ports:
       - "2236:22"
     healthcheck: *ssh-healthcheck
@@ -116,7 +122,6 @@ services:
       args:
         SCENARIO: unsupported
     image: pocketshell-test:bootstrap-unsupported
-    container_name: pocketshell-test-bootstrap-unsupported
     ports:
       - "2232:22"
     healthcheck: *ssh-healthcheck
@@ -128,7 +133,6 @@ services:
       args:
         SCENARIO: daemon-disabled
     image: pocketshell-test:bootstrap-daemon-disabled
-    container_name: pocketshell-test-bootstrap-daemon-disabled
     ports:
       - "2233:22"
     healthcheck: *ssh-healthcheck
@@ -140,7 +144,6 @@ services:
       args:
         SCENARIO: user-local-path
     image: pocketshell-test:bootstrap-user-local-path
-    container_name: pocketshell-test-bootstrap-user-local-path
     ports:
       - "2234:22"
     healthcheck: *ssh-healthcheck
@@ -154,7 +157,6 @@ services:
         INSTALL_FISH: "true"
         LOGIN_SHELL: /usr/bin/fish
     image: pocketshell-test:bootstrap-fish-user-local-path
-    container_name: pocketshell-test-bootstrap-fish-user-local-path
     ports:
       - "2235:22"
     healthcheck: *ssh-healthcheck

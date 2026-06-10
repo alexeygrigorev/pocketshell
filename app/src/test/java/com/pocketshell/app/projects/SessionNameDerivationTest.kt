@@ -5,25 +5,29 @@ import org.junit.Test
 
 /**
  * Unit tests for the tmuxctl-style directory-derived session naming
- * (issue #429). These pin the exact names produced for the maintainer's
- * `tmuxctl` (`t`) convention: home-relative when under `$HOME`, absolute
- * components otherwise, agent prefix preserved, no random timestamp,
- * deterministic collision suffix.
+ * (issues #429, #642). These pin the exact names produced for the
+ * maintainer's `tmuxctl` (`t`) / `pocketshell sessions` convention:
+ * a **pure path-prefix** — home-relative when under `$HOME`, absolute
+ * components otherwise — with NO agent-CLI prefix, no random timestamp,
+ * and a deterministic collision suffix. Agent and shell sessions in the
+ * same directory derive the same base name (distinguished by badge, not
+ * by name).
  */
 class SessionNameDerivationTest {
 
     private val home = "/home/alexey"
 
-    // --- Acceptance criterion: agent session under home ---
+    // --- Acceptance criterion (#642): agent session under home gets the
+    // pure path-prefix, NO `claude-` decoration ---
 
     @Test
-    fun agentUnderHomeYieldsPrefixedHomeRelativeName() {
+    fun agentUnderHomeYieldsPurePathPrefixNoAgentDecoration() {
         val name = SessionNameDerivation.derive(
             startDirectory = "~/git/pocketshell",
             homeDirectory = home,
             agentCommand = "claude",
         )
-        assertEquals("claude-git-pocketshell", name)
+        assertEquals("git-pocketshell", name)
     }
 
     @Test
@@ -33,7 +37,38 @@ class SessionNameDerivationTest {
             homeDirectory = home,
             agentCommand = "claude",
         )
-        assertEquals("claude-git-pocketshell", name)
+        assertEquals("git-pocketshell", name)
+    }
+
+    @Test
+    fun agentAndShellInSameDirDeriveSameBaseName() {
+        // #642: the name is a pure path-prefix; the agent CLI no longer
+        // decorates it, so agent + shell in the same dir share a base.
+        val agent = SessionNameDerivation.derive(
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+            agentCommand = "claude",
+        )
+        val shell = SessionNameDerivation.derive(
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+            agentCommand = null,
+        )
+        assertEquals("git-pocketshell", agent)
+        assertEquals(agent, shell)
+    }
+
+    @Test
+    fun dataEngineeringZoomcampAgentDropsAgentPrefix() {
+        // The exact regression the maintainer reported (#642): an agent
+        // session in `~/git/data-engineering-zoomcamp` must read
+        // `git-data-engineering-zoomcamp`, NOT `claude-git-…`.
+        val name = SessionNameDerivation.derive(
+            startDirectory = "~/git/data-engineering-zoomcamp",
+            homeDirectory = home,
+            agentCommand = "claude",
+        )
+        assertEquals("git-data-engineering-zoomcamp", name)
     }
 
     // --- Acceptance criterion: shell session outside home ---
@@ -124,12 +159,14 @@ class SessionNameDerivationTest {
 
     @Test
     fun dottedProjectNameIsSanitised() {
+        // #642: even for an agent session, the name is the sanitised
+        // path-prefix only — no `codex-` decoration.
         val name = SessionNameDerivation.derive(
             startDirectory = "~/my.project.v2",
             homeDirectory = home,
             agentCommand = "codex",
         )
-        assertEquals("codex-my_project_v2", name)
+        assertEquals("my_project_v2", name)
         assertNoTmuxForbidden(name)
     }
 
@@ -155,13 +192,30 @@ class SessionNameDerivationTest {
 
     @Test
     fun collisionAppendsDeterministicSuffix() {
+        // A genuine second session in the same dir (#642 keeps this):
+        // `git-pocketshell` is taken, so the next one gets `-2`.
         val name = SessionNameDerivation.derive(
             startDirectory = "~/git/pocketshell",
             homeDirectory = home,
             agentCommand = "claude",
-            existingNames = setOf("claude-git-pocketshell"),
+            existingNames = setOf("git-pocketshell"),
         )
-        assertEquals("claude-git-pocketshell-2", name)
+        assertEquals("git-pocketshell-2", name)
+    }
+
+    @Test
+    fun agentCollidesWithExistingShellInSameDir() {
+        // Because the base no longer carries the agent CLI (#642), an
+        // agent session lands on the SAME base as a shell in the same dir
+        // and so disambiguates against it: shell took `git-pocketshell`,
+        // the agent becomes `git-pocketshell-2`.
+        val name = SessionNameDerivation.derive(
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+            agentCommand = "claude",
+            existingNames = setOf("git-pocketshell"),
+        )
+        assertEquals("git-pocketshell-2", name)
     }
 
     @Test
@@ -193,7 +247,7 @@ class SessionNameDerivationTest {
         val a = SessionNameDerivation.derive("~/git/pocketshell", home, "claude")
         val b = SessionNameDerivation.derive("~/git/pocketshell", home, "claude")
         assertEquals(a, b)
-        assertEquals("claude-git-pocketshell", a)
+        assertEquals("git-pocketshell", a)
     }
 
     // --- conventionalRemoteHome / knownSessionNames helpers ---

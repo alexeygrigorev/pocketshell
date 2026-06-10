@@ -16,8 +16,13 @@ package com.pocketshell.app.projects
  *    components normalised and joined by `-`
  *    (e.g. `/var/log` → `var-log`).
  *
- * Agent sessions keep the agent CLI as a prefix so the flat list still
- * reads "what kind of session is this" — e.g. `claude-git-pocketshell`.
+ * The name is a **pure path-prefix** — agent and shell sessions in the
+ * same directory derive the same base name (e.g. `~/git/pocketshell` →
+ * `git-pocketshell` for both). This matches what `tmuxctl` /
+ * `pocketshell sessions` name the same directory, so desktop navigation
+ * stays consistent. The flat list distinguishes agent vs shell via the
+ * badge, not the name. There is no agent-CLI decoration (#642, D22
+ * hard-cut: the old `claude-…` prefix is removed, no compatibility shim).
  *
  * The random timestamp suffix is gone. Idempotency for re-picking the
  * same directory is handled server-side by `tmux new-session -A`
@@ -42,8 +47,11 @@ internal object SessionNameDerivation {
      *   home-relative path and the `$HOME` special case). When `null` only
      *   the `~`-prefix form can be recognised as home; absolute paths are
      *   treated as outside-home.
-     * @param agentCommand for agent sessions, the CLI command to prefix
-     *   (e.g. `claude`); `null`/blank for shell sessions.
+     * @param agentCommand accepted for call-site convenience (the picker
+     *   passes the agent CLI for agent sessions). It no longer affects the
+     *   name — the convention is a pure path-prefix shared by agent and
+     *   shell sessions (#642). The flat list distinguishes them via the
+     *   badge, not the name.
      * @param existingNames names already taken on the host. When the
      *   derived base name is present, a deterministic `-2`, `-3`, … suffix
      *   is appended until a free name is found. Default empty (no
@@ -53,13 +61,14 @@ internal object SessionNameDerivation {
     fun derive(
         startDirectory: String,
         homeDirectory: String?,
-        agentCommand: String?,
+        @Suppress("UNUSED_PARAMETER") agentCommand: String?,
         existingNames: Set<String> = emptySet(),
     ): String {
+        // Pure path-prefix: the agent CLI no longer decorates the name
+        // (#642). Agent and shell sessions in the same directory share the
+        // same base; the flat list distinguishes them via the badge.
         val base = baseName(startDirectory, homeDirectory)
-        val prefix = agentCommand?.trim()?.takeIf { it.isNotEmpty() }?.let { sanitisePart(it) }
-        val candidate = if (!prefix.isNullOrEmpty()) "$prefix-$base" else base
-        return disambiguate(candidate, existingNames)
+        return disambiguate(base, existingNames)
     }
 
     /**

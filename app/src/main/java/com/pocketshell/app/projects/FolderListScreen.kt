@@ -570,9 +570,9 @@ private fun queryUriSize(resolver: ContentResolver, uri: Uri): Long? = try {
  * possible) rather than the old cryptic `<basename>-<6-digit-timestamp>`.
  * See [SessionNameDerivation] for the full convention.
  *
- *  - `~/git/pocketshell` (agent) → `claude-git-pocketshell`
- *  - `/var/log` (shell)          → `var-log`
- *  - `$HOME` itself              → `home-<homeBasename>`
+ *  - `~/git/pocketshell` (agent or shell) → `git-pocketshell`
+ *  - `/var/log` (shell)                   → `var-log`
+ *  - `$HOME` itself                       → `home-<homeBasename>`
  *
  * @param homeDirectory the remote `$HOME` if known, so paths under home
  *   collapse to their home-relative form (and `~` is recognised). May be

@@ -126,14 +126,15 @@ class RepoBrowserSessionPickerTest {
             agentChoice.startCommand(),
         )
 
-        // Agent session name carries the agent prefix, derived from the
-        // repo path — identical to the folder Agent flow.
+        // Agent session name is the pure path-prefix derived from the repo
+        // path — no agent-CLI decoration (#642), identical to the folder
+        // Agent flow and to the Shell name for the same directory.
         val name = derivedSessionName(
             choice = agentChoice,
             homeDirectory = conventionalRemoteHome("alexey"),
             existingNames = knownSessionNames(FolderListUiState.Loading()),
         )
-        assertEquals("codex-git-pocketshell", name)
+        assertEquals("git-pocketshell", name)
     }
 
     // Screenshot capture is best-effort evidence: a content-only Compose

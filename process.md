@@ -307,7 +307,7 @@ Parallelism is issue-scoped, not role-skipping:
 - Waiting on an agent is only appropriate when the next required process step depends on that specific agent result and there is no other useful non-overlapping work to do.
 - Concurrent-agent cap: **up to ~10 background agents** can run in parallel under normal load (research spikes + implementers + reviewers combined). When the cap is reached and more work is queued, prefer firing read-only research/Explore spikes (no filesystem contention) over additional implementers. Drop below the cap only when an agent completes; do not pause running agents to make room.
 - Push for parallelism actively: when an agent completes, the orchestrator's next step is normally "what else can dispatch right now?" not "wait for the next user message." Independent research (audits, spikes, library feasibility) is especially good for filling capacity because it doesn't compete for the AVD.
-- Emulator-touching work is the contention bottleneck, not the agent count itself. Reviewers and implementers that need `connectedAndroidTest` queue politely on the AVD (retry once on SIGKILL) per the workflow set in `emulator_contention.md`. The release-emulator-validation gate scripts hold an exclusive `flock` (#182) and will block sibling worktrees during a release run.
+- Emulator-touching work is the contention bottleneck, not the agent count itself. **Run every connected/emulator test through `scripts/connected-test.sh --suffix i<issue> <gradle args>`** (#672). It (a) wraps the run in the shared AVD `flock` (`scripts/lib/avd-lock.sh`) and (b) builds + installs with a per-worktree `applicationIdSuffix` (`-PpocketshellAppIdSuffix=i<issue>`) so the APK installs as `com.pocketshell.app.i<issue>` and **coexists** with sibling agents' APKs on the one emulator instead of `adb install` SIGKILL-ing them mid-run. This is what makes parallel agents safe — prefer it over serializing. `--cleanup-suffixes` sweeps leftover `com.pocketshell.app.i*` (it spares the base package). A raw `./gradlew connectedDebugAndroidTest` (no wrapper) still races siblings; only fall back to it (with retry-once on a `Process crashed`/signal-9 SIGKILL, which is a sibling install, not an assertion failure) when the wrapper is unavailable. The release-emulator-validation gate scripts hold an exclusive `flock` (#182) and will block sibling worktrees during a release run.
 
 ### Choosing the right agent type
 
@@ -430,9 +430,16 @@ the same as one created by the raw commands above.
   new work.
 - Respect file ownership across parallel issues — the brief lists which
   files belong to other live issues and must not be touched.
-- Queue politely on shared resources (local emulator, Docker compose). If
-  resources are held by a sibling worktree, wait or retry once; do not
-  race. Surface persistent contention in the status comment.
+- Run connected/emulator tests through
+  `scripts/connected-test.sh --suffix i<issue> <gradle args>` (#672) — it
+  holds the shared AVD lock and installs your APK under a per-worktree
+  `applicationId` (`com.pocketshell.app.i<issue>`) so you coexist with
+  sibling agents on the one emulator instead of SIGKILL-ing each other's
+  installs. Don't fire a bare `./gradlew connectedDebugAndroidTest` in
+  parallel. For Docker compose + other shared resources, queue politely;
+  if held, wait or retry once, and surface persistent contention in the
+  status comment. A `Process crashed`/signal-9 with fewer tests than
+  expected is a sibling-install SIGKILL, not an assertion failure.
 - Report by posting a comment on the GitHub issue. Include the absolute
   worktree path in the final message back to the orchestrator so the diff
   can be reviewed and merged.
@@ -443,7 +450,12 @@ the same as one created by the raw commands above.
   Do not pull the diff into `main` to inspect — that pollutes the
   orchestrator's checkout.
 - Run build, unit tests, and the emulator/Docker workbench from inside the
-  worktree.
+  worktree. Run connected/emulator tests through
+  `scripts/connected-test.sh --suffix i<issue> <gradle args>` (#672) so your
+  install coexists with sibling agents on the shared AVD instead of
+  SIGKILL-ing them; a `Process crashed`/signal-9 with fewer tests than
+  expected is a sibling-install collision, not a real failure — re-run, don't
+  report it as the implementer's bug.
 - Approve or request changes via an issue comment as usual. The reviewer
   does not need its own worktree.
 

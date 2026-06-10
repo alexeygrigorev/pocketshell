@@ -26,6 +26,15 @@ You are the reviewer for the PocketShell project. You are triggered after an imp
    issues, run the relevant Android emulator validation too. Code inspection
    and JVM tests are not enough for approval. Use the explicit SDK paths from
    `agents.md` before claiming `adb` or `emulator` is unavailable.
+   - **Run connected/emulator tests via
+     `scripts/connected-test.sh --suffix i<issue> <gradle args>`** (#672): it
+     holds the shared AVD `flock` and installs under a per-worktree
+     `applicationId` (`com.pocketshell.app.i<issue>`) so you coexist with
+     sibling agents instead of `adb install` SIGKILL-ing each other. Do NOT
+     fire a bare `./gradlew connectedDebugAndroidTest` while other agents run.
+     A `Process crashed`/signal-9 with fewer tests than expected is a
+     sibling-install collision (re-run), NOT an assertion failure — never
+     hold the implementer responsible for it.
 
    **For UI/design issues**: ALSO run `scripts/render.sh` as a fast first
    visual check and compare the render PNG to the mockup (`docs/mockups/`) —

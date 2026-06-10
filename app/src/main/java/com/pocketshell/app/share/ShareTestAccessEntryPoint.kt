@@ -1,9 +1,15 @@
 package com.pocketshell.app.share
 
+import android.content.Context
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.tmux.TmuxClientFactory
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 
 /**
@@ -39,4 +45,16 @@ import dagger.hilt.components.SingletonComponent
 internal interface ShareTestAccessEntryPoint {
     fun activeTmuxClients(): ActiveTmuxClients
     fun tmuxClientFactory(): TmuxClientFactory
+
+    // Issue #664: the deps a connected Compose UI test needs to build a real
+    // [ShareViewModel] off the production Hilt graph and render
+    // [HostPickerScreen] for an arbitrary upload state (the NeedsPassphrase ->
+    // PassphraseDialog rendering case). Constructing a fresh ViewModel through
+    // these singletons keeps the rendered surface the real production one.
+    @ApplicationContext
+    fun applicationContext(): Context
+    fun hostDao(): HostDao
+    fun sshKeyDao(): SshKeyDao
+    fun projectRootDao(): ProjectRootDao
+    fun sshLeaseManager(): SshLeaseManager
 }

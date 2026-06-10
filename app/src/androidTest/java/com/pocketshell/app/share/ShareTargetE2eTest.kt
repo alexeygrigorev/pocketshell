@@ -7,6 +7,8 @@ import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.core.content.FileProvider
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -193,7 +195,7 @@ class ShareTargetE2eTest {
                 pollRemoteUntilFileExists(key, marker)
             }
             assertNoShareFailure("upload reported a failure state in the share UI")
-            assertNoShareSuccessSurface()
+            assertShareSuccessSurface(marker)
             assertNotNull(
                 "expected at least one share-target file under ~/inbox/pocketshell/ on remote",
                 remoteListing,
@@ -300,6 +302,12 @@ class ShareTargetE2eTest {
             // Issue #473: pick "Host inbox" in the per-host target chooser.
             clickHostInboxTarget()
 
+            // Issue #664: the multi-file upload renders a single success
+            // surface once all three land; its detail lists every uploaded
+            // path so it carries the shared base marker.
+            assertNoShareFailure("multi-file upload reported a failure state")
+            assertShareSuccessSurface(marker)
+
             // Every staged file must have landed under the inbox with
             // its own marker and round-tripped contents.
             for ((fileMarker, _, contents) in staged) {
@@ -307,7 +315,6 @@ class ShareTargetE2eTest {
                     pollRemoteUntilFileExists(key, fileMarker)
                 }
                 assertNoShareFailure("multi-file upload reported a failure state")
-                assertNoShareSuccessSurface()
                 assertNotNull(
                     "expected file with marker '$fileMarker' under ~/inbox/pocketshell/",
                     remoteListing,
@@ -434,7 +441,7 @@ class ShareTargetE2eTest {
                 pollRemoteUntilProjectFileExists(key, projectPath, marker)
             }
             assertNoShareFailure("project upload reported a failure state")
-            assertNoShareSuccessSurface()
+            assertShareSuccessSurface(marker)
             assertNotNull(
                 "expected a share file under $projectPath/.inbox/ on remote",
                 remoteName,
@@ -616,7 +623,7 @@ class ShareTargetE2eTest {
                 pollRemoteUntilProjectFileExists(key, projectPath, marker)
             }
             assertNoShareFailure("session-project upload reported a failure")
-            assertNoShareSuccessSurface()
+            assertShareSuccessSurface(marker)
             assertNotNull(
                 "expected a share file under $projectPath/.inbox/ on remote",
                 remoteName,
@@ -1073,18 +1080,41 @@ class ShareTargetE2eTest {
             val detailText = compose
                 .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
-                .joinToString(" / ") { it.toString() }
+                .flatMap { node ->
+                    node.config.getOrNull(SemanticsProperties.Text).orEmpty().map { it.text }
+                }
+                .joinToString(" / ")
             throw AssertionError("$message: $detailText")
         }
     }
 
-    private fun assertNoShareSuccessSurface() {
-        val successNodes = compose
-            .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
+    /**
+     * Issue #664: #621 ("Reuse SSH leases for share uploads") deliberately
+     * reverted the #593 "finish quietly" behaviour — a successful file share
+     * now renders a confirmation surface (`SHARE_RESULT_SUCCESS_TAG`) with the
+     * remote path and a copy/Done affordance. The old assertion still demanded
+     * the quiet-finish behaviour and so every file-share journey assertion
+     * contradicted current production, which is the broken-test root cause.
+     * Assert the CORRECT current behaviour: the success surface IS shown and
+     * its detail carries the marker we uploaded.
+     */
+    private fun assertShareSuccessSurface(marker: String) {
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        val detail = compose
+            .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
             .fetchSemanticsNodes()
+            .flatMap { node ->
+                node.config.getOrNull(SemanticsProperties.Text).orEmpty().map { it.text }
+            }
+            .joinToString(" / ")
         assertTrue(
-            "successful file shares must not render the old upload-complete result surface",
-            successNodes.isEmpty(),
+            "expected the success surface detail to reference the uploaded marker " +
+                "'$marker' but got: $detail",
+            detail.contains(marker),
         )
     }
 

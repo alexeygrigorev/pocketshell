@@ -1111,6 +1111,21 @@ internal class ShareViewModel internal constructor(
         _uploadState.value = UploadState.Idle
     }
 
+    /**
+     * Issue #664: deterministic test seam. Pushes [_uploadState] to an
+     * arbitrary [UploadState] so an instrumented Compose UI test can render
+     * the production surface for that state (e.g. drive
+     * [UploadState.NeedsPassphrase] to verify the [HostPickerScreen]
+     * `PassphraseDialog` renders) without needing a passphrase-protected key
+     * and a flaky live SSH auth round-trip. The JVM unit tests already cover
+     * the real state transition (`ShareViewModelTest`); this only exercises
+     * the on-device rendering of the resulting surface.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setUploadStateForTest(state: UploadState) {
+        _uploadState.value = state
+    }
+
     fun chooseDifferentShareTarget() {
         clearPendingPassphrase()
         _targetSelection.value = null

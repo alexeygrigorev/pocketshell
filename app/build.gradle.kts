@@ -64,6 +64,28 @@ android {
         debug {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debugKeystore")
+
+            // Issue #672: let each parallel worktree install its DEBUG apk
+            // under a distinct applicationId (e.g. `com.pocketshell.app.i672`)
+            // so multiple test apps coexist on ONE emulator without
+            // uninstalling each other. The suffix comes from a gradle
+            // property and DEFAULTS EMPTY — so `./gradlew :app:assembleDebug`
+            // with no property is byte-for-byte the old `com.pocketshell.app`
+            // build, and the release build type is never touched.
+            //
+            // Only `[A-Za-z0-9._]` is allowed (a package-segment token) so a
+            // stray value can't produce an invalid/ambiguous applicationId.
+            val rawSuffix = (project.findProperty("pocketshellAppIdSuffix") as String?)
+                ?.trim()
+                .orEmpty()
+            if (rawSuffix.isNotEmpty()) {
+                require(rawSuffix.matches(Regex("[A-Za-z0-9._]+"))) {
+                    "pocketshellAppIdSuffix must match [A-Za-z0-9._]+ (got: '$rawSuffix')"
+                }
+                // applicationIdSuffix is appended verbatim, so prepend the dot
+                // separator ourselves (`i672` -> `com.pocketshell.app.i672`).
+                applicationIdSuffix = ".$rawSuffix"
+            }
         }
     }
 

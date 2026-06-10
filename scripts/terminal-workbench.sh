@@ -80,7 +80,25 @@ else
   AGENT_SERVICE="${AGENT_SERVICE:-agents}"
   SSH_PORT="${SSH_PORT:-2222}"
 fi
-DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
+# Issue #672: per-worktree applicationIdSuffix. When POCKETSHELL_APP_ID_SUFFIX
+# is set (e.g. `i672`), build/install/instrument the suffixed package
+# `com.pocketshell.app.i672` so multiple test apps coexist on one emulator.
+# Default empty -> the base package, identical to the historical behaviour.
+# Test SELECTORS are fully-qualified source class names and are NOT suffixed
+# (applicationIdSuffix changes only the runtime applicationId, not Java
+# package/class names).
+POCKETSHELL_APP_ID_SUFFIX="${POCKETSHELL_APP_ID_SUFFIX:-}"
+if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
+  [[ "$POCKETSHELL_APP_ID_SUFFIX" =~ ^[A-Za-z0-9._]+$ ]] || {
+    printf 'FAIL: POCKETSHELL_APP_ID_SUFFIX must match [A-Za-z0-9._]+ (got: %s)\n' "$POCKETSHELL_APP_ID_SUFFIX" >&2
+    exit 1
+  }
+  PACKAGE="com.pocketshell.app.$POCKETSHELL_APP_ID_SUFFIX"
+else
+  PACKAGE="com.pocketshell.app"
+fi
+TEST_PACKAGE="$PACKAGE.test"
+DEVICE_OUTPUT_DIR="/sdcard/Android/media/$PACKAGE/additional_test_output"
 DEVICE_ARTIFACT_DIR="$DEVICE_OUTPUT_DIR/terminal-lab"
 TEST_SELECTOR="${TEST_SELECTOR:-com.pocketshell.app.terminal.TerminalLabDockerTest#terminalWorkbenchKeepsDockerShellOpenForVisualIteration}"
 if [[ "$REAL_AGENTS" == "1" && "$TEST_SELECTOR_WAS_SET" != "1" ]]; then
@@ -349,7 +367,11 @@ run_logged "02-docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build
 run_logged "03-docker-ssh-readiness" wait_for_ssh_fixture
 
 if [[ "$BUILD_APKS" == "1" ]]; then
-  run_logged "04-build-apks" ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+  GRADLE_SUFFIX_ARGS=()
+  if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
+    GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$POCKETSHELL_APP_ID_SUFFIX")
+  fi
+  run_logged "04-build-apks" ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
 else
   [[ -f "$APP_APK" ]] || fail "app APK missing at $APP_APK"
   [[ -f "$TEST_APK" ]] || fail "test APK missing at $TEST_APK"
@@ -424,7 +446,7 @@ run_terminal_workbench_instrumentation() {
     run_logged "07-run-workbench" \
       "$ADB" shell am instrument -w -r \
       "${INSTRUMENTATION_ARGS[@]}" \
-      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
+      "$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner"
     instrumentation_status=$?
     set -e
     cp "$RUN_DIR/07-run-workbench.log" "$RUN_DIR/07-run-workbench-attempt-$attempt.log" || true
@@ -444,8 +466,8 @@ run_terminal_workbench_instrumentation() {
       printf 'Terminal workbench instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
       "$ADB" reconnect >/dev/null 2>&1 || true
       "$ADB" wait-for-device >/dev/null 2>&1 || true
-      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
-      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop "$TEST_PACKAGE" >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
       sleep 2
       continue
     fi

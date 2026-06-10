@@ -32,7 +32,23 @@ SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
 SSH_PORT="${SSH_PORT:-2222}"
 SSH_USER="${SSH_USER:-testuser}"
-DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
+# Issue #672: per-worktree applicationIdSuffix. When POCKETSHELL_APP_ID_SUFFIX
+# is set (e.g. `i672`), build/install/instrument the suffixed package
+# `com.pocketshell.app.i672` so multiple test apps coexist on one emulator.
+# Default empty -> the base package, identical to the historical behaviour.
+# Test CLASS selectors are fully-qualified source names and are NOT suffixed.
+POCKETSHELL_APP_ID_SUFFIX="${POCKETSHELL_APP_ID_SUFFIX:-}"
+if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
+  [[ "$POCKETSHELL_APP_ID_SUFFIX" =~ ^[A-Za-z0-9._]+$ ]] || {
+    printf 'FAIL: POCKETSHELL_APP_ID_SUFFIX must match [A-Za-z0-9._]+ (got: %s)\n' "$POCKETSHELL_APP_ID_SUFFIX" >&2
+    exit 1
+  }
+  PACKAGE="com.pocketshell.app.$POCKETSHELL_APP_ID_SUFFIX"
+else
+  PACKAGE="com.pocketshell.app"
+fi
+TEST_PACKAGE="$PACKAGE.test"
+DEVICE_OUTPUT_DIR="/sdcard/Android/media/$PACKAGE/additional_test_output"
 APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
 
@@ -285,8 +301,8 @@ reset_device_artifacts_command() {
       sleep 1
       continue
     }
-    timeout 20s "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-    timeout 20s "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
+    timeout 20s "$ADB" shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+    timeout 20s "$ADB" shell am force-stop "$TEST_PACKAGE" >/dev/null 2>&1 || true
     timeout 20s "$ADB" shell input keyevent HOME >/dev/null 2>&1 || true
     timeout 20s "$ADB" shell rm -rf "$device_artifact_dir" && return 0
     sleep 1
@@ -333,7 +349,7 @@ run_instrumentation_with_retry() {
       -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
       "${runner_args[@]}" \
       -e class "$selector" \
-      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+      "$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner" ||
       status=$?
     cp "$attempt_log" "$canonical_log"
 
@@ -656,7 +672,11 @@ build_and_install_apks() {
         printf 'Skipped because PHONE_WALKTHROUGH_CLEAN_GENERATED=0\n'
       } | tee "$LOG_DIR/07-clean-app-generated-build-outputs.log"
     fi
-    run_logged "08-build-apks" ./gradlew --no-daemon --no-build-cache --no-parallel :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+    GRADLE_SUFFIX_ARGS=()
+    if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
+      GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$POCKETSHELL_APP_ID_SUFFIX")
+    fi
+    run_logged "08-build-apks" ./gradlew --no-daemon --no-build-cache --no-parallel :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
   else
     [[ -f "$APP_APK" ]] || fail "BUILD_APKS=0 but app APK is missing at $APP_APK"
     [[ -f "$TEST_APK" ]] || fail "BUILD_APKS=0 but androidTest APK is missing at $TEST_APK"
@@ -670,10 +690,10 @@ build_and_install_apks() {
 
   run_logged "09-cold-reset-app-state-before-install" bash -lc \
     "printf 'COLD-RESET: clearing app/test package data for deterministic phone walkthrough\n'; \
-    '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app.test >/dev/null 2>&1 || true"
-  run_logged "10-cold-reset-install-apks" bash -lc "$(declare -f install_apk); ADB='$ADB'; printf 'COLD-RESET: installing app/test APKs after data clear\n'; install_apk com.pocketshell.app '$APP_APK'; install_apk com.pocketshell.app.test '$TEST_APK'"
+    '$ADB' shell am force-stop $PACKAGE >/dev/null 2>&1 || true; '$ADB' shell am force-stop $TEST_PACKAGE >/dev/null 2>&1 || true; '$ADB' shell pm clear $PACKAGE >/dev/null 2>&1 || true; '$ADB' shell pm clear $TEST_PACKAGE >/dev/null 2>&1 || true"
+  run_logged "10-cold-reset-install-apks" bash -lc "$(declare -f install_apk); ADB='$ADB'; printf 'COLD-RESET: installing app/test APKs after data clear\n'; install_apk $PACKAGE '$APP_APK'; install_apk $TEST_PACKAGE '$TEST_APK'"
   run_logged "11-wait-package-manager-idle" bash -lc \
-    "'$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true; '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true; for i in {1..30}; do '$ADB' shell pm path com.pocketshell.app >/dev/null && '$ADB' shell pm path com.pocketshell.app.test >/dev/null && '$ADB' shell pm list instrumentation | grep -q '^instrumentation:com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner' && exit 0; sleep 1; done; '$ADB' shell pm path com.pocketshell.app; '$ADB' shell pm path com.pocketshell.app.test; '$ADB' shell pm list instrumentation; exit 1"
+    "'$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true; '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true; for i in {1..30}; do '$ADB' shell pm path $PACKAGE >/dev/null && '$ADB' shell pm path $TEST_PACKAGE >/dev/null && '$ADB' shell pm list instrumentation | grep -q \"^instrumentation:$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner\" && exit 0; sleep 1; done; '$ADB' shell pm path $PACKAGE; '$ADB' shell pm path $TEST_PACKAGE; '$ADB' shell pm list instrumentation; exit 1"
 }
 
 assert_no_crash_diagnostics() {
@@ -704,7 +724,7 @@ run_terminal_lab() {
   build_and_install_apks
 
   run_logged "12-reset-terminal-lab-artifacts" bash -lc \
-    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$TERMINAL_LAB_DEVICE_DIR'"
+    "'$ADB' shell am force-stop $PACKAGE >/dev/null 2>&1 || true; '$ADB' shell am force-stop $TEST_PACKAGE >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$TERMINAL_LAB_DEVICE_DIR'"
   run_logged "13-clear-logcat" "$ADB" logcat -c
 
   run_instrumentation_with_retry \
@@ -782,7 +802,7 @@ run_visual_audit() {
   build_and_install_apks
 
   run_logged "12-reset-visual-audit-artifacts" bash -lc \
-    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$VISUAL_AUDIT_DEVICE_DIR'"
+    "'$ADB' shell am force-stop $PACKAGE >/dev/null 2>&1 || true; '$ADB' shell am force-stop $TEST_PACKAGE >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$VISUAL_AUDIT_DEVICE_DIR'"
   run_logged "13-clear-logcat" "$ADB" logcat -c
 
   local main_start_ms main_end_ms conversation_start_ms conversation_end_ms composer_start_ms composer_end_ms
@@ -909,7 +929,7 @@ run_tmux_existing_session() {
   build_and_install_apks
 
   run_logged "12-reset-tmux-existing-session-artifacts" bash -lc \
-    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$TMUX_EXISTING_SESSION_DEVICE_DIR'"
+    "'$ADB' shell am force-stop $PACKAGE >/dev/null 2>&1 || true; '$ADB' shell am force-stop $TEST_PACKAGE >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$TMUX_EXISTING_SESSION_DEVICE_DIR'"
   run_logged "13-clear-logcat" "$ADB" logcat -c
 
   run_instrumentation_with_retry \
@@ -1011,7 +1031,7 @@ run_setup_detection_profile() {
 
   rm -rf "$device_artifact_dir" "$screenshot_dir"
   run_logged "12-reset-setup-detection-$profile-artifacts" bash -lc \
-    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$SETUP_DETECTION_DEVICE_DIR/$profile'"
+    "'$ADB' shell am force-stop $PACKAGE >/dev/null 2>&1 || true; '$ADB' shell am force-stop $TEST_PACKAGE >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$SETUP_DETECTION_DEVICE_DIR/$profile'"
   run_logged "13-clear-logcat-setup-detection-$profile" "$ADB" logcat -c
 
   run_instrumentation_with_retry \

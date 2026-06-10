@@ -121,6 +121,20 @@ abstract class NetworkFaultProofBase {
         waitForSshFixtureReady(SshKey.Pem(key), port = NETWORK_FAULT_SSH_PORT)
     }
 
+    /**
+     * Seed an ADDITIONAL tmux session on the same fixture without resetting the
+     * proxy — used by multi-session switch proofs that need a second session to
+     * switch to. Goes through the direct SSH port so it works regardless of the
+     * proxy toxic state.
+     */
+    protected suspend fun seedExtraSession(
+        key: String,
+        sessionName: String,
+        readyText: String,
+    ) {
+        seedTmuxSession(key, sessionName, readyText)
+    }
+
     protected suspend fun preparePacketLossProxyAndRemoteSession(
         key: String,
         sessionName: String,
@@ -186,6 +200,17 @@ abstract class NetworkFaultProofBase {
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        openSessionFromList(hostName, sessionName)
+    }
+
+    /**
+     * Tap a session row from the host-detail folder/session list (the screen
+     * reached after a host-row tap, or after pressing Back out of the terminal).
+     * Splits out of [attachToSession] so multi-session switch proofs can open a
+     * second session without re-navigating from the host list.
+     */
+    protected fun openSessionFromList(hostName: String, sessionName: String) {
+        val pickerTimeoutMs = TerminalTestTimeouts.terminalVisibilityTimeoutMs()
         var folderPath = FolderListViewModel.UNTRACKED_PATH
         waitUntilWithDiagnostics(
             label = "folder row for $sessionName",

@@ -112,12 +112,28 @@ internal class RealSshSession(
         tail(path, fromLineExclusive = -1, onLine = onLine)
 
     override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job {
-        ensureConnected()
         // Each tail owns its own exec channel — running `tail -F` keeps the
         // channel open for the lifetime of the job. Cancelling the job
         // closes the channel via `Command.close()` which signals the remote
         // tail to exit.
         return scope.launch {
+            // Issue #621: the connectivity check must run INSIDE the launched
+            // coroutine, not synchronously before it. A `startAgentConversationForPane`
+            // crash (app v0.3.29) was traced to `tail()` calling `ensureConnected()`
+            // on the caller's thread over an already-dead SSH session, throwing
+            // `SshException("SSH session is not connected")` straight into
+            // `AgentConversationRepository.tailEventsFromLine` / the main thread.
+            // A silently-dead transport (sshj's `isConnected` lies until the 60s
+            // keepalive trips) is an ordinary network-loss event, NOT a crash:
+            // the reconnect state machine relaunches the tail on a fresh session
+            // after reattach. Handle it like the `startSession()` transport-drop
+            // below — log it as recoverable and end the tail job cleanly — so it
+            // never reaches the crash reporter even if a caller forgets to wrap
+            // the launch in a try/catch.
+            if (!isConnected) {
+                logTailRecoverableFailure(path, SshException("SSH session is not connected"))
+                return@launch
+            }
             val coroutineJob = currentCoroutineContext()[Job]
             // Issue #239 — agent-log tail must NOT propagate transport
             // failures to the coroutine root.

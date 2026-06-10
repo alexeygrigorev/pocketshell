@@ -57,8 +57,11 @@ import java.net.SocketException
  *     error (`IllegalStateException`) → wrapped in `SshException` and
  *     surfaced via the job's completion exception (so genuine bugs
  *     still get reported).
- *  6. `ensureConnected()` precondition still enforced: an unconnected
- *     client throws `SshException` synchronously from `tail()`.
+ *  6. Issue #621: an unconnected session is a RECOVERABLE transport drop,
+ *     not a programmer error. `tail()` on a disconnected session must NOT
+ *     throw synchronously into the caller (that crashed the main thread via
+ *     `startAgentConversationForPane` → `tailEventsFromLine` in app v0.3.29).
+ *     It returns a job that ends cleanly, like the startSession-drop cases.
  *
  * The test does NOT exercise the mid-stream `readLine()` IOException
  * branch — that requires a full `Session` / `Command` mock and the
@@ -146,24 +149,39 @@ class RealSshSessionTailRecoverableFailureTest {
     }
 
     @Test
-    fun `tail throws SshException synchronously when the session is not connected`() {
-        // Precondition guard from `ensureConnected()` is unchanged —
-        // calling `tail` on a disconnected session is a programmer
-        // error, not a recoverable runtime fault. This test pins that
-        // synchronous-throw contract so the #239 fix does not
-        // accidentally swallow the pre-flight check.
+    fun `tail on a disconnected session ends cleanly without a synchronous throw`() {
+        // Issue #621: app v0.3.29 crashed on the main thread because
+        // `tail()` ran its connectivity check SYNCHRONOUSLY (before the
+        // launched coroutine) and threw `SshException("SSH session is not
+        // connected")` straight into `startAgentConversationForPane` →
+        // `AgentConversationRepository.tailEventsFromLine`. A silently-dead
+        // transport (sshj's `isConnected` lies until its 60s keepalive trips)
+        // is an ordinary network-loss event — the reconnect state machine
+        // relaunches the tail after reattach — so it must be handled like any
+        // other transport drop: the tail job ends cleanly and NOTHING is
+        // thrown to the caller's thread, even if the caller forgot to wrap it.
         val client = DisconnectedClient()
         val session = RealSshSession(client)
-
+        val capturedExceptions = mutableListOf<Throwable>()
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
+            capturedExceptions += throwable
+        }
         try {
-            session.tail("/path") { /* unreachable */ }
-            assertTrue("expected SshException for disconnected session", false)
-        } catch (e: SshException) {
+            // Must NOT throw synchronously into the caller.
+            val job = session.tail("/path") { /* unreachable */ }
+            runBlocking {
+                withTimeout(5_000) { job.join() }
+                delay(10)
+            }
+            assertTrue("tail job should complete cleanly on a disconnected session", job.isCompleted)
+            assertFalse("tail job should NOT complete with an exception", job.isCancelled)
             assertTrue(
-                "expected message to flag the disconnected precondition",
-                e.message?.contains("not connected") == true,
+                "no uncaught exception must reach the default handler; captured=$capturedExceptions",
+                capturedExceptions.isEmpty(),
             )
         } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previousHandler)
             session.close()
         }
     }

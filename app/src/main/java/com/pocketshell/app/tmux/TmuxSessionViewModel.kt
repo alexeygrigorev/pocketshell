@@ -441,6 +441,19 @@ public class TmuxSessionViewModel @Inject constructor(
     // connect attempt so a stale cause never leaks into a later decision.
     private var lastConnectFailureCause: Throwable? = null
 
+    // Issue #621 / #634 / #636 (Slice 4): how many consecutive transparent
+    // stale-lease auto-recoveries we have already kicked off for the current
+    // connect chain. A warm SSH lease can be silently dead — its transport
+    // keeps reporting `isConnected` until sshj's 60s keepalive trips — so the
+    // first `tmux -CC` open / `list-panes` over it EOFs. Rather than stranding
+    // the user on a Disconnected band + manual Reconnect, the open/switch
+    // attach evicts the poisoned lease and re-dials a FRESH transport
+    // transparently (via [scheduleAutoReconnect]). This counter caps how many
+    // times we do that before concluding the host is genuinely dead and
+    // falling back to the manual Reconnect affordance, so a permanently-broken
+    // host cannot loop forever. Reset to 0 on a successful attach.
+    private var staleLeaseAutoRecoverAttempts: Int = 0
+
     // Issue #145: whether [reconnect] would result in a new connect
     // attempt. The screen surfaces a Reconnect button only when this is
     // true; without a known target (e.g. the ViewModel was never opened)
@@ -921,6 +934,10 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         trigger: TmuxConnectTrigger,
     ) {
+        // Issue #621 / #634 / #636 (Slice 4): a successful attach means the
+        // stale-lease heal worked (or was never needed), so the budget resets
+        // for the next connect chain.
+        staleLeaseAutoRecoverAttempts = 0
         lifecycleReattachNetworkCoalesce =
             if (trigger == TmuxConnectTrigger.LifecycleReattach) {
                 LifecycleReattachNetworkCoalesce(
@@ -2905,6 +2922,71 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
+            // Issue #621 / #634 / #636 (Slice 4): the fast-switch reuses the
+            // warm SSH session directly. When that session is silently dead
+            // (`session.isConnected` lies until sshj's 60s keepalive trips),
+            // the `tmux -CC` open / `list-panes` EOFs here. Rather than
+            // surfacing a Disconnected band + manual Reconnect, evict the
+            // poisoned lease and fall back to the full [runConnect] path on a
+            // FRESH transport — INLINE in this same coroutine so the heal is
+            // transparent and never re-enters a failing connect job. The
+            // budget cap keeps a genuinely-dead host from looping forever.
+            if (
+                isStaleChannelSymptom(t) &&
+                staleLeaseAutoRecoverAttempts < STALE_LEASE_AUTO_RECOVER_MAX
+            ) {
+                staleLeaseAutoRecoverAttempts += 1
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-stale-lease-auto-recover fast-switch EOF -> fresh re-dial inline; " +
+                        "attempt=$staleLeaseAutoRecoverAttempts/$STALE_LEASE_AUTO_RECOVER_MAX " +
+                        "${targetLogFields(target)}",
+                )
+                ReconnectCauseTrail.record(
+                    stage = "stale_lease_auto_recover",
+                    outcome = "fast_switch_fresh_redial",
+                    cause = "stale_lease_attach_eof",
+                    trigger = trigger.logValue,
+                    "attempt" to staleLeaseAutoRecoverAttempts,
+                    "maxAttempts" to STALE_LEASE_AUTO_RECOVER_MAX,
+                    "hostId" to target.hostId,
+                    "failureClass" to t.javaClass.simpleName,
+                )
+                // Evict the poisoned pooled lease so the fresh re-dial cannot
+                // re-grab the corpse, then tear the failed attach down fully
+                // (cancel+join the event loop, per-pane, and disconnect-watcher
+                // jobs) exactly like the slow [connect] path does before a
+                // reconnect — leaking those jobs would leave stale collectors
+                // on the dead client and can wedge the subsequent attach.
+                // Closing the parked cached runtimes is dispatched async (as
+                // the fast-switch's own leave path does) so joining a leaving
+                // pane producer never blocks the re-dial.
+                closeCachedRuntimesAsync(runtimeCache.removeHost(target.hostId))
+                withContext(NonCancellable) {
+                    runCatching { sshLeaseManager.disconnect(target.toSshLeaseTarget().leaseKey) }
+                    closeCurrentConnectionAndJoin(
+                        cacheEviction = RuntimeCacheEviction.TargetRuntime(target.toRuntimeKey()),
+                    )
+                }
+                connectingTarget = target
+                refreshReconnectAvailability()
+                // Escalate from the keep-frame [Switching] to the full-screen
+                // [Connecting] overlay: we are now doing a real fresh handshake.
+                _connectionStatus.value = ConnectionStatus.Connecting(
+                    target.host,
+                    target.port,
+                    target.user,
+                )
+                _panes.value = emptyList()
+                rebuildUnifiedPanes()
+                // The poisoned pooled lease was disconnected above and the
+                // cached runtimes were dropped, so the pool is empty: an
+                // [AutoReconnect] dial (which does NOT re-run the synchronous
+                // force-fresh cache cleanup) still opens a brand-new transport
+                // without blocking on a leaving pane producer.
+                runConnect(target, attempt, TmuxConnectTrigger.AutoReconnect)
+                return
+            }
             failConnectAttempt(
                 target = target,
                 attempt = attempt,
@@ -3066,10 +3148,119 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         activeAttachMilestone = null
         activeTarget = null
+
+        // Issue #621 / #634 / #636 (Slice 4): an open/switch attach that EOFs
+        // on a silently-dead warm lease (`tmux -CC` open or `list-panes`) must
+        // NOT strand the user on a Disconnected band + manual Reconnect. The
+        // poisoned lease was already evicted above (staleChannelSymptom), so a
+        // FRESH re-dial will attach to the live tmux session. Kick off the
+        // existing auto-reconnect machinery transparently instead of surfacing
+        // Failed, so the heal is invisible to the user.
+        //
+        // We only do this for the INITIAL user-facing open/switch (the
+        // not-yet-a-reconnect triggers). When the trigger is already a
+        // reconnect trigger, the [scheduleAutoReconnect] loop that invoked us
+        // owns the retry/exhaust decision — re-entering it here would
+        // double-drive the loop. The budget cap ([STALE_LEASE_AUTO_RECOVER_MAX])
+        // ensures a genuinely-dead host (every fresh transport also EOFs) falls
+        // back to the manual Reconnect affordance instead of looping forever.
+        if (shouldTransparentlyRecoverStaleLease(staleChannelSymptom, trigger)) {
+            staleLeaseAutoRecoverAttempts += 1
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-stale-lease-auto-recover transparent re-dial after stale attach EOF; " +
+                    "attempt=$staleLeaseAutoRecoverAttempts/$STALE_LEASE_AUTO_RECOVER_MAX " +
+                    "trigger=${trigger.logValue} ${targetLogFields(target)}",
+            )
+            ReconnectCauseTrail.record(
+                stage = "stale_lease_auto_recover",
+                outcome = "transparent_redial",
+                cause = "stale_lease_attach_eof",
+                trigger = trigger.logValue,
+                "attempt" to staleLeaseAutoRecoverAttempts,
+                "maxAttempts" to STALE_LEASE_AUTO_RECOVER_MAX,
+                "hostId" to target.hostId,
+                "failureClass" to cause.javaClass.simpleName,
+            )
+            // Show the Reconnecting band immediately so the surface is never a
+            // Disconnected/Failed band, even for the brief window before the
+            // fresh re-dial coroutine is dispatched. Deliberately leave
+            // [connectingTarget] null so the recovery's [connect] is not
+            // swallowed by its `connectJob?.isActive && connectingTarget ==
+            // target` early-return guard while this failing job unwinds.
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Reconnecting(
+                host = target.host,
+                port = target.port,
+                user = target.user,
+                attempt = 1,
+                maxAttempts = 1,
+                retryDelayMs = 0L,
+                reason = "Reattaching ${target.user}@${target.host}:${target.port}.",
+            )
+            // Drop any cached runtimes for this host asynchronously (as the
+            // fast-switch leave path does) so the upcoming re-dial never blocks
+            // joining a leaving pane producer, and the [AutoReconnect] dial does
+            // not have to run the synchronous force-fresh cache cleanup.
+            closeCachedRuntimesAsync(runtimeCache.removeHost(target.hostId))
+            // Re-dial via the SAME entry point the manual Reconnect uses,
+            // dispatched as a fresh top-level job so it runs AFTER this failing
+            // connect job fully unwinds rather than re-entering it. The poisoned
+            // pooled lease was already evicted above (staleChannelSymptom), so
+            // the pool is empty and an [AutoReconnect] dial opens a brand-new
+            // transport. Drop the reference to the job we are unwinding inside
+            // so the recovery's [connect] does not block joining itself.
+            val recoverTarget = target
+            connectJob = null
+            viewModelScope.launch {
+                connect(
+                    hostId = recoverTarget.hostId,
+                    hostName = recoverTarget.hostName,
+                    host = recoverTarget.host,
+                    port = recoverTarget.port,
+                    user = recoverTarget.user,
+                    keyPath = recoverTarget.keyPath,
+                    passphrase = recoverTarget.passphrase,
+                    sessionName = recoverTarget.sessionName,
+                    startDirectory = recoverTarget.startDirectory,
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                )
+            }
+            return
+        }
+
         connectingTarget = if (preserveReconnectTarget || staleChannelSymptom) target else null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Failed(message)
     }
+
+    /**
+     * Issue #621 / #634 / #636 (Slice 4): decide whether to transparently
+     * re-dial a fresh SSH transport after an open/switch attach EOF'd on a
+     * silently-dead warm lease, instead of surfacing a Disconnected band.
+     *
+     * Conditions:
+     *  - the failure is a stale-channel symptom (transport alive-but-dead, the
+     *    `failConnectAttempt` caller already evicted the poisoned lease);
+     *  - the app is foregrounded (a backgrounded app must not burn re-dials —
+     *    [scheduleAutoReconnect] would pause anyway, but we avoid even starting);
+     *  - auto-reconnect is enabled (the user hasn't disabled it / a test hasn't
+     *    cleared the delays);
+     *  - the trigger is an INITIAL open/switch, not already a reconnect trigger
+     *    (those are owned by the in-flight [scheduleAutoReconnect] loop);
+     *  - the per-chain budget has not been exhausted, so a genuinely-dead host
+     *    cannot loop forever.
+     */
+    private fun shouldTransparentlyRecoverStaleLease(
+        staleChannelSymptom: Boolean,
+        trigger: TmuxConnectTrigger,
+    ): Boolean =
+        staleChannelSymptom &&
+            appActive &&
+            autoReconnectDelaysMs.isNotEmpty() &&
+            !trigger.isReconnectTrigger &&
+            staleLeaseAutoRecoverAttempts < STALE_LEASE_AUTO_RECOVER_MAX
 
     private fun isStaleChannelSymptom(cause: Throwable?): Boolean =
         isChannelOpenFailure(cause) || isTmuxCommandTimeout(cause) || isTmuxEofWriteFailure(cause)
@@ -9198,6 +9389,16 @@ internal const val ISSUE_464_KILL_TAG: String = "issue464-killsession"
 internal const val KILL_SESSION_EVENT_WAIT_MS: Long = 2_000L
 
 private val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
+
+/**
+ * Issue #621 / #634 / #636 (Slice 4): how many consecutive transparent
+ * stale-lease re-dials an open/switch attach may trigger before concluding the
+ * host is genuinely dead and surfacing the manual Reconnect affordance. A
+ * silently-dead warm lease normally heals on the FIRST fresh transport, so a
+ * small cap is enough; it exists only to stop a permanently-broken host from
+ * looping forever (each fresh transport also EOFing).
+ */
+private const val STALE_LEASE_AUTO_RECOVER_MAX: Int = 2
 
 /**
  * Issue #440: simple class names of connect-failure causes that retrying

@@ -32,3 +32,20 @@ public data class CommandResponse(
     val output: List<String>,
     val isError: Boolean,
 )
+
+/**
+ * Issue #640: result of [TmuxClient.captureWithCursor] — a pane's `capture-pane`
+ * snapshot plus the raw `#{cursor_x},#{cursor_y}` reply line, both obtained in a
+ * single single-flight control-mode exchange.
+ *
+ * @property capture the `capture-pane` response block (the pane's rendered
+ *   lines). Callers replay [CommandResponse.output] into the emulator.
+ * @property cursorReply the raw `cursor_x,cursor_y` line from the paired
+ *   `display-message` block, or `null` when tmux did not return a usable cursor
+ *   block (older tmux, dropped/failed reply). Callers parse it and degrade to a
+ *   seed without an explicit cursor restore when it is `null`.
+ */
+public data class CaptureWithCursor(
+    val capture: CommandResponse,
+    val cursorReply: String?,
+)

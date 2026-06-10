@@ -37,6 +37,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -144,6 +145,11 @@ class TmuxAttachPrefillDockerTest {
                 lastSeedLine in remoteCapture,
             )
 
+            // Issue #640: snapshot the seed latency legs for THIS attach only,
+            // so the post-attach assertions can prove the round-trip reduction
+            // (folded cursor query + no redundant reseed).
+            TmuxSessionLatencyTelemetry.resetForTest()
+
             // Issue #470 blocker #1: runtime permissions are granted by the
             // [grantPermissions] rule before this body runs, so the system
             // permission dialog never steals focus from the Compose
@@ -239,6 +245,44 @@ class TmuxAttachPrefillDockerTest {
             assertTrue(
                 "expected visible terminal after attach to contain seeded last line $lastSeedLine to prove full-screen prefill, got:\n$finalVisible",
                 lastSeedLine in finalVisible,
+            )
+
+            // ---- Issue #640: prove the seed round-trip reduction. ----
+            // The seed now issues ONE chained `capture-pane ; display-message`
+            // command per pane (folded cursor) and does NOT run a redundant
+            // second full reseed for panes already seeded on this cold open.
+            val seedEvents = TmuxSessionLatencyTelemetry.snapshot()
+            val captureLegs = seedEvents.filter { it.name == "capture_pane" }
+            val cursorLegs = seedEvents.filter { it.name == "cursor_query" }
+            seedEvents.map { it.toArtifactLine() }.forEach {
+                Log.i(LOG_TAG, "ISSUE640_LATENCY $it")
+                println("ISSUE640_LATENCY $it")
+            }
+            // Single-pane fixture: exactly one capture per pane, no duplicate
+            // reseed pass.
+            assertEquals(
+                "cold open must capture the single visible pane exactly once " +
+                    "(no redundant second reseed); legs=${captureLegs.map { it.toArtifactLine() }}",
+                1,
+                captureLegs.size,
+            )
+            // The cursor query is folded into the capture round-trip: zero-cost
+            // legs tagged folded_into_capture, never a separate serial RTT.
+            assertTrue(
+                "expected the cursor query to be folded into the capture round-trip, " +
+                    "got cursor legs=${cursorLegs.map { it.toArtifactLine() }}",
+                cursorLegs.isNotEmpty() &&
+                    cursorLegs.all { it.durationMs == 0L && it.detail.contains("folded_into_capture=true") },
+            )
+            assertTrue(
+                "the folded capture command must report folded_cursor=true, " +
+                    "got ${captureLegs.map { it.toArtifactLine() }}",
+                captureLegs.all { it.detail.contains("folded_cursor=true") },
+            )
+            recordTiming("issue640_capture_pane_round_trips", captureLegs.size.toLong())
+            recordTiming(
+                "issue640_separate_cursor_round_trips",
+                cursorLegs.count { it.durationMs > 0L }.toLong(),
             )
 
             // Write the standard terminal-workbench artifact files so the

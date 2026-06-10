@@ -108,6 +108,15 @@ internal class FakeTmuxClient(
     val sentCommands: MutableList<String> = mutableListOf()
 
     /**
+     * Issue #640: synchronous side-channel invoked the instant a command is
+     * recorded, before any canned response is produced. Lets a test observe
+     * external state (e.g. the view model's [connectionStatus]) at the exact
+     * moment a specific command reaches the wire — used to prove the seed
+     * capture is sent BEFORE the Connected surface is revealed.
+     */
+    var onCommandSent: ((String) -> Unit)? = null
+
+    /**
      * FIFO queue of canned responses. Pop one per `sendCommand` call.
      * Empty → a default successful empty response is returned.
      */
@@ -171,6 +180,7 @@ internal class FakeTmuxClient(
 
     private suspend fun handleCommand(cmd: String, bestEffort: Boolean): CommandResponse {
         sentCommands += cmd
+        onCommandSent?.invoke(cmd)
         sendCommandGatePrefix?.let { prefix ->
             if (cmd.startsWith(prefix)) {
                 sendCommandGate?.await()

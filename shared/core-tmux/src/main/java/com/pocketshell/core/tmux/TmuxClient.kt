@@ -121,6 +121,43 @@ public interface TmuxClient : AutoCloseable {
         sendCommand(cmd)
 
     /**
+     * Issue #640: capture a pane's content AND its cursor in a SINGLE wire
+     * round-trip.
+     *
+     * The seed path needs both the `capture-pane` snapshot and the pane's true
+     * cursor (`#{cursor_x},#{cursor_y}`, see #259) to repaint a freshly-attached
+     * pane correctly. In `tmux -CC` control mode a `cmd1 ; cmd2` request is
+     * answered with TWO separate `%begin`/`%end` blocks — chaining does NOT
+     * collapse them — so a naive single `sendCommand` would only see the first
+     * block and the cursor reply would arrive as an uncorrelated second block.
+     *
+     * Implementations therefore send the chained command and drain BOTH
+     * response blocks under one single-flight acquisition, returning the capture
+     * block plus the raw cursor reply line. This collapses the previous two
+     * serial seed round-trips into one wire exchange while keeping the cursor
+     * restore intact. Best-effort: a missing/failed cursor block degrades to a
+     * null [CaptureWithCursor.cursorReply] (seed without explicit cursor
+     * restore) rather than failing the capture.
+     *
+     * The default implementation falls back to two separate best-effort
+     * commands for [TmuxClient] doubles that do not model control-mode block
+     * correlation.
+     */
+    public suspend fun captureWithCursor(
+        paneId: String,
+        scrollbackLines: Int,
+    ): CaptureWithCursor {
+        val capture = sendBestEffortCommand("capture-pane -p -e -S -$scrollbackLines -t $paneId")
+        val cursor = runCatching {
+            sendBestEffortCommand("display-message -p -t $paneId '#{cursor_x},#{cursor_y}'")
+        }.getOrNull()
+            ?.takeUnless { it.isError }
+            ?.output
+            ?.firstOrNull()
+        return CaptureWithCursor(capture = capture, cursorReply = cursor)
+    }
+
+    /**
      * Subscribe to `%output` events for a single pane.
      *
      * Multiple callers may subscribe to the same pane — the underlying
@@ -453,6 +490,120 @@ internal class RealTmuxClient(
 
     override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
         sendCommandInternal(cmd, timeoutMode = CommandTimeoutMode.BestEffortDrain)
+
+    /**
+     * Issue #640: capture a pane + its cursor in a single single-flight wire
+     * exchange. tmux `-CC` answers `capture-pane ; display-message` with two
+     * separate `%begin`/`%end` blocks, so we register TWO pending commands
+     * (capture, then cursor) under one [sendMutex] acquisition, write the
+     * chained line once, and drain both blocks in FIFO order. This collapses
+     * the two serial seed round-trips into one while keeping the cursor restore.
+     */
+    override suspend fun captureWithCursor(
+        paneId: String,
+        scrollbackLines: Int,
+    ): CaptureWithCursor {
+        if (closed) throw TmuxClientException("client is closed")
+        if (!connected) throw TmuxClientException("client is not connected")
+        val chained =
+            "capture-pane -p -e -S -$scrollbackLines -t $paneId ; " +
+                "display-message -p -t $paneId '#{cursor_x},#{cursor_y}'"
+        return sendMutex.withLock {
+            if (closed) throw TmuxClientException("client is closed")
+            if (!connected) throw TmuxClientException("client is not connected")
+            val sh = shell ?: throw TmuxClientException("client has no active shell")
+
+            // Register both expected response blocks BEFORE writing so neither
+            // can be lost if it arrives before the write returns. Order matters:
+            // tmux answers the chained commands in submission order, so the
+            // capture block correlates to [capturePending] and the cursor block
+            // to [cursorPending].
+            val capturePending = PendingCommand(deferred = CompletableDeferred())
+            val cursorPending = PendingCommand(deferred = CompletableDeferred())
+            synchronized(responseCorrelationLock) {
+                pendingQueue.offer(capturePending)
+                pendingQueue.offer(cursorPending)
+            }
+
+            val writeResult = CompletableDeferred<Unit>()
+            val writeJob = clientScope.launch {
+                try {
+                    writeLine(sh.stdin, chained)
+                    writeResult.complete(Unit)
+                } catch (t: Throwable) {
+                    writeResult.completeExceptionally(t)
+                }
+            }
+            var writeCompleted = false
+
+            try {
+                val capture = withTimeoutOrNull(commandTimeoutMs) {
+                    writeResult.await()
+                    writeCompleted = true
+                    capturePending.deferred.await()
+                } ?: run {
+                    // Capture itself timed out: tear down both pending entries
+                    // and surface a best-effort failure (the caller falls back
+                    // to opening the seed gate without a snapshot).
+                    cleanupCaptureWithCursorPending(capturePending, cursorPending)
+                    writeJob.cancel()
+                    throw TmuxClientException(
+                        "tmux capture-pane (combined) timed out after ${commandTimeoutMs}ms",
+                    )
+                }
+                // The cursor block is best-effort: a slow/absent reply degrades
+                // to no explicit cursor restore rather than failing the seed.
+                val cursorReply = withTimeoutOrNull(commandTimeoutMs) {
+                    cursorPending.deferred.await()
+                }
+                    ?.takeUnless { it.isError }
+                    ?.output
+                    ?.firstOrNull()
+                if (cursorReply == null) {
+                    // Stop waiting on the cursor block: drop it from the queue so
+                    // a late reply is treated as a stale block to ignore rather
+                    // than mis-correlating with the NEXT command on the wire.
+                    synchronized(responseCorrelationLock) {
+                        val stillWaitingForBegin = cursorPending.commandNumber < 0L
+                        if (pendingQueue.remove(cursorPending) && stillWaitingForBegin) {
+                            staleResponseBlocksToIgnore += 1
+                        }
+                    }
+                }
+                CaptureWithCursor(capture = capture, cursorReply = cursorReply)
+            } catch (t: Throwable) {
+                cleanupCaptureWithCursorPending(capturePending, cursorPending)
+                writeJob.cancel()
+                if (!writeCompleted) {
+                    close()
+                    throw TmuxClientException(
+                        "failed to write tmux combined capture command: ${t.message}",
+                        t,
+                    )
+                }
+                throw t
+            }
+        }
+    }
+
+    /**
+     * Issue #640: remove both pending entries for a combined capture exchange,
+     * accounting for any block tmux has already begun (so its late `%end`
+     * drains as a stale block rather than mis-correlating with a later command).
+     */
+    private fun cleanupCaptureWithCursorPending(
+        capturePending: PendingCommand,
+        cursorPending: PendingCommand,
+    ) {
+        synchronized(responseCorrelationLock) {
+            for (pending in listOf(capturePending, cursorPending)) {
+                val startedBlock = pending.commandNumber >= 0L
+                if (pendingQueue.remove(pending) && startedBlock) {
+                    staleResponseBlocksToIgnore += 1
+                }
+            }
+        }
+    }
 
     private suspend fun sendCommandInternal(
         cmd: String,

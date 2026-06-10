@@ -306,6 +306,16 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
     private var activeAttachMilestone: AttachMilestone? = null
+
+    /**
+     * Issue #640: pane IDs already seeded (via [seedPaneFromCapture]) during
+     * the current attach. The cold-open reveal uses this to skip the redundant
+     * second full reseed for panes the preload pass already painted, so a fresh
+     * connect pays exactly one capture per visible pane and only *reused*
+     * (reattach) panes are re-captured. Reset at the start of each attach.
+     */
+    private val panesSeededThisAttach: MutableSet<String> =
+        java.util.Collections.newSetFromMap(ConcurrentHashMap())
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
     private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
     private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
@@ -1849,20 +1859,18 @@ public class TmuxSessionViewModel @Inject constructor(
         // buffered live output is flushed in order rather than swallowed.
         var seeded = false
         try {
-            val capture = runCatching {
-                client.sendBestEffortCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+            // Issue #640: single-flight combined capture+cursor exchange (see
+            // [TmuxClient.captureWithCursor]) shared with the cold-open seed
+            // path so both pay one wire round-trip and restore the #259 cursor.
+            val combined = runCatching {
+                client.captureWithCursor(pane.paneId, scrollbackLines = SEED_SCROLLBACK_LINES)
             }.getOrNull() ?: return
+            val capture = combined.capture
             if (capture.isError || capture.output.isEmpty()) return
-            val cursor = runCatching {
-                client.sendBestEffortCommand(
-                    "display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'",
-                )
-            }.getOrNull()
-                ?.takeUnless { it.isError }
-                ?.output
-                ?.firstOrNull()
-                .let { parseTmuxPaneCursor(it) }
-            pane.terminalState.appendRemoteOutput(capture.output.toTerminalViewportBytes(cursor))
+            val cursor = parseTmuxPaneCursor(combined.cursorReply)
+            pane.terminalState.appendRemoteOutput(
+                capture.output.toTerminalViewportBytes(cursor),
+            )
             seeded = true
         } finally {
             if (!seeded) pane.terminalState.openSeedGateWithoutSeed()
@@ -2666,6 +2674,11 @@ public class TmuxSessionViewModel @Inject constructor(
             installLifecycleHooks(target.hostId)
             bindProjectRootsForHost(target.hostId)
 
+            // Issue #640: track per-attach seeding so the reveal can skip the
+            // redundant second full reseed for panes the preload already
+            // painted. Cleared here so a reconnect starts fresh.
+            panesSeededThisAttach.clear()
+
             awaitPanesReadyForAttach(
                 target = target,
                 attempt = attempt,
@@ -2673,6 +2686,29 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
             )
 
+            maybeRefreshControlClientSize()
+            // Issue #553/#640: tmux `-CC` does not re-emit existing pane content
+            // on a fresh control-client attach — only subsequent `%output`
+            // deltas. Re-seed every visible pane from a `capture-pane` snapshot
+            // BEFORE revealing the Connected surface so the user never sees a
+            // blank/partial grid with a lone live spinner painting against
+            // black (#640 fragments-then-fill). [preloadVisibleContentForNewPanes]
+            // already seeded the freshly-created pane rows during
+            // [awaitPanesReadyForAttach]; [reseedAllVisiblePanes] now only
+            // re-captures panes *reused* across a racing reconcile / reattach
+            // (the #553 safety net) — it skips panes already seeded this attach,
+            // so a cold open pays no duplicate capture pass.
+            reseedAllVisiblePanes(
+                RuntimeRefreshGuard(
+                    generation = connectGeneration,
+                    target = target,
+                    client = client,
+                ),
+            )
+
+            // Issue #640: reveal the Connected surface only AFTER every visible
+            // pane has been seeded above, so the first frame the user sees is
+            // the complete screen rather than a black/partial grid that fills in.
             connectingTarget = null
             refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Connected(
@@ -2713,25 +2749,6 @@ public class TmuxSessionViewModel @Inject constructor(
                     trigger = trigger,
                     target = target,
                     sourceCandidate = "connect_success",
-                ),
-            )
-            maybeRefreshControlClientSize()
-            // Issue #553: tmux `-CC` does not re-emit existing pane content on
-            // a fresh control-client attach — only subsequent `%output`
-            // deltas. Re-seed every visible pane from a `capture-pane`
-            // snapshot now that the handshake is complete, so EVERY reconnect
-            // (manual Reconnect AND the #444 auto-reconnect path both reach
-            // here via [runConnect]) repaints the full prior screen instead of
-            // leaving it blank with only the live timer/spinner painting
-            // against black. [preloadVisibleContentForNewPanes] already seeds
-            // the freshly-created pane rows; this is the safety net for panes
-            // reused across a racing reconcile and the authoritative
-            // post-attach repaint.
-            reseedAllVisiblePanes(
-                RuntimeRefreshGuard(
-                    generation = connectGeneration,
-                    target = target,
-                    client = client,
                 ),
             )
         } catch (t: Throwable) {
@@ -4657,7 +4674,13 @@ public class TmuxSessionViewModel @Inject constructor(
             trigger = trigger,
         )
         try {
+            // Issue #640: mirror runConnect ordering exactly so unit tests
+            // exercise the real seed-before-reveal + skip-redundant-reseed path
+            // (the test seam used to flip Connected immediately and never
+            // reseed, hiding the production ordering it is supposed to verify).
+            panesSeededThisAttach.clear()
             awaitPanesReadyForAttach(target, attempt, startedAtMs, trigger)
+            reseedAllVisiblePanes()
             connectingTarget = null
             refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
@@ -5497,6 +5520,15 @@ public class TmuxSessionViewModel @Inject constructor(
         val panes = paneRows.values.toList()
         for (pane in panes) {
             if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
+            // Issue #640: skip panes already seeded during this attach. On a
+            // cold open every visible pane is freshly created and seeded by
+            // [preloadVisibleContentForNewPanes], so this loop becomes a no-op
+            // and the redundant second full reseed (one extra capture per pane)
+            // is eliminated. The reseed still fires for panes *reused* across a
+            // reconcile / reattach (the #553 case) — those were never added to
+            // [panesSeededThisAttach] this attach, so they get their authoritative
+            // post-attach repaint here.
+            if (pane.paneId in panesSeededThisAttach) continue
             // [seedPaneFromCapture] feeds the snapshot through
             // [TerminalSurfaceState.appendRemoteOutput], which is safe to call
             // on an already-open gate (it is a feed + an open no-op), so a pane
@@ -5520,49 +5552,49 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshGuard: RuntimeRefreshGuard?,
         recordMilestone: Boolean,
     ): Boolean {
+        // Issue #640: one single-flight round-trip that captures the pane AND
+        // its cursor. tmux `-CC` control mode assigns each `;`-separated command
+        // its OWN `%begin`/`%end` block, so the cursor cannot ride inside the
+        // capture's block — [TmuxClient.captureWithCursor] therefore sends the
+        // chained command and drains BOTH response blocks under a single
+        // [sendMutex] acquisition, collapsing the previous two serial seed
+        // round-trips into one wire exchange. The cursor restore (#259) is
+        // preserved, not dropped.
         val captureStartedAtMs = SystemClock.elapsedRealtime()
-        val response = runCatching {
-            client.sendBestEffortCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+        val combined = runCatching {
+            client.captureWithCursor(pane.paneId, scrollbackLines = SEED_SCROLLBACK_LINES)
         }.getOrNull()
+        val captureDurationMs = SystemClock.elapsedRealtime() - captureStartedAtMs
+        val captureResponse = combined?.capture
         TmuxSessionLatencyTelemetry.record(
             name = "capture_pane",
-            durationMs = SystemClock.elapsedRealtime() - captureStartedAtMs,
+            durationMs = captureDurationMs,
             sessionName = activeTarget?.sessionName,
             paneId = pane.paneId,
             trigger = activeAttachMilestone?.trigger,
-            detail = "success=${response != null && !response.isError}",
+            detail = "success=${captureResponse != null && !captureResponse.isError} folded_cursor=true",
         )
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
-        if (response == null || response.isError || response.output.isEmpty()) return false
-        // Issue #259: ask tmux for the pane's true cursor position so the
-        // seed can restore it after replaying the capture. Without this the
-        // emulator's cursor lands below the captured content, and the
-        // agent's next in-place status/spinner rewrite (`\r` + frame, no
-        // re-home) paints on the wrong row — stranding the seeded frame
-        // above the live one and mashing fragments of different frames
-        // together (the reported garble). A missing/old/malformed reply
-        // degrades to a seed with no explicit cursor restore.
-        val cursorStartedAtMs = SystemClock.elapsedRealtime()
-        val cursor = runCatching {
-            client.sendBestEffortCommand(
-                "display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'",
-            )
-        }.getOrNull()
-            .also { cursorResponse ->
-                TmuxSessionLatencyTelemetry.record(
-                    name = "cursor_query",
-                    durationMs = SystemClock.elapsedRealtime() - cursorStartedAtMs,
-                    sessionName = activeTarget?.sessionName,
-                    paneId = pane.paneId,
-                    trigger = activeAttachMilestone?.trigger,
-                    detail = "success=${cursorResponse != null && !cursorResponse.isError}",
-                )
-            }
-            ?.takeUnless { it.isError }
-            ?.output
-            ?.firstOrNull()
-            .let { parseTmuxPaneCursor(it) }
+        if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
+            return false
+        }
+        // Issue #259/#640: the cursor reply arrived in the SAME single-flight
+        // exchange as the capture (its own control-mode block, drained together),
+        // so it no longer costs a second serial round-trip. Record a zero-cost
+        // `cursor_query` leg (folded into the capture exchange) so the latency
+        // artifact still proves the cursor restore is in place and the
+        // round-trip reduction is visible.
+        val cursor = parseTmuxPaneCursor(combined.cursorReply)
+        TmuxSessionLatencyTelemetry.record(
+            name = "cursor_query",
+            durationMs = 0L,
+            sessionName = activeTarget?.sessionName,
+            paneId = pane.paneId,
+            trigger = activeAttachMilestone?.trigger,
+            detail = "folded_into_capture=true present=${cursor != null}",
+        )
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        val response = captureResponse
         val appendStartedAtMs = SystemClock.elapsedRealtime()
         try {
             pane.terminalState.appendRemoteOutput(
@@ -5573,6 +5605,10 @@ public class TmuxSessionViewModel @Inject constructor(
             reportTerminalSurfaceFailure(pane.paneId, cause)
             return false
         }
+        // Issue #640: record that this pane was seeded during the current
+        // attach so the post-attach reveal can skip the redundant second full
+        // reseed for panes already painted in this pass.
+        panesSeededThisAttach.add(pane.paneId)
         if (recordMilestone) {
             activeAttachMilestone?.let { milestone ->
                 if (!milestone.firstCaptureReadyLogged) {
@@ -8935,6 +8971,14 @@ private val UPPER_R: Byte = 'R'.code.toByte()
  * so the live frame cleanly overwrites the seeded one.
  */
 internal data class TmuxPaneCursor(val column: Int, val row: Int)
+
+/**
+ * Issue #640: scrollback budget for the seed capture. The seed replays up to
+ * this many lines of history so the freshly-attached emulator matches tmux's
+ * current frame plus a little scrollback; widening it would only make the first
+ * paint slower (per the #640 diagnosis), so it stays at the prior value.
+ */
+internal const val SEED_SCROLLBACK_LINES: Int = 200
 
 /**
  * Parse a tmux `display-message -p '#{cursor_x},#{cursor_y}'` reply line

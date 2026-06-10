@@ -117,6 +117,18 @@ class TmuxSessionViewModelTest {
             sessionLifecycleSignals = sessionLifecycleSignals,
         ).also { createdViewModels += it }
 
+    /**
+     * Issue #640: the seed capture command. [TmuxClient.captureWithCursor] now
+     * pairs this with the cursor query in ONE single-flight exchange, but the
+     * `capture-pane` command string itself is unchanged. Centralised so the
+     * command-string assertions track [SEED_SCROLLBACK_LINES] if it ever moves.
+     */
+    private fun seedCaptureCommand(paneId: String): String =
+        "capture-pane -p -e -S -$SEED_SCROLLBACK_LINES -t $paneId"
+
+    private fun seedCursorCommand(paneId: String): String =
+        "display-message -p -t $paneId '#{cursor_x},#{cursor_y}'"
+
     @After
     fun tearDown() {
         createdViewModels.asReversed().forEach { vm ->
@@ -494,16 +506,20 @@ class TmuxSessionViewModelTest {
 
         assertTrue(
             "expected a capture-pane prefill for the new pane, got ${client.sentCommands}",
-            client.sentCommands.contains("capture-pane -p -e -S -200 -t %0"),
+            client.sentCommands.contains(seedCaptureCommand("%0")),
         )
     }
 
     @Test
-    fun newPaneReconcileQueriesCursorPositionForTheSeed() = runTest {
-        // Issue #259: after the capture-pane snapshot the seed path must ask
-        // tmux for the pane's true cursor so the emulator's cursor can be
-        // restored — otherwise the agent's next in-place spinner rewrite paints
-        // on the wrong row and fragments of different frames coexist.
+    fun newPaneReconcileSeedsCaptureWithRestoredCursor() = runTest {
+        // Issue #259/#640: the seed pairs the capture with the pane's true
+        // cursor (so the agent's next in-place spinner rewrite lands on the
+        // right row) via [TmuxClient.captureWithCursor]. The capture command
+        // must run, and the cursor query must follow the capture so the builder
+        // can append the restore. (The single-flight FOLD that avoids a second
+        // wire round-trip is verified in the core-tmux RealTmuxClient tests; the
+        // [FakeTmuxClient] uses the two-command default, which exercises the
+        // same observable command sequence here.)
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -531,17 +547,18 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         assertTrue(
-            "expected a cursor-position query for the new pane, got ${client.sentCommands}",
-            client.sentCommands.contains(
-                "display-message -p -t %0 '#{cursor_x},#{cursor_y}'",
-            ),
+            "expected a capture-pane seed for the new pane, got ${client.sentCommands}",
+            client.sentCommands.contains(seedCaptureCommand("%0")),
+        )
+        assertTrue(
+            "expected a cursor-position query paired with the capture, " +
+                "got ${client.sentCommands}",
+            client.sentCommands.contains(seedCursorCommand("%0")),
         )
         // The cursor query must come AFTER the capture for the same pane so the
         // builder can append the restore to the replayed snapshot.
-        val captureIdx = client.sentCommands.indexOf("capture-pane -p -e -S -200 -t %0")
-        val cursorIdx = client.sentCommands.indexOf(
-            "display-message -p -t %0 '#{cursor_x},#{cursor_y}'",
-        )
+        val captureIdx = client.sentCommands.indexOf(seedCaptureCommand("%0"))
+        val cursorIdx = client.sentCommands.indexOf(seedCursorCommand("%0"))
         assertTrue("capture must precede cursor query", captureIdx in 0 until cursorIdx)
     }
 
@@ -579,12 +596,17 @@ class TmuxSessionViewModelTest {
         assertFalse("best-effort capture timeout must not close tmux client", client.closed)
         assertTrue(
             "expected capture-pane seed attempt, got ${client.sentCommands}",
-            client.sentCommands.contains("capture-pane -p -e -S -200 -t %0"),
+            client.sentCommands.contains(seedCaptureCommand("%0")),
         )
     }
 
     @Test
-    fun bestEffortCursorFailureDuringAttachKeepsConnectionConnectedAndClientOpen() = runTest {
+    fun missingCursorReplyDuringSeedDegradesToSeedWithoutRestore() = runTest {
+        // Issue #259/#640: the seed pairs the capture with a cursor query via
+        // [TmuxClient.captureWithCursor]. When tmux returns no usable cursor
+        // (older tmux / dropped reply) the seed must still apply (no explicit
+        // cursor restore) and the attach must reach Connected — the
+        // graceful-degradation contract the cursor restore depends on.
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -601,8 +623,11 @@ class TmuxSessionViewModelTest {
                 isError = false,
             ),
         )
-        client.failBestEffortOnCommandPrefix = "display-message"
-        client.bestEffortException = TmuxClientException("tmux command `display-message` timed out")
+        // Cursor query returns an error so captureWithCursor yields a null
+        // cursor reply, modelling tmux that did not emit a usable cursor.
+        client.cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = emptyList(), isError = true),
+        )
 
         vm.attachClientWithReadinessForTest(
             hostId = 1L,
@@ -617,14 +642,14 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         assertTrue(
-            "best-effort cursor timeout must not surface as Failed/Reconnecting; " +
+            "missing cursor reply must not surface as Failed/Reconnecting; " +
                 "status=${vm.connectionStatus.value}",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
-        assertFalse("best-effort cursor timeout must not close tmux client", client.closed)
+        assertFalse("missing cursor reply must not close tmux client", client.closed)
         assertTrue(
-            "expected cursor query after capture-pane, got ${client.sentCommands}",
-            client.sentCommands.contains("display-message -p -t %0 '#{cursor_x},#{cursor_y}'"),
+            "expected the capture seed command, got ${client.sentCommands}",
+            client.sentCommands.contains(seedCaptureCommand("%0")),
         )
     }
 
@@ -681,6 +706,122 @@ class TmuxSessionViewModelTest {
             artifactLines.any { it.startsWith("tmux_latency_list_panes_ms=") },
         )
         TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
+    fun coldOpenRevealsConnectedOnlyAfterTheVisiblePaneIsSeeded() = runTest {
+        // Issue #640 (seed-before-reveal): the terminal surface must NOT flip
+        // to the revealed Connected state until the initial capture-pane seed
+        // for the visible pane has been APPLIED. Otherwise the user watches the
+        // live agent spinner paint onto a black/partial grid until the seed
+        // lands (the reported fragments-then-fill). We snapshot the sent
+        // commands at the exact moment the status first becomes Connected and
+        // assert the seed capture is already present.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("issue640-seed-line-001", "issue640-seed-line-002"),
+                isError = false,
+            ),
+        )
+        client.cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("0,1"), isError = false),
+        )
+
+        // Capture the connection status synchronously at the exact moment the
+        // seed capture command reaches the wire. If the surface were revealed
+        // before seeding, the status would already be Connected here.
+        var statusWhenSeedSent: TmuxSessionViewModel.ConnectionStatus? = null
+        client.onCommandSent = { cmd ->
+            if (cmd == seedCaptureCommand("%0") && statusWhenSeedSent == null) {
+                statusWhenSeedSent = vm.connectionStatus.value
+            }
+        }
+
+        vm.attachClientWithReadinessForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "status must reach Connected after seeding; got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        val seedStatus = statusWhenSeedSent
+        assertNotNull("the visible pane was never seeded", seedStatus)
+        assertFalse(
+            "Connected was revealed BEFORE the visible pane was seeded — the user " +
+                "would see a blank/partial grid with only the live spinner painting. " +
+                "Status when seed sent: $seedStatus",
+            seedStatus is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+    }
+
+    @Test
+    fun coldOpenSeedsEachVisiblePaneExactlyOnceWithNoRedundantReseed() = runTest {
+        // Issue #640: on a cold open every visible pane is freshly created and
+        // seeded by the preload pass; the post-attach reseed must NOT re-capture
+        // those same panes (the redundant second full reseed the diagnosis
+        // flagged). Assert each visible pane's capture seed runs exactly once.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tshell\t0",
+                    "%1\t@1\t\$0\twork\teditor\t0",
+                ),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 2L, output = listOf("pane0-content"), isError = false),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("pane1-content"), isError = false),
+        )
+
+        vm.attachClientWithReadinessForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "each visible pane must be seeded exactly once on cold open " +
+                "(no redundant second reseed); got ${client.sentCommands}",
+            1,
+            client.sentCommands.count { it == seedCaptureCommand("%0") },
+        )
+        assertEquals(
+            "each visible pane must be seeded exactly once on cold open " +
+                "(no redundant second reseed); got ${client.sentCommands}",
+            1,
+            client.sentCommands.count { it == seedCaptureCommand("%1") },
+        )
     }
 
     @Test
@@ -7736,11 +7877,11 @@ class TmuxSessionViewModelTest {
         )
         assertTrue(
             "new panes discovered by the async refresh should be seeded after the visible swap",
-            clientA.sentCommands.contains("capture-pane -p -e -S -200 -t %1"),
+            clientA.sentCommands.contains(seedCaptureCommand("%1")),
         )
         assertTrue(
-            "async seed should query the cursor after capture-pane",
-            clientA.sentCommands.contains("display-message -p -t %1 '#{cursor_x},#{cursor_y}'"),
+            "async seed should pair the capture with the cursor restore query",
+            clientA.sentCommands.contains(seedCursorCommand("%1")),
         )
         assertEquals(listOf("%0", "%1"), vm.panes.value.map { it.paneId })
         TmuxSessionLatencyTelemetry.resetForTest()
@@ -7897,7 +8038,7 @@ class TmuxSessionViewModelTest {
 
         assertTrue(
             "expected cached-runtime refresh to attempt capture seed, got ${clientA.sentCommands}",
-            clientA.sentCommands.contains("capture-pane -p -e -S -200 -t %1"),
+            clientA.sentCommands.contains(seedCaptureCommand("%1")),
         )
         assertTrue(
             "cached-runtime best-effort seed timeout must not mark connection Failed/Reconnecting; " +
@@ -8447,17 +8588,18 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sessionPrewarmBestEffortSeedFailureCachesRuntimeAndKeepsClientOpen() = runTest {
+    fun sessionPrewarmSeedsCaptureWithCursorRestore() = runTest {
+        // Issue #640: the prewarm seed shares the capture+cursor exchange via
+        // [TmuxClient.captureWithCursor] (single-flight in production), pairing
+        // the capture with the cursor restore, and still caches the runtime +
+        // keeps the client open.
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             runtimeCache = runtimeCache,
             sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
-        val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4").apply {
-            failBestEffortOnCommandPrefix = "display-message"
-            bestEffortException = TmuxClientException("tmux command `display-message` timed out")
-        }
+        val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4")
         vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
         vm.replaceClientForTest(
             hostId = 1L,
@@ -8475,8 +8617,13 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         assertTrue(
-            "expected prewarm seed to query cursor best-effort, got ${prewarmClient.sentCommands}",
-            prewarmClient.sentCommands.contains("display-message -p -t %4 '#{cursor_x},#{cursor_y}'"),
+            "expected prewarm seed to capture the pane, got ${prewarmClient.sentCommands}",
+            prewarmClient.sentCommands.contains(seedCaptureCommand("%4")),
+        )
+        assertTrue(
+            "expected prewarm seed to pair the capture with a cursor restore query, " +
+                "got ${prewarmClient.sentCommands}",
+            prewarmClient.sentCommands.contains(seedCursorCommand("%4")),
         )
         assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")))
         assertFalse("prewarm seed timeout must not close tmux client", prewarmClient.closed)
@@ -8513,7 +8660,7 @@ class TmuxSessionViewModelTest {
 
         assertTrue(
             "expected prewarm seed to attempt capture best-effort, got ${prewarmClient.sentCommands}",
-            prewarmClient.sentCommands.contains("capture-pane -p -e -S -200 -t %4"),
+            prewarmClient.sentCommands.contains(seedCaptureCommand("%4")),
         )
         assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")))
         assertFalse("prewarm capture timeout must not close tmux client", prewarmClient.closed)

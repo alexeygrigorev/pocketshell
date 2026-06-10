@@ -22,6 +22,7 @@ import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -268,6 +269,93 @@ class TmuxClientTest {
             assertEquals(7L, result.number)
             assertTrue(result.isError)
             assertEquals(listOf("no such window: @99"), result.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `captureWithCursor sends one chained command and drains both response blocks`() = runBlocking {
+        // Issue #640: the seed needs capture + cursor in ONE wire round-trip.
+        // tmux -CC answers a `capture-pane ; display-message` request with TWO
+        // separate begin/end blocks, so captureWithCursor must write ONE chained
+        // line and correlate both blocks under one single-flight acquisition.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val result = scope.async {
+                client.captureWithCursor("%3", scrollbackLines = 200)
+            }
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            // Exactly ONE chained line on the wire (one round-trip), carrying
+            // both the capture and the cursor query.
+            assertEquals(
+                "capture-pane -p -e -S -200 -t %3 ; " +
+                    "display-message -p -t %3 '#{cursor_x},#{cursor_y}'\n",
+                shell.stdinAsString(),
+            )
+
+            // tmux answers with two sequential blocks: capture, then cursor.
+            shell.feed(
+                "%begin 1700000000 10 0\n" +
+                    "line-one\n" +
+                    "line-two\n" +
+                    "%end 1700000000 10 0\n" +
+                    "%begin 1700000000 11 0\n" +
+                    "4,2\n" +
+                    "%end 1700000000 11 0\n",
+            )
+
+            val combined = withTimeout(3_000) { result.await() }
+            assertFalse(combined.capture.isError)
+            assertEquals(listOf("line-one", "line-two"), combined.capture.output)
+            assertEquals("4,2", combined.cursorReply)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `captureWithCursor degrades to null cursor when only the capture block returns`() = runBlocking {
+        // Issue #640/#259: a missing/failed cursor block must NOT fail the
+        // capture — the seed degrades to no explicit cursor restore.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 300L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val result = scope.async {
+                client.captureWithCursor("%3", scrollbackLines = 200)
+            }
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+
+            // Only the capture block returns; the cursor block never arrives.
+            shell.feed(
+                "%begin 1700000000 10 0\n" +
+                    "only-capture\n" +
+                    "%end 1700000000 10 0\n",
+            )
+
+            val combined = withTimeout(3_000) { result.await() }
+            assertFalse(combined.capture.isError)
+            assertEquals(listOf("only-capture"), combined.capture.output)
+            assertNull(combined.cursorReply)
         } finally {
             client.close()
         }

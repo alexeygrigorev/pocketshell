@@ -51,6 +51,7 @@ import com.pocketshell.app.hosts.QrScannerScreen
 import com.pocketshell.app.env.EnvCopySourceFolder
 import com.pocketshell.app.env.EnvScreen
 import com.pocketshell.app.fileexplorer.FileExplorerScreen
+import com.pocketshell.app.git.GitHistoryScreen
 import com.pocketshell.app.fileviewer.FileViewerScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
@@ -1054,6 +1055,22 @@ private fun AppNavigator(
                     ),
                 )
             },
+            // Issue #646: route to the read-only Git commit-history view,
+            // reusing the SSH credentials this folder screen already holds.
+            onGitHistory = { path, label ->
+                navigate(
+                    AppDestination.GitHistory(
+                        hostId = dest.hostId,
+                        hostName = label.ifBlank { dest.hostName },
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        dir = path,
+                    ),
+                )
+            },
             onAssistantNavigate = { destination ->
                 navigate(destination)
             },
@@ -1178,6 +1195,17 @@ private fun AppNavigator(
                     ),
                 )
             },
+        )
+
+        is AppDestination.GitHistory -> GitHistoryScreen(
+            hostName = dest.hostName,
+            hostname = dest.hostname,
+            port = dest.port,
+            username = dest.username,
+            keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
+            dir = dest.dir,
+            onBack = ::back,
         )
 
         is AppDestination.RecurringJobs -> {
@@ -1576,6 +1604,7 @@ internal fun AppDestination.timingName(): String = when (this) {
     is AppDestination.EnvFiles -> "EnvFiles(hostId=$hostId)"
     is AppDestination.FileViewer -> "FileViewer(hostId=$hostId)"
     is AppDestination.FileExplorer -> "FileExplorer(hostId=$hostId)"
+    is AppDestination.GitHistory -> "GitHistory(hostId=$hostId)"
     is AppDestination.RecurringJobs -> "RecurringJobs(session=$sessionName)"
 }
 
@@ -1598,6 +1627,7 @@ internal fun AppDestination.diagnosticRouteName(): String = when (this) {
     is AppDestination.EnvFiles -> "EnvFiles"
     is AppDestination.FileViewer -> "FileViewer"
     is AppDestination.FileExplorer -> "FileExplorer"
+    is AppDestination.GitHistory -> "GitHistory"
     is AppDestination.RecurringJobs -> "RecurringJobs"
 }
 
@@ -1676,6 +1706,13 @@ internal fun AppDestination.crashReportContext(): CrashReportContext = when (thi
         hostname = hostname,
         username = username,
         startDirectory = startDir,
+    )
+    is AppDestination.GitHistory -> CrashReportContext(
+        screen = "Git history",
+        hostName = hostName,
+        hostname = hostname,
+        username = username,
+        startDirectory = dir,
     )
     is AppDestination.RecurringJobs -> CrashReportContext(
         screen = "Recurring jobs",

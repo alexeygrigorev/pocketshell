@@ -315,6 +315,26 @@ sealed interface AppDestination {
         val startDir: String,
     ) : AppDestination
 
+    /**
+     * Read-only Git commit-history / timeline view for a project directory —
+     * issue #646 (epic #644 slice 2). Reachable from the host-detail folder
+     * action sheet's "Git history" row; [dir] roots the `git log` at that
+     * project's path.
+     *
+     * SSH connection parameters are required because the screen opens a
+     * persistent [com.pocketshell.core.ssh.SshSession] to run `git log`.
+     */
+    data class GitHistory(
+        val hostId: Long,
+        val hostName: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val passphrase: CharArray?,
+        val dir: String,
+    ) : AppDestination
+
     /** Per-session recurring jobs backed by the host's `pocketshell jobs` CLI. */
     data class RecurringJobs(
         val hostName: String,

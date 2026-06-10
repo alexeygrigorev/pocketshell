@@ -44,12 +44,15 @@ class FolderContextActionSheetScreenshotTest {
                         onCloneGitProject = {},
                         onEmptyProject = {},
                         onEnv = {},
+                        onGitHistory = {},
                     )
                 }
             }
         }
 
         compose.onNodeWithTag(FOLDER_CONTEXT_EMPTY_PROJECT_TAG).assertExists()
+        // Issue #646: the read-only Git history entry point shows for a project.
+        compose.onNodeWithTag(FOLDER_CONTEXT_GIT_HISTORY_TAG).assertExists()
         compose.waitForIdle()
         SystemClock.sleep(200)
 

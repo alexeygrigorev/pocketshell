@@ -47,6 +47,7 @@ fun FolderContextActionSheet(
     onCloneGitProject: () -> Unit,
     onEmptyProject: () -> Unit,
     onEnv: (() -> Unit)? = null,
+    onGitHistory: (() -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -63,6 +64,7 @@ fun FolderContextActionSheet(
             onCloneGitProject = onCloneGitProject,
             onEmptyProject = onEmptyProject,
             onEnv = onEnv,
+            onGitHistory = onGitHistory,
         )
     }
 }
@@ -76,6 +78,7 @@ internal fun FolderContextActionContent(
     onCloneGitProject: () -> Unit,
     onEmptyProject: () -> Unit,
     onEnv: (() -> Unit)? = null,
+    onGitHistory: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -98,6 +101,16 @@ internal fun FolderContextActionContent(
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
         FolderContextRow("+ New session here", FOLDER_CONTEXT_NEW_SESSION_TAG, onNewSession)
+        // Read-only Git commit-history / timeline view (#646). Suppressed for
+        // roots, which aren't themselves projects (null onGitHistory).
+        if (onGitHistory != null) {
+            FolderContextRow(
+                label = "Git history",
+                description = "View recent commits for this project",
+                testTag = FOLDER_CONTEXT_GIT_HISTORY_TAG,
+                onClick = onGitHistory,
+            )
+        }
         // Env files folds into the per-folder overflow sheet (#455); the
         // former inline `E` button is gone. Suppressed for roots (no .env).
         if (onEnv != null) {
@@ -220,6 +233,7 @@ fun EmptyProjectDialog(
 const val FOLDER_CONTEXT_SHEET_TAG: String = "folder-context:sheet"
 const val FOLDER_CONTEXT_NEW_SESSION_TAG: String = "folder-context:new-session"
 const val FOLDER_CONTEXT_ENV_TAG: String = "folder-context:env"
+const val FOLDER_CONTEXT_GIT_HISTORY_TAG: String = "folder-context:git-history"
 const val FOLDER_CONTEXT_IMPORT_TAG: String = "folder-context:import"
 const val FOLDER_CONTEXT_CLONE_TAG: String = "folder-context:clone"
 const val FOLDER_CONTEXT_EMPTY_PROJECT_TAG: String = "folder-context:empty-project"

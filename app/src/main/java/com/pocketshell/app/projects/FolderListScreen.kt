@@ -167,6 +167,13 @@ fun FolderListScreen(
      * from the same data the user saw here (D24).
      */
     onEditEnv: (path: String, label: String, allFolders: List<Pair<String, String>>) -> Unit,
+    /**
+     * Issue #646: open the read-only Git commit-history view for a project.
+     * Fired with the tapped folder's canonical path + label so the caller
+     * (MainActivity) can route to `AppDestination.GitHistory`, reusing the SSH
+     * credentials this screen already holds.
+     */
+    onGitHistory: (path: String, label: String) -> Unit = { _, _ -> },
     onOpenUsage: () -> Unit = {},
     onAssistantNavigate: (AppDestination) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -441,6 +448,16 @@ fun FolderListScreen(
                 {
                     actionFolder = null
                     onEditEnv(target.path, target.label, target.envSources)
+                }
+            } else {
+                null
+            },
+            // Git history (#646). Suppressed for roots — they aren't projects
+            // themselves — using the same envSources signal as the env row.
+            onGitHistory = if (target.envSources.isNotEmpty()) {
+                {
+                    actionFolder = null
+                    onGitHistory(target.path, target.label)
                 }
             } else {
                 null

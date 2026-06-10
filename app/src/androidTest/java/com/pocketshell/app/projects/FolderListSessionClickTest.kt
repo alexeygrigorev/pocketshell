@@ -174,8 +174,21 @@ class FolderListSessionClickTest {
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithTag(folderRowTestTag("/root")).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(folderRowTestTag("/root")).performClick()
-        compose.onNodeWithText("claude-main").performClick()
+        // Ensure the project is expanded so the session row renders (an active
+        // session auto-expands its folder, but tap to expand if it didn't).
+        if (compose.onAllNodesWithTag(folderDetailRowTestTag("/root", "claude-main"))
+                .fetchSemanticsNodes().isEmpty()
+        ) {
+            compose.onNodeWithTag(folderRowTestTag("/root")).performClick()
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(folderDetailRowTestTag("/root", "claude-main"))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        // The quiet session row opens on tap (no kebab). The row is a merging
+        // `combinedClickable` container now, so the session name `Text` is no
+        // longer an independent node on the merged tree — tap the row by tag.
+        compose.onNodeWithTag(folderDetailRowTestTag("/root", "claude-main")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             clickedSession != null
         }

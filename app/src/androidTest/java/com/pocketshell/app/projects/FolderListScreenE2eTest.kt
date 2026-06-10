@@ -12,15 +12,18 @@ import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onChild
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
 import androidx.core.graphics.createBitmap
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -453,14 +456,15 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).assertExists()
         compose.onNodeWithTag(folderTreeRootLabelTag("~/git"), useUnmergedTree = true).assertExists()
         // The action-bearing root header Rows (~/git, ~/tmp) wrap their label
-        // in a semantics-merging `combinedClickable` (#455), so the label
-        // `Text` is no longer an independently-keyed node in the merged tree.
-        // Scroll to the still-independent root actions kebab button instead,
-        // then assert the label exists on the unmerged tree. The OTHER root
-        // has no actions (no `combinedClickable`, no kebab), so its label
-        // stays an independent node and can be scrolled to directly.
+        // in a semantics-merging `combinedClickable` (the band long-press opens
+        // the root actions sheet), so the label `Text` is no longer an
+        // independently-keyed node in the merged tree. Scroll to the
+        // still-independent subtle `+` (add-project) button instead, then assert
+        // the label exists on the unmerged tree. The OTHER root has no actions
+        // (no `combinedClickable`, no `+`), so its label stays an independent
+        // node and can be scrolled to directly.
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
-            .performScrollToNode(hasTestTag(folderTreeRootActionsTestTag("~/tmp")))
+            .performScrollToNode(hasTestTag(folderTreeRootCreateTestTag("~/tmp")))
         compose.onNodeWithTag(folderTreeRootLabelTag("~/tmp"), useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderTreeRootLabelTag(FolderListViewModel.OTHER_ROOT_PATH)))
@@ -626,17 +630,48 @@ class FolderListScreenE2eTest {
         // and can return blank), so this is the authoritative #504 screenshot.
         WalkthroughScreenshotArtifacts.capture("issue504-folder-tree-header-no-grid-toggle")
         captureViewport("issue504-folder-tree-header-no-grid-toggle-viewport.png")
-        assertOverflowTrigger(folderTreeRootActionsTestTag("~/git"), "Root actions")
-        assertOverflowTrigger(folderDetailActionsTestTag("/home/u/git/pocketshell"), "Project actions")
-        assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/git"))
+        // The root header no longer carries an overflow kebab — its one visible
+        // affordance is the subtle accent `+` ("Add project"). Root actions are
+        // reached by long-pressing the root band (asserted below). The folder
+        // "+" likewise opens the folder actions sheet; its contentDescription is
+        // now "New session in <label>".
+        assertSubtleAddButton(folderTreeRootCreateTestTag("~/git"), "Add project")
+        assertSubtleAddButton(
+            folderDetailActionsTestTag("/home/u/git/pocketshell"),
+            "New session in pocketshell",
+        )
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/git"))
-        assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/tmp"))
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/tmp"))
-        // #478: the per-project trailing cluster is now JUST the overflow
-        // kebab — the inline `+` (new-session) button was dropped to match
-        // the maintainer's mockup. Start-session moved into the kebab sheet
-        // (asserted below). Confirm the kebab still meets its touch target
-        // and the inline `+` node no longer exists for a visible project.
+        // The retired root overflow kebab must not render anywhere in the tree.
+        compose.onAllNodesWithTag(folderTreeRootActionsTestTag("~/git"), useUnmergedTree = true)
+            .fetchSemanticsNodes().also {
+                assertTrue("retired root overflow kebab must be gone", it.isEmpty())
+            }
+        // Long-pressing the root band reaches the same root actions sheet the
+        // retired kebab used to open.
+        compose.onNodeWithTag(folderTreeRootLabelTag("~/git"), useUnmergedTree = true)
+            .performTouchInput { longClick() }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(FOLDER_CONTEXT_SHEET_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_CONTEXT_NEW_SESSION_TAG).assertIsDisplayed()
+        // Dismiss the sheet (New session routes into the picker; cancel it) so
+        // the remaining tree assertions see a clean surface.
+        compose.onNodeWithTag(FOLDER_CONTEXT_NEW_SESSION_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_CANCEL_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
+        // The per-project trailing cluster is now JUST the subtle accent `+`
+        // (new-session) — tapping it opens the folder actions sheet, and the
+        // rest of the folder actions (rename / env / import / clone) live on the
+        // row long-press. Confirm the `+` meets its touch target and the legacy
+        // inline create node no longer exists for a visible project.
         assertAccessibleTouchTarget(folderDetailActionsTestTag("/home/u/git/pocketshell"))
         compose.onAllNodesWithTag(
             folderDetailCreateTestTag("/home/u/git/pocketshell"),
@@ -705,12 +740,15 @@ class FolderListScreenE2eTest {
             folderSessionStatusDotTestTag("/home/u/git/pocketshell", "claude-main"),
             useUnmergedTree = true,
         ).assertExists()
-        // #522 item 3: tree session rows lead with the terminal tile glyph too,
-        // alongside the status dot, for consistency with the flat rows.
-        compose.onNodeWithTag(
+        // The quiet-rows redesign removed the decorative terminal tile glyph
+        // from tree session rows — they now lead with just the status dot (the
+        // tile survives only on flat-view rows and window rows).
+        compose.onAllNodesWithTag(
             folderSessionTileTestTag("/home/u/git/pocketshell", "claude-main"),
             useUnmergedTree = true,
-        ).assertExists()
+        ).fetchSemanticsNodes().also {
+            assertTrue("tree session rows must not render the decorative tile glyph", it.isEmpty())
+        }
         compose.onNodeWithText("build-shell", useUnmergedTree = true).assertExists()
 
         // Issue #276: per-host session rows stay compact. The retired
@@ -1048,18 +1086,22 @@ class FolderListScreenE2eTest {
             folderListFlatRowStatusDotTestTag("claude-main"),
             useUnmergedTree = true,
         ).assertExists()
+        // The badge label `Text` is the single child of the tagged badge `Box`.
+        // The flat row's clickable merges the trailing badge away on the merged
+        // tree, so resolve the badge on the UNMERGED tree and read its one
+        // child's text (the box itself carries no text).
         compose.onNodeWithTag(
             folderListFlatRowBadgeTestTag("claude-main"),
             useUnmergedTree = true,
-        ).assertTextEquals("Claude")
+        ).onChild().assertTextEquals("Claude")
         compose.onNodeWithTag(
             folderListFlatRowBadgeTestTag("codex-llm"),
             useUnmergedTree = true,
-        ).assertTextEquals("Codex")
+        ).onChild().assertTextEquals("Codex")
         compose.onNodeWithTag(
             folderListFlatRowBadgeTestTag("build-shell"),
             useUnmergedTree = true,
-        ).assertTextEquals("Shell")
+        ).onChild().assertTextEquals("Shell")
 
         // #489: sessions group into ACTIVE / IDLE sections (SectionHeaders with
         // counts) and a host header carries the `N active · M idle · K sessions`
@@ -1264,14 +1306,17 @@ class FolderListScreenE2eTest {
 
             compose.waitUntil(timeoutMillis = 10_000) {
                 fakeGateway.callCount.get() >= 1 &&
-                    compose.onAllNodesWithTag(folderTreeRootActionsTestTag(longRootPath))
+                    compose.onAllNodesWithTag(folderTreeRootCreateTestTag(longRootPath))
                         .fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
-                .performScrollToNode(hasTestTag(folderTreeRootActionsTestTag(longRootPath)))
-            assertOverflowTrigger(folderTreeRootActionsTestTag(longRootPath), "Root actions")
+                .performScrollToNode(hasTestTag(folderTreeRootCreateTestTag(longRootPath)))
+            // The root header's only trailing action is now the subtle accent
+            // `+` ("Add project"); the overflow kebab is gone (root actions live
+            // on the band long-press). A long root title must still leave room
+            // for that `+`.
+            assertSubtleAddButton(folderTreeRootCreateTestTag(longRootPath), "Add project")
             assertRootHeaderLeavesRoomForActions(longRootPath)
-            assertAccessibleTouchTarget(folderTreeRootActionsTestTag(longRootPath))
             assertAccessibleTouchTarget(folderTreeRootCreateTestTag(longRootPath))
             compose.onNodeWithTag(folderTreeRootEmptyHintAddTestTag(longRootPath))
                 .assertIsDisplayed()
@@ -1338,7 +1383,10 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderDetailActionsTestTag(folderPath)))
 
-        assertOverflowTrigger(folderDetailActionsTestTag(folderPath), "Project actions")
+        // The project row's one visible affordance is now the subtle accent `+`
+        // ("New session in <label>"); tapping it still opens the folder actions
+        // sheet, so a long folder name must keep room for it.
+        assertSubtleAddButton(folderDetailActionsTestTag(folderPath), "New session in $longFolderName")
         assertAccessibleTouchTarget(folderDetailActionsTestTag(folderPath))
         assertProjectHeaderLeavesRoomForOverflow(folderPath)
 
@@ -1455,7 +1503,13 @@ class FolderListScreenE2eTest {
         )
     }
 
-    private fun assertOverflowTrigger(tag: String, contentDescription: String) {
+    /**
+     * Quiet-rows redesign: the root/folder rows no longer carry an overflow
+     * kebab. Their one visible affordance is a subtle accent `+` add button with
+     * a descriptive contentDescription ("Add project" for roots, "New session in
+     * <label>" for folders). Verify the `+` exists as a clickable control.
+     */
+    private fun assertSubtleAddButton(tag: String, contentDescription: String) {
         compose.onNode(
             hasTestTag(tag) and hasContentDescription(contentDescription),
             useUnmergedTree = true,
@@ -1476,7 +1530,7 @@ class FolderListScreenE2eTest {
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
         val actionsBounds = compose.onNodeWithTag(
-            folderTreeRootActionsTestTag(rootPath),
+            folderTreeRootCreateTestTag(rootPath),
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
         val minGapPx = 4f * density

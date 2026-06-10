@@ -11,9 +11,11 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
 import androidx.core.graphics.createBitmap
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -168,9 +170,10 @@ class FolderListStopSessionTest {
         }
         captureViewport("before-stop-viewport.png")
 
-        // Open the row kebab first. Destructive Stop must be a menu item, not
-        // a direct-to-confirm affordance.
-        compose.onNodeWithTag(folderSessionActionsTestTag(projectPath, doomed)).performClick()
+        // Long-press the session row to open the action menu first. Destructive
+        // Stop must be a menu item, not a direct-to-confirm affordance.
+        compose.onNodeWithTag(folderDetailRowTestTag(projectPath, doomed))
+            .performTouchInput { longClick() }
         compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, doomed)).assertExists()
         compose.onNodeWithText("Open session").assertExists()
         compose.onNodeWithText("Rename session").assertExists()
@@ -190,8 +193,10 @@ class FolderListStopSessionTest {
         assertTrue("doomed row must remain after Cancel", gateway.killedSessions.isEmpty())
         compose.onNodeWithTag(folderDetailRowTestTag(projectPath, doomed)).assertExists()
 
-        // Now choose Stop from the menu again, then confirm the kill.
-        compose.onNodeWithTag(folderSessionActionsTestTag(projectPath, doomed)).performClick()
+        // Now long-press the row and choose Stop from the menu again, then
+        // confirm the kill.
+        compose.onNodeWithTag(folderDetailRowTestTag(projectPath, doomed))
+            .performTouchInput { longClick() }
         compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, doomed)).performClick()
         compose.onNodeWithTag(STOP_SESSION_DIALOG_TAG).assertExists()
         compose.onNodeWithText("Stop").performClick()
@@ -277,7 +282,8 @@ class FolderListStopSessionTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
 
-        compose.onNodeWithTag(folderSessionActionsTestTag(projectPath, oldName)).performClick()
+        compose.onNodeWithTag(folderDetailRowTestTag(projectPath, oldName))
+            .performTouchInput { longClick() }
         compose.onNodeWithTag(folderSessionOpenMenuItemTestTag(projectPath, oldName)).assertExists()
         compose.onNodeWithTag(folderSessionRenameMenuItemTestTag(projectPath, oldName)).assertExists()
         compose.onNodeWithTag(folderSessionStopMenuItemTestTag(projectPath, oldName)).assertExists()
@@ -304,15 +310,18 @@ class FolderListStopSessionTest {
     }
 
     @Test
-    fun longSessionNamesKeepTreeKebabVisibleAndOpenMenu() {
+    fun longSessionNamesKeepTreeRowTappableAndLongPressOpensMenu() {
         val longName = "agent-" + "very-long-session-name-".repeat(8) + "tail"
 
-        assertLongNameKebabVisibleAndMenuOpens(
+        // Tree session rows are quiet — no visible kebab. The badge must still
+        // stay inside the row even with a long name, and a long-press on the
+        // row must open the Open / Rename / Stop menu.
+        assertLongNameSessionMenuOpens(
             longName = longName,
             mode = HostDetailViewMode.Tree,
             rowTag = folderDetailRowTestTag(projectPath, longName),
             badgeTag = folderSessionBadgeTestTag(projectPath, longName),
-            triggerTag = folderSessionActionsTestTag(projectPath, longName),
+            triggerTag = null,
             openItemTag = folderSessionOpenMenuItemTestTag(projectPath, longName),
             renameItemTag = folderSessionRenameMenuItemTestTag(projectPath, longName),
             stopItemTag = folderSessionStopMenuItemTestTag(projectPath, longName),
@@ -324,7 +333,8 @@ class FolderListStopSessionTest {
     fun longSessionNamesKeepFlatKebabVisibleAndOpenMenu() {
         val longName = "agent-" + "very-long-session-name-".repeat(8) + "tail"
 
-        assertLongNameKebabVisibleAndMenuOpens(
+        // Flat rows are unchanged — they keep a visible kebab trigger.
+        assertLongNameSessionMenuOpens(
             longName = longName,
             mode = HostDetailViewMode.Flat,
             rowTag = folderListFlatRowTestTag(longName),
@@ -356,12 +366,15 @@ class FolderListStopSessionTest {
         return vm
     }
 
-    private fun assertLongNameKebabVisibleAndMenuOpens(
+    private fun assertLongNameSessionMenuOpens(
         longName: String,
         mode: HostDetailViewMode,
         rowTag: String,
         badgeTag: String,
-        triggerTag: String,
+        // Non-null for views that keep a visible kebab trigger (flat). Null for
+        // the quiet tree session row, whose menu opens via a long-press on the
+        // row itself (no inline affordance).
+        triggerTag: String?,
         openItemTag: String,
         renameItemTag: String,
         stopItemTag: String,
@@ -427,7 +440,11 @@ class FolderListStopSessionTest {
         }
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG).performScrollToNode(hasTestTag(rowTag))
 
-        assertActionTargetVisibleInsideRow(rowTag = rowTag, triggerTag = triggerTag)
+        // The trailing badge must stay inside the row even with a long name in
+        // both views. The visible kebab trigger only exists in the flat view.
+        if (triggerTag != null) {
+            assertActionTargetVisibleInsideRow(rowTag = rowTag, triggerTag = triggerTag)
+        }
         assertNodeVisibleInsideRow(rowTag = rowTag, nodeTag = badgeTag)
         captureViewport(
             when (mode) {
@@ -436,7 +453,12 @@ class FolderListStopSessionTest {
             },
         )
 
-        compose.onNodeWithTag(triggerTag).performClick()
+        // Flat: tap the visible kebab. Tree (quiet row): long-press the row.
+        if (triggerTag != null) {
+            compose.onNodeWithTag(triggerTag).performClick()
+        } else {
+            compose.onNodeWithTag(rowTag).performTouchInput { longClick() }
+        }
         compose.onNodeWithTag(openItemTag).assertExists()
         compose.onNodeWithTag(renameItemTag).assertExists()
         compose.onNodeWithTag(stopItemTag).assertExists()

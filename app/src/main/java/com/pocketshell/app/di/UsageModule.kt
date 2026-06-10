@@ -5,6 +5,7 @@ import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.usage.DefaultUsageNotifier
 import com.pocketshell.app.usage.HostUsageFetcher
 import com.pocketshell.app.usage.SshHostUsageFetcher
+import com.pocketshell.app.usage.SharedPreferencesUsageNotificationStateStore
 import com.pocketshell.app.usage.UsageNotifier
 import com.pocketshell.app.usage.UsageRemoteSource
 import dagger.Binds
@@ -59,5 +60,9 @@ object UsageProvidersModule {
     fun provideUsageNotifier(
         @ApplicationContext context: Context,
         settingsRepository: SettingsRepository,
-    ): UsageNotifier = DefaultUsageNotifier(context, settingsRepository)
+    ): UsageNotifier = DefaultUsageNotifier(
+        context = context,
+        settingsRepository = settingsRepository,
+        stateStore = SharedPreferencesUsageNotificationStateStore(context),
+    )
 }

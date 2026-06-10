@@ -34,6 +34,21 @@ class UsageNotificationsTest {
             .edit().clear().commit()
     }
 
+    /**
+     * In-memory [UsageNotificationStateStore] standing in for the real
+     * SharedPreferences-backed store. A single instance shared across two
+     * notifiers simulates persistence surviving a process restart.
+     */
+    private class FakeStateStore : UsageNotificationStateStore {
+        private var keys: Set<UsageNotificationKey> = emptySet()
+
+        override fun notifiedKeys(): Set<UsageNotificationKey> = keys
+
+        override fun setNotifiedKeys(keys: Set<UsageNotificationKey>) {
+            this.keys = keys
+        }
+    }
+
     @Test
     fun approachingUsageNotificationUsesConfiguredThresholdCopy() {
         val event = usageNotificationEvent(
@@ -110,6 +125,7 @@ class UsageNotificationsTest {
         val notifier = DefaultUsageNotifier(
             context = context,
             settingsRepository = SettingsRepository(context),
+            stateStore = FakeStateStore(),
             now = { Instant.parse("2026-06-08T10:00:00Z") },
             zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
@@ -163,6 +179,7 @@ class UsageNotificationsTest {
         val notifier = DefaultUsageNotifier(
             context = context,
             settingsRepository = SettingsRepository(context),
+            stateStore = FakeStateStore(),
             now = { Instant.parse("2026-06-08T10:00:00Z") },
             zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
@@ -184,6 +201,7 @@ class UsageNotificationsTest {
         val notifier = DefaultUsageNotifier(
             context = context,
             settingsRepository = SettingsRepository(context),
+            stateStore = FakeStateStore(),
             now = { Instant.parse("2026-06-08T10:00:00Z") },
             zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
@@ -232,6 +250,129 @@ class UsageNotificationsTest {
 
         assertEquals(AppDestination.Usage, initialDestinationFromIntent(intent))
     }
+
+    @Test
+    fun exceededCrossingDoesNotReNotifyAfterProcessRestart() {
+        // Issue #619: a persistent store shared across two notifier instances
+        // simulates process death + recreation (D21 foreground-only). The same
+        // Exceeded snapshot must NOT re-post on the recreated process.
+        val store = FakeStateStore()
+        val exceeded = exceededSnapshot()
+
+        val firstEvents = mutableListOf<UsageNotificationEvent>()
+        notifier(store) { firstEvents += it }
+            .onSnapshotsChanged(mapOf(1L to exceeded))
+        assertEquals(listOf("Codex weekly quota exceeded"), firstEvents.map { it.title })
+
+        // Fresh notifier, same persistent store == process restart.
+        val secondEvents = mutableListOf<UsageNotificationEvent>()
+        notifier(store) { secondEvents += it }
+            .onSnapshotsChanged(mapOf(1L to exceeded))
+
+        assertEquals(emptyList<String>(), secondEvents.map { it.title })
+    }
+
+    @Test
+    fun exceededCrossingReArmsAcrossRestartAfterReset() {
+        // After notifying, a sync where the provider is back below threshold
+        // prunes the persisted key; a later genuine crossing re-posts even on a
+        // freshly recreated process.
+        val store = FakeStateStore()
+
+        val first = mutableListOf<UsageNotificationEvent>()
+        notifier(store) { first += it }
+            .onSnapshotsChanged(mapOf(1L to exceededSnapshot()))
+        assertEquals(1, first.size)
+
+        // Restart + below-threshold sync clears the crossing.
+        notifier(store) {}.onSnapshotsChanged(mapOf(1L to snapshot(percent = 70.0)))
+
+        // Restart + crosses again -> re-posts.
+        val third = mutableListOf<UsageNotificationEvent>()
+        notifier(store) { third += it }
+            .onSnapshotsChanged(mapOf(1L to exceededSnapshot()))
+
+        assertEquals(listOf("Codex weekly quota exceeded"), third.map { it.title })
+    }
+
+    @Test
+    fun dismissalSuppressesReNotifyForSameCrossing() {
+        // A user swipe records the crossing as dismissed in the persistent
+        // store; the same Exceeded snapshot must not re-post afterwards.
+        val store = FakeStateStore()
+        val exceeded = exceededSnapshot()
+
+        val events = mutableListOf<UsageNotificationEvent>()
+        val first = notifier(store) { events += it }
+        first.onSnapshotsChanged(mapOf(1L to exceeded))
+        assertEquals(1, events.size)
+
+        // Simulate the delete-intent: record the posted crossing as dismissed.
+        val dismissedKey = events.single().key
+        store.setNotifiedKeys(store.notifiedKeys() + dismissedKey)
+
+        // Same crossing on a recreated process must stay suppressed.
+        val afterDismiss = mutableListOf<UsageNotificationEvent>()
+        notifier(store) { afterDismiss += it }
+            .onSnapshotsChanged(mapOf(1L to exceeded))
+
+        assertEquals(emptyList<String>(), afterDismiss.map { it.title })
+    }
+
+    @Test
+    fun dismissReceiverRecordsCrossingInStore() {
+        val store = FakeStateStore()
+        UsageNotificationDismissReceiver.storeFactory = { store }
+        try {
+            val key = UsageNotificationKey(
+                hostId = 1L,
+                provider = "codex",
+                state = UsageThresholdState.Exceeded,
+                windowName = "7d",
+            )
+            val intent = Intent(UsageNotificationDismissReceiver.ACTION_DISMISS)
+                .putExtra(
+                    UsageNotificationDismissReceiver.EXTRA_NOTIFICATION_KEY,
+                    key.encode(),
+                )
+
+            UsageNotificationDismissReceiver().onReceive(context, intent)
+
+            assertEquals(setOf(key), store.notifiedKeys())
+        } finally {
+            UsageNotificationDismissReceiver.storeFactory = { ctx ->
+                SharedPreferencesUsageNotificationStateStore(ctx)
+            }
+        }
+    }
+
+    private fun notifier(
+        store: UsageNotificationStateStore,
+        poster: (UsageNotificationEvent) -> Unit,
+    ): DefaultUsageNotifier = DefaultUsageNotifier(
+        context = context,
+        settingsRepository = SettingsRepository(context),
+        stateStore = store,
+        now = { Instant.parse("2026-06-08T10:00:00Z") },
+        zoneId = { ZoneId.of("UTC") },
+        poster = poster,
+    )
+
+    private fun exceededSnapshot(): UsageSnapshot.Records = UsageSnapshot.Records(
+        hostId = 1L,
+        hostName = "agent-box",
+        records = listOf(
+            UsageProviderRecord(
+                provider = "codex",
+                status = UsageStatus.Blocked,
+                rawStatus = "quota_exhausted",
+                blockReason = "codex quota exhausted (weekly window at 80%)",
+                windows = listOf(UsageWindow("7d", 100.0, 100.0, "percent", null)),
+            ),
+        ),
+        fetchedAt = Instant.parse("2026-06-08T10:00:00Z"),
+        command = UsageRemoteSource.defaultUsageCommand,
+    )
 
     private fun snapshot(
         percent: Double,

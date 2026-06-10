@@ -256,6 +256,21 @@
         </receiver>
 
         <!--
+            Issue #619: delete-intent target for usage warning notifications.
+            A user swipe durably records the dismissed crossing so it does not
+            re-fire on the next sync / cold launch. Not exported: the
+            deleteIntent is fired by the system within this app only.
+        -->
+        <receiver
+            android:name=".usage.UsageNotificationDismissReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.pocketshell.app.usage.action.USAGE_NOTIFICATION_DISMISSED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
             Issue #203 expanded scope (round 3): foreground service for
             the SSH port-forwarding feature. See
             `com.pocketshell.app.portfwd.service.ForwardingService` for

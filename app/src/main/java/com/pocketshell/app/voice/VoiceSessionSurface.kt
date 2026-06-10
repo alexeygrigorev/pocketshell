@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -464,8 +466,16 @@ private fun PrimaryChipCluster(
         onShowKeyboardTap == null &&
         onAddSnippetTap == null
     ) return
+    val scrollState = rememberScrollState()
     Row(
+        // Issue #641: scroll horizontally so that when the caller caps the cluster
+        // width (via `widthIn(max = ...)`, to reserve space for the pinned composer
+        // launcher) the chips keep their natural width and scroll within the cap,
+        // instead of compressing (snippets text wrapping vertically) or clipping.
+        // When the chips fit, the scroll is inert and the cluster renders exactly
+        // as before.
         modifier = modifier
+            .horizontalScroll(scrollState)
             .padding(
                 top = PocketShellSpacing.sm,
                 bottom = PocketShellSpacing.sm,
@@ -631,30 +641,58 @@ internal fun BottomChipControls(
                 .border(width = 1.dp, color = PocketShellColors.Border),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Issue #641: the composer launcher is pinned LAST and unweighted so it
+            // reserves its width before the flexible chip area is measured — it is
+            // therefore ALWAYS fully on-screen. The low-frequency command chips
+            // ([ScrollableChipStrip]) take the remaining width via `weight(1f)` and
+            // scroll. The sticky primary cluster (`/ commands` / `Enter` /
+            // `show keyboard` / picker) stays pinned, between the command strip and
+            // the launcher, so the high-value affordances remain reachable without
+            // scrolling whenever they fit (design-system §9 / #221).
+            //
+            // Before this fix the primary cluster was unweighted with NO width cap.
+            // With all four primary chips present (a shell pane that was briefly an
+            // agent pane, so the `/ commands` palette chip is sticky-present), the
+            // cluster claimed its full natural width and the launcher — rendered
+            // last and also unweighted — was pushed off the right edge and clipped.
+            // The dogfood symptom was the composer being unreachable in a plain
+            // shell. Capping the cluster at the row width minus the launcher's
+            // reserved width (via [BoxWithConstraints]) and letting it scroll within
+            // that cap guarantees the launcher is never clipped, while the cluster
+            // keeps each chip at its natural width (no vertical-text compression).
             ScrollableChipStrip(
                 chips = chips,
                 onChipTap = if (inputEnabled) onChipTap else { _ -> },
                 onProjectNavigationTap = onProjectNavigationTap,
-                // Issue #628: pass the toggle chip through to the scrollable strip
-                // so it renders at the START of the row, before the command chips.
+                // Issue #628: pass the toggle chip through so it renders at the
+                // START of the row, before the command chips.
                 previousSessionName = previousSessionName,
                 onTogglePreviousSession = onTogglePreviousSession,
                 modifier = Modifier.weight(1f),
             )
-            PrimaryChipCluster(
-                onAgentCommandsTap = onAgentCommandsTap?.let { callback ->
-                    if (inputEnabled) callback else ({})
-                },
-                onEnterTap = onEnterTap?.let { callback ->
-                    if (inputEnabled) callback else ({})
-                },
-                onShowKeyboardTap = onShowKeyboardTap,
-                onAddSnippetTap = onAddSnippetTap,
-                enterLabel = enterLabel,
-                agentCommandsLabel = agentCommandsLabel,
-                addSnippetLabel = addSnippetLabel,
-                addSnippetIcon = addSnippetIcon,
-            )
+            BoxWithConstraints {
+                // Cap the cluster so it can never consume the launcher's reserved
+                // width. The launcher tap target plus its end padding is
+                // [SessionComposerLauncherReservedWidth]; leave at least that much
+                // for the launcher even at the cluster's widest.
+                val clusterMaxWidth =
+                    (maxWidth - SessionComposerLauncherReservedWidth).coerceAtLeast(0.dp)
+                PrimaryChipCluster(
+                    onAgentCommandsTap = onAgentCommandsTap?.let { callback ->
+                        if (inputEnabled) callback else ({})
+                    },
+                    onEnterTap = onEnterTap?.let { callback ->
+                        if (inputEnabled) callback else ({})
+                    },
+                    onShowKeyboardTap = onShowKeyboardTap,
+                    onAddSnippetTap = onAddSnippetTap,
+                    enterLabel = enterLabel,
+                    agentCommandsLabel = agentCommandsLabel,
+                    addSnippetLabel = addSnippetLabel,
+                    addSnippetIcon = addSnippetIcon,
+                    modifier = Modifier.widthIn(max = clusterMaxWidth),
+                )
+            }
             if (onDictateTap != null) {
                 Box(
                     modifier = Modifier
@@ -676,6 +714,18 @@ internal fun BottomChipControls(
 }
 
 internal val SessionBottomControlsMinHeight = PocketShellDensity.tapTargetMin + 8.dp
+
+/**
+ * Issue #641: the horizontal space the pinned composer launcher reserves on the
+ * right of the bottom-control bar — its tap target plus its trailing `end`
+ * padding. [BottomChipControls] caps the sticky primary cluster at
+ * `rowWidth - SessionComposerLauncherReservedWidth` so the cluster can never grow
+ * into the launcher's space and push it off the right edge (the dogfood symptom:
+ * the composer launcher was clipped/absent in a shell with all four primary
+ * chips). Keep this in sync with the launcher [Box]'s size + `end` padding below.
+ */
+internal val SessionComposerLauncherReservedWidth =
+    PocketShellDensity.tapTargetMin + PocketShellSpacing.sm
 
 @Composable
 private fun ComposerLauncherButton(

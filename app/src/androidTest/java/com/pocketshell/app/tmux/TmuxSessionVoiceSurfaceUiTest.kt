@@ -205,6 +205,127 @@ class TmuxSessionVoiceSurfaceUiTest {
             .assertDoesNotExist()
     }
 
+    /**
+     * Issue #641: a plain **shell** (non-agent) pane with the IME hidden must
+     * still surface the Prompt Composer launcher so the user can compose /
+     * dictate input in a shell, not only when an agent is detected. This is
+     * the exact state from the dogfood screenshot (shell pane, hidden IME) where
+     * only `/ commands` / `Enter` / `show keyboard` / `snippets` were shown and
+     * the launcher was missing. The launcher (`onDictateTap`) is wired
+     * unconditionally for shell panes too, so it must be displayed and tappable.
+     */
+    @Test
+    fun shellKeyboardHiddenShowsComposerLauncher() {
+        var dictateTaps = 0
+        var enterTaps = 0
+        var keyboardTaps = 0
+        var snippetTaps = 0
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = false,
+                    showConversation = false,
+                    sessionLive = true,
+                    // Shell (non-agent) pane — the regression case from #641.
+                    isAgentPane = false,
+                    keyBarExpanded = false,
+                    onKeyBarExpandedChange = {},
+                    onKey = {},
+                    onChipTap = {},
+                    onDictateTap = { dictateTaps++ },
+                    onEnterTap = { enterTaps++ },
+                    onShowKeyboardTap = { keyboardTaps++ },
+                    onAddSnippetTap = { snippetTaps++ },
+                )
+            }
+        }
+
+        captureViewportArtifact("issue641-shell-bottom-bar-with-composer-launcher.png")
+
+        // No raw key bar without the IME.
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithText("^C").assertDoesNotExist()
+
+        // The shell pane keeps Enter / show-keyboard / snippets …
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+
+        // … AND the Prompt Composer launcher (the #641 fix): visible + tappable
+        // in shell mode just like an agent pane.
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+
+        assertEquals(1, dictateTaps)
+        assertEquals(1, enterTaps)
+        assertEquals(1, keyboardTaps)
+        assertEquals(1, snippetTaps)
+    }
+
+    /**
+     * Issue #641: the exact dogfood state — a shell pane where an agent was
+     * detected (so the `/ commands` palette chip is sticky-present) but
+     * detection is currently null (so it renders as a SHELL band with
+     * `snippets`). With `/ commands` + `Enter` + `show keyboard` + `snippets`
+     * all in the non-scrolling primary cluster, the composer launcher (rendered
+     * last with no weight) was pushed off the right edge and clipped — exactly
+     * what the screenshot shows (only the four chips, launcher absent). The
+     * launcher must stay fully on-screen and clickable regardless of how many
+     * primary chips precede it.
+     */
+    @Test
+    fun shellBandWithAllPrimaryChipsKeepsComposerLauncherOnScreen() {
+        var dictateTaps = 0
+        compose.setContent {
+            PocketShellTheme {
+                BottomChipControls(
+                    chips = DefaultSessionChips,
+                    onChipTap = {},
+                    onDictateTap = { dictateTaps++ },
+                    // The `/ commands` palette chip is present (sticky agent for
+                    // this pane) even though the band renders as a shell band.
+                    onAgentCommandsTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+                    addSnippetIcon = SnippetsChipIcon,
+                    onProjectNavigationTap = null,
+                )
+            }
+        }
+
+        captureViewportArtifact("issue641-shell-band-all-primary-chips.png")
+
+        // The composer launcher must be FULLY on-screen (both edges inside the
+        // root) and tappable — not pushed off the right edge by the four primary
+        // chips. The pre-fix layout left only a sliver of the launcher visible.
+        val rootBounds = compose.onRoot().getUnclippedBoundsInRoot()
+        val launcherBounds = compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .getUnclippedBoundsInRoot()
+        assertTrue(
+            "composer launcher must be fully inside the viewport, not clipped past " +
+                "the right edge; launcher=[${launcherBounds.left}..${launcherBounds.right}] " +
+                "root=[${rootBounds.left}..${rootBounds.right}]",
+            launcherBounds.left >= rootBounds.left && launcherBounds.right <= rootBounds.right,
+        )
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).performClick()
+        assertEquals(1, dictateTaps)
+    }
+
     @Test
     fun tmuxKeyboardHiddenShowsControlsWithoutHotkeyBar() {
         val keyTaps = mutableListOf<String>()

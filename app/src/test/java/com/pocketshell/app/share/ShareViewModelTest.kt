@@ -706,6 +706,130 @@ class ShareViewModelTest {
     }
 
     @Test
+    fun startUploadDoesNotReAuthWhenWarmLeaseExistsForPassphraseKey() = runTest {
+        // Issue #654: a passphrase-protected key must STILL reuse the warm
+        // app lease without any passphrase prompt — the passphrase is not
+        // part of the lease key, so an already-unlocked lease is shared.
+        val host = seededHost(id = 654L, name = "hetzner", hasPassphrase = true)
+        val keyPath = "/tmp/key-654"
+        val fakeSession = FakeStagingSshSession()
+        var connectCalls = 0
+        // The first connect (the live app session's) succeeds; any SECOND
+        // connect would mean the share re-authenticated instead of reusing
+        // the warm lease, which the assertion below forbids.
+        val leaseManager = SshLeaseManager(
+            connector = { _: SshLeaseTarget ->
+                connectCalls += 1
+                if (connectCalls == 1) {
+                    Result.success(fakeSession)
+                } else {
+                    Result.failure(SshException("Authentication failed"))
+                }
+            },
+        )
+        val activeLease = leaseManager.acquire(host.shareTestLeaseTarget(keyPath)).getOrThrow()
+        try {
+            val vm = newVm(ActiveTmuxClients(), sshLeaseManager = leaseManager)
+            vm.setItem(ShareableItem.TextItem(text = "report body", displayName = "report"))
+
+            vm.startUpload(host)
+            advanceUntilIdle()
+
+            val success = vm.uploadState.first { it is UploadState.Success }
+            assertTrue("warm lease reuse must succeed", success is UploadState.Success)
+            assertEquals(
+                "the passphrase-protected key's warm lease was reused; no fresh auth",
+                1,
+                connectCalls,
+            )
+        } finally {
+            activeLease.release()
+            leaseManager.close()
+        }
+    }
+
+    @Test
+    fun startUploadPromptsForPassphraseWhenFreshAuthFailsOnLockedKey() = runTest {
+        // Issue #654: no warm lease -> fresh connect -> auth fails because
+        // the key is passphrase-protected. Instead of a bare
+        // "Authentication failed", the share must surface the same unlock
+        // the main app uses (NeedsPassphrase), then succeed once the
+        // passphrase is supplied.
+        val host = seededHost(id = 6541L, name = "hetzner", hasPassphrase = true)
+        val keyPath = "/tmp/key-6541"
+        val fakeSession = FakeStagingSshSession()
+        val seenPassphrases = mutableListOf<String?>()
+        var connectCalls = 0
+        val leaseManager = SshLeaseManager(
+            connector = { target: SshLeaseTarget ->
+                connectCalls += 1
+                seenPassphrases += target.passphrase?.concatToString()
+                if (target.passphrase != null) {
+                    Result.success(fakeSession)
+                } else {
+                    Result.failure(SshException("Authentication failed"))
+                }
+            },
+        )
+        try {
+            val vm = newVm(ActiveTmuxClients(), sshLeaseManager = leaseManager)
+            vm.setItem(ShareableItem.TextItem(text = "report body", displayName = "report"))
+
+            vm.startUpload(host)
+            advanceUntilIdle()
+
+            val prompt = vm.uploadState.first { it is UploadState.NeedsPassphrase }
+                as UploadState.NeedsPassphrase
+            assertEquals("hetzner", prompt.hostName)
+            assertEquals(1, connectCalls)
+
+            vm.submitPassphrase("hunter2".toCharArray())
+            advanceUntilIdle()
+
+            val success = vm.uploadState.first { it is UploadState.Success }
+            assertTrue("upload must succeed once unlocked", success is UploadState.Success)
+            assertEquals(
+                "fresh connect retried with the entered passphrase",
+                listOf(null, "hunter2"),
+                seenPassphrases,
+            )
+            assertTrue(
+                "the unlocked session uploaded the file",
+                fakeSession.uploadedRemotePaths.isNotEmpty(),
+            )
+        } finally {
+            leaseManager.close()
+        }
+    }
+
+    @Test
+    fun startUploadShowsAuthFailureNotPromptForPassphraselessKey() = runTest {
+        // Issue #654 guard: a key WITHOUT a passphrase that still fails auth
+        // is a genuine failure, not a missing passphrase. Show the normal
+        // failure surface, never the passphrase prompt.
+        val host = seededHost(id = 6542L, name = "hetzner", hasPassphrase = false)
+        val leaseManager = SshLeaseManager(
+            connector = { _: SshLeaseTarget -> Result.failure(SshException("Authentication failed")) },
+        )
+        try {
+            val vm = newVm(ActiveTmuxClients(), sshLeaseManager = leaseManager)
+            vm.setItem(ShareableItem.TextItem(text = "report body", displayName = "report"))
+
+            vm.startUpload(host)
+            advanceUntilIdle()
+
+            val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+            assertEquals("Authentication failed", failed.message)
+            assertFalse(
+                "passphrase-less key must not raise the unlock prompt",
+                vm.uploadState.value is UploadState.NeedsPassphrase,
+            )
+        } finally {
+            leaseManager.close()
+        }
+    }
+
+    @Test
     @Config(sdk = [28])
     fun startUploadFailureInBackgroundPostsAndroidNotificationWithoutFakeActions() = runTest {
         val vm = newVm(ActiveTmuxClients())
@@ -1406,9 +1530,17 @@ class ShareViewModelTest {
      * `sshKeyDao.getById(host.keyId)` lookup succeeds and the upload loop
      * runs against the [FakeUploader].
      */
-    private suspend fun seededHost(id: Long, name: String): HostEntity {
+    private suspend fun seededHost(
+        id: Long,
+        name: String,
+        hasPassphrase: Boolean = false,
+    ): HostEntity {
         val keyId = db.sshKeyDao().insert(
-            SshKeyEntity(name = "key-$id", privateKeyPath = "/tmp/key-$id"),
+            SshKeyEntity(
+                name = "key-$id",
+                privateKeyPath = "/tmp/key-$id",
+                hasPassphrase = hasPassphrase,
+            ),
         )
         val host = HostEntity(
             id = id,

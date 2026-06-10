@@ -23,7 +23,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -166,6 +169,13 @@ internal fun HostPickerScreen(
                 }
             }
             is UploadState.Running -> UploadingSurface(hostName = state.hostName)
+            is UploadState.NeedsPassphrase ->
+                PassphraseDialog(
+                    hostName = state.hostName,
+                    keyName = state.keyName,
+                    onSubmit = { entered -> viewModel.submitPassphrase(entered) },
+                    onCancel = { viewModel.cancelPassphrasePrompt() },
+                )
             is UploadState.Success -> {
                 val isPaste = dispatchChoice == TextDispatchChoice.PasteIntoSession
                 if (isPaste) {
@@ -612,6 +622,68 @@ private fun TextDispatchDialog(
     )
 }
 
+/**
+ * Issue #654: passphrase unlock for the share upload. Shown when the
+ * fresh share connect could not authenticate because the host's SSH key
+ * is passphrase-protected and there is no warm app lease to reuse. The
+ * field mirrors the main app's key unlock — a masked password entry that,
+ * on submit, re-runs the upload with the passphrase plumbed into the SSH
+ * connect.
+ */
+@Composable
+private fun PassphraseDialog(
+    hostName: String,
+    keyName: String,
+    onSubmit: (CharArray) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var passphrase by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        modifier = Modifier.testTag(SHARE_PASSPHRASE_DIALOG_TAG),
+        title = { Text(text = "Unlock key for $hostName") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
+                Text(
+                    text = "The key \"$keyName\" is passphrase-protected. " +
+                        "Enter its passphrase to upload.",
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    value = passphrase,
+                    onValueChange = { passphrase = it },
+                    singleLine = true,
+                    label = { Text(text = "Passphrase") },
+                    visualTransformation =
+                        androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(SHARE_PASSPHRASE_FIELD_TAG),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSubmit(passphrase.toCharArray()) },
+                enabled = passphrase.isNotEmpty(),
+                modifier = Modifier.testTag(SHARE_PASSPHRASE_SUBMIT_TAG),
+            ) {
+                Text(text = "Unlock")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onCancel,
+                modifier = Modifier.testTag(SHARE_PASSPHRASE_CANCEL_TAG),
+            ) {
+                Text(text = "Cancel")
+            }
+        },
+    )
+}
+
 internal const val SHARE_PICKER_ROOT_TAG: String = "share:picker:root"
 internal const val SHARE_HOST_ROW_TAG_PREFIX: String = "share:host:row:"
 internal const val SHARE_RESULT_SUCCESS_TAG: String = "share:result:success"
@@ -632,3 +704,7 @@ internal const val SHARE_TARGET_SESSION_PROJECT_ROW_TAG_PREFIX: String =
     "share:target:session-project:"
 internal const val SHARE_TARGET_PROJECT_ROW_TAG_PREFIX: String = "share:target:project:"
 internal const val SHARE_TARGET_BACK_TAG: String = "share:target:back"
+internal const val SHARE_PASSPHRASE_DIALOG_TAG: String = "share:passphrase:dialog"
+internal const val SHARE_PASSPHRASE_FIELD_TAG: String = "share:passphrase:field"
+internal const val SHARE_PASSPHRASE_SUBMIT_TAG: String = "share:passphrase:submit"
+internal const val SHARE_PASSPHRASE_CANCEL_TAG: String = "share:passphrase:cancel"

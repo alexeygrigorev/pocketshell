@@ -183,6 +183,21 @@ internal class ShareViewModel internal constructor(
     private var lastShareAction: ShareRetryAction? = null
 
     /**
+     * Issue #654: the passphrase entered for the current share's
+     * passphrase-protected key, if any. A fresh share connect (when no
+     * warm app lease is reusable) needs the key's passphrase exactly the
+     * way the main app does. The share activity is launched cold from the
+     * system share sheet, so it cannot inherit the live session's already
+     * unlocked credentials when that session's warm lease has expired
+     * (e.g. the user spent longer than the background grace window in the
+     * other app). We hold the freshly entered passphrase here for the
+     * lifetime of this one share so the upload + any retry reuse it, and
+     * clear it the moment the share surface is dismissed so it never
+     * outlives the transaction.
+     */
+    private val pendingPassphrase = AtomicReference<CharArray?>(null)
+
+    /**
      * Issue #560: one-shot navigation event. After the shared file is
      * staged into a chosen active session's `.pocketshell/attachments`
      * scope (the #544 mechanic), the ViewModel emits a [SessionLaunch] here.
@@ -227,13 +242,29 @@ internal class ShareViewModel internal constructor(
         host: HostEntity,
         keyPath: String,
     ): Result<SshSession> {
-        val target = host.toShareLeaseTarget(keyPath)
+        val target = host.toShareLeaseTarget(keyPath, pendingPassphrase.get())
         return sshLeaseManager.acquire(target).map { lease ->
             LeaseBackedShareSession(lease)
         }
     }
 
-    private fun HostEntity.toShareLeaseTarget(keyPath: String): SshLeaseTarget =
+    /**
+     * Build the lease target for the share connect.
+     *
+     * The [SshLeaseKey] is byte-for-byte identical to the one the live
+     * tmux session uses (`TmuxSessionViewModel.toSshLeaseTarget`) — same
+     * `credentialId` (`"$id:$keyPath"`) and `knownHostsId` — so when the
+     * app already holds a warm lease for this host/key the share REUSES it
+     * (the passphrase is intentionally NOT part of the lease key, so a
+     * warm, already-unlocked lease is shared regardless of whether we have
+     * a passphrase here). The [passphrase] only matters on the
+     * fresh-connect fallback, when no reusable lease exists and the key is
+     * passphrase-protected (issue #654).
+     */
+    private fun HostEntity.toShareLeaseTarget(
+        keyPath: String,
+        passphrase: CharArray?,
+    ): SshLeaseTarget =
         SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
@@ -243,7 +274,7 @@ internal class ShareViewModel internal constructor(
                 knownHostsId = "accept-all",
             ),
             key = SshKey.Path(File(keyPath)),
-            passphrase = null,
+            passphrase = passphrase?.copyOf(),
             knownHosts = KnownHostsPolicy.AcceptAll,
         )
 
@@ -670,9 +701,45 @@ internal class ShareViewModel internal constructor(
             val failedNames = mutableListOf<String>()
             var lastError: String? = null
 
-            for (item in payload) {
+            for ((index, item) in payload.withIndex()) {
                 val itemLabel = item.displayName?.takeIf { it.isNotBlank() } ?: "file"
-                uploader.upload(host, keyEntity, item, target).fold(
+                val result = uploader.upload(host, keyEntity, item, target)
+                val failure = result.exceptionOrNull()
+                // Issue #654: a fresh share connect (when no warm app lease
+                // is reusable — e.g. the live session's lease expired while
+                // the user was in the other app past the background grace
+                // window) can only authenticate a passphrase-protected key
+                // if we have its passphrase. Rather than surfacing a bare
+                // "Authentication failed", prompt for the same unlock the
+                // main app uses and re-run the upload. We only divert on the
+                // FIRST item before anything uploaded — once a file has
+                // landed the credentials are clearly fine and any later
+                // failure is a genuine per-file error.
+                if (failure != null &&
+                    index == 0 &&
+                    succeededPaths.isEmpty() &&
+                    keyEntity.hasPassphrase &&
+                    pendingPassphrase.get() == null &&
+                    isAuthFailure(failure)
+                ) {
+                    DiagnosticEvents.record(
+                        "action",
+                        "share_upload_result",
+                        "status" to "needs_passphrase",
+                        "hostId" to host.id,
+                        "target" to targetName,
+                    )
+                    android.util.Log.i(
+                        LOG_TAG,
+                        "share upload needs passphrase for host ${host.name}; prompting",
+                    )
+                    _uploadState.value = UploadState.NeedsPassphrase(
+                        hostName = host.name,
+                        keyName = keyEntity.name,
+                    )
+                    return@launch
+                }
+                result.fold(
                     onSuccess = { remotePath ->
                         if (remotePath.isBlank()) {
                             val message = "Upload completed but returned no remote path"
@@ -1040,10 +1107,12 @@ internal class ShareViewModel internal constructor(
     }
 
     fun clearUploadState() {
+        clearPendingPassphrase()
         _uploadState.value = UploadState.Idle
     }
 
     fun chooseDifferentShareTarget() {
+        clearPendingPassphrase()
         _targetSelection.value = null
         _uploadState.value = UploadState.Idle
     }
@@ -1056,6 +1125,54 @@ internal class ShareViewModel internal constructor(
             is ShareRetryAction.StageIntoSession -> stageIntoSession(action.host, action.session)
             is ShareRetryAction.PasteIntoSession -> pasteIntoSession(action.host)
         }
+    }
+
+    /**
+     * Issue #654: the user typed the passphrase in the
+     * [UploadState.NeedsPassphrase] prompt. Stash it for this share, then
+     * re-run the last share action so the fresh connect can unlock the
+     * key. The same retry path covers a wrong passphrase: the upload fails
+     * auth again, but [pendingPassphrase] is now non-null so we surface a
+     * normal failure ("Authentication failed") rather than re-prompting in
+     * a loop — the user can re-enter via the retry/different-host buttons.
+     */
+    fun submitPassphrase(passphrase: CharArray) {
+        if (passphrase.isEmpty()) return
+        pendingPassphrase.getAndSet(passphrase.copyOf())?.fill(' ')
+        retryLastShareAction()
+    }
+
+    /** Issue #654: the user dismissed the passphrase prompt without typing one. */
+    fun cancelPassphrasePrompt() {
+        clearUploadState()
+    }
+
+    private fun clearPendingPassphrase() {
+        pendingPassphrase.getAndSet(null)?.fill(' ')
+    }
+
+    /**
+     * Issue #654: does this throwable indicate the SSH handshake failed
+     * because the credentials were rejected (vs. a transport/IO error)?
+     * Mirrors the keyword match [ShareUploader.errorMessage] uses to map
+     * the failure to "Authentication failed", so the passphrase prompt
+     * triggers on exactly the cases the user would otherwise see as a bare
+     * auth failure.
+     */
+    override fun onCleared() {
+        // Issue #654: never let an entered passphrase outlive the share.
+        clearPendingPassphrase()
+        super.onCleared()
+    }
+
+    private fun isAuthFailure(error: Throwable): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            val text = (cause.message ?: cause.javaClass.simpleName).lowercase(java.util.Locale.ROOT)
+            if (text.contains("auth")) return true
+            cause = cause.cause
+        }
+        return false
     }
 
     private companion object {
@@ -1115,6 +1232,18 @@ internal sealed interface UploadState {
 
     /** SCP upload (or send-keys paste) is running. Surface a spinner + the host name. */
     data class Running(val hostName: String) : UploadState
+
+    /**
+     * Issue #654: the fresh share connect could not authenticate because
+     * the host's SSH key is passphrase-protected and there is no warm,
+     * already-unlocked app lease to reuse (the share activity is launched
+     * cold from the system share sheet). Show the same passphrase unlock
+     * the main app uses; submitting it re-runs the upload.
+     */
+    data class NeedsPassphrase(
+        val hostName: String,
+        val keyName: String,
+    ) : UploadState
 
     /**
      * Operation succeeded.

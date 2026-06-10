@@ -451,4 +451,184 @@ class SshIntegrationTest {
         session.close()
         assertTrue("session should report disconnected after close", !session.isConnected)
     }
+
+    // ---- Issue #654: share-upload auth path against a passphrase key ----
+
+    /**
+     * Issue #654 root-cause repro: a passphrase-protected key with NO
+     * passphrase fails authentication. This is exactly what the share flow
+     * did before the fix — `ShareViewModel.toShareLeaseTarget` hardcoded
+     * `passphrase = null`, so sharing to a host whose key is encrypted
+     * surfaced a bare "Authentication failed".
+     */
+    @Test
+    fun passphraseKeyWithoutPassphraseFailsAuth() = runTest {
+        val encrypted = encryptedKeyFile(PASSPHRASE)
+        val result = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(encrypted),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        )
+        assertTrue(
+            "an encrypted key with no passphrase must fail auth (the pre-fix bug)",
+            result.isFailure,
+        )
+        assertTrue(result.exceptionOrNull() is SshException)
+    }
+
+    /**
+     * Issue #654 fix: supplying the passphrase (the same unlock the main
+     * app uses, now plumbed into the share connect) authenticates the
+     * encrypted key and the SCP upload lands. Proves the upload-auth path
+     * the share's passphrase prompt drives.
+     */
+    @Test
+    fun passphraseKeyWithCorrectPassphraseAuthenticatesAndUploads() = runTest {
+        val encrypted = encryptedKeyFile(PASSPHRASE)
+        val result = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(encrypted),
+            passphrase = PASSPHRASE.toCharArray(),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        )
+        assertTrue(
+            "encrypted key + correct passphrase should authenticate; got ${result.exceptionOrNull()}",
+            result.isSuccess,
+        )
+        result.getOrThrow().use { session ->
+            session.exec("mkdir -p ~/inbox/pocketshell && echo ok")
+            val bytes = "issue-654 share payload".toByteArray(Charsets.UTF_8)
+            val remotePath = "inbox/pocketshell/issue-654.txt"
+            session.uploadStream(
+                input = bytes.inputStream(),
+                length = bytes.size.toLong(),
+                name = "issue-654.txt",
+                remotePath = remotePath,
+            )
+            val readBack = session.exec("cat ~/$remotePath")
+            assertEquals(0, readBack.exitCode)
+            assertEquals("issue-654 share payload", readBack.stdout.trim())
+            session.exec("rm -f ~/$remotePath")
+        }
+    }
+
+    /**
+     * Issue #654: the share reuses the running app's warm SSH lease rather
+     * than re-authenticating. With a passphrase-protected key, the FIRST
+     * acquire opens the (passphrase-unlocked) transport; the SECOND acquire
+     * for the same lease key — the one the share makes — hits the live
+     * entry and connects ZERO additional times, even though it carries no
+     * passphrase. This is the "no re-auth from scratch when already
+     * connected" guarantee, exercised against a real sshd.
+     */
+    @Test
+    fun warmLeaseIsReusedForSharedConnectWithoutReauth() = runTest {
+        val encrypted = encryptedKeyFile(PASSPHRASE)
+        var connectCount = 0
+        val connector = SshLeaseConnector { target ->
+            connectCount += 1
+            SshConnection.connect(
+                host = target.leaseKey.host,
+                port = target.leaseKey.port,
+                user = target.leaseKey.user,
+                key = target.key,
+                passphrase = target.passphrase?.copyOf(),
+                knownHosts = target.knownHosts,
+                timeoutMs = target.timeoutMs,
+            )
+        }
+        val manager = SshLeaseManager(connector = connector)
+        val leaseKey = SshLeaseKey(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            credentialId = "654:${encrypted.absolutePath}",
+        )
+        // The live app session: connects once, with the passphrase.
+        val appLease = manager.acquire(
+            SshLeaseTarget(
+                leaseKey = leaseKey,
+                key = SshKey.Path(encrypted),
+                passphrase = PASSPHRASE.toCharArray(),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ),
+        ).getOrThrow()
+        try {
+            // The share connect: SAME lease key, but no passphrase. It must
+            // REUSE the warm transport, not start a fresh (and here
+            // doomed-without-passphrase) auth.
+            val shareLease = manager.acquire(
+                SshLeaseTarget(
+                    leaseKey = leaseKey,
+                    key = SshKey.Path(encrypted),
+                    passphrase = null,
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ),
+            ).getOrThrow()
+            assertTrue("share lease must reuse the live transport", !shareLease.isNewConnection)
+            assertEquals("share must not re-authenticate", 1, connectCount)
+
+            // The reused session is fully usable for the SCP upload.
+            val bytes = "reused-lease payload".toByteArray(Charsets.UTF_8)
+            val remotePath = "inbox/pocketshell/issue-654-reuse.txt"
+            shareLease.session.exec("mkdir -p ~/inbox/pocketshell")
+            shareLease.session.uploadStream(
+                input = bytes.inputStream(),
+                length = bytes.size.toLong(),
+                name = "issue-654-reuse.txt",
+                remotePath = remotePath,
+            )
+            val readBack = shareLease.session.exec("cat ~/$remotePath")
+            assertEquals("reused-lease payload", readBack.stdout.trim())
+            shareLease.session.exec("rm -f ~/$remotePath")
+            shareLease.release()
+        } finally {
+            appLease.release()
+            manager.close()
+        }
+    }
+
+    /**
+     * Produce a passphrase-encrypted copy of the shared `test_key` (same
+     * key material, so the container's `authorized_keys` still authorizes
+     * it). Cached per-passphrase for the class lifetime.
+     */
+    private fun encryptedKeyFile(passphrase: String): File {
+        encryptedKeyCache[passphrase]?.let { return it }
+        val tmpDir = createTempDir(prefix = "ps654-key").also { it.deleteOnExit() }
+        val target = File(tmpDir, "encrypted_key")
+        target.writeBytes(privateKeyFile.readBytes())
+        // ssh-keygen refuses an over-permissive private key, so lock the
+        // copy down to 0600 (owner read/write only) before rewriting it.
+        java.nio.file.Files.setPosixFilePermissions(
+            target.toPath(),
+            java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"),
+        )
+        // ssh-keygen -p rewrites the key in place with a new passphrase.
+        val process = ProcessBuilder(
+            "ssh-keygen", "-p",
+            "-f", target.absolutePath,
+            "-P", "",
+            "-N", passphrase,
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.readBytes().toString(Charsets.UTF_8)
+        val finished = process.waitFor(30, TimeUnit.SECONDS)
+        assertTrue("ssh-keygen -p timed out", finished)
+        assertEquals("ssh-keygen -p failed: $output", 0, process.exitValue())
+        encryptedKeyCache[passphrase] = target
+        return target
+    }
+
+    private val encryptedKeyCache = mutableMapOf<String, File>()
 }
+
+private const val PASSPHRASE = "issue-654-secret"

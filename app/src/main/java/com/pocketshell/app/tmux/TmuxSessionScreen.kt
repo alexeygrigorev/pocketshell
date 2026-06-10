@@ -4197,7 +4197,12 @@ internal fun ConsolidatedTopChrome(
             .fillMaxWidth()
             .background(color = PocketShellColors.Background)
             .height(56.dp)
-            .padding(start = 4.dp, end = 8.dp),
+            // Issue #637: a single horizontal inset on both edges keeps the
+            // back chevron and the kebab a consistent, comfortable distance
+            // from the screen edges in BOTH the breadcrumb and the
+            // agent-toggle layout, instead of the kebab looking like it
+            // floats at an odd offset.
+            .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Back chevron — 48dp touch target so edge taps land on the
@@ -4237,11 +4242,20 @@ internal fun ConsolidatedTopChrome(
 
         // Issue #481: the title — the agent/model name when a conversation
         // is detected (`claude-3-5-sonnet` in the mockup), otherwise the
-        // tmux session name. `weight(1f, fill = false)` hugs the status dot
-        // at the leading edge: the title measures at its natural width
-        // (ellipsising when it would overflow the remaining row space) while
-        // the unused slack inside its weighted slot pushes the segmented
-        // toggle + kebab flush right, matching the mockup.
+        // tmux session name.
+        //
+        // Issue #637: the title takes the full weighted slot (`weight(1f)`,
+        // fill = true) so it consumes ALL remaining width and pushes the
+        // trailing control cluster flush against the right edge. This is what
+        // gives the kebab a CONSISTENT right-anchored position in both
+        // states — the previous `fill = false` left the title hugging its
+        // own text, so the kebab floated in the middle of the row next to a
+        // short name instead of sitting at the edge ("⋮ position looks off").
+        // Because the title is the only element that yields width, a long
+        // host/session name ellipsises inside this slot WITHOUT squeezing the
+        // toggle or pushing the kebab off screen. The 8dp end padding
+        // guarantees the name never butts straight against the trailing
+        // controls.
         // Issue #628: long-press on session name crumb toggles to the
         // previous session (IME-up fallback when chip row is hidden).
         // Only active when a previous session exists. Uses
@@ -4249,8 +4263,8 @@ internal fun ConsolidatedTopChrome(
         // switcher via the parent Row) is not disturbed.
         @OptIn(ExperimentalFoundationApi::class)
         val sessionLabelModifier = Modifier
-            .weight(1f, fill = false)
-            .padding(end = 4.dp)
+            .weight(1f)
+            .padding(end = 8.dp)
             .then(
                 if (onTogglePreviousSession != null) {
                     Modifier.combinedClickable(
@@ -4271,34 +4285,44 @@ internal fun ConsolidatedTopChrome(
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             modifier = sessionLabelModifier,
         )
-        ConnectionStatusPill(connectionStatus)
 
-        if (tabLabels.size > 1) {
-            Spacer(modifier = Modifier.width(4.dp))
-            TabsRowWithPulse(pulseVisible = pulseConversationTab) {
-                ConsolidatedTabPill(
-                    labels = tabLabels,
-                    selectedIndex = selectedTabIndex,
-                    onSelected = onTabSelected,
-                    modifier = Modifier.testTag(TMUX_TABS_TAG),
-                )
+        // Issue #637: the trailing control cluster. Grouping these into one
+        // non-shrinking [Row] (with an 8dp gap between siblings) keeps the
+        // toggle uncrowded and gives the kebab a stable, comfortable position
+        // in both states — the breadcrumb (just the kebab) and the
+        // agent-toggle layout (toggle + kebab) line the kebab up at the same
+        // right edge.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ConnectionStatusPill(connectionStatus)
+
+            if (tabLabels.size > 1) {
+                TabsRowWithPulse(pulseVisible = pulseConversationTab) {
+                    ConsolidatedTabPill(
+                        labels = tabLabels,
+                        selectedIndex = selectedTabIndex,
+                        onSelected = onTabSelected,
+                        modifier = Modifier.testTag(TMUX_TABS_TAG),
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(4.dp))
-        }
 
-        SessionForwardingChromeButton(
-            state = forwardingState,
-            onClick = onOpenPortForwarding,
-        )
-
-        Box(modifier = Modifier.size(48.dp)) {
-            KebabTrigger(
-                contentDescription = "More session actions",
-                onClick = onMore,
-                triggerTestTag = TMUX_FULL_CHROME_MORE_BUTTON_TAG,
-                triggerSize = 48.dp,
+            SessionForwardingChromeButton(
+                state = forwardingState,
+                onClick = onOpenPortForwarding,
             )
-            moreMenu()
+
+            Box(modifier = Modifier.size(48.dp)) {
+                KebabTrigger(
+                    contentDescription = "More session actions",
+                    onClick = onMore,
+                    triggerTestTag = TMUX_FULL_CHROME_MORE_BUTTON_TAG,
+                    triggerSize = 48.dp,
+                )
+                moreMenu()
+            }
         }
     }
 }
@@ -4651,8 +4675,10 @@ private fun SessionForwardingChromeButton(
     if (!state.visible) return
     val color = if (state.restoring) PocketShellColors.Amber else PocketShellColors.Accent
     Row(
+        // Issue #637: spacing to its siblings is owned by the trailing-cluster
+        // Row in [ConsolidatedTopChrome] (Arrangement.spacedBy), so this chip
+        // no longer carries its own leading inset.
         modifier = modifier
-            .padding(start = 4.dp)
             .height(36.dp)
             .defaultMinSize(minWidth = 40.dp)
             .background(

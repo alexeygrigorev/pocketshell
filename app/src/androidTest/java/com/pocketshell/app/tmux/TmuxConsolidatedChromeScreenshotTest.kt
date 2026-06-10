@@ -197,6 +197,71 @@ class TmuxConsolidatedChromeScreenshotTest {
     }
 
     @Test
+    fun captureLongNameBreadcrumbChrome() {
+        // Issue #637: a long host/session name must ellipsise inside the title
+        // slot and leave the kebab at its stable right-edge position — it must
+        // not push the kebab off screen or overlap it.
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "really-long-session-name-that-overflows-the-header",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    PaneProxy()
+                }
+            }
+        }
+        compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
+        // The kebab must still be on screen (not pushed off the right edge).
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG).assertIsDisplayed()
+        compose.waitForIdle()
+        SystemClock.sleep(200)
+        captureFullDevice(File(artifactDir(), "consolidated-chrome-long-name-breadcrumb.png"))
+    }
+
+    @Test
+    fun captureLongNameWithAgentToggleChrome() {
+        // Issue #637: with the agent Terminal/Conversation toggle present, a
+        // long name must ellipsise and yield width to the toggle + kebab — the
+        // toggle must stay uncramped and the kebab must stay on screen.
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "really-long-session-name-that-overflows-the-header",
+                        tabLabels = listOf("Terminal", "Conversation"),
+                        selectedTabIndex = 0,
+                        onBack = {},
+                        onMore = {},
+                    )
+                    PaneProxy()
+                }
+            }
+        }
+        compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
+        // Toggle and kebab both stay fully on screen even with a long name.
+        compose.onNodeWithTag(TMUX_TABS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG).assertIsDisplayed()
+        compose.waitForIdle()
+        SystemClock.sleep(200)
+        captureFullDevice(File(artifactDir(), "consolidated-chrome-long-name-with-agent.png"))
+    }
+
+    @Test
     fun captureImeUpCompactChrome() {
         compose.setContent {
             PocketShellTheme {

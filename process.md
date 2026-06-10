@@ -648,6 +648,41 @@ Code-read + one happy-path screenshot is grounds to return `CHANGES REQUESTED`
 for these flows. The load-bearing journey tests must run in regular CI, not only
 the release gate (#638), so these regressions are caught at PR time.
 
+### Visual / composer / keyboard / layout regressions (mandatory — #641/#567/#615)
+
+Several "fixed + reviewer-approved + closed" UI issues came back unfixed because
+the reviewer verified a *narrow proxy* (an isolated component test, a Roborazzi
+render of one composable, "the button is present in the tree") instead of the
+**maintainer's actual on-screen scenario**. #641 ("composer launcher hidden")
+was closed on a width-cap render check while the real symptom — controls
+occluded behind the launcher and hidden when the soft keyboard is up — was never
+reproduced. That is a reviewer-rigor failure, and it is the maintainer's #1
+process complaint. For ANY change to a screen's layout, composer, bottom
+chrome, chips, keyboard/IME handling, insets, or anything the user reported as
+"hidden / clipped / cut off / squished / can't reach":
+
+- **Reproduce the bug as FAILING first.** Before judging the fix, the reviewer
+  reproduces the reported symptom on the base (no fix) on the emulator and
+  captures it. If you cannot reproduce the original problem, you cannot certify
+  it fixed — say so and return `CHANGES REQUESTED` for evidence.
+- **Reproduce the maintainer's EXACT scenario, including transient states.** If
+  the report is about the soft keyboard being up, the proof screenshot MUST show
+  the real session screen **with the keyboard visible** (use the emulator IME),
+  not a keyboard-down render. If it's about a shell pane (vs agent pane), use a
+  shell pane. Match the reported device state, not a convenient one.
+- **Isolated component tests and Roborazzi renders are NOT sufficient** to close
+  a visual occlusion/layout bug. They are the fast first check only. The
+  acceptance is a full-device emulator screenshot of the exact reported state,
+  showing every control the maintainer said was hidden is now fully visible and
+  tappable (and not under the keyboard / behind another control / off-screen).
+- **Verify reachability, not just presence.** "The view is in the hierarchy"
+  ≠ "the user can see and tap it." Confirm the control is within the visible
+  viewport above the keyboard and not occluded by sibling chrome.
+
+A reviewer who approves a layout/occlusion fix without an emulator screenshot of
+the exact reported state (keyboard up where relevant) has not done the review.
+When in doubt, return `CHANGES REQUESTED` and ask for the missing-state proof.
+
 ## Fast Design Renders (Roborazzi)
 
 For UI/design work, the JVM render harness (#555) is the **fast first visual

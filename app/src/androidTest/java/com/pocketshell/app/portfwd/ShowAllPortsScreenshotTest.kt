@@ -31,15 +31,17 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #492 screenshot test — renders the port-forward discovery table with a
- * deterministic fake host whose `ss -tlnp` output mixes:
- *  - user-useful ports in 1000..10000 (2222 / 3000 / 8080) shown by default,
- *    and
- *  - low/system plus high ports (22 / 443 / 11434 / 49152) hidden by default.
+ * Issue #492 / #602 screenshot test — renders the port-forward discovery table
+ * with a deterministic fake host whose `ss -tlnp` output mirrors the
+ * maintainer's v0.3.30 dogfood report (issue-602-portfwd-clutter.png):
+ *  - dev-server ports in 3000..10000 (4000 / 4001 / 8080) shown by default, and
+ *  - the docker/agent/test SSH-proxy noise (2222 / 2224 / 2226 / 2240) plus
+ *    low/system (22 / 443) and high (11434 / 49152) ports hidden by default.
  *
  * Two artifacts prove the acceptance criteria:
  *  - `show-all-ports-default.png` — the default filtered table ("Show
- *    hidden/noisy ports" unchecked with the hidden noisy-port count).
+ *    hidden/noisy ports" unchecked with the hidden noisy-port count). The 222x
+ *    infra ports must NOT appear here.
  *  - `show-all-ports-checked.png` — after clicking the checkbox, the full
  *    table including the previously hidden/noisy ports.
  */
@@ -110,11 +112,12 @@ class ShowAllPortsScreenshotTest {
             }
         }
 
-        // Wait for discovery to populate the default (filtered) table.
+        // Wait for discovery to populate the default (filtered) table. The 222x /
+        // 2240 docker/agent SSH proxies are hidden; only 4000 / 4001 / 8080 show.
         compose.waitUntil(timeoutMillis = 15_000) {
             val state = viewModel.state.value
             state.connectionState == PortForwardConnectionState.Connected &&
-                state.tunnels.map { it.remotePort } == listOf(2222, 3000, 8080)
+                state.tunnels.map { it.remotePort } == listOf(4000, 4001, 8080)
         }
         compose.waitForIdle()
         SystemClock.sleep(300)
@@ -125,7 +128,7 @@ class ShowAllPortsScreenshotTest {
         compose.waitUntil(timeoutMillis = 5_000) {
             viewModel.state.value.showAllPorts &&
                 viewModel.state.value.tunnels.map { it.remotePort } ==
-                listOf(2222, 3000, 8080, 22, 443, 11434, 49152)
+                listOf(4000, 4001, 8080, 22, 443, 2222, 2224, 2226, 2240, 11434, 49152)
         }
         compose.waitForIdle()
         SystemClock.sleep(300)
@@ -162,13 +165,19 @@ class ShowAllPortsScreenshotTest {
     }
 
     private companion object {
-        // Ports in 1000..10000 are visible by default. Low/system and high
-        // ports stay hidden unless the user enables the full table.
+        // Mirrors the maintainer's dogfood host: docker/agent SSH proxies in the
+        // 222x / 2240 family plus low/system + high ports are noise hidden by
+        // default; only the dev-server ports in 3000..10000 (4000 / 4001 / 8080)
+        // are visible until "Show hidden/noisy ports" is enabled.
         val NOISY_SS_OUTPUT: String = """
             0.0.0.0:22 users:(("sshd",pid=1,fd=3))
             0.0.0.0:443 users:(("nginx",pid=2,fd=3))
             0.0.0.0:2222 users:(("docker-proxy",pid=10,fd=3))
-            0.0.0.0:3000 users:(("node",pid=42,fd=3))
+            0.0.0.0:2224 users:(("docker-proxy",pid=11,fd=3))
+            0.0.0.0:2226 users:(("docker-proxy",pid=12,fd=3))
+            0.0.0.0:2240 users:(("docker-proxy",pid=13,fd=3))
+            0.0.0.0:4000 users:(("app",pid=40,fd=3))
+            0.0.0.0:4001 users:(("app",pid=41,fd=3))
             0.0.0.0:8080 users:(("vite",pid=43,fd=3))
             0.0.0.0:11434 users:(("ollama",pid=44,fd=3))
             0.0.0.0:49152 users:(("app",pid=45,fd=3))

@@ -9,8 +9,16 @@ import com.pocketshell.core.portfwd.RemotePort
  * Issue #456 established the original "interesting range" intuition. Issue #602
  * tightens it for the port-forward table: by default the table shows the
  * user-useful application/dev-server range in [DEFAULT_VISIBLE_RANGE]
- * (`1000..10000`) and hides low/system plus high/ephemeral-style ports unless
+ * (`3000..10000`) and hides low/system plus high/ephemeral-style ports unless
  * the user explicitly asks to show hidden/noisy rows.
+ *
+ * The `3000` lower bound is the maintainer's v0.3.30 dogfood feedback: the
+ * default list was dominated by docker/agent/test SSH proxies in the `222x` /
+ * `2240` family (and other sub-3000 infra ports), which are pure noise for this
+ * workflow. The meaningful dev-server ports the maintainer wanted to keep
+ * (e.g. `3000`, `4000`, `4001`, `5173`, `8080`) all live at or above `3000`, so
+ * raising the floor to `3000` hides the infra noise while keeping the useful
+ * rows. The hidden ports stay reachable behind "Show hidden/noisy ports".
  *
  * Two filtering modes:
  *
@@ -31,7 +39,7 @@ object InterestingPortFilter {
      * ports below this and high/noisy ports above it remain available behind
      * "Show hidden/noisy ports".
      */
-    val DEFAULT_VISIBLE_RANGE: IntRange = 1_000..10_000
+    val DEFAULT_VISIBLE_RANGE: IntRange = 3_000..10_000
 
     /** True when [port] is hidden unless "Show hidden/noisy ports" is enabled. */
     fun isNoisy(port: Int): Boolean = port !in DEFAULT_VISIBLE_RANGE

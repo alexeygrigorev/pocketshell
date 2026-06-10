@@ -62,6 +62,34 @@ class AutoForwarderTest {
     }
 
     @Test
+    fun `mirror port walks N N+1 N+2 until a free local port is found`() = runTest {
+        // #602 ask 4: forwarding remote N defaults local N, but when N and the
+        // next two candidates are busy the forwarder must keep walking upward and
+        // surface the ACTUAL chosen local port (no failure, no broken mapping).
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+
+        val occupied = setOf(3000, 3001, 3002)
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            localPortAvailability = LocalPortAvailability { port -> port !in occupied },
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        val tunnel = forwarder.flowOfTunnels().first().single()
+        assertEquals(3000, tunnel.remotePort)
+        assertEquals("local port should walk past the three busy candidates", 3003, tunnel.localPort)
+        assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
+        assertEquals(3003, session.openForwards.values.single().localPort)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
     fun `in-window mirror port increments when requested local port is occupied`() = runTest {
         val session = FakeSession()
         session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")

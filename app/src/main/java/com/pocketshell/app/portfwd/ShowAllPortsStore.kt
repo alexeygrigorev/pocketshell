@@ -11,7 +11,7 @@ import javax.inject.Singleton
  * checkbox.
  *
  * By default the table shows local/remote ports in
- * [InterestingPortFilter.DEFAULT_VISIBLE_RANGE] (`1000..10000`) and hides rows
+ * [InterestingPortFilter.DEFAULT_VISIBLE_RANGE] (`3000..10000`) and hides rows
  * outside that user-useful band. Ticking "Show hidden/noisy ports" reveals
  * those rows. The user's choice should survive panel navigation and app
  * restarts, so it is persisted here.

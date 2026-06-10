@@ -9,26 +9,36 @@ import org.junit.Test
 class InterestingPortFilterTest {
 
     @Test
-    fun `user useful ports from 1000 through 10000 are visible by default`() {
-        for (port in listOf(1_000, 2_222, 3_000, 5_173, 5_432, 8_080, 9_999, 10_000)) {
+    fun `dev-server ports from 3000 through 10000 are visible by default`() {
+        // #602 (maintainer dogfood v0.3.30): the default band is the dev-server
+        // range. 4000/4001 are the maintainer's "meaningful app ports" that must
+        // stay; 3000/5173/8080 are the other common dev servers.
+        for (port in listOf(3_000, 4_000, 4_001, 5_173, 5_432, 8_080, 9_999, 10_000)) {
             assertTrue("$port should be visible", InterestingPortFilter.isVisibleByDefault(port))
         }
     }
 
     @Test
-    fun `low system and high ports are hidden by default`() {
-        for (port in listOf(1, 22, 80, 443, 999, 10_001, 11_434, 49_152, 65_535)) {
+    fun `low system infra and high ports are hidden by default`() {
+        // #602: the 222x family (docker/agent/test SSH proxies — 2222/2224/2226/
+        // 2228/2229/2230/2240) is exactly the noise the maintainer saw dominating
+        // the list. They are below 3000 and must be hidden by default.
+        for (port in listOf(
+            1, 22, 80, 443, 999, 1_000, 2_222, 2_224, 2_226, 2_228, 2_229,
+            2_230, 2_240, 2_999, 10_001, 11_434, 49_152, 65_535,
+        )) {
             assertTrue("$port should be noisy", InterestingPortFilter.isNoisy(port))
             assertFalse("$port should be hidden", InterestingPortFilter.isVisibleByDefault(port))
         }
     }
 
     @Test
-    fun `default filter shows only the user useful 1000 through 10000 range`() {
+    fun `default filter shows only the user useful 3000 through 10000 range`() {
         val filtered = InterestingPortFilter.filter(
             listOf(
                 RemotePort(22, "sshd"),
                 RemotePort(80, "nginx"),
+                RemotePort(2222, "docker-proxy"),
                 RemotePort(3000, "node"),
                 RemotePort(10_000, "app"),
                 RemotePort(11_434, "ollama"),
@@ -139,8 +149,8 @@ class InterestingPortFilterTest {
     @Test
     fun `hiddenCount is zero when every port is default-visible`() {
         val ports = listOf(
-            RemotePort(1_000, "nginx"),
             RemotePort(3_000, "node"),
+            RemotePort(4_000, "app"),
             RemotePort(9_999, "x"),
             RemotePort(10_000, "y"),
         )
@@ -148,11 +158,12 @@ class InterestingPortFilterTest {
     }
 
     @Test
-    fun `realistic noisy host shows user useful ports by default`() {
-        // Mirrors the maintainer's report: system + docker/test 222x noise
-        // plus local dev servers, plus high app ports. The default user-facing
-        // result shows the 1000..10000 range and leaves the rest behind the
-        // explicit hidden/noisy toggle.
+    fun `realistic noisy host hides the 222x infra ports and keeps dev servers`() {
+        // Mirrors the maintainer's exact v0.3.30 dogfood screenshot
+        // (issue-602-portfwd-clutter.png): the 222x / 2240 docker/agent/test SSH
+        // proxies dominate the list and are pure noise. After #602 they are
+        // hidden by default; only the meaningful app ports (4000/4001) plus other
+        // dev servers in the 3000..10000 band stay visible.
         val noisy = listOf(
             RemotePort(22, "sshd"),
             RemotePort(22, "sshd"),
@@ -161,19 +172,27 @@ class InterestingPortFilterTest {
             RemotePort(2222, "docker-proxy"),
             RemotePort(2224, "docker-proxy"),
             RemotePort(2226, "docker-proxy"),
+            RemotePort(2228, "docker-proxy"),
+            RemotePort(2229, "docker-proxy"),
+            RemotePort(2230, "docker-proxy"),
+            RemotePort(2240, "docker-proxy"),
             RemotePort(3000, "node"),
+            RemotePort(4000, "app"),
+            RemotePort(4001, "app"),
             RemotePort(8080, "vite"),
             RemotePort(10_000, "dev"),
             RemotePort(11_434, "ollama"),
             RemotePort(49_152, "app"),
         )
         val filtered = InterestingPortFilter.filter(noisy)
+        // The 222x/2240 noise is gone; only the dev-server band survives.
         assertEquals(
-            listOf(2222, 2224, 2226, 3000, 8080, 10_000),
+            listOf(3000, 4000, 4001, 8080, 10_000),
             filtered.map { it.port },
         )
-        assertEquals(6, InterestingPortFilter.count(noisy))
-        // 22, 53, 80, 11434, 49152 are the de-duplicated hidden ports.
-        assertEquals(5, InterestingPortFilter.hiddenCount(noisy))
+        assertEquals(5, InterestingPortFilter.count(noisy))
+        // De-duplicated hidden ports: 22, 53, 80, 2222, 2224, 2226, 2228, 2229,
+        // 2230, 2240, 11434, 49152 = 12.
+        assertEquals(12, InterestingPortFilter.hiddenCount(noisy))
     }
 }

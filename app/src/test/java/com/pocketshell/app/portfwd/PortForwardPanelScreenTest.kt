@@ -104,6 +104,37 @@ class PortForwardPanelScreenTest {
     }
 
     @Test
+    fun `maintainer dogfood 222x forwarded ports are hidden by default`() {
+        // Mirrors issue-602-portfwd-clutter.png: the active forwarding panel was
+        // dominated by docker/agent/test SSH proxies (2222/2224/2226/2228/2229/
+        // 2230/2240) mirrored 1:1 to local ports. After #602 those rows are hidden
+        // by default; only the meaningful app ports (4000/4001) stay visible, and
+        // the hidden count is exactly the 222x/2240 family.
+        val tunnels = listOf(
+            forwardingTunnel(remotePort = 2222),
+            forwardingTunnel(remotePort = 2224),
+            forwardingTunnel(remotePort = 2226),
+            forwardingTunnel(remotePort = 2228),
+            forwardingTunnel(remotePort = 2229),
+            forwardingTunnel(remotePort = 2230),
+            forwardingTunnel(remotePort = 2240),
+            forwardingTunnel(remotePort = 4000),
+            forwardingTunnel(remotePort = 4001),
+        )
+
+        assertEquals(
+            listOf(4000, 4001),
+            visibleTunnelRows(tunnels, showAllPorts = false).map { it.remotePort },
+        )
+        assertEquals(7, hiddenTunnelRowCount(tunnels))
+        // Show-all surfaces the meaningful ports first, then the hidden 222x noise.
+        assertEquals(
+            listOf(4000, 4001, 2222, 2224, 2226, 2228, 2229, 2230, 2240),
+            visibleTunnelRows(tunnels, showAllPorts = true).map { it.remotePort },
+        )
+    }
+
+    @Test
     fun `hiddenNoisyPortsToggleLabel names hidden noisy ports with count`() {
         assertEquals(
             "Show hidden/noisy ports (3 hidden)",

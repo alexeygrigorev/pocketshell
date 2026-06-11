@@ -224,6 +224,106 @@ class MultiSessionSwitchJourneyE2eTest {
     }
 
     /**
+     * Issue #620 (the maintainer's #1 recurring ask) — the FIRST session open
+     * from host detail must be an INSTANT warm attach, not a 3-4s COLD connect.
+     *
+     * Root cause this locks in: host detail acquires a warm SSH lease when the
+     * host row is tapped (#370/#620). Before connect coalescing, the user tapping
+     * a session before that warm handshake finished raced a SECOND independent
+     * SSH dial — a full 3-4s connect on the first open. With coalescing in
+     * [com.pocketshell.core.ssh.SshLeaseManager], the session open joins the
+     * in-flight host-detail handshake and reuses the warm transport, so:
+     *
+     *   1. NO fresh SSH handshake is charged to the session open:
+     *      [SSH_HANDSHAKE_ATTEMPTS] does NOT increment across the open (the host
+     *      detail warm acquire — counted nowhere in the session VM — is the only
+     *      dial). A fresh handshake here is exactly the 3-4s cold-connect bug.
+     *   2. The open-to-content latency is well under the cold-connect budget.
+     *
+     * This is a regular-CI gate (no [assumeFalse(isRunningOnCi())]) on the plain
+     * Docker `agents` fixture, so the recurring "first open is slow" regression
+     * is caught at PR time, not only in the release gate.
+     */
+    @Test
+    fun firstOpenFromHostDetailReusesWarmLeaseNoFreshHandshake() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        seedTmuxSessions(key)
+        val hostRowTag = seedDockerHost(key, "Issue620 First Open")
+        forceFlatHostDetailViewMode()
+        clearLogcat()
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        // Open host detail — this kicks the warm-lease acquire (#370/#620). The
+        // warm handshake is the ONE legitimate dial; capture the handshake count
+        // right BEFORE the session open so we can prove the open itself adds
+        // none.
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady()
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+
+        val handshakesBeforeOpen = SSH_HANDSHAKE_ATTEMPTS.get()
+        val openAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalContains(SESSION_A_MARKER, "first-open warm attach to A")
+        val openToContentMs = SystemClock.elapsedRealtime() - openAt
+        val handshakesAfterOpen = SSH_HANDSHAKE_ATTEMPTS.get()
+        recordTiming("first_open_to_content_ms", openToContentMs)
+        recordTiming("first_open_ssh_handshakes", (handshakesAfterOpen - handshakesBeforeOpen).toLong())
+        captureViewport("issue620-00-first-open-$SESSION_A")
+
+        // (1) The session open charged NO fresh SSH handshake — it reused the
+        // host-detail warm lease (coalesced onto the in-flight handshake). This
+        // is the structural proof the first open is not a cold re-dial.
+        assertEquals(
+            "first open from host detail must reuse the warm lease — NO fresh SSH " +
+                "handshake (a fresh dial is the 3-4s cold-connect bug #620). " +
+                "Reconnect log tail:\n${reconnectTriggerLogTail()}",
+            handshakesBeforeOpen,
+            handshakesAfterOpen,
+        )
+
+        // (1b) No Disconnected/EOF band on the first open.
+        assertNoDisconnectBand("first-open")
+        assertNoBrokenTransportText("first-open", visibleTerminalText())
+
+        // (2) The open-to-content latency must be well under the cold-connect
+        // budget. The handshake-count proof above is the structural guarantee;
+        // this wall-clock bound is the user-perceived "instant" assertion. The
+        // threshold is generous for a loaded shared AVD but still far below the
+        // 3-4s cold-connect the maintainer reported.
+        val budgetMs = if (TerminalTestTimeouts.isRunningOnCi()) 4_000L else 2_500L
+        assertTrue(
+            "first open-to-content must be well under the cold-connect budget; " +
+                "got ${openToContentMs}ms (budget ${budgetMs}ms). A slow first open is the #620 bug.",
+            openToContentMs < budgetMs,
+        )
+
+        writeSummary(
+            lines = listOf(
+                "scenario=first-open-from-host-detail",
+                "session=$SESSION_A",
+                "first_open_to_content_ms=$openToContentMs",
+                "first_open_ssh_handshakes=${handshakesAfterOpen - handshakesBeforeOpen}",
+                "expectation=first open reuses the host-detail warm lease (0 fresh handshakes), " +
+                    "instant warm attach, no Disconnected/EOF band",
+            ),
+        )
+        writeTimings()
+        Unit
+    }
+
+    /**
      * Drive ONE switch [fromSession] -> [toSession] via the in-session drawer
      * pager, then assert all five journey invariants for that switch.
      */

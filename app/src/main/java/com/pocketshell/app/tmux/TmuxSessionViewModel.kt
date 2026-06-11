@@ -463,6 +463,12 @@ public class TmuxSessionViewModel @Inject constructor(
         viewModelScope.launch {
             sshLeaseManager.stateEvents.collect { event ->
                 when (event.state) {
+                    // Issue #620: a Connecting key (host detail's warm-lease
+                    // handshake in flight) counts as warm for the synchronous
+                    // open hint — a session open landing in this window
+                    // coalesces onto the in-flight connect, so it must show the
+                    // green Attaching affordance, not the cold Connecting overlay.
+                    com.pocketshell.core.ssh.SshLeaseConnectionState.Connecting,
                     com.pocketshell.core.ssh.SshLeaseConnectionState.Connected,
                     com.pocketshell.core.ssh.SshLeaseConnectionState.Idle,
                     -> liveLeaseKeys.add(event.key)
@@ -857,8 +863,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 // pointer-swapped). If the host's SSH lease is still live, attach
                 // instantly under the green [Switching] affordance rather than the
                 // blanking [Connecting] overlay (see the slow-path branch below).
+                // Issue #620: also warm when host detail's lease handshake is
+                // still in flight — this open coalesces onto it, no second dial.
                 val warmOpen = !shouldForceFreshLease(effectiveTrigger) &&
-                    sshLeaseManager.hasLiveLease(target.toSshLeaseTarget().leaseKey)
+                    sshLeaseManager.hasLiveOrConnectingLease(target.toSshLeaseTarget().leaseKey)
                 _connectionStatus.value = if (warmOpen) {
                     ConnectionStatus.Switching(host, port, user)
                 } else {
@@ -1033,8 +1041,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     // the [Connecting] overlay. We must NOT mistake a reconnect /
                     // network-reattach trigger for a warm open: those deliberately
                     // force a fresh transport ([shouldForceFreshLease]).
+                    // Issue #620: a connect for this key being in flight (host
+                    // detail's warm-lease handshake) ALSO counts as a warm open —
+                    // the acquire below coalesces onto it, so no second SSH dial
+                    // happens and the attach is instant.
                     val warmOpen = !shouldForceFreshLease(effectiveTrigger) &&
-                        sshLeaseManager.hasLiveLease(target.toSshLeaseTarget().leaseKey)
+                        sshLeaseManager.hasLiveOrConnectingLease(target.toSshLeaseTarget().leaseKey)
                     if (warmOpen) {
                         recordWarmSwitchMilestone(
                             attempt = attempt,

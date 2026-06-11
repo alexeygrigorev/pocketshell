@@ -1,5 +1,6 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +33,15 @@ public class SshLeaseManager(
 ) : AutoCloseable {
     private val mutex = Mutex()
     private val entries: MutableMap<SshLeaseKey, Entry> = linkedMapOf()
+    // Issue #620: in-flight cold connects, keyed by lease key. The FIRST
+    // acquire for a key that has no live entry "owns" the connect; concurrent
+    // acquires for the same key await this deferred instead of dialing their
+    // own redundant SSH handshake. This is what makes the FIRST session open
+    // from host detail instant: host detail's warm-lease acquire and the
+    // user's session-open tap share ONE handshake, so the tap reuses the warm
+    // transport the moment it is up rather than racing a second 3-4s connect.
+    private val inFlightConnects: MutableMap<SshLeaseKey, CompletableDeferred<Entry?>> =
+        linkedMapOf()
     private var closed: Boolean = false
     private var nextEntryId: Long = 1L
     private var processStarted: Boolean = true
@@ -48,71 +58,209 @@ public class SshLeaseManager(
 
     public suspend fun acquire(target: SshLeaseTarget): Result<SshLease> {
         val key = target.leaseKey
-        val existing = mutex.withLock {
+
+        // Decide our role under the lock: reuse a live entry, await an
+        // in-flight connect started by a concurrent acquire, or become the
+        // owner of a fresh connect.
+        val decision = mutex.withLock {
             if (closed) return Result.failure(SshLeaseManagerClosedException())
-            entries[key]?.takeIf { it.session.isConnected }?.also { entry ->
-                entry.closeJob?.cancel()
-                entry.closeJob = null
-                entry.idleSinceMillis = null
-                entry.refCount += 1
+            val existing = entries[key]?.takeIf { it.session.isConnected }
+            if (existing != null) {
+                existing.closeJob?.cancel()
+                existing.closeJob = null
+                existing.idleSinceMillis = null
+                existing.refCount += 1
                 emitStateLocked(key, SshLeaseConnectionState.Connected)
+                AcquireDecision.Reuse(existing)
+            } else {
+                // No live entry; a stale (disconnected) one must go before a
+                // fresh transport replaces it.
+                entries.remove(key)?.close()
+                val pending = inFlightConnects[key]
+                if (pending != null) {
+                    // Another acquire is already dialing this exact key. Join
+                    // it instead of opening a second redundant handshake.
+                    AcquireDecision.Await(pending)
+                } else {
+                    val deferred = CompletableDeferred<Entry?>()
+                    inFlightConnects[key] = deferred
+                    // Announce the in-flight handshake so a synchronous consumer
+                    // (the tmux warm-open hint) can treat a session open landing
+                    // in this window as a warm "Attaching" rather than a cold
+                    // "Connecting" overlay (#620).
+                    emitStateLocked(key, SshLeaseConnectionState.Connecting)
+                    AcquireDecision.Own(deferred)
+                }
             }
         }
-        if (existing != null) {
+
+        return when (decision) {
+            is AcquireDecision.Reuse ->
+                Result.success(
+                    SshLease(
+                        key = key,
+                        session = decision.entry.session,
+                        isNewConnection = false,
+                        entryId = decision.entry.id,
+                        releaseAction = ::release,
+                    ),
+                )
+            is AcquireDecision.Await -> awaitSharedConnect(target, decision.deferred)
+            is AcquireDecision.Own -> runOwnedConnect(target, decision.deferred)
+        }
+    }
+
+    /**
+     * Issue #620: take a ref on the entry produced by another acquire's
+     * in-flight connect for this key. If that connect failed, or the shared
+     * entry was closed/disconnected by the time we awoke, fall back to a fresh
+     * owned connect so the caller still gets a lease (never silently fails just
+     * because the connect it joined lost its transport).
+     */
+    private suspend fun awaitSharedConnect(
+        target: SshLeaseTarget,
+        deferred: CompletableDeferred<Entry?>,
+    ): Result<SshLease> {
+        val key = target.leaseKey
+        val shared = deferred.await()
+        val reused = mutex.withLock {
+            if (closed) return Result.failure(SshLeaseManagerClosedException())
+            val entry = shared
+                ?.takeIf { entries[key] === it && it.session.isConnected }
+                ?: return@withLock null
+            entry.closeJob?.cancel()
+            entry.closeJob = null
+            entry.idleSinceMillis = null
+            entry.refCount += 1
+            emitStateLocked(key, SshLeaseConnectionState.Connected)
+            entry
+        }
+        if (reused != null) {
             return Result.success(
                 SshLease(
                     key = key,
-                    session = existing.session,
+                    session = reused.session,
                     isNewConnection = false,
-                    entryId = existing.id,
+                    entryId = reused.id,
                     releaseAction = ::release,
                 ),
             )
         }
+        // The shared connect did not yield a usable entry for us; dial our own.
+        return acquire(target)
+    }
 
-        mutex.withLock {
-            entries.remove(key)?.close()
+    /**
+     * Issue #620: own the cold connect for [target]. Concurrent acquires for
+     * the same key park on [deferred] and reuse the entry we register here, so
+     * the host-detail warm-lease handshake and the FIRST session-open tap share
+     * ONE SSH connect instead of racing two.
+     */
+    private suspend fun runOwnedConnect(
+        target: SshLeaseTarget,
+        deferred: CompletableDeferred<Entry?>,
+    ): Result<SshLease> {
+        val key = target.leaseKey
+        try {
+            val session = connector.connect(target).getOrElse { error ->
+                // Connect failed: clear the in-flight slot, retract the
+                // optimistic Connecting hint, and wake any awaiters so they fall
+                // back to their own dial rather than blocking forever.
+                mutex.withLock {
+                    if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
+                    retractConnectingHintLocked(key)
+                }
+                deferred.complete(null)
+                return Result.failure(error)
+            }
+            return mutex.withLock {
+                if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
+                if (closed) {
+                    runCatching { session.close() }
+                    retractConnectingHintLocked(key)
+                    deferred.complete(null)
+                    return@withLock Result.failure(SshLeaseManagerClosedException())
+                }
+                val raced = entries[key]
+                if (raced != null && raced.session.isConnected) {
+                    // A live entry appeared for this key while we were dialing
+                    // (e.g. a different code path acquired directly). Drop our
+                    // redundant transport and reuse the live one; awaiters reuse
+                    // it too via the deferred.
+                    runCatching { session.close() }
+                    raced.closeJob?.cancel()
+                    raced.closeJob = null
+                    raced.idleSinceMillis = null
+                    raced.refCount += 1
+                    emitStateLocked(key, SshLeaseConnectionState.Connected)
+                    deferred.complete(raced)
+                    Result.success(
+                        SshLease(
+                            key = key,
+                            session = raced.session,
+                            isNewConnection = false,
+                            entryId = raced.id,
+                            releaseAction = ::release,
+                        ),
+                    )
+                } else {
+                    raced?.close()
+                    val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
+                    entries[key] = entry
+                    emitStateLocked(key, SshLeaseConnectionState.Connected)
+                    deferred.complete(entry)
+                    Result.success(
+                        SshLease(
+                            key = key,
+                            session = session,
+                            isNewConnection = true,
+                            entryId = entry.id,
+                            releaseAction = ::release,
+                        ),
+                    )
+                }
+            }
+        } finally {
+            // Cancellation (or any non-local exit) must never strand the
+            // in-flight slot or leave awaiters blocked on a deferred that
+            // would never complete. Clear our slot and wake awaiters; they
+            // fall back to their own dial. No-op when the success/failure
+            // paths above already completed the deferred.
+            if (!deferred.isCompleted) {
+                withContext(NonCancellable) {
+                    mutex.withLock {
+                        if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
+                        retractConnectingHintLocked(key)
+                    }
+                }
+                deferred.complete(null)
+            }
         }
+    }
 
-        val session = connector.connect(target).getOrElse { return Result.failure(it) }
-        return mutex.withLock {
-            if (closed) {
-                runCatching { session.close() }
-                return@withLock Result.failure(SshLeaseManagerClosedException())
-            }
-            val raced = entries[key]
-            if (raced != null && raced.session.isConnected) {
-                runCatching { session.close() }
-                raced.closeJob?.cancel()
-                raced.closeJob = null
-                raced.idleSinceMillis = null
-                raced.refCount += 1
-                emitStateLocked(key, SshLeaseConnectionState.Connected)
-                Result.success(
-                    SshLease(
-                        key = key,
-                        session = raced.session,
-                        isNewConnection = false,
-                        entryId = raced.id,
-                        releaseAction = ::release,
-                    ),
-                )
-            } else {
-                raced?.close()
-                val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
-                entries[key] = entry
-                emitStateLocked(key, SshLeaseConnectionState.Connected)
-                Result.success(
-                    SshLease(
-                        key = key,
-                        session = session,
-                        isNewConnection = true,
-                        entryId = entry.id,
-                        releaseAction = ::release,
-                    ),
-                )
-            }
-        }
+    /**
+     * Issue #620: retract the optimistic [SshLeaseConnectionState.Connecting]
+     * hint for [key] when an owned connect ended WITHOUT leaving a live entry
+     * (failed / cancelled / manager closed). Emit [SshLeaseConnectionState.Closed]
+     * only when there is genuinely no live transport left, so a synchronous
+     * consumer drops the stale "Attaching" hint instead of treating a dead key
+     * as warm. No-op when a live entry exists for the key (it already announced
+     * Connected). Must be called while holding [mutex].
+     */
+    private fun retractConnectingHintLocked(key: SshLeaseKey) {
+        if (entries[key]?.session?.isConnected == true) return
+        if (inFlightConnects.containsKey(key)) return
+        emitStateLocked(
+            key = key,
+            state = SshLeaseConnectionState.Closed,
+            closeReason = SshLeaseCloseReason.Disconnected,
+        )
+    }
+
+    private sealed interface AcquireDecision {
+        data class Reuse(val entry: Entry) : AcquireDecision
+        data class Await(val deferred: CompletableDeferred<Entry?>) : AcquireDecision
+        data class Own(val deferred: CompletableDeferred<Entry?>) : AcquireDecision
     }
 
     /**
@@ -130,6 +278,28 @@ public class SshLeaseManager(
         mutex.withLock {
             if (closed) return@withLock false
             entries[key]?.session?.isConnected == true
+        }
+
+    /**
+     * Issue #620: like [hasLiveLease], but ALSO true when a connect for [key] is
+     * currently in flight (host detail's warm-lease acquire is mid-handshake).
+     *
+     * This is the signal the FIRST session-open from host detail needs: when the
+     * user taps a session before the host's warm handshake has finished, the
+     * open is NOT a genuine cold dial — it will coalesce onto the in-flight
+     * connect and reuse the shared transport the instant it is up. So it should
+     * show the green "Attaching" affordance, not the full-screen Connecting
+     * overlay, exactly like a #634 warm open. Without this, the first open
+     * flashes the blanking overlay even though no second handshake happens.
+     *
+     * Like [hasLiveLease], this only reads pool state and never mutates the
+     * lease lifecycle.
+     */
+    public suspend fun hasLiveOrConnectingLease(key: SshLeaseKey): Boolean =
+        mutex.withLock {
+            if (closed) return@withLock false
+            if (entries[key]?.session?.isConnected == true) return@withLock true
+            inFlightConnects.containsKey(key)
         }
 
     public suspend fun closeIdle() {
@@ -224,12 +394,18 @@ public class SshLeaseManager(
 
     override fun close() {
         val toClose = mutableListOf<Entry>()
+        val pendingToWake = mutableListOf<CompletableDeferred<Entry?>>()
         runCatching {
             kotlinx.coroutines.runBlocking {
                 mutex.withLock {
                     closed = true
                     toClose += entries.values
                     entries.clear()
+                    // Issue #620: wake any acquires parked on an in-flight
+                    // connect so they observe `closed` and fail fast instead of
+                    // blocking forever on a deferred that would never complete.
+                    pendingToWake += inFlightConnects.values
+                    inFlightConnects.clear()
                     toClose.forEach {
                         emitStateLocked(
                             key = it.key,
@@ -240,6 +416,7 @@ public class SshLeaseManager(
                 }
             }
         }
+        pendingToWake.forEach { it.complete(null) }
         toClose.forEach { it.close() }
     }
 
@@ -350,6 +527,12 @@ public data class SshLeaseStateEvent(
 )
 
 public enum class SshLeaseConnectionState {
+    // Issue #620: a cold connect for this key has STARTED (host detail's
+    // warm-lease acquire is mid-handshake) but has not yet produced a live
+    // transport. Lets a consumer treat a session open that lands in this window
+    // as a warm "Attaching", not a blanking cold "Connecting" overlay, because
+    // the open coalesces onto the in-flight handshake (no second dial).
+    Connecting,
     Connected,
     Idle,
     Closed,

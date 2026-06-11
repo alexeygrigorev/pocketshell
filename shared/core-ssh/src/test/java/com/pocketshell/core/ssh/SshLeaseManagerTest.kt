@@ -3,6 +3,7 @@ package com.pocketshell.core.ssh
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -166,6 +167,159 @@ class SshLeaseManagerTest {
             "closed transport must report no live lease",
             manager.hasLiveLease(TARGET.leaseKey),
         )
+    }
+
+    @Test
+    fun `concurrent acquires for the same key coalesce into one connect`() = runTest {
+        // Issue #620: host detail's warm-lease acquire and the FIRST
+        // session-open tap dial the SAME key concurrently. They must share ONE
+        // SSH handshake so the tap reuses the warm transport instead of racing
+        // a second 3-4s connect (the bug behind the maintainer's "3-4s on the
+        // first open"). A second FakeSshSession is queued only to prove it is
+        // NEVER dialed.
+        val shared = FakeSshSession()
+        val neverUsed = FakeSshSession()
+        val connector = GatedLeaseConnector(shared, neverUsed)
+        val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+        // First acquire owns the connect and parks inside connector.connect().
+        val firstDeferred = async { manager.acquire(TARGET).getOrThrow() }
+        runCurrent()
+        assertEquals(1, connector.startedConnects)
+
+        // Second acquire arrives while the first connect is still in flight. It
+        // must NOT start a second connect — it joins the in-flight one.
+        val secondDeferred = async { manager.acquire(TARGET).getOrThrow() }
+        runCurrent()
+        assertEquals(
+            "second concurrent acquire must not dial a second connect",
+            1,
+            connector.startedConnects,
+        )
+
+        // Let the single shared connect complete.
+        connector.releaseConnect()
+        runCurrent()
+        val lease1 = firstDeferred.await()
+        val lease2 = secondDeferred.await()
+
+        assertEquals("only one SSH handshake for the coalesced opens", 1, connector.startedConnects)
+        assertSame("both acquires share the same warm transport", shared, lease1.session)
+        assertSame(shared, lease2.session)
+        assertTrue("exactly one of the two acquires owns the fresh transport", lease1.isNewConnection)
+        assertFalse("the coalesced acquire reuses, it does not re-dial", lease2.isNewConnection)
+        assertFalse("the redundant queued session must never be dialed", neverUsed.closed)
+
+        // Both holders own a ref: releasing one keeps the transport warm.
+        lease1.release()
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertFalse("a remaining holder keeps the shared transport alive", shared.closed)
+        lease2.release()
+    }
+
+    @Test
+    fun `hasLiveOrConnectingLease is true while a connect is in flight and emits Connecting`() = runTest {
+        // Issue #620: the FIRST session open from host detail must read the
+        // host's in-flight warm handshake as "warm" so it shows Attaching, not
+        // a cold Connecting overlay. hasLiveOrConnectingLease reports true for an
+        // in-flight connect; a Connecting state event lets a synchronous consumer
+        // (the tmux warm-open hint) pick the same warm affordance.
+        val session = FakeSshSession()
+        val connector = GatedLeaseConnector(session)
+        val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+        val events = mutableListOf<SshLeaseConnectionState>()
+        val eventsCollector = launch { manager.stateEvents.collect { events.add(it.state) } }
+        runCurrent()
+
+        // No connect yet: not live, not connecting.
+        assertFalse(manager.hasLiveLease(TARGET.leaseKey))
+        assertFalse(manager.hasLiveOrConnectingLease(TARGET.leaseKey))
+
+        // Start the connect; it parks in the gated connector (in flight).
+        val acquireJob = async { manager.acquire(TARGET).getOrThrow() }
+        runCurrent()
+        assertFalse("transport not up yet: hasLiveLease must be false", manager.hasLiveLease(TARGET.leaseKey))
+        assertTrue(
+            "an in-flight connect must read as live-or-connecting",
+            manager.hasLiveOrConnectingLease(TARGET.leaseKey),
+        )
+        assertTrue("starting a connect emits Connecting", events.contains(SshLeaseConnectionState.Connecting))
+
+        // Complete it; now genuinely live.
+        connector.releaseConnect()
+        runCurrent()
+        val lease = acquireJob.await()
+        assertTrue(manager.hasLiveLease(TARGET.leaseKey))
+        assertTrue(manager.hasLiveOrConnectingLease(TARGET.leaseKey))
+        assertTrue("a completed connect emits Connected", events.contains(SshLeaseConnectionState.Connected))
+
+        lease.release()
+        eventsCollector.cancel()
+    }
+
+    @Test
+    fun `failed in-flight connect retracts the connecting hint`() = runTest {
+        // Issue #620: a Connecting hint for a key whose handshake FAILS must be
+        // retracted (Closed) so a synchronous consumer drops the stale Attaching
+        // hint instead of treating a dead key as warm.
+        val connector = GatedLeaseConnector(null)
+        val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+        val events = mutableListOf<SshLeaseConnectionState>()
+        val eventsCollector = launch { manager.stateEvents.collect { events.add(it.state) } }
+        runCurrent()
+
+        val acquireJob = async { manager.acquire(TARGET) }
+        runCurrent()
+        assertTrue(manager.hasLiveOrConnectingLease(TARGET.leaseKey))
+        assertTrue(events.contains(SshLeaseConnectionState.Connecting))
+
+        connector.releaseConnect()
+        runCurrent()
+        val result = acquireJob.await()
+        assertTrue("a failed connect surfaces failure", result.isFailure)
+        assertFalse(
+            "a failed connect must retract the connecting hint",
+            manager.hasLiveOrConnectingLease(TARGET.leaseKey),
+        )
+        assertTrue(
+            "a failed in-flight connect emits Closed to retract the hint",
+            events.contains(SshLeaseConnectionState.Closed),
+        )
+        eventsCollector.cancel()
+    }
+
+    @Test
+    fun `awaiter falls back to its own connect when the shared connect fails`() = runTest {
+        // Issue #620: if the coalesced (owning) connect fails, the acquire that
+        // joined it must NOT silently fail — it dials its own transport so the
+        // caller still gets a usable lease.
+        val good = FakeSshSession()
+        val connector = GatedLeaseConnector(null, good)
+        val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+        val firstDeferred = async { manager.acquire(TARGET) }
+        runCurrent()
+        val secondDeferred = async { manager.acquire(TARGET) }
+        runCurrent()
+        assertEquals("awaiter coalesced behind the in-flight connect", 1, connector.startedConnects)
+
+        // The shared connect resolves as a failure.
+        connector.releaseConnect()
+        runCurrent()
+
+        val first = firstDeferred.await()
+        assertTrue("the owning acquire surfaces the connect failure", first.isFailure)
+
+        // The awaiter falls back to its own dial and succeeds.
+        connector.releaseConnect()
+        runCurrent()
+        val second = secondDeferred.await()
+        assertTrue("the awaiter recovers with its own connect", second.isSuccess)
+        assertSame(good, second.getOrThrow().session)
+        assertEquals("exactly two connects: failed shared + awaiter fallback", 2, connector.startedConnects)
     }
 
     @Test
@@ -493,6 +647,37 @@ class SshLeaseManagerTest {
                 ?: error("unexpected connect $connectCount for ${target.leaseKey}")
             connectCount += 1
             return Result.success(next)
+        }
+    }
+
+    /**
+     * Issue #620: a connector whose every `connect` parks until the test
+     * releases it, so a test can observe the in-flight window where a second
+     * acquire for the same key would race a redundant handshake. Each queued
+     * session resolves successfully; a `null` slot resolves as a connect
+     * failure (used to exercise the awaiter-fallback path).
+     */
+    private class GatedLeaseConnector(
+        private vararg val sessions: FakeSshSession?,
+    ) : SshLeaseConnector {
+        var startedConnects: Int = 0
+        private val gates: ArrayDeque<CompletableDeferred<Unit>> = ArrayDeque()
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            val index = startedConnects
+            startedConnects += 1
+            val gate = CompletableDeferred<Unit>()
+            gates.addLast(gate)
+            gate.await()
+            val session = sessions.getOrNull(index)
+                ?: return Result.failure(java.io.IOException("connect $index failed"))
+            return Result.success(session)
+        }
+
+        fun releaseConnect() {
+            val gate = gates.removeFirstOrNull()
+                ?: error("no in-flight connect to release")
+            gate.complete(Unit)
         }
     }
 

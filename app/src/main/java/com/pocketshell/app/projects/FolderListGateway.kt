@@ -1321,12 +1321,12 @@ class SshFolderListGateway internal constructor(
          * `ConnectError` panel in a few seconds instead of leaving the
          * folder screen stuck in `Loading`.
          *
-         * Deliberately kept BELOW [FolderListViewModel.POLL_INTERVAL_MS]
-         * (5 s): the folder list re-probes on that cadence, so a bound at or
-         * above the poll interval would let the next poll cancel-and-restart
-         * the in-flight probe before this timeout could fire — and the
-         * wedged read would never surface the error panel (exactly the
-         * failure the readiness gate's retry-once branch needs to recover).
+         * Kept small (3.5 s) so a fully wedged read surfaces a retryable
+         * `ConnectError` panel in a few seconds rather than leaving the folder
+         * screen stuck in `Loading`. (EPIC #679 replaced the legacy constant
+         * 5 s discovery poll with an infrequent maintained-tree reconcile, so
+         * there is no longer a tight poll cadence to stay below; this bound now
+         * just protects the single in-flight reconcile probe.)
          */
         const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
 

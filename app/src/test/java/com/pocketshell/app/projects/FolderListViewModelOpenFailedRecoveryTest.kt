@@ -99,14 +99,19 @@ class FolderListViewModelOpenFailedRecoveryTest {
 
     @Test
     fun retryRecoversFromOpenFailedAfterReturningFromDeadSession() = runTest {
-        // The full chain: the tree was Ready, the user drilled into a session
-        // (stopPolling on nav-away), the session was dead, they came back, the
-        // re-probe failed with "open failed", THEN Retry recovers.
+        // EPIC #679: the tree was Ready, the user drilled into a session
+        // (stopPolling on nav-away), the session was dead, they came back.
+        // Returning now renders the HELD maintained tree INSTANTLY with NO
+        // probe (requirement #1 — no refresh on every open). The user then
+        // pull-to-refreshes; that explicit reconcile fails with "open failed"
+        // and surfaces the non-displacing banner while keeping the stale tree
+        // usable (#620); a second refresh (Retry) recovers and drops the stale
+        // ghost row by the authoritative reconcile.
         val gateway = ScriptedGateway(
             results = listOf(
-                // initial healthy probe
+                // initial healthy reconcile
                 FolderListResult.Sessions(rows = listOf(sessionRow("alpha"), sessionRow("ghost"))),
-                // probe after returning from the dead session fails
+                // the user's pull-to-refresh fails
                 FolderListResult.ConnectFailed(RuntimeException("open failed")),
                 // Retry succeeds; the ghost session is gone on the remote
                 FolderListResult.Sessions(rows = listOf(sessionRow("alpha"))),
@@ -118,25 +123,39 @@ class FolderListViewModelOpenFailedRecoveryTest {
             runCurrent()
             assertEquals(setOf("alpha", "ghost"), readySessionNames(vm))
 
-            // Drill into the (dead) session: the screen stops the tree poll.
+            // Drill into the (dead) session: the screen stops the reconcile.
             vm.stopPolling()
             runCurrent()
 
-            // Return to the tree -> re-bind same host kicks the failing probe.
-            // Issue #620 keeps the last visible rows usable instead of
-            // replacing the host detail screen with an error panel; the failure
-            // is surfaced through the existing lightweight action banner.
+            // Return to the tree -> re-bind same host renders the HELD tree
+            // instantly, NO probe consumed (requirement #1). The fresh held tree
+            // is not stale, so no auto-reconcile fires.
             bind(vm)
             runCurrent()
             assertEquals(
-                "failed automatic refresh should keep the stale-but-usable tree visible",
+                "re-opening the same host shows the held tree instantly, no probe",
+                setOf("alpha", "ghost"),
+                readySessionNames(vm),
+            )
+            assertEquals(
+                "no auto-reconcile on open means no failure banner yet",
+                FolderActionStatus.Idle,
+                vm.actionStatus.value,
+            )
+
+            // The user pulls-to-refresh; the explicit reconcile fails but keeps
+            // the stale-but-usable tree visible (#620) and surfaces the banner.
+            vm.refreshSessions()
+            runCurrent()
+            assertEquals(
+                "failed pull-to-refresh keeps the stale-but-usable tree visible",
                 setOf("alpha", "ghost"),
                 readySessionNames(vm),
             )
             val failedStatus = vm.actionStatus.value
             when (failedStatus) {
                 is FolderActionStatus.Failed -> assertTrue(failedStatus.message.contains("open failed"))
-                else -> fail("expected an automatic refresh failure banner, got $failedStatus")
+                else -> fail("expected a pull-to-refresh failure banner, got $failedStatus")
             }
 
             // Retry recovers; stale ghost row is dropped by the authoritative probe.

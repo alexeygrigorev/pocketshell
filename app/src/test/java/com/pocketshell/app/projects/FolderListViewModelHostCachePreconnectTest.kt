@@ -126,7 +126,12 @@ class FolderListViewModelHostCachePreconnectTest {
     }
 
     @Test
-    fun foregroundVisibilityStartsPreconnectWithoutTappingSession() = runTest {
+    fun foregroundVisibilityStartsReconcileWithoutTappingSession() = runTest {
+        // EPIC #679 requirement #2: a foreground/resume reconciles the held tree
+        // ONLY when it is stale (or never reconciled), not on every transition.
+        // The first foreground reconciles (the tree was never reconciled); a
+        // rapid background->foreground bounce within the staleness window does
+        // NOT re-probe (the held tree is still fresh).
         val gateway = ScriptedGateway(FolderListResult.Sessions(rows = listOf(row("alpha"))))
         val vm = newViewModel(gateway, processStarted = false)
 
@@ -137,14 +142,24 @@ class FolderListViewModelHostCachePreconnectTest {
 
             vm.setProcessStartedForTest(true)
             runCurrent()
-            assertEquals("foregrounding the visible host screen should probe immediately", 1, gateway.callCount)
+            assertEquals(
+                "foregrounding the visible host screen reconciles the never-reconciled tree",
+                1,
+                gateway.callCount,
+            )
 
+            // A quick background->foreground bounce must NOT re-probe — the held
+            // tree was just reconciled and is not stale (requirement #2).
             vm.setProcessStartedForTest(false)
             vm.setProcessStartedForTest(true)
             advanceTimeBy(100L)
             runCurrent()
 
-            assertEquals("returning from background should trigger another immediate preconnect", 2, gateway.callCount)
+            assertEquals(
+                "a non-stale held tree must NOT re-probe on a quick re-foreground",
+                1,
+                gateway.callCount,
+            )
         } finally {
             vm.stopPolling()
         }

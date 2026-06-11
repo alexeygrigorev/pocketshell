@@ -267,6 +267,124 @@ class FolderListScreenE2eTest {
         assertEquals(false, openedWorkspaceSettings)
     }
 
+    /**
+     * EPIC #679 Slice 1: the maintained tree is HELD across opens (requirement
+     * #1) and a NEW window appears immediately by-id (#678) via the pull-to-
+     * refresh gesture (requirement #4). Proves on the emulator:
+     *  - the tree renders the held sessions instantly,
+     *  - leaving (stopPolling) + returning (re-bind same host) does NOT fire a
+     *    fresh probe (the held tree is reused, no full refresh on every open),
+     *  - the pull-to-refresh host is present and a forced reconcile surfaces a
+     *    newly-created session immediately by id.
+     */
+    @Test
+    fun heldTreeReusedOnReopenAndNewSessionAppearsOnPullToRefresh() {
+        val gateway = MutableFolderListGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = "alpha",
+                    lastActivity = 1_700_004_000L,
+                    attached = true,
+                    cwd = "/home/u/git/alpha",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+        )
+        val viewModel = constructFolderListViewModel(gateway)
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue679-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue679",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onOpenSettings = {},
+                    onOpenWorkspaceSettings = {},
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        // The held tree renders the session instantly after the first reconcile.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            gateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithText("alpha", useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+        val callsAfterFirstRender = gateway.callCount.get()
+        captureFullDevice("issue679-held-tree-first.png")
+        captureViewport("issue679-held-tree-first-viewport.png")
+
+        // Requirement #1: leaving + returning to the SAME host must NOT fire a
+        // fresh probe — the maintained tree is held and re-shown instantly.
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            viewModel.stopPolling()
+            viewModel.bind(
+                hostId = hostId,
+                hostName = "issue679-host",
+                hostname = "h.example",
+                port = 22,
+                username = "u",
+                keyPath = "/tmp/issue679",
+                passphrase = null,
+            )
+        }
+        instrumentation.waitForIdleSync()
+        assertTrue(
+            "the held tree still shows alpha after re-opening the same host",
+            compose.onAllNodesWithText("alpha", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
+        assertEquals(
+            "re-opening the same host must NOT probe again (held tree, #679 req #1)",
+            callsAfterFirstRender,
+            gateway.callCount.get(),
+        )
+
+        // The pull-to-refresh host is present (requirement #4 — the swipe gesture
+        // affordance, not a button).
+        compose.onNodeWithTag(FOLDER_LIST_PULL_TO_REFRESH_TAG).assertExists()
+
+        // #678: a newly-created session shows up by id on the next reconcile. The
+        // gateway now reports a new window/session; a forced reconcile surfaces it.
+        gateway.rows = gateway.rows + FolderSessionRow(
+            sessionName = "beta-new",
+            lastActivity = 1_700_005_000L,
+            attached = false,
+            cwd = "/home/u/git/beta",
+            agentKind = SessionAgentKind.Shell,
+        )
+        instrumentation.runOnMainSync { viewModel.refreshSessions() }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("beta-new", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        // alpha is still present (incremental reconcile, not a blank-and-rebuild).
+        assertTrue(
+            "alpha survives the reconcile that adds beta-new (incremental, not rebuild)",
+            compose.onAllNodesWithText("alpha", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
+        assertTrue(
+            "beta-new appears by id on the reconcile (#678)",
+            compose.onAllNodesWithText("beta-new", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
+        captureFullDevice("issue679-after-pull-to-refresh.png")
+        captureViewport("issue679-after-pull-to-refresh-viewport.png")
+    }
+
     @Test
     fun emptyProjectContinuesIntoSessionTypePickerForCreatedFolder() {
         val fakeGateway = FakeFolderListGateway(
@@ -1882,6 +2000,67 @@ class FolderListScreenE2eTest {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
         }
     }
+}
+
+/**
+ * EPIC #679 Slice 1: a gateway whose reported [rows] can be mutated between
+ * reconciles, so a connected test can prove the maintained tree reconciles a
+ * newly-created session by id (and that re-opening the same host does NOT fire
+ * a fresh probe — the held tree is reused).
+ */
+private class MutableFolderListGateway(
+    @Volatile var rows: List<FolderSessionRow>,
+    private val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+    private val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
+) : FolderListGateway {
+
+    val callCount: AtomicInteger = AtomicInteger(0)
+
+    override suspend fun listSessionsWithFolder(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        watchedRoots: List<ProjectRootEntity>,
+    ): FolderListResult {
+        callCount.incrementAndGet()
+        return FolderListResult.Sessions(
+            rows = rows,
+            projectFoldersByRoot = projectFoldersByRoot,
+            resolvedWatchedRootPaths = resolvedWatchedRootPaths,
+        )
+    }
+
+    override suspend fun createSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        cwd: String,
+        startCommand: String?,
+    ): Result<String> = Result.success(sessionName)
+
+    override suspend fun createEmptyProject(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        parentPath: String,
+        folderName: String,
+    ): Result<String> = Result.success("$parentPath/$folderName")
+
+    override suspend fun importFile(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        folderPath: String,
+        payload: FolderImportPayload,
+    ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
+
+    override suspend fun killSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+    ): Result<Unit> = Result.success(Unit)
 }
 
 /**

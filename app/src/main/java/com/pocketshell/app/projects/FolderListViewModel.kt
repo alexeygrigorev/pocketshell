@@ -41,7 +41,6 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,7 +50,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -395,49 +393,27 @@ class FolderListViewModel internal constructor(
     @androidx.annotation.VisibleForTesting
     internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     private var watchedFoldersJob: Job? = null
-    private var pollingJob: Job? = null
-    private var lastSessions: List<FolderSessionEntry> = emptyList()
-    private var lastSessionFolderPaths: Map<String, String> = emptyMap()
+    private var probeJob: Job? = null
+
+    /**
+     * EPIC #679 — the maintained in-memory project tree. Held across opens of
+     * the same host; only a host CHANGE resets it ([HostTreeModel.bindHost]).
+     * Order, expansion, and bucket placement are intrinsic node state, and
+     * app-initiated changes mutate it directly by id (#653/#678). A probe
+     * becomes a reconcile (diff add/remove/update), never a from-scratch
+     * rebuild — replacing the legacy `lastXxx` snapshot fields +
+     * `stableSessionOrder` + `expandedProjectPaths` recompute that this view
+     * model used to carry.
+     */
+    private val tree = HostTreeModel()
     private var lastWatchedFolders: List<ProjectRootEntity> = emptyList()
     private var rootSnapshotLoaded: Boolean = false
-    private var hasSessionProbeSnapshot: Boolean = false
-    private var lastScannedProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
-    private var lastHistoryProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
-    private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
-    private var lastCreatedFolders: Map<String, String> = emptyMap()
-    private var expandedProjectPaths: Set<String> = emptySet()
-    private var sessionRefreshInFlight: Boolean = false
-
-    /**
-     * Issue #639: the frozen display order of sessions, by name. A routine
-     * refresh fires on every session switch and returns the SAME session set
-     * with shifted `lastActivity` timestamps; re-sorting on recency made rows
-     * jump and the user mis-tapped the row that moved under their finger.
-     *
-     * This list records the order sessions were first laid out in. Every
-     * rebuild re-orders the current sessions by their index in here ([stabilise]),
-     * so a refresh that returns the same set keeps every tap target exactly
-     * where it was. Genuinely new sessions are sorted in by the recency/agent
-     * rule and appended; sessions that disappear drop out. The order is reset
-     * to empty on a new [bind] so it never leaks across hosts.
-     */
-    private var stableSessionOrder: List<String> = emptyList()
-
-    /**
-     * Issue #471: folder paths the user has *explicitly collapsed*. This is
-     * the memory that makes auto-expand respect manual collapse.
-     *
-     * Auto-expand ([emitReady]) opens any folder with ≥1 active session on
-     * first ready and whenever a freshly-active folder appears — but it must
-     * NOT fight the user. Once the user collapses a session-bearing folder it
-     * lands here, and every subsequent 5 s discovery poll / re-emission skips
-     * re-expanding it. The path leaves this set only when the user expands the
-     * folder again ([toggleProjectExpanded]), restoring auto-expand for it.
-     */
-    private var userCollapsedProjectPaths: Set<String> = emptySet()
     private var lastDiscoveredPorts: List<HostDiscoveredPort> = emptyList()
     private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
+    private var sessionRefreshInFlight: Boolean = false
     private var refreshSessionsRequested: Boolean = false
+    /** Foreground generation observed by the last scheduled resume reconcile. */
+    private var lastResumeGenerationHandled: Long = -1L
 
     /**
      * Issue #430: whole-process foreground signal driven by
@@ -479,6 +455,16 @@ class FolderListViewModel internal constructor(
                 }
             }
         }
+        // EPIC #679 requirement #2: reconcile INFREQUENTLY, not on a constant
+        // poll. The tree is held across opens, so a foreground/resume only
+        // triggers a reconcile when the held tree is stale (or never
+        // reconciled). D21-clean: this rides the existing [ProcessLifecycleOwner]
+        // foreground signal, never a Timer/WorkManager/AlarmManager.
+        viewModelScope.launch {
+            processStarted.collect { started ->
+                if (started) maybeReconcileOnResume()
+            }
+        }
         if (attachLifecycle) attachProcessLifecycle()
     }
 
@@ -503,15 +489,19 @@ class FolderListViewModel internal constructor(
     internal fun onSessionKilled(killed: com.pocketshell.app.tmux.KilledSession) {
         val params = bound ?: return
         if (params.hostId != killed.hostId) return
-        if (hasSessionProbeSnapshot) {
-            val before = lastSessions.size
-            lastSessions = lastSessions.filterNot { it.sessionName == killed.sessionName }
-            if (lastSessions.size != before) {
-                lastSessionFolderPaths = lastSessionFolderPaths - killed.sessionName
-                emitReady()
-            }
+        // EPIC #679: drop the dead row from the maintained tree directly by id.
+        // The reconcile is a confirmation, not the trigger.
+        if (tree.removeSession(killed.sessionName)) {
+            emitReady()
         }
-        if (pollingJob != null) refresh()
+        // Only kick an authoritative reconcile when the tree screen is still
+        // composed (a reconcile is already in flight / the screen is live). If
+        // the user navigated onward (stopPolling cleared probeJob), the
+        // optimistic drop stands and the reconcile rides the next bind/resume —
+        // re-probing now would re-acquire the warm lease and race the session
+        // screen's own attach, and a gateway that still reports the just-killed
+        // session would resurrect the dropped row.
+        if (probeJob != null) refresh()
     }
 
     /**
@@ -593,29 +583,25 @@ class FolderListViewModel internal constructor(
         )
         warmReleaseJob?.cancel()
         warmReleaseJob = null
-        if (bound == params) {
-            if (pollingJob == null) startPolling()
+        // EPIC #679 requirement #1: opening the host detail renders the HELD
+        // tree INSTANTLY. Re-binding the SAME host reuses the maintained tree
+        // (no probe-on-open, no loading flash) and only kicks a reconcile if one
+        // is genuinely due (staleness gate). A host CHANGE resets the tree.
+        if (bound == params && !tree.bindHost(hostId)) {
+            // Same host: keep showing the held tree; re-project so a re-entry
+            // reflects any by-id mutation that landed while away, then reconcile
+            // only if stale.
+            if (rootSnapshotLoaded) emitReady()
+            maybeReconcileOnOpen(params)
             return
         }
-        pollingJob?.cancel()
-        pollingJob = null
+        probeJob?.cancel()
+        probeJob = null
         bound = params
+        tree.bindHost(hostId)
         rootSnapshotLoaded = false
-        hasSessionProbeSnapshot = false
-        lastSessions = emptyList()
-        lastSessionFolderPaths = emptyMap()
         lastWatchedFolders = emptyList()
-        lastScannedProjectFoldersByRoot = emptyMap()
-        lastHistoryProjectFoldersByRoot = emptyMap()
-        lastResolvedWatchedRootPaths = emptyMap()
         sessionRefreshInFlight = false
-        // Issue #639: a new host starts with no frozen order so the first probe
-        // establishes a fresh layout and a prior host's order can't leak across.
-        stableSessionOrder = emptyList()
-        // Issue #471: a new host starts with no expansion memory so auto-expand
-        // applies fresh and a prior host's collapse choices don't leak across.
-        expandedProjectPaths = emptySet()
-        userCollapsedProjectPaths = emptySet()
         _state.value = loadingState()
         restoreCachedSessions(hostId)
 
@@ -639,39 +625,45 @@ class FolderListViewModel internal constructor(
         watchedFoldersJob = viewModelScope.launch {
             projectRootDao.getByHostId(hostId).collectLatest { rows ->
                 lastWatchedFolders = rows
+                tree.setWatchedFolders(rows)
+                val firstSnapshot = !rootSnapshotLoaded
                 rootSnapshotLoaded = true
-                if (pollingJob == null) {
-                    startPolling()
+                // EPIC #679: a reconcile fires only when one is due. On the very
+                // first watched-folder snapshot the held tree has never been
+                // reconciled, so this kicks the initial probe; afterwards a
+                // watched-folder edit just re-projects (the bucket overlay
+                // changed, the session set did not).
+                if (firstSnapshot) {
+                    maybeReconcileOnOpen(params)
+                } else {
+                    // Re-emit so a watched-folder write surfaces immediately,
+                    // mapping sessions into the new root overlay without a probe.
+                    emitReady()
                 }
-                // Re-emit so a watched-folder write that lands after the
-                // initial probe surfaces immediately. Before the first
-                // probe, keep the explicit loading state instead of
-                // rendering roots-only scaffolding that will be replaced
-                // moments later by session/scan data.
-                emitReady()
             }
         }
     }
 
     /**
-     * Re-run the gateway probe NOW. Wired to the screen's pull-to-refresh
-     * affordance, the retry button on the error panel, and the
-     * post-create-session refresh after the
-     * [SessionTypePickerSheet] returns.
+     * Force a reconcile NOW. Wired to the screen's pull-to-refresh swipe
+     * gesture (EPIC #679 requirement #4), the retry button on the error panel,
+     * and the post-create reconcile after an app-initiated change. Unlike the
+     * legacy 5 s poll this is an EXPLICIT, infrequent trigger — there is no
+     * background loop; the held tree is otherwise reconciled only on a stale
+     * foreground/resume.
      */
     fun refresh() {
-        // Cancel the in-flight poll cycle and restart so the new probe
-        // runs immediately rather than waiting for the next tick.
-        startPolling()
+        runReconcileNow()
     }
 
     /**
-     * Manual host-detail overflow action for issue #607. Reuses the same
-     * session/folder discovery path as [refresh], but keeps the current Ready
-     * snapshot visible if the remote refresh fails and reports that failure via
-     * the non-displacing failure affordance. In-progress feedback rides the
-     * non-displacing refresh progress bar ([FolderListUiState.Ready.isRefreshing],
-     * #639), so no displacing "Refreshing sessions" banner is emitted (#656).
+     * Manual host-detail pull-to-refresh (EPIC #679 requirement #4 — the swipe
+     * gesture, NOT a button). Reuses the same reconcile path as [refresh], but
+     * keeps the current Ready snapshot visible if the remote reconcile fails and
+     * reports that failure via the non-displacing failure affordance. In-progress
+     * feedback rides the non-displacing refresh progress bar
+     * ([FolderListUiState.Ready.isRefreshing], #639), so no displacing
+     * "Refreshing sessions" banner is emitted (#656).
      */
     fun refreshSessions() {
         if (_state.value is FolderListUiState.Ready) {
@@ -815,22 +807,8 @@ class FolderListViewModel internal constructor(
     }
 
     private fun renameSessionSnapshot(oldTarget: String, newTarget: String) {
-        if (!hasSessionProbeSnapshot) return
-        var changed = false
-        lastSessions = lastSessions.map { session ->
-            if (session.sessionName == oldTarget) {
-                changed = true
-                session.copy(sessionName = newTarget)
-            } else {
-                session
-            }
-        }
-        val folderPath = lastSessionFolderPaths[oldTarget]
-        if (folderPath != null) {
-            lastSessionFolderPaths = lastSessionFolderPaths - oldTarget + (newTarget to folderPath)
-            changed = true
-        }
-        if (changed) emitReady()
+        // EPIC #679: rename by id on the maintained tree, preserving the slot.
+        if (tree.renameSession(oldTarget, newTarget)) emitReady()
     }
 
     fun createEmptyProject(
@@ -853,9 +831,10 @@ class FolderListViewModel internal constructor(
             )
             result.fold(
                 onSuccess = { path ->
-                    // Issue #656: a successful create emits no banner — the new
-                    // folder appearing in the list is the feedback.
-                    lastCreatedFolders = lastCreatedFolders + (canonicalisePath(path) to defaultLabelForPath(path))
+                    // Issue #656 / EPIC #679: a successful create emits no banner.
+                    // Insert the known folder by id so it appears immediately
+                    // (the reconcile confirms it later).
+                    tree.insertOptimisticFolder(path, defaultLabelForPath(path))
                     emitReady()
                     onCreated(path)
                     refresh()
@@ -885,10 +864,9 @@ class FolderListViewModel internal constructor(
             )
             result.fold(
                 onSuccess = { _ ->
-                    // Issue #656: a successful import emits no banner — the
-                    // imported file landing in the folder is the feedback.
-                    lastCreatedFolders = lastCreatedFolders +
-                        (canonicalisePath(folderPath) to defaultLabelForPath(folderPath))
+                    // Issue #656 / EPIC #679: a successful import emits no banner.
+                    // Insert the known folder by id so it shows immediately.
+                    tree.insertOptimisticFolder(folderPath, defaultLabelForPath(folderPath))
                     emitReady()
                 },
                 onFailure = { error ->
@@ -905,17 +883,10 @@ class FolderListViewModel internal constructor(
     }
 
     fun toggleProjectExpanded(projectPath: String) {
-        val canonical = canonicalisePath(projectPath)
-        val wasExpanded = canonical in expandedProjectPaths
-        expandedProjectPaths = toggleProjectExpansion(expandedProjectPaths, canonical)
-        // Issue #471: record/clear the explicit manual-collapse so auto-expand
-        // respects the user's choice. Collapsing a folder pins it collapsed
-        // across polls; expanding it again restores auto-expand for it.
-        userCollapsedProjectPaths = if (wasExpanded) {
-            userCollapsedProjectPaths + canonical
-        } else {
-            userCollapsedProjectPaths - canonical
-        }
+        // EPIC #679: expansion is intrinsic node state on the maintained tree
+        // (#471 collapse-stickiness lives there now). Collapsing a folder pins
+        // it collapsed across reconciles; expanding it restores auto-expand.
+        tree.toggleProjectExpanded(projectPath)
         emitReady()
     }
 
@@ -1016,17 +987,62 @@ class FolderListViewModel internal constructor(
             }
         }
         appendLine("known_sessions:")
-        lastSessions.take(12).forEach { appendLine("- ${it.sessionName}") }
+        tree.sessionEntries().take(12).forEach { appendLine("- ${it.sessionName}") }
     }.trim()
 
     private fun recordAssistantCreatedProject(path: String) {
         val canonical = canonicalisePath(path)
-        lastCreatedFolders = lastCreatedFolders + (canonical to defaultLabelForPath(canonical))
+        tree.insertOptimisticFolder(canonical, defaultLabelForPath(canonical))
         emitReady()
         refresh()
     }
 
-    private fun startPolling() {
+    /**
+     * EPIC #679 reconcile entry point for an OPEN (bind / first watched-folder
+     * snapshot). Renders the held tree instantly and only kicks a reconcile when
+     * one is genuinely due (the tree was never reconciled, or it is stale past
+     * [HostTreeModel.RECONCILE_STALENESS_MS]). This is requirement #1: no
+     * probe-on-open unless due.
+     */
+    private fun maybeReconcileOnOpen(params: BoundParams) {
+        if (!rootSnapshotLoaded) {
+            if (_state.value !is FolderListUiState.Ready) {
+                _state.value = loadingState()
+            }
+            return
+        }
+        lastResumeGenerationHandled = foregroundGeneration
+        if (tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = HostTreeModel.RECONCILE_STALENESS_MS)) {
+            launchReconcile(params)
+        } else {
+            // Fresh held tree — render it immediately, no spinner.
+            emitReady()
+        }
+    }
+
+    /**
+     * EPIC #679 requirement #2: a foreground/resume reconciles the held tree
+     * only when it is stale (or never reconciled). Replaces the legacy
+     * "probe on every foreground" so a quick background→foreground bounce does
+     * NOT re-probe. D21-clean: rides the [ProcessLifecycleOwner] signal.
+     */
+    private fun maybeReconcileOnResume() {
+        val params = bound ?: return
+        if (!rootSnapshotLoaded) return
+        // Only react to a genuine new foreground generation.
+        if (foregroundGeneration == lastResumeGenerationHandled) return
+        lastResumeGenerationHandled = foregroundGeneration
+        if (tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = HostTreeModel.RECONCILE_STALENESS_MS)) {
+            launchReconcile(params)
+        }
+    }
+
+    /**
+     * Force a reconcile NOW regardless of staleness — the explicit
+     * pull-to-refresh swipe (requirement #4), error-panel retry, and the
+     * post-app-action confirmation. Gated only on the foreground signal (D21).
+     */
+    private fun runReconcileNow() {
         val params = bound ?: return
         if (!rootSnapshotLoaded) {
             if (_state.value !is FolderListUiState.Ready) {
@@ -1034,45 +1050,38 @@ class FolderListViewModel internal constructor(
             }
             return
         }
-        pollingJob?.cancel()
-        pollingJob = viewModelScope.launch {
-            // Surface loading state on the very first cycle when we have
-            // nothing to show yet; subsequent cycles keep the previous
-            // snapshot visible (so classifier-chip updates are a single
-            // Compose recomposition, not a loading flash).
+        launchReconcile(params)
+    }
+
+    private fun launchReconcile(params: BoundParams) {
+        probeJob?.cancel()
+        probeJob = viewModelScope.launch {
             if (_state.value !is FolderListUiState.Ready) {
                 _state.value = loadingState()
             }
-            while (isActive) {
-                // Issue #430: gate every probe on the whole-process
-                // foreground signal. While the app is backgrounded this
-                // suspends (no background SSH work, D21 / #161); the
-                // suspension releases on the next `ON_START`, so a
-                // `false -> true` foreground/resume transition runs an
-                // immediate probe and a host's live tmux sessions
-                // reappear on the folder tree without manual re-attach.
-                processStarted.first { it }
-                setSessionRefreshInFlight(true)
-                runProbe(params)
-                waitForNextPollOrForegroundReturn(foregroundGeneration)
-            }
+            // D21 / #430: gate the reconcile on the whole-process foreground
+            // signal. While backgrounded this suspends (no background SSH work);
+            // it releases on the next ON_START.
+            processStarted.first { it }
+            setSessionRefreshInFlight(true)
+            runReconcile(params)
         }
     }
 
     /**
-     * Stop the background poll cycle — wired to the screen's
-     * `DisposableEffect.onDispose` so navigating away (e.g. tapping a
-     * session row → TmuxSessionScreen) frees the SSH probe channel
-     * for the next destination immediately rather than waiting for
-     * Hilt's ViewModelStore cleanup.
+     * Stop any in-flight reconcile — wired to the screen's
+     * `DisposableEffect.onDispose` so navigating away (e.g. tapping a session
+     * row → TmuxSessionScreen) frees the SSH probe channel for the next
+     * destination immediately. The MAINTAINED TREE survives (held across opens),
+     * so returning renders it instantly without a fresh probe (#679 req #1).
      */
     fun stopPolling() {
-        pollingJob?.cancel()
-        pollingJob = null
+        probeJob?.cancel()
+        probeJob = null
         scheduleWarmRelease()
     }
 
-    private suspend fun runProbe(params: BoundParams) {
+    private suspend fun runReconcile(params: BoundParams) {
         val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
             setSessionRefreshInFlight(false)
             _state.value = FolderListUiState.Failed("Host not found.")
@@ -1087,35 +1096,24 @@ class FolderListViewModel internal constructor(
         if (bound != params) return
         when (result) {
             is FolderListResult.Sessions -> {
-                hasSessionProbeSnapshot = true
                 hostSessionListCache?.save(params.hostId, result.rows)
-                lastSessions = result.rows.map { row ->
-                    FolderSessionEntry(
-                        sessionName = row.sessionName,
-                        lastActivity = row.lastActivity,
-                        attached = row.attached,
-                        agentKind = row.agentKind,
-                        windows = row.windows.map { window ->
-                            FolderSessionWindowEntry(
-                                index = window.index,
-                                name = window.name,
-                                active = window.active,
-                                command = window.command,
-                                agentKind = window.agentKind,
-                            )
-                        },
-                    )
-                }
-                lastSessionFolderPaths = result.rows.associate { row ->
+                val sessionEntries = result.rows.map { it.toSessionEntry() }
+                val folderPaths = result.rows.associate { row ->
                     row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
                 }
-                lastScannedProjectFoldersByRoot = result.projectFoldersByRoot
-                lastHistoryProjectFoldersByRoot = result.historyProjectFoldersByRoot
-                lastResolvedWatchedRootPaths = result.resolvedWatchedRootPaths
-                // Issue #456/#602: filter discovery to interesting ports
-                // (de-dupe and show the user-useful 1000..10000 range by
-                // default) so the host card's "N ports" count and the panel
-                // agree and the card never reflects an ~80-port dump.
+                // EPIC #679: reconcile the held tree (diff add/remove/update by
+                // id) instead of overwriting snapshot fields + a from-scratch
+                // rebuild.
+                tree.reconcile(
+                    HostTreeModel.ProbeSnapshot(
+                        sessions = sessionEntries,
+                        folderPaths = folderPaths,
+                        scannedProjectFoldersByRoot = result.projectFoldersByRoot,
+                        historyProjectFoldersByRoot = result.historyProjectFoldersByRoot,
+                        resolvedWatchedRootPaths = result.resolvedWatchedRootPaths,
+                    ),
+                )
+                // Issue #456/#602: filter discovery to interesting ports.
                 lastDiscoveredPorts = InterestingPortFilter.filter(result.discoveredPorts).map { port ->
                     HostDiscoveredPort(
                         remotePort = port.port,
@@ -1152,18 +1150,22 @@ class FolderListViewModel internal constructor(
         }
     }
 
-    private suspend fun waitForNextPollOrForegroundReturn(observedForegroundGeneration: Long) {
-        var waitedMs = 0L
-        while (currentCoroutineContext().isActive && waitedMs < POLL_INTERVAL_MS) {
-            delay(POLL_TICK_MS)
-            if (foregroundGeneration != observedForegroundGeneration) return
-            if (!processStarted.value) {
-                processStarted.first { it }
-                return
-            }
-            waitedMs += POLL_TICK_MS
-        }
-    }
+    private fun FolderSessionRow.toSessionEntry(): FolderSessionEntry =
+        FolderSessionEntry(
+            sessionName = sessionName,
+            lastActivity = lastActivity,
+            attached = attached,
+            agentKind = agentKind,
+            windows = windows.map { window ->
+                FolderSessionWindowEntry(
+                    index = window.index,
+                    name = window.name,
+                    active = window.active,
+                    command = window.command,
+                    agentKind = window.agentKind,
+                )
+            },
+        )
 
     private fun preserveReadyOnRefresh(message: String): Boolean {
         if (_state.value !is FolderListUiState.Ready) return false
@@ -1192,34 +1194,21 @@ class FolderListViewModel internal constructor(
 
     private fun restoreCachedSessions(hostId: Long) {
         val snapshot = hostSessionListCache?.read(hostId) ?: return
-        hasSessionProbeSnapshot = true
-        lastSessions = snapshot.rows.map { row ->
-            FolderSessionEntry(
-                sessionName = row.sessionName,
-                lastActivity = row.lastActivity,
-                attached = row.attached,
-                agentKind = row.agentKind,
-                windows = row.windows.map { window ->
-                    FolderSessionWindowEntry(
-                        index = window.index,
-                        name = window.name,
-                        active = window.active,
-                        command = window.command,
-                        agentKind = window.agentKind,
-                    )
-                },
-            )
-        }
-        lastSessionFolderPaths = snapshot.rows.associate { row ->
+        val sessionEntries = snapshot.rows.map { it.toSessionEntry() }
+        val folderPaths = snapshot.rows.associate { row ->
             row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
         }
+        // EPIC #679: seed the held tree from the cold-render cache so the screen
+        // shows last-known sessions instantly. This is NOT a reconcile, so the
+        // staleness gate still fires a real reconcile when due.
+        tree.restoreCached(sessionEntries, folderPaths)
         emitReady()
     }
 
     private fun setSessionRefreshInFlight(refreshing: Boolean) {
         if (sessionRefreshInFlight == refreshing) return
         sessionRefreshInFlight = refreshing
-        if (hasSessionProbeSnapshot) emitReady()
+        if (tree.hasSnapshot) emitReady()
     }
 
     /**
@@ -1227,70 +1216,23 @@ class FolderListViewModel internal constructor(
      * snapshot + watched-folder overlay. Idempotent: every change in
      * either input re-runs the grouping.
      */
+    /**
+     * EPIC #679: project the maintained [HostTreeModel] into
+     * [FolderListUiState.Ready]. The visuals stay byte-identical because the
+     * projection feeds the SAME pure builders (`groupSessionsIntoFolders` /
+     * `buildFolderTree`) and the same `resolveExpandedProjectPaths` auto-expand
+     * the legacy rebuild used — but order, expansion, and node identity are now
+     * intrinsic to the held tree (no per-emit re-derivation, no flash).
+     */
     private fun emitReady() {
         if (bound == null) return
-        if (!hasSessionProbeSnapshot) return
-        // Issue #639: freeze the display order. The stable order keeps every
-        // existing session in its established slot (so a routine refresh that
-        // returns the same set does not move a tap target) and only sorts in
-        // genuinely new sessions / drops removed ones. Recompute it once here
-        // from the current sessions, then every downstream sort keys off it.
-        stableSessionOrder = stabiliseSessionOrder(
-            previousOrder = stableSessionOrder,
-            sessions = lastSessions,
-        )
-        val orderRank = stableSessionOrder.withIndex()
-            .associate { (index, name) -> name to index }
-        val orderedSessions = lastSessions.sortedBy { orderRank[it.sessionName] ?: Int.MAX_VALUE }
-        val folders = groupSessionsIntoFolders(
-            sessions = orderedSessions,
-            sessionFolderPaths = lastSessionFolderPaths,
-            watchedFolders = lastWatchedFolders,
-            extraFolders = lastCreatedFolders,
-            sessionOrderRank = orderRank,
-        )
-        val treeRoots = buildFolderTree(
-            sessions = orderedSessions,
-            sessionFolderPaths = lastSessionFolderPaths,
-            watchedFolders = lastWatchedFolders,
-            scannedProjectFoldersByRoot = lastScannedProjectFoldersByRoot,
-            historyProjectFoldersByRoot = lastHistoryProjectFoldersByRoot,
-            resolvedWatchedRootPaths = lastResolvedWatchedRootPaths,
-            extraFolders = lastCreatedFolders,
-            sessionOrderRank = orderRank,
-        )
-        val visibleFolders = treeRoots.flatMap { root -> root.folders }
-        val visibleProjectPaths = visibleFolders
-            .map { folder -> folder.path }
-            .toSet()
-        // Issue #471: auto-expand folders with ≥1 active session by default so
-        // running sessions are visible at a glance, while RESPECTING manual
-        // collapse. A folder the user collapsed stays in
-        // [userCollapsedProjectPaths] and is skipped here, so a 5 s discovery
-        // poll / re-emission never springs it back open. Empty folders are
-        // never auto-expanded (keeps the #455 compact-tree direction).
-        val activeProjectPaths = visibleFolders
-            .filter { it.sessions.isNotEmpty() }
-            .map { it.path }
-            .toSet()
-        expandedProjectPaths = resolveExpandedProjectPaths(
-            previousExpanded = expandedProjectPaths,
-            visibleProjectPaths = visibleProjectPaths,
-            activeProjectPaths = activeProjectPaths,
-            userCollapsedProjectPaths = userCollapsedProjectPaths,
-        )
-        // Drop collapse memory for folders that no longer exist so it can't
-        // leak across rebinds or accumulate stale paths.
-        userCollapsedProjectPaths = userCollapsedProjectPaths.intersect(visibleProjectPaths)
+        if (!tree.hasSnapshot) return
+        val projection = tree.project()
         _state.value = FolderListUiState.Ready(
-            folders = folders,
-            treeRoots = treeRoots,
-            // Issue #639: flat-view rows follow the frozen stable order so a
-            // refresh that returns the same sessions never reorders the list.
-            // The Active/Idle partition (#489) is applied on top of this order
-            // downstream, so grouping semantics are unaffected.
-            flatSessions = orderedSessions,
-            expandedProjectPaths = expandedProjectPaths,
+            folders = projection.folders,
+            treeRoots = projection.treeRoots,
+            flatSessions = projection.flatSessions,
+            expandedProjectPaths = projection.expandedProjectPaths,
             isRefreshing = sessionRefreshInFlight,
             portForwarding = forwardingSummary(),
         )
@@ -1320,12 +1262,12 @@ class FolderListViewModel internal constructor(
             active = snapshot?.active == true,
             activeTunnelCount = snapshot?.tunnelCount ?: 0,
             entryAvailable = true,
-            discoveryLoading = !hasSessionProbeSnapshot,
+            discoveryLoading = !tree.hasSnapshot,
         )
     }
 
     override fun onCleared() {
-        pollingJob?.cancel()
+        probeJob?.cancel()
         warmJob?.cancel()
         warmReleaseJob?.cancel()
         runBlocking {
@@ -1448,26 +1390,12 @@ class FolderListViewModel internal constructor(
         const val ROOT_LABEL: String = "/ (root)"
         const val HOME_LABEL: String = "~ (home)"
 
-        /**
-         * Polling cadence for the gateway probe. The folder list is a
-         * leaf surface the user dwells on for at most a few seconds
-         * before drilling further; 5 s is short enough that an agent
-         * promotion (shell → claude) registers before the user moves
-         * on, and long enough to not hammer the SSH server. Matches
-         * the spike Section 6 detection-latency note ("~500 ms SSH
-         * exec; user sees the classifier chip update shortly after agent
-         * startup").
-         */
-        const val POLL_INTERVAL_MS: Long = 5_000L
+        // EPIC #679 (D22 hard-cut): the constant 5 s discovery poll
+        // (`POLL_INTERVAL_MS` / `POLL_TICK_MS`) is deleted. The maintained
+        // [HostTreeModel] is held across opens and reconciled INFREQUENTLY —
+        // on a stale foreground/resume ([HostTreeModel.RECONCILE_STALENESS_MS])
+        // and on the explicit pull-to-refresh swipe — never on a tight loop.
         const val WARM_RELEASE_DELAY_MS: Long = 10_000L
-
-        /**
-         * Maximum time the polling coroutine spends inside `delay()`
-         * before yielding so the Compose test idling registry can
-         * settle. The poll cadence is split into 100 ms ticks so a
-         * `compose.waitUntil` doesn't block on a 5-second `delay`.
-         */
-        private const val POLL_TICK_MS: Long = 100L
 
         /**
          * Canonicalise a `pane_current_path` / `session_path` value

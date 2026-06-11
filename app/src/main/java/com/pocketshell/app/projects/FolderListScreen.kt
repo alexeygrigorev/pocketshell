@@ -38,12 +38,15 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -379,6 +382,7 @@ fun FolderListScreen(
                         actionFolder = PickerTarget(path = root.path, label = root.label)
                     },
                     onToggleProjectExpanded = { row -> viewModel.toggleProjectExpanded(row.path) },
+                    onPullToRefresh = viewModel::refreshSessions,
                 )
             }
         }
@@ -969,6 +973,7 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 
 // Issue #639: internal (was private) so the refresh-indicator + stable-order
 // screenshot test can drive the real content composable directly.
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FolderListContent(
     hostName: String,
@@ -990,6 +995,11 @@ internal fun FolderListContent(
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
     onToggleProjectExpanded: (FolderRow) -> Unit,
+    // EPIC #679 requirement #4: the swipe-down pull-to-refresh gesture is the
+    // explicit manual-reconcile affordance (no extra button). Defaulted so the
+    // existing render/screenshot harnesses that don't drive a refresh still
+    // compile.
+    onPullToRefresh: () -> Unit = {},
 ) {
     // session→folder map derived from the grouped `folders` set so a flat-view
     // tap still carries the session's cwd into the picker/attach path (#485).
@@ -1021,6 +1031,22 @@ internal fun FolderListContent(
     // the indicator is a thin top progress bar overlaid on the content (it
     // reflows nothing) — see [FolderRefreshProgressBar] pinned to the top of
     // this Box below.
+    //
+    // EPIC #679 requirement #4: the standard swipe-down pull-to-refresh gesture
+    // is the explicit manual-reconcile affordance (no extra button). The
+    // [PullToRefreshBox] hosts the LazyColumn so a drag-down fires
+    // [onPullToRefresh] (→ the maintained-tree reconcile) and surfaces the
+    // refreshing spinner driven by the same [isRefreshing] flag as the #639
+    // top bar.
+    val pullState = rememberPullToRefreshState()
+    PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = onPullToRefresh,
+        state = pullState,
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag(FOLDER_LIST_PULL_TO_REFRESH_TAG),
+    ) {
     Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
         modifier = Modifier
@@ -1194,6 +1220,7 @@ internal fun FolderListContent(
                     .padding(horizontal = 12.dp, vertical = 12.dp),
             )
         }
+    }
     }
 }
 
@@ -2674,6 +2701,8 @@ private val FolderListBottomContentPadding = 12.dp
 // Test tags exposed for the unit / connected E2E suite.
 const val FOLDER_LIST_SCREEN_TAG: String = "folder-list:screen"
 const val FOLDER_LIST_CONTENT_TAG: String = "folder-list:content"
+/** EPIC #679 req #4: the swipe-down pull-to-refresh host over the tree. */
+const val FOLDER_LIST_PULL_TO_REFRESH_TAG: String = "folder-list:pull-to-refresh"
 const val FOLDER_LIST_PORT_FORWARDING_TAG: String = "folder-list:port-forwarding"
 const val FOLDER_LIST_BOTTOM_SPACER_TAG: String = "folder-list:bottom-spacer"
 const val FOLDER_LIST_BACK_TAG: String = "folder-list:back"

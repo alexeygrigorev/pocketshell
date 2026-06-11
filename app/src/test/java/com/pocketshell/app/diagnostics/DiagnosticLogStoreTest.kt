@@ -143,7 +143,7 @@ class DiagnosticLogStoreTest {
     }
 
     @Test
-    fun `exportSnapshot copies current log to timestamped share file`() {
+    fun `exportSnapshot writes summary header then the full log`() {
         val store = newStore()
         val line = DiagnosticEventJson.encode(
             DiagnosticsEvent(
@@ -161,7 +161,77 @@ class DiagnosticLogStoreTest {
         assertNotNull(exported)
         assertTrue(exported!!.name.startsWith("pocketshell-diagnostics-pixel-test-20260607-101530"))
         assertTrue(exported.name.endsWith(".jsonl"))
-        assertEquals(store.readText(), exported.readText())
+
+        val lines = exported.readLines().filter { it.isNotBlank() }
+        // First line is the export_summary header, then the original log line.
+        val header = JSONObject(lines.first())
+        assertEquals("diagnostics", header.getString("category"))
+        assertEquals("export_summary", header.getString("name"))
+        assertEquals(line, lines[1])
+        assertEquals(store.readText().trim(), lines.drop(1).joinToString("\n"))
+    }
+
+    @Test
+    fun `exportSnapshot summary header indexes counts seq and time range`() {
+        val store = newStore()
+        store.appendLine(
+            DiagnosticEventJson.encode(
+                DiagnosticsEvent(
+                    sequence = 4L,
+                    wallClockTime = Instant.parse("2026-06-07T10:15:30Z"),
+                    monotonicTimestampNanos = 4L,
+                    category = "app",
+                    name = "foreground",
+                ),
+            ),
+        )
+        store.appendLine(
+            DiagnosticEventJson.encode(
+                DiagnosticsEvent(
+                    sequence = 5L,
+                    wallClockTime = Instant.parse("2026-06-07T10:15:31Z"),
+                    monotonicTimestampNanos = 5L,
+                    category = "connection",
+                    name = "connect_start",
+                ),
+            ),
+        )
+        store.appendLine(
+            DiagnosticEventJson.encode(
+                DiagnosticsEvent(
+                    sequence = 9L,
+                    wallClockTime = Instant.parse("2026-06-07T10:15:35Z"),
+                    monotonicTimestampNanos = 9L,
+                    category = "connection",
+                    name = "connect_fail",
+                ),
+            ),
+        )
+
+        val exported = store.exportSnapshot(deviceLabel = "Pixel Test", appVersion = "0.3.32 (332)")
+
+        assertNotNull(exported)
+        // The summary header must parse back as a normal diagnostics event so
+        // jq/rg/tail and the existing reader can consume it.
+        val summary = DiagnosticEventJson.decode(exported!!.readLines().first())
+        assertNotNull(summary)
+        assertEquals("diagnostics", summary!!.category)
+        assertEquals("export_summary", summary.name)
+
+        val metadata = summary.metadata
+        assertEquals(3, metadata["events"])
+        assertEquals(4, metadata["firstSeq"])
+        assertEquals(9, metadata["lastSeq"])
+        assertEquals("2026-06-07T10:15:30Z", metadata["firstWallClock"])
+        assertEquals("2026-06-07T10:15:35Z", metadata["lastWallClock"])
+        assertEquals(5_000L.toInt(), (metadata["windowMs"] as Number).toInt())
+        assertEquals("0.3.32 (332)", metadata["appVersion"])
+        assertEquals("Pixel Test", metadata["device"])
+
+        val header = JSONObject(exported.readLines().first())
+        val categories = header.getJSONObject("metadata").getJSONObject("categories")
+        assertEquals(1, categories.getInt("app"))
+        assertEquals(2, categories.getInt("connection"))
     }
 
     @Test
@@ -231,9 +301,18 @@ class DiagnosticLogStoreTest {
         )
 
         assertNotNull(exported)
-        val exportedEvents = exported!!.readLines().mapNotNull(DiagnosticEventJson::decode)
+        val exportedEvents = exported!!.readLines()
+            .mapNotNull(DiagnosticEventJson::decode)
+            .filterNot { it.category == "diagnostics" && it.name == "export_summary" }
         assertEquals(listOf(3L, 4L), exportedEvents.map { it.sequence })
         assertTrue(exportedEvents.all { it.category == "connection" })
+
+        // The prepended summary still indexes only the filtered window.
+        val summary = DiagnosticEventJson.decode(exported.readLines().first())!!
+        assertEquals("export_summary", summary.name)
+        assertEquals(2, summary.metadata["events"])
+        assertEquals(3, summary.metadata["firstSeq"])
+        assertEquals(4, summary.metadata["lastSeq"])
     }
 
     private fun eventLine(

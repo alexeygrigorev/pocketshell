@@ -56,8 +56,13 @@ class DiagnosticRecorderTest {
         assertNotNull(exported)
         assertTrue(exported!!.name.endsWith(".jsonl"))
         val lines = exported.readLines()
-        assertEquals(1, lines.size)
-        val json = JSONObject(lines.single())
+        // First line is the export_summary header (#549 slice d), then the event.
+        assertEquals(2, lines.size)
+        val header = JSONObject(lines.first())
+        assertEquals("diagnostics", header.getString("category"))
+        assertEquals("export_summary", header.getString("name"))
+        assertEquals(1, header.getJSONObject("metadata").getInt("events"))
+        val json = JSONObject(lines[1])
         assertEquals(1L, json.getLong("sequence"))
         assertEquals("connection", json.getString("category"))
         assertEquals("connect_start", json.getString("name"))
@@ -188,8 +193,10 @@ class DiagnosticRecorderTest {
             ),
         )
 
-        val metadata = JSONObject(recorder.exportSnapshot()!!.readLines().single())
-            .getJSONObject("metadata")
+        // Skip the export_summary header line (#549 slice d) and read the event.
+        val eventLine = recorder.exportSnapshot()!!.readLines()
+            .last { JSONObject(it).getString("name") == "dangerous_test" }
+        val metadata = JSONObject(eventLine).getJSONObject("metadata")
         assertEquals("[redacted]", metadata.getString("prompt"))
         assertEquals("[redacted]", metadata.getString("command"))
         assertEquals("[redacted]", metadata.getString("message"))

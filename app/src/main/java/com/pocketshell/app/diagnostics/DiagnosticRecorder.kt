@@ -87,7 +87,7 @@ class DiagnosticRecorder @Inject constructor(
     suspend fun exportSnapshot(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): File? {
         flush()
         return withContext(Dispatchers.IO) {
-            store.exportSnapshot(deviceLabel(), filter)
+            store.exportSnapshot(deviceLabel(), appVersion(), filter)
         }
     }
 
@@ -121,6 +121,19 @@ class DiagnosticRecorder @Inject constructor(
             .filter { it.isNotBlank() }
             .joinToString(separator = " ")
             .ifBlank { "device" }
+
+    private fun appVersion(): String =
+        runCatching {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            val name = info.versionName?.takeIf { it.isNotBlank() } ?: "unknown"
+            val code = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toLong()
+            }
+            "$name ($code)"
+        }.getOrDefault("unknown")
 
     private sealed interface RecorderCommand {
         data class Line(val line: String) : RecorderCommand

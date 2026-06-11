@@ -1,7 +1,9 @@
 package com.pocketshell.app.diagnostics
 
+import org.json.JSONObject
 import java.io.File
 import java.time.Clock
+import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
@@ -26,18 +28,27 @@ internal class DiagnosticLogStore(
 
     fun exportSnapshot(
         deviceLabel: String = "device",
+        appVersion: String = "unknown",
         filter: DiagnosticEventFilter = DiagnosticEventFilter.All,
     ): File? {
         if (!logFile.isFile || logFile.length() == 0L) return null
+        val eventLines = readLines(filter)
+        if (eventLines.isEmpty()) return null
+        val events = eventLines.mapNotNull(DiagnosticEventJson::decode)
         exportDirectory.mkdirs()
         val file = File(exportDirectory, exportFileName(deviceLabel))
-        if (filter == DiagnosticEventFilter.All) {
-            logFile.copyTo(file, overwrite = true)
-        } else {
-            val lines = readLines(filter)
-            if (lines.isEmpty()) return null
-            file.writeText(lines.joinToString(separator = "\n", postfix = "\n"))
-        }
+        // Prepend a single-line export_summary header so an agent can orient
+        // with one `head -1` (counts, sequence/time range, app version, device)
+        // before reading the rest of the JSONL window. (#549 slice d)
+        val summaryLine = DiagnosticExportSummary.headerLine(
+            events = events,
+            deviceLabel = deviceLabel,
+            appVersion = appVersion,
+            generatedAt = clock.instant(),
+        )
+        file.writeText(
+            (listOf(summaryLine) + eventLines).joinToString(separator = "\n", postfix = "\n"),
+        )
         return file
     }
 
@@ -102,5 +113,69 @@ internal class DiagnosticLogStore(
         private val ExportTimestampFormatter: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
                 .withZone(ZoneOffset.UTC)
+    }
+}
+
+/**
+ * Builds the single `export_summary` NDJSON header line prepended to a
+ * diagnostics export (#549 slice d). It is shaped exactly like a normal
+ * diagnostics event (`category`/`name`/`metadata`) so `jq`/`rg`/`tail` and the
+ * existing [DiagnosticEventJson.decode] reader treat it as one more line, while
+ * giving an agent a one-`head -1` index of the exported window: event count,
+ * sequence range, wall-clock range/span, per-category counts, app version, and
+ * device.
+ */
+internal object DiagnosticExportSummary {
+    const val CATEGORY = "diagnostics"
+    const val NAME = "export_summary"
+
+    fun headerLine(
+        events: List<DiagnosticsEvent>,
+        deviceLabel: String,
+        appVersion: String,
+        generatedAt: Instant,
+    ): String {
+        val sequences = events.map { it.sequence }
+        val wallClocks = events.map { it.wallClockTime }
+        val firstWall = wallClocks.minOrNull()
+        val lastWall = wallClocks.maxOrNull()
+        val categories = JSONObject()
+        events.groupingBy { it.category }.eachCount()
+            .toSortedMap()
+            .forEach { (category, count) -> categories.put(category, count) }
+
+        val metadata = JSONObject()
+            .put("events", events.size)
+            .put("firstSeq", sequences.minOrNull() ?: JSONObject.NULL)
+            .put("lastSeq", sequences.maxOrNull() ?: JSONObject.NULL)
+            .put(
+                "firstWallClock",
+                firstWall?.let(DateTimeFormatter.ISO_INSTANT::format) ?: JSONObject.NULL,
+            )
+            .put(
+                "lastWallClock",
+                lastWall?.let(DateTimeFormatter.ISO_INSTANT::format) ?: JSONObject.NULL,
+            )
+            .put(
+                "windowMs",
+                if (firstWall != null && lastWall != null) {
+                    java.time.Duration.between(firstWall, lastWall).toMillis()
+                } else {
+                    JSONObject.NULL
+                },
+            )
+            .put("categories", categories)
+            .put("appVersion", appVersion)
+            .put("device", deviceLabel)
+            .put("generatedAt", DateTimeFormatter.ISO_INSTANT.format(generatedAt))
+
+        return JSONObject()
+            .put("sequence", 0)
+            .put("wallClockTime", DateTimeFormatter.ISO_INSTANT.format(generatedAt))
+            .put("monotonicTimestampNanos", 0)
+            .put("category", CATEGORY)
+            .put("name", NAME)
+            .put("metadata", metadata)
+            .toString()
     }
 }

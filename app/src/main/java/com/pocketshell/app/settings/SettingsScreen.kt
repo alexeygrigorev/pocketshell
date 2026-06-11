@@ -151,7 +151,17 @@ fun SettingsScreen(
         when (val state = diagnosticsShareState) {
             is DiagnosticsShareState.Prepared -> {
                 runCatching { shareDiagnosticsFile(context, state.file) }
-                    .onSuccess { viewModel.markDiagnosticsShareLaunched() }
+                    .onSuccess {
+                        // On-device export confirmation (#549 slice d): tell the
+                        // user the diagnostics file was exported and name it, so a
+                        // short opt-in capture clearly ends with a shareable file.
+                        Toast.makeText(
+                            context,
+                            "Diagnostics exported: ${state.file.name}",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        viewModel.markDiagnosticsShareLaunched()
+                    }
                     .onFailure { error ->
                         viewModel.diagnosticsShareLaunchFailed(
                             error.message ?: "Could not open share sheet.",

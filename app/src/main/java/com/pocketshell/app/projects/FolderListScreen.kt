@@ -174,6 +174,14 @@ fun FolderListScreen(
      * credentials this screen already holds.
      */
     onGitHistory: (path: String, label: String) -> Unit = { _, _ -> },
+    /**
+     * Issue #643: open the SFTP file explorer rooted at [startDir]. Fired from
+     * the host-detail overflow ("Browse files" → `~`) and from a folder's
+     * long-press action sheet ("Browse files" → that folder's path). The caller
+     * (MainActivity) routes to `AppDestination.FileExplorer`, reusing the SSH
+     * credentials this screen already holds.
+     */
+    onBrowseFiles: (startDir: String) -> Unit = {},
     onOpenUsage: () -> Unit = {},
     onAssistantNavigate: (AppDestination) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -307,6 +315,7 @@ fun FolderListScreen(
                 isRefreshing = headerRefreshInFlight,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
+                onBrowseFiles = { onBrowseFiles("~") },
                 onRefreshSessions = viewModel::refreshSessions,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
@@ -461,6 +470,12 @@ fun FolderListScreen(
                 }
             } else {
                 null
+            },
+            // Browse files (#643): always available — open the explorer rooted
+            // at this folder's path so the user sees its file tree.
+            onBrowseFiles = {
+                actionFolder = null
+                onBrowseFiles(target.path)
             },
             onImport = {
                 actionFolder = null
@@ -661,6 +676,7 @@ private fun FolderListAppBar(
     isRefreshing: Boolean,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
+    onBrowseFiles: () -> Unit,
     onRefreshSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
@@ -709,6 +725,7 @@ private fun FolderListAppBar(
         trailing = {
             FolderListOverflowMenu(
                 onBrowseRepos = onBrowseRepos,
+                onBrowseFiles = onBrowseFiles,
                 onRefreshSessions = onRefreshSessions,
                 isRefreshing = isRefreshing,
                 onOpenAssistant = onOpenAssistant,
@@ -732,6 +749,7 @@ private fun FolderListAppBar(
 @Composable
 private fun FolderListOverflowMenu(
     onBrowseRepos: () -> Unit,
+    onBrowseFiles: () -> Unit,
     onRefreshSessions: () -> Unit,
     isRefreshing: Boolean,
     onOpenAssistant: () -> Unit,
@@ -747,6 +765,12 @@ private fun FolderListOverflowMenu(
                 onClick = onOpenAssistant,
                 contentDescription = "Host assistant",
                 testTag = FOLDER_LIST_ASSISTANT_TAG,
+            ),
+            KebabItem(
+                label = "Browse files",
+                onClick = onBrowseFiles,
+                contentDescription = "Browse files",
+                testTag = FOLDER_LIST_BROWSE_FILES_TAG,
             ),
             KebabItem(
                 label = "Browse repos",
@@ -2676,6 +2700,7 @@ private const val FLAT_ACTIVE_SECTION_KEY: String = "flat-section-active"
 private const val FLAT_IDLE_SECTION_KEY: String = "flat-section-idle"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
+const val FOLDER_LIST_BROWSE_FILES_TAG: String = "folder-list:browse-files"
 const val FOLDER_LIST_REFRESH_SESSIONS_TAG: String = "folder-list:refresh-sessions"
 const val FOLDER_LIST_USAGE_TAG: String = "folder-list:usage"
 const val FOLDER_LIST_SETTINGS_TAG: String = "folder-list:settings"

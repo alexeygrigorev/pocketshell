@@ -32,8 +32,12 @@ class FileExplorerScaffoldTest {
         entries: List<RemoteEntry>,
         path: String = "/home/u/proj",
         truncated: Boolean = false,
+        transfer: FileTransferState = FileTransferState.Idle,
         onOpenDirectory: (RemoteEntry) -> Unit = {},
         onOpenFile: (RemoteEntry) -> Unit = {},
+        onDownloadFile: (RemoteEntry) -> Unit = {},
+        onUpload: () -> Unit = {},
+        onDismissTransfer: () -> Unit = {},
         onUp: () -> Unit = {},
         onCrumb: (String) -> Unit = {},
     ) {
@@ -42,10 +46,14 @@ class FileExplorerScaffoldTest {
                 FileExplorerScaffold(
                     hostName = "agents",
                     state = FileExplorerUiState.Ready(path, entries, truncated),
+                    transfer = transfer,
                     onBack = {},
                     onUp = onUp,
                     onOpenDirectory = onOpenDirectory,
                     onOpenFile = onOpenFile,
+                    onDownloadFile = onDownloadFile,
+                    onUpload = onUpload,
+                    onDismissTransfer = onDismissTransfer,
                     onCrumb = onCrumb,
                     onGoToPath = {},
                     onRetry = {},
@@ -61,10 +69,14 @@ class FileExplorerScaffoldTest {
                 FileExplorerScaffold(
                     hostName = "agents",
                     state = FileExplorerUiState.Loading("/home/u"),
+                    transfer = FileTransferState.Idle,
                     onBack = {},
                     onUp = {},
                     onOpenDirectory = {},
                     onOpenFile = {},
+                    onDownloadFile = {},
+                    onUpload = {},
+                    onDismissTransfer = {},
                     onCrumb = {},
                     onGoToPath = {},
                     onRetry = {},
@@ -143,10 +155,14 @@ class FileExplorerScaffoldTest {
                         currentPath = "/root",
                         message = "Permission denied: you can't read /root.",
                     ),
+                    transfer = FileTransferState.Idle,
                     onBack = {},
                     onUp = {},
                     onOpenDirectory = {},
                     onOpenFile = {},
+                    onDownloadFile = {},
+                    onUpload = {},
+                    onDismissTransfer = {},
                     onCrumb = {},
                     onGoToPath = {},
                     onRetry = { retries++ },
@@ -157,5 +173,63 @@ class FileExplorerScaffoldTest {
         compose.onNodeWithText("Permission denied: you can't read /root.").assertIsDisplayed()
         compose.onNodeWithTag(FILE_EXPLORER_RETRY_TAG).performClick()
         assertEquals(1, retries)
+    }
+
+    @Test
+    fun readyStateShowsUploadAction() {
+        var uploads = 0
+        setReady(listOf(dir("sub")), onUpload = { uploads++ })
+        compose.onNodeWithTag(FILE_EXPLORER_UPLOAD_TAG).assertIsDisplayed().performClick()
+        assertEquals(1, uploads)
+    }
+
+    @Test
+    fun fileRowHasDownloadAffordance() {
+        var downloaded: RemoteEntry? = null
+        setReady(listOf(file("report.txt", 512)), onDownloadFile = { downloaded = it })
+        compose.onNodeWithTag(FILE_EXPLORER_DOWNLOAD_TAG_PREFIX + "report.txt")
+            .assertIsDisplayed()
+            .performClick()
+        assertEquals("report.txt", downloaded?.name)
+    }
+
+    @Test
+    fun directoryRowHasNoDownloadAffordance() {
+        setReady(listOf(dir("sub")))
+        compose.onNodeWithTag(FILE_EXPLORER_DOWNLOAD_TAG_PREFIX + "sub").assertDoesNotExist()
+    }
+
+    @Test
+    fun inProgressTransferShowsBannerAndHidesUpload() {
+        setReady(
+            listOf(file("a.txt", 1)),
+            transfer = FileTransferState.InProgress(name = "a.txt", isUpload = true),
+        )
+        compose.onNodeWithTag(FILE_EXPLORER_TRANSFER_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Uploading a.txt…").assertIsDisplayed()
+        // Upload is suppressed while a transfer is running.
+        compose.onNodeWithTag(FILE_EXPLORER_UPLOAD_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun successTransferShowsDismissibleBanner() {
+        var dismisses = 0
+        setReady(
+            listOf(file("a.txt", 1)),
+            transfer = FileTransferState.Success("Uploaded a.txt to /home/u/proj"),
+            onDismissTransfer = { dismisses++ },
+        )
+        compose.onNodeWithText("Uploaded a.txt to /home/u/proj").assertIsDisplayed()
+        compose.onNodeWithTag(FILE_EXPLORER_TRANSFER_DISMISS_TAG).performClick()
+        assertEquals(1, dismisses)
+    }
+
+    @Test
+    fun failureTransferShowsMessage() {
+        setReady(
+            listOf(file("a.txt", 1)),
+            transfer = FileTransferState.Failure("Upload failed: permission denied"),
+        )
+        compose.onNodeWithText("Upload failed: permission denied").assertIsDisplayed()
     }
 }

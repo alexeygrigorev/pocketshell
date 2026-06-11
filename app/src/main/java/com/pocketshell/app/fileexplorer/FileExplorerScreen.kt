@@ -1,5 +1,9 @@
 package com.pocketshell.app.fileexplorer
 
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -33,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -63,6 +68,10 @@ const val FILE_EXPLORER_TRUNCATED_TAG = "fileExplorerTruncated"
 const val FILE_EXPLORER_ERROR_TAG = "fileExplorerError"
 const val FILE_EXPLORER_RETRY_TAG = "fileExplorerRetry"
 const val FILE_EXPLORER_ROW_TAG_PREFIX = "fileExplorerRow:"
+const val FILE_EXPLORER_UPLOAD_TAG = "fileExplorerUpload"
+const val FILE_EXPLORER_DOWNLOAD_TAG_PREFIX = "fileExplorerDownload:"
+const val FILE_EXPLORER_TRANSFER_TAG = "fileExplorerTransfer"
+const val FILE_EXPLORER_TRANSFER_DISMISS_TAG = "fileExplorerTransferDismiss"
 
 /**
  * Browsable remote file explorer — issue #528.
@@ -99,13 +108,64 @@ fun FileExplorerScreen(
         )
     }
     val state by viewModel.state.collectAsState()
+    val transfer by viewModel.transfer.collectAsState()
+    val context = LocalContext.current
+
+    // Upload: pick any device file, resolve its display name + size from the
+    // content provider, and hand a fresh-stream opener to the view-model.
+    val uploadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val resolver = context.contentResolver
+        var displayName = "file"
+        var size = -1L
+        runCatching {
+            resolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0 && !cursor.isNull(nameIdx)) displayName = cursor.getString(nameIdx)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) size = cursor.getLong(sizeIdx)
+                }
+            }
+        }
+        viewModel.uploadFile(
+            displayName = displayName,
+            length = size,
+            openStream = { resolver.openInputStream(uri) },
+        )
+    }
+
+    // Download: the user names a destination document on the device; we hold
+    // the pending entry so the result callback knows which remote file to pull.
+    var pendingDownload by remember { mutableStateOf<RemoteEntry?>(null) }
+    val downloadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri: Uri? ->
+        val entry = pendingDownload
+        pendingDownload = null
+        if (uri == null || entry == null) return@rememberLauncherForActivityResult
+        viewModel.downloadFile(entry) { bytes ->
+            context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                ?: throw IllegalStateException("Couldn't open the chosen destination.")
+        }
+    }
+
     FileExplorerScaffold(
         hostName = hostName,
         state = state,
+        transfer = transfer,
         onBack = onBack,
         onUp = viewModel::goUp,
         onOpenDirectory = viewModel::openDirectory,
         onOpenFile = { entry -> onOpenFile(FileExplorerViewModel.joinPath(state.currentPath, entry.name)) },
+        onDownloadFile = { entry ->
+            pendingDownload = entry
+            downloadLauncher.launch(entry.name)
+        },
+        onUpload = { uploadLauncher.launch("*/*") },
+        onDismissTransfer = viewModel::dismissTransfer,
         onCrumb = viewModel::navigateToAbsolute,
         onGoToPath = viewModel::goToPath,
         onRetry = viewModel::retry,
@@ -123,10 +183,14 @@ fun FileExplorerScreen(
 internal fun FileExplorerScaffold(
     hostName: String,
     state: FileExplorerUiState,
+    transfer: FileTransferState,
     onBack: () -> Unit,
     onUp: () -> Unit,
     onOpenDirectory: (RemoteEntry) -> Unit,
     onOpenFile: (RemoteEntry) -> Unit,
+    onDownloadFile: (RemoteEntry) -> Unit,
+    onUpload: () -> Unit,
+    onDismissTransfer: () -> Unit,
     onCrumb: (String) -> Unit,
     onGoToPath: (String) -> Unit,
     onRetry: () -> Unit,
@@ -145,13 +209,19 @@ internal fun FileExplorerScaffold(
             FileExplorerHeader(
                 hostName = hostName,
                 path = state.currentPath,
+                // Upload only makes sense once a directory is listed (we need a
+                // resolved cwd); gate it on Ready.
+                canUpload = state is FileExplorerUiState.Ready &&
+                    transfer !is FileTransferState.InProgress,
                 onBack = onBack,
+                onUpload = onUpload,
                 onCrumb = onCrumb,
                 onGoTo = {
                     goToText = state.currentPath
                     showGoTo = true
                 },
             )
+            TransferBanner(transfer = transfer, onDismiss = onDismissTransfer)
             when (state) {
                 is FileExplorerUiState.Loading -> LoadingPanel()
                 is FileExplorerUiState.Failed -> ErrorPanel(
@@ -165,6 +235,7 @@ internal fun FileExplorerScaffold(
                     onUp = onUp,
                     onOpenDirectory = onOpenDirectory,
                     onOpenFile = onOpenFile,
+                    onDownloadFile = onDownloadFile,
                 )
             }
         }
@@ -216,7 +287,9 @@ internal fun FileExplorerScaffold(
 private fun FileExplorerHeader(
     hostName: String,
     path: String,
+    canUpload: Boolean,
     onBack: () -> Unit,
+    onUpload: () -> Unit,
     onCrumb: (String) -> Unit,
     onGoTo: () -> Unit,
 ) {
@@ -245,11 +318,20 @@ private fun FileExplorerHeader(
                 }
             },
             trailing = {
-                HeaderAction(
-                    label = "Go to…",
-                    testTag = FILE_EXPLORER_GOTO_TAG,
-                    onClick = onGoTo,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (canUpload) {
+                        HeaderAction(
+                            label = "Upload",
+                            testTag = FILE_EXPLORER_UPLOAD_TAG,
+                            onClick = onUpload,
+                        )
+                    }
+                    HeaderAction(
+                        label = "Go to…",
+                        testTag = FILE_EXPLORER_GOTO_TAG,
+                        onClick = onGoTo,
+                    )
+                }
             },
         )
         // Breadcrumb strip — each segment is tappable to jump to that ancestor.
@@ -315,12 +397,86 @@ private fun HeaderAction(
     }
 }
 
+/**
+ * Transfer status banner (issue #643) — overlays the top of the listing while
+ * an upload/download is in flight or after one finishes. Stays out of the
+ * listing's own state so the directory rows remain visible underneath.
+ */
+@Composable
+private fun TransferBanner(
+    transfer: FileTransferState,
+    onDismiss: () -> Unit,
+) {
+    if (transfer is FileTransferState.Idle) return
+    val (text, role, showSpinner, dismissible) = when (transfer) {
+        is FileTransferState.InProgress ->
+            BannerSpec(
+                text = (if (transfer.isUpload) "Uploading " else "Downloading ") + transfer.name + "…",
+                role = BannerRole.Progress,
+                showSpinner = true,
+                dismissible = false,
+            )
+        is FileTransferState.Success ->
+            BannerSpec(transfer.message, BannerRole.Success, showSpinner = false, dismissible = true)
+        is FileTransferState.Failure ->
+            BannerSpec(transfer.message, BannerRole.Error, showSpinner = false, dismissible = true)
+        FileTransferState.Idle -> return
+    }
+    val accent = when (role) {
+        BannerRole.Progress -> PocketShellColors.Accent
+        BannerRole.Success -> PocketShellColors.Accent
+        BannerRole.Error -> PocketShellColors.TextSecondary
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = PocketShellDensity.rowPadH, vertical = PocketShellSpacing.sm)
+            .testTag(FILE_EXPLORER_TRANSFER_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        if (showSpinner) {
+            CircularProgressIndicator(
+                color = PocketShellColors.Accent,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Text(
+            text = text,
+            color = accent,
+            style = PocketShellType.bodyDense,
+            modifier = Modifier.weight(1f),
+        )
+        if (dismissible) {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag(FILE_EXPLORER_TRANSFER_DISMISS_TAG),
+            ) {
+                Text("Dismiss", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
+            }
+        }
+    }
+}
+
+private enum class BannerRole { Progress, Success, Error }
+
+private data class BannerSpec(
+    val text: String,
+    val role: BannerRole,
+    val showSpinner: Boolean,
+    val dismissible: Boolean,
+)
+
 @Composable
 private fun ReadyPanel(
     state: FileExplorerUiState.Ready,
     onUp: () -> Unit,
     onOpenDirectory: (RemoteEntry) -> Unit,
     onOpenFile: (RemoteEntry) -> Unit,
+    onDownloadFile: (RemoteEntry) -> Unit,
 ) {
     val atRoot = state.currentPath == "/"
     LazyColumn(
@@ -357,11 +513,33 @@ private fun ReadyPanel(
             // to a not-a-directory error the user can read).
             val navigable = entry.type == RemoteEntry.Type.DIRECTORY ||
                 entry.type == RemoteEntry.Type.SYMLINK
+            // Regular files get a tap-to-download affordance in the trailing
+            // slot (issue #643); tapping the row itself still opens the viewer.
+            val trailing: (@Composable () -> Unit)? = if (entry.type == RemoteEntry.Type.FILE) {
+                {
+                    Box(
+                        modifier = Modifier
+                            .size(PocketShellDensity.tapTargetMin)
+                            .clickable(role = Role.Button) { onDownloadFile(entry) }
+                            .testTag(FILE_EXPLORER_DOWNLOAD_TAG_PREFIX + entry.name),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "↓",
+                            color = PocketShellColors.Accent,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            } else {
+                rowBadge(entry)
+            }
             ListRow(
                 title = entry.name,
                 subtitle = rowSubtitle(entry),
                 leading = { GlyphCell(glyphFor(entry.type)) },
-                trailing = rowBadge(entry),
+                trailing = trailing,
                 onClick = {
                     if (navigable) onOpenDirectory(entry) else onOpenFile(entry)
                 },

@@ -48,6 +48,7 @@ fun FolderContextActionSheet(
     onEmptyProject: () -> Unit,
     onEnv: (() -> Unit)? = null,
     onGitHistory: (() -> Unit)? = null,
+    onBrowseFiles: (() -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -65,6 +66,7 @@ fun FolderContextActionSheet(
             onEmptyProject = onEmptyProject,
             onEnv = onEnv,
             onGitHistory = onGitHistory,
+            onBrowseFiles = onBrowseFiles,
         )
     }
 }
@@ -79,6 +81,7 @@ internal fun FolderContextActionContent(
     onEmptyProject: () -> Unit,
     onEnv: (() -> Unit)? = null,
     onGitHistory: (() -> Unit)? = null,
+    onBrowseFiles: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -101,6 +104,16 @@ internal fun FolderContextActionContent(
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
         FolderContextRow("+ New session here", FOLDER_CONTEXT_NEW_SESSION_TAG, onNewSession)
+        // Browse files (#643): open the SFTP explorer rooted at this folder's
+        // path so the user can see its file tree, upload, and download.
+        if (onBrowseFiles != null) {
+            FolderContextRow(
+                label = "Browse files",
+                description = "Open the file explorer for this folder",
+                testTag = FOLDER_CONTEXT_BROWSE_FILES_TAG,
+                onClick = onBrowseFiles,
+            )
+        }
         // Read-only Git commit-history / timeline view (#646). Suppressed for
         // roots, which aren't themselves projects (null onGitHistory).
         if (onGitHistory != null) {
@@ -234,6 +247,7 @@ const val FOLDER_CONTEXT_SHEET_TAG: String = "folder-context:sheet"
 const val FOLDER_CONTEXT_NEW_SESSION_TAG: String = "folder-context:new-session"
 const val FOLDER_CONTEXT_ENV_TAG: String = "folder-context:env"
 const val FOLDER_CONTEXT_GIT_HISTORY_TAG: String = "folder-context:git-history"
+const val FOLDER_CONTEXT_BROWSE_FILES_TAG: String = "folder-context:browse-files"
 const val FOLDER_CONTEXT_IMPORT_TAG: String = "folder-context:import"
 const val FOLDER_CONTEXT_CLONE_TAG: String = "folder-context:clone"
 const val FOLDER_CONTEXT_EMPTY_PROJECT_TAG: String = "folder-context:empty-project"

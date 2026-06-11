@@ -45,6 +45,7 @@ class FolderContextActionSheetScreenshotTest {
                         onEmptyProject = {},
                         onEnv = {},
                         onGitHistory = {},
+                        onBrowseFiles = {},
                     )
                 }
             }
@@ -53,6 +54,8 @@ class FolderContextActionSheetScreenshotTest {
         compose.onNodeWithTag(FOLDER_CONTEXT_EMPTY_PROJECT_TAG).assertExists()
         // Issue #646: the read-only Git history entry point shows for a project.
         compose.onNodeWithTag(FOLDER_CONTEXT_GIT_HISTORY_TAG).assertExists()
+        // Issue #643: the file-explorer entry point shows for a folder.
+        compose.onNodeWithTag(FOLDER_CONTEXT_BROWSE_FILES_TAG).assertExists()
         compose.waitForIdle()
         SystemClock.sleep(200)
 

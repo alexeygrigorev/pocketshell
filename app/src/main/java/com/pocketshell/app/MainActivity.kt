@@ -1079,6 +1079,23 @@ private fun AppNavigator(
                     ),
                 )
             },
+            // Issue #643: open the SFTP file explorer rooted at the requested
+            // directory (`~` from the host overflow, a folder path from a
+            // long-press), reusing this screen's SSH credentials.
+            onBrowseFiles = { startDir ->
+                navigate(
+                    AppDestination.FileExplorer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        startDir = startDir,
+                    ),
+                )
+            },
             onAssistantNavigate = { destination ->
                 navigate(destination)
             },

@@ -142,6 +142,90 @@ class FileExplorerDockerTest {
     }
 
     @Test
+    fun uploadsADeviceFileThenDownloadsItBack(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val root = "/tmp/issue643-$suffix"
+        seededRoot = root
+
+        // Seed an empty directory we'll upload into.
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec("mkdir -p '$root' && echo ok")
+                assertEquals("seed exit", 0, exit.exitCode)
+            } ?: error("could not connect to seed fixture dir")
+        }
+
+        val viewModel = FileExplorerViewModel()
+        viewModel.start(
+            FileExplorerViewModel.Request(
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                startDir = root,
+            ),
+        )
+        // Wait for the listing to settle so currentDir is the resolved root.
+        withTimeout(30_000) {
+            while (viewModel.state.value !is FileExplorerUiState.Ready) {
+                kotlinx.coroutines.delay(100)
+            }
+        }
+
+        // 1. Upload a device-side file into the explorer's current directory.
+        val payload = "issue643 round-trip payload".toByteArray()
+        viewModel.uploadFile(
+            displayName = "upload me.txt",
+            length = payload.size.toLong(),
+            openStream = { payload.inputStream() },
+        )
+        withTimeout(30_000) {
+            while (viewModel.transfer.value !is FileTransferState.Success) {
+                val t = viewModel.transfer.value
+                if (t is FileTransferState.Failure) error("upload failed: ${t.message}")
+                kotlinx.coroutines.delay(100)
+            }
+        }
+        // The file (sanitised name) now exists remotely.
+        val remoteName = FileExplorerViewModel.sanitizeUploadName("upload me.txt")
+        withTimeout(15_000) {
+            connect()?.use { session ->
+                val cat = session.exec("cat '$root/$remoteName'")
+                assertEquals("uploaded content", "issue643 round-trip payload", cat.stdout.trim())
+            } ?: error("could not connect to verify upload")
+        }
+
+        // Re-list happens after a successful upload; wait for the row to appear.
+        withTimeout(20_000) {
+            while (true) {
+                val s = viewModel.state.value
+                if (s is FileExplorerUiState.Ready && s.entries.any { it.name == remoteName }) break
+                kotlinx.coroutines.delay(100)
+            }
+        }
+
+        // 2. Download the same file back to the device.
+        val entry = (viewModel.state.value as FileExplorerUiState.Ready)
+            .entries.first { it.name == remoteName }
+        var downloaded: ByteArray? = null
+        viewModel.downloadFile(entry) { bytes -> downloaded = bytes }
+        withTimeout(30_000) {
+            while (viewModel.transfer.value !is FileTransferState.Success) {
+                val t = viewModel.transfer.value
+                if (t is FileTransferState.Failure) error("download failed: ${t.message}")
+                kotlinx.coroutines.delay(100)
+            }
+        }
+        assertNotNull("download should produce bytes", downloaded)
+        assertEquals(
+            "round-trip content",
+            "issue643 round-trip payload",
+            String(downloaded!!),
+        )
+    }
+
+    @Test
     fun showsPermissionDeniedForUnreadableDirectory(): Unit = runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue528-perm-$suffix"

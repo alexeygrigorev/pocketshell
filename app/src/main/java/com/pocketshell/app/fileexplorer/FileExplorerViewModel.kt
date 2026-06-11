@@ -6,10 +6,12 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshFileNotFoundException
+import com.pocketshell.core.ssh.SshFileTooLargeException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshNotADirectoryException
 import com.pocketshell.core.ssh.SshPermissionDeniedException
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.app.share.FilenameSanitiser
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.InputStream
 import javax.inject.Inject
 
 /**
@@ -57,6 +60,32 @@ sealed interface FileExplorerUiState {
 }
 
 /**
+ * Transfer banner state for in-explorer upload / download (issue #643).
+ *
+ * Kept separate from [FileExplorerUiState] so a transfer never clobbers the
+ * directory listing the user is looking at — the banner overlays the list and
+ * the entries stay visible underneath.
+ */
+sealed interface FileTransferState {
+
+    /** No transfer in flight; nothing to show. */
+    data object Idle : FileTransferState
+
+    /**
+     * A transfer is running. [name] is the file's display name and
+     * [isUpload] picks the verb shown in the banner ("Uploading…" vs
+     * "Downloading…").
+     */
+    data class InProgress(val name: String, val isUpload: Boolean) : FileTransferState
+
+    /** A transfer finished successfully. [message] is the user-facing summary. */
+    data class Success(val message: String) : FileTransferState
+
+    /** A transfer failed. [message] is the user-facing reason. */
+    data class Failure(val message: String) : FileTransferState
+}
+
+/**
  * Backs [FileExplorerScreen] — issue #528.
  *
  * Browses the remote filesystem over SSH: lists a directory via
@@ -77,9 +106,13 @@ class FileExplorerViewModel @Inject constructor() : ViewModel() {
     )
     val state: StateFlow<FileExplorerUiState> = _state.asStateFlow()
 
+    private val _transfer = MutableStateFlow<FileTransferState>(FileTransferState.Idle)
+    val transfer: StateFlow<FileTransferState> = _transfer.asStateFlow()
+
     private var request: Request? = null
     private var session: SshSession? = null
     private var loadJob: Job? = null
+    private var transferJob: Job? = null
 
     /** The absolute path of the directory currently shown (resolved). */
     private var currentDir: String = ""
@@ -136,6 +169,110 @@ class FileExplorerViewModel @Inject constructor() : ViewModel() {
             else -> input
         }
         navigateTo(target, resolveSymbolic = true)
+    }
+
+    /** Dismiss the transfer banner once the user has seen the result. */
+    fun dismissTransfer() {
+        if (_transfer.value is FileTransferState.InProgress) return
+        _transfer.value = FileTransferState.Idle
+    }
+
+    /**
+     * Upload a device file into the directory currently shown (issue #643).
+     *
+     * The caller resolves a content URI into [openStream] (a fresh
+     * [InputStream] each invocation), the byte [length], and the device-side
+     * [displayName]; we sanitise the name, SCP-stream it into [currentDir],
+     * surface a progress/success/failure banner, then re-list so the new file
+     * appears. [openStream] may be invoked twice — once for the size-bearing
+     * stream upload, and only if needed — so it must return a fresh stream.
+     */
+    fun uploadFile(displayName: String, length: Long, openStream: () -> InputStream?) {
+        val req = request ?: return
+        val dir = currentDir
+        if (dir.isBlank()) return
+        if (_transfer.value is FileTransferState.InProgress) return
+        val safeName = sanitizeUploadName(displayName)
+        _transfer.value = FileTransferState.InProgress(name = safeName, isUpload = true)
+        transferJob?.cancel()
+        transferJob = viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val live = ensureSession(req)
+                        ?: throw IllegalStateException("Couldn't reach ${req.username}@${req.hostname}.")
+                    val remotePath = joinPath(dir, safeName)
+                    val input = openStream()
+                        ?: throw IllegalStateException("Couldn't read the selected file.")
+                    input.use { stream ->
+                        live.uploadStream(
+                            input = stream,
+                            length = length,
+                            name = safeName,
+                            remotePath = remotePath,
+                        )
+                    }
+                }
+            }
+            result.fold(
+                onSuccess = { written ->
+                    _transfer.value = FileTransferState.Success(
+                        "Uploaded $safeName to ${displayPath(written)}",
+                    )
+                    // Re-list the current directory so the new file shows up.
+                    navigateTo(dir, resolveSymbolic = false)
+                },
+                onFailure = { t ->
+                    if (t is CancellationException) throw t
+                    _transfer.value = FileTransferState.Failure(
+                        "Upload failed: ${transferErrorText(t)}",
+                    )
+                },
+            )
+        }
+    }
+
+    /**
+     * Download a remote file from the current listing to the device
+     * (issue #643).
+     *
+     * Fetches [entry] from [currentDir] over the existing session (capped at
+     * [MAX_DOWNLOAD_BYTES] so a runaway file never blows the JVM heap) and hands
+     * the bytes to [writeBytes], which the caller wires to the device URI it
+     * picked (`ContentResolver.openOutputStream`). Surfaces a
+     * progress/success/failure banner.
+     */
+    fun downloadFile(entry: RemoteEntry, writeBytes: (ByteArray) -> Unit) {
+        val req = request ?: return
+        val dir = currentDir
+        if (dir.isBlank()) return
+        if (_transfer.value is FileTransferState.InProgress) return
+        _transfer.value = FileTransferState.InProgress(name = entry.name, isUpload = false)
+        transferJob?.cancel()
+        transferJob = viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val live = ensureSession(req)
+                        ?: throw IllegalStateException("Couldn't reach ${req.username}@${req.hostname}.")
+                    val remotePath = joinPath(dir, entry.name)
+                    val bytes = live.downloadFile(remotePath, MAX_DOWNLOAD_BYTES)
+                    writeBytes(bytes)
+                    bytes.size
+                }
+            }
+            result.fold(
+                onSuccess = { written ->
+                    _transfer.value = FileTransferState.Success(
+                        "Downloaded ${entry.name} (${formatSize(written.toLong())})",
+                    )
+                },
+                onFailure = { t ->
+                    if (t is CancellationException) throw t
+                    _transfer.value = FileTransferState.Failure(
+                        "Download failed: ${transferErrorText(t)}",
+                    )
+                },
+            )
+        }
     }
 
     private fun navigateTo(path: String, resolveSymbolic: Boolean) {
@@ -224,9 +361,31 @@ class FileExplorerViewModel @Inject constructor() : ViewModel() {
         return opened
     }
 
+    /**
+     * Shorten an absolute remote path for the success banner: collapse the
+     * file's own name off the end so the banner reads "…to /home/me/logs"
+     * rather than repeating the filename.
+     */
+    private fun displayPath(remotePath: String): String {
+        val parent = parentOf(remotePath)
+        return parent.ifBlank { remotePath }
+    }
+
+    /** One-line, stack-trace-free reason text for a transfer banner. */
+    private fun transferErrorText(t: Throwable): String = when (t) {
+        is SshPermissionDeniedException -> "permission denied"
+        is SshFileNotFoundException -> "no such file on the server"
+        is SshNotADirectoryException -> "not a directory"
+        is SshFileTooLargeException ->
+            "file exceeds the ${MAX_DOWNLOAD_BYTES / (1024 * 1024)} MB transfer limit"
+        else -> (t.message ?: t.javaClass.simpleName).lineSequence().firstOrNull()?.take(160)
+            ?: "transfer error"
+    }
+
     override fun onCleared() {
         super.onCleared()
         loadJob?.cancel()
+        transferJob?.cancel()
         runCatching { session?.close() }
         session = null
     }
@@ -270,6 +429,25 @@ class FileExplorerViewModel @Inject constructor() : ViewModel() {
     }
 
     companion object {
+
+        /**
+         * Hard cap on a single download-to-device transfer (issue #643). A few
+         * hundred MB is far past anything the user will sensibly pull onto a
+         * phone; capping here keeps a runaway file (a multi-GB log, an image
+         * dump) from blowing the JVM heap, mirroring the viewer's preview cap.
+         */
+        const val MAX_DOWNLOAD_BYTES: Long = 256L * 1024 * 1024
+
+        /**
+         * Sanitise a device-picked filename for a remote upload (issue #643).
+         * Reuses the share-target [FilenameSanitiser] so traversal segments,
+         * control bytes, and absurd lengths can't reach the remote path; unlike
+         * the share path we do NOT prepend a timestamp, since the user is
+         * choosing the destination directory explicitly and expects the file to
+         * land under its own name.
+         */
+        internal fun sanitizeUploadName(displayName: String): String =
+            FilenameSanitiser.sanitise(displayName).render()
 
         /**
          * Join [name] onto a directory [base], collapsing the trailing slash.

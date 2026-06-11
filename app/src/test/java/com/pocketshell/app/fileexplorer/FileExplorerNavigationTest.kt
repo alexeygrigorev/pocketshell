@@ -68,4 +68,29 @@ class FileExplorerNavigationTest {
     fun `breadcrumbSegments renders a non-absolute path as one crumb`() {
         assertEquals(listOf("~" to "~"), FileExplorerViewModel.breadcrumbSegments("~"))
     }
+
+    // --- Upload name sanitisation (issue #643) ---
+
+    @Test
+    fun `sanitizeUploadName keeps a normal filename`() {
+        assertEquals("report.txt", FileExplorerViewModel.sanitizeUploadName("report.txt"))
+    }
+
+    @Test
+    fun `sanitizeUploadName strips path traversal segments`() {
+        assertEquals("passwd", FileExplorerViewModel.sanitizeUploadName("../../etc/passwd"))
+    }
+
+    @Test
+    fun `sanitizeUploadName collapses whitespace`() {
+        assertEquals("my_notes.md", FileExplorerViewModel.sanitizeUploadName("my notes.md"))
+    }
+
+    @Test
+    fun `sanitizeUploadName does not prepend a timestamp`() {
+        // Unlike the share path, the user picked the destination, so the file
+        // keeps its own name with no `yyyyMMdd-HHmmss-` prefix.
+        val name = FileExplorerViewModel.sanitizeUploadName("photo.png")
+        assertEquals("photo.png", name)
+    }
 }

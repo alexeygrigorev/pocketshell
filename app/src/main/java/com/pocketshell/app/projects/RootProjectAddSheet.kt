@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
@@ -16,8 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -52,7 +51,12 @@ fun RootProjectAddSheet(
     onCreateEmptyProject: () -> Unit,
     onCloneGitProject: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    // Issue #613: the search field auto-focuses, so the soft keyboard opens
+    // immediately. Use a fully-expanded sheet (not a partial one) so the
+    // filtered project results have the maximum vertical room to stay visible
+    // above the keyboard instead of being shoved off the bottom of a
+    // half-height sheet.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -93,13 +97,32 @@ internal fun RootProjectAddSheetContent(
         searchFocus.requestFocus()
     }
 
+    // Issue #613: keyboard-aware layout.
+    //
+    // The old layout put a fixed-height results LazyColumn at the bottom of a
+    // single `verticalScroll` Column. When the search field auto-focused and
+    // the soft keyboard came up, the header + search + quick-action rows ate
+    // the now-shorter sheet and the filtered project rows were pushed *below*
+    // the keyboard — exactly the reported "I can't see which folders match
+    // while typing" bug.
+    //
+    // The fix splits the sheet into a PINNED header (label, path, search field,
+    // quick actions, "New session here") that always stays visible while
+    // typing, and a single weighted results LazyColumn that takes the remaining
+    // space and scrolls. `imePadding()` on the bounded-height outer Column
+    // shrinks that remaining space to sit right above the keyboard, so the
+    // matched folders stay visible and scrollable above the IME and the search
+    // field never scrolls away.
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
             .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),
+            .fillMaxHeight(ROOT_PROJECT_ADD_HEIGHT_FRACTION)
+            .heightIn(max = ROOT_PROJECT_ADD_MAX_HEIGHT)
+            .padding(horizontal = PocketShellSpacing.lg)
+            .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.md)
+            .testTag(ROOT_PROJECT_ADD_CONTENT_TAG),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
         Text(
@@ -146,8 +169,8 @@ internal fun RootProjectAddSheetContent(
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 360.dp)
-            .testTag(ROOT_PROJECT_ADD_LIST_TAG),
+                .weight(1f, fill = true)
+                .testTag(ROOT_PROJECT_ADD_LIST_TAG),
             contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
         ) {
@@ -302,7 +325,15 @@ private fun RootProjectAddEmptyState(query: String) {
     }
 }
 
+// Issue #613: bound the sheet height so the weighted results LazyColumn can
+// shrink to fit above the keyboard. The fraction keeps a sliver of the
+// backdrop visible (matching the SessionTypePickerSheet); the max cap stops
+// the sheet from feeling oversized on tall devices.
+private const val ROOT_PROJECT_ADD_HEIGHT_FRACTION = 0.92f
+private val ROOT_PROJECT_ADD_MAX_HEIGHT = 640.dp
+
 const val ROOT_PROJECT_ADD_SHEET_TAG: String = "root-project-add:sheet"
+const val ROOT_PROJECT_ADD_CONTENT_TAG: String = "root-project-add:content"
 const val ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG: String = "root-project-add:empty-project"
 const val ROOT_PROJECT_ADD_CLONE_TAG: String = "root-project-add:clone"
 const val ROOT_PROJECT_ADD_ROOT_SESSION_TAG: String = "root-project-add:root-session"

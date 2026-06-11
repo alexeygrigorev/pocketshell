@@ -1,6 +1,7 @@
 package com.pocketshell.core.voice
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -188,16 +189,11 @@ class PcmCapturePumpTest {
      * race the ready latch exists to close.
      */
     private class LiveStreamSource(private val frameBytes: Int) : PcmSource {
-        // Signalled the instant the blocking read is entered for the first time —
-        // i.e. the reader thread has passed the loop guard and committed to a
-        // read. This is precisely the state the ready latch must guarantee before
-        // start() returns.
+        // Counted down the instant the blocking read is entered for the first
+        // time — i.e. the reader thread has passed the loop guard and committed
+        // to a read. This is precisely the state the ready latch must guarantee
+        // before start() returns.
         val firstReadEntered = CountDownLatch(1)
-
-        // Gates the FIRST read body so the test controls exactly when the live
-        // frame is delivered. Without this the reader could race ahead and the
-        // discriminator between latch / no-latch would be lost to scheduling.
-        val releaseFirstRead = CountDownLatch(1)
 
         @Volatile
         var stopped = false
@@ -206,10 +202,8 @@ class PcmCapturePumpTest {
         override fun read(buffer: ByteArray, offsetBytes: Int, sizeBytes: Int): Int {
             if (firstRead.compareAndSet(0, 1)) {
                 // The reader thread reached its first blocking read: it passed
-                // `while (capturing)` and is committed. Announce it, then park
-                // until the test releases the live frame.
+                // `while (capturing)` and is committed.
                 firstReadEntered.countDown()
-                releaseFirstRead.await(2, TimeUnit.SECONDS)
                 if (!stopped) {
                     // Deliver exactly one live frame. There is NO backing buffer:
                     // a frame produced here exists only because this blocking read
@@ -238,38 +232,95 @@ class PcmCapturePumpTest {
         // NEVER by the post-stop drain (readNonBlocking returns 0). So the only
         // way to capture it is for the blocking read loop to actually run.
         //
-        // The pump's ready latch makes start() block until the reader thread has
-        // passed `while (capturing)` and entered its first read. We assert that
-        // contract DIRECTLY and deterministically: the moment start() returns,
-        // firstReadEntered must already be counted down. If the latch is removed,
-        // start() returns before the reader thread is scheduled, firstReadEntered
-        // is NOT yet down, and a stop() at that point flips capturing=false so the
-        // loop guard fails, the read never runs, and zero bytes are captured —
-        // the literal "real speech -> No speech detected" dogfood symptom.
+        // De-flake (issue #683): the previous version asserted the contract with
+        // a zero-wait `firstReadEntered.await(0)` immediately after start(). That
+        // raced the reader thread — start() unblocks the instant the pump counts
+        // down its ready latch, but firstReadEntered only fires one statement
+        // later when source.read() is actually entered, so under CI CPU load the
+        // reader could be descheduled in that window and the zero-wait check saw
+        // `false` even though the latch was working. Here we make the start race
+        // DETERMINISTIC with a reader-thread entry barrier the pump exposes as a
+        // test seam: the reader is held BEFORE the `while (capturing)` guard until
+        // the test releases it, so the latch/no-latch outcome no longer depends on
+        // scheduler timing.
         val source = LiveStreamSource(frameBytes)
-        val pump = PcmCapturePump(source = source, frameBytes = frameBytes)
 
-        pump.start()
-
-        // The ready-latch contract, asserted with a zero-wait check so the test
-        // never synchronises with the reader thread itself. WITH the latch this
-        // is already true on return; WITHOUT the latch it is false (the reader
-        // thread has not yet been scheduled past the loop guard).
-        assertTrue(
-            "ready-latch contract: start() must not return until the reader thread " +
-                "has entered its first blocking read — without the latch the read " +
-                "never runs for a live (non-drainable) frame and the utterance is lost",
-            source.firstReadEntered.await(0, TimeUnit.MILLISECONDS),
+        // Held while the reader thread sits at its entry hook, before the loop
+        // guard. The test owns exactly when the reader is allowed to proceed.
+        val releaseReader = CountDownLatch(1)
+        val readerAtEntry = CountDownLatch(1)
+        val pump = PcmCapturePump(
+            source = source,
+            frameBytes = frameBytes,
+            // Large ready timeout so the ONLY thing that can unblock start() in
+            // this test is the genuine ready-latch countDown (which happens after
+            // the guard) — never an incidental await timeout while the reader is
+            // deliberately held. That keeps the "start() still blocked" assertion
+            // below load-bearing for the latch and free of timing fragility.
+            readyTimeoutMs = 30_000L,
+            onReaderThreadEntry = {
+                readerAtEntry.countDown()
+                // Park the reader BEFORE it can evaluate `while (capturing)`.
+                releaseReader.await(5, TimeUnit.SECONDS)
+            },
         )
 
-        // And the data-loss consequence end to end: with the read committed, the
-        // live frame survives a stop; the drain alone could never have recovered
-        // it. Request stop, release the in-flight read so it delivers its frame.
+        // start() runs on its own thread: WITH the ready latch it must BLOCK
+        // inside start() until the reader passes the guard and counts the latch
+        // down — and the reader is parked at the entry hook, so start() cannot
+        // return yet. That blocking IS the latch's contract; we verify it.
+        val startReturned = CountDownLatch(1)
+        val startThread = Thread {
+            pump.start()
+            startReturned.countDown()
+        }
+        startThread.start()
+
+        // Reader has reached the entry hook and is parked there, pre-guard.
+        assertTrue(
+            "reader thread must reach its entry hook",
+            readerAtEntry.await(2, TimeUnit.SECONDS),
+        )
+        // Ready-latch contract, deterministic & load-bearing: while the reader is
+        // held BEFORE the loop guard, the ready latch CANNOT have been counted down
+        // (it is counted down only after the guard, one statement past this hook).
+        // So WITH the latch, start() is causally guaranteed to still be parked in
+        // readyLatch.await() — `startReturned` cannot count down no matter how long
+        // we wait. We give it a generous window: a true here means start() returned
+        // EARLY, which is exactly the neutered-latch behaviour (start() does not
+        // wait for the reader at all) and exactly the start race that drops a live
+        // frame. The neutered return is causally immediate and independent of the
+        // held reader, so this window deterministically catches it; with the latch
+        // the window provably elapses without a return.
+        assertFalse(
+            "ready-latch contract: start() must NOT return while the reader thread " +
+                "is still parked before the `while (capturing)` guard — without the " +
+                "latch start() returns early and a fast stop drops the live frame",
+            startReturned.await(1, TimeUnit.SECONDS),
+        )
+
+        // Release the reader: it passes the guard, counts the ready latch down,
+        // enters source.read(), and start() unblocks. All deterministic now.
+        releaseReader.countDown()
+        assertTrue(
+            "start() must return once the reader passes the guard",
+            startReturned.await(2, TimeUnit.SECONDS),
+        )
+        assertTrue(
+            "by the time start() returns the reader has entered its first blocking " +
+                "read — the frame is now recoverable",
+            source.firstReadEntered.await(2, TimeUnit.SECONDS),
+        )
+        startThread.join(2_000)
+
+        // Data-loss consequence end to end: with the read committed, the live
+        // frame survives a stop; the drain alone could never have recovered it.
         val stopResult = arrayOfNulls<ByteArray>(1)
         val stopThread = Thread { stopResult[0] = pump.stop() }
         stopThread.start()
-        Thread.sleep(20)
-        source.releaseFirstRead.countDown()
+        // Tell the source to stop; the in-flight first read has already delivered
+        // its frame, so stop() joins and returns the captured byte(s).
+        source.stopped = true
         stopThread.join(2_000)
 
         val pcm = stopResult[0]

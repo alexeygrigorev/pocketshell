@@ -61,6 +61,13 @@ internal class PcmCapturePump(
     // only cost of waiting is start latency; we never want to fail a
     // recording just because thread scheduling was slow.
     private val readyTimeoutMs: Long = READY_TIMEOUT_MS,
+    // Test-only seam (issue #683): a hook the reader thread runs as its very
+    // first action, BEFORE the `while (capturing)` guard. Production passes the
+    // default no-op so behaviour is unchanged; the unit test injects a barrier
+    // here to deterministically order a stop() against the loop guard and thus
+    // exercise the start-race without depending on real thread scheduling. It
+    // runs once, on the reader thread, and must not block in production.
+    private val onReaderThreadEntry: () -> Unit = {},
 ) {
     private val buffer = ByteArrayOutputStream()
     private val readyLatch = CountDownLatch(1)
@@ -87,6 +94,10 @@ internal class PcmCapturePump(
         capturing = true
         captureThread = thread(start = true, name = "core-voice-capture") {
             val frame = ByteArray(frameBytes)
+            // Reader-thread entry hook (no-op in production). The test uses it to
+            // hold the reader BEFORE the loop guard so it can deterministically
+            // decide whether a stop() wins the start race — see issue #683.
+            onReaderThreadEntry()
             var first = true
             while (capturing) {
                 // Signal readiness from INSIDE the loop, on the first iteration,

@@ -452,6 +452,42 @@ class SshIntegrationTest {
         assertTrue("session should report disconnected after close", !session.isConnected)
     }
 
+    /**
+     * EPIC #687 Phase-1 GATE: pin the EXACT stale-channel symptom message the
+     * lease/transport layer produces so the heal stays wired.
+     *
+     * The app-layer heal matcher `isSessionNotConnected` (FolderListGateway /
+     * TmuxSessionViewModel, owned by sibling issues) classifies a transient
+     * stale-channel fault by MATCHING the substring "SSH session is not
+     * connected" on the cause chain, then drives evict-and-retry-once instead of
+     * a false "not connected" banner (#680). That matcher depends on
+     * `RealSshSession.ensureConnected()` (core-ssh) producing exactly that text
+     * when a pooled lease's `isConnected` flipped false between acquire and exec.
+     * If the Phase-2 rewrite changes this message, the cross-module matcher
+     * breaks SILENTLY — so this characterization pins the contract from the real
+     * `exec` path against a real sshd. MUST stay green on current code.
+     */
+    @Test
+    fun execOnAClosedSessionThrowsExactStaleChannelMessage() = runTest {
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+        session.close()
+
+        val ex = runCatching { session.exec("whoami") }.exceptionOrNull()
+        assertTrue("expected SshException after close, got $ex", ex is SshException)
+        assertTrue(
+            "exec on a dead transport must produce the exact #680 heal-matcher text " +
+                "\"SSH session is not connected\"; got: ${ex?.message}",
+            ex?.message?.contains("SSH session is not connected", ignoreCase = true) == true,
+        )
+    }
+
     // ---- Issue #654: share-upload auth path against a passphrase key ----
 
     /**

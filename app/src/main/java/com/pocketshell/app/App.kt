@@ -14,6 +14,7 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
+import com.pocketshell.app.release.UpdateCheckScheduler
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -97,6 +98,16 @@ class App : Application() {
 
     @Inject
     lateinit var settingsRepository: SettingsRepository
+
+    /**
+     * Issue #698: fires the GitHub-Releases update check on process
+     * foreground resume (and host-open, from MainActivity), throttled, so
+     * the maintainer — who deep-links straight into a host and almost
+     * never opens the home screen — actually sees update prompts. Wired to
+     * [ProcessLifecycleOwner] in [onCreate], mirroring [usageScheduler].
+     */
+    @Inject
+    lateinit var updateCheckScheduler: UpdateCheckScheduler
 
     /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
@@ -243,6 +254,15 @@ class App : Application() {
         StartupTiming.mark("usage-lifecycle-observed")
         usageScheduler.start()
         StartupTiming.mark("usage-scheduler-started")
+
+        // Issue #698: fire the GitHub-Releases update check on process
+        // foreground resume (throttled) so the maintainer — who deep-links
+        // straight into a host and skips the home screen — actually sees
+        // update prompts. Foreground-only (D21): the observer only fires on
+        // ON_START and each check is a single one-shot HTTP round-trip; no
+        // WorkManager / AlarmManager / repeating timer.
+        updateCheckScheduler.observeProcessLifecycle()
+        StartupTiming.mark("update-check-lifecycle-observed")
 
         // Issue #235 + #450: auto-detach tmux `-CC` clients on lifecycle
         // background + reattach on foreground, but only after the bounded

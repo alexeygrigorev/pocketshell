@@ -72,6 +72,7 @@ import com.pocketshell.app.settings.SettingsScreen
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
+import com.pocketshell.app.release.UpdateCheckScheduler
 import com.pocketshell.app.tmux.TmuxConnectTrigger
 import com.pocketshell.app.tmux.TmuxRestoreIntentSnapshot
 import com.pocketshell.app.tmux.TmuxSessionScreen
@@ -151,6 +152,17 @@ class MainActivity : FragmentActivity() {
     // receive scheduler snapshots for persistent quota chrome.
     @Inject
     lateinit var usageScheduler: UsageScheduler
+
+    /**
+     * Issue #698: the foreground update-check scheduler. We notify it when
+     * the user opens a host (folder list / session) so the maintainer, who
+     * rarely opens the home screen, still gets a (throttled) update check
+     * the first time they reach a host. The same singleton's foreground-
+     * resume trigger is wired in [App.onCreate]; this is the open-host
+     * trigger.
+     */
+    @Inject
+    lateinit var updateCheckScheduler: UpdateCheckScheduler
 
     /**
      * Issue #177: persists the last in-session view so a return-to-
@@ -378,7 +390,16 @@ class MainActivity : FragmentActivity() {
                         // persist the in-session view for fast resume; the
                         // restored draft flows the other way so the session
                         // comes back with the user's half-typed message.
-                        onCurrentDestinationChanged = { dest -> currentTopDestination = dest },
+                        onCurrentDestinationChanged = { dest ->
+                            currentTopDestination = dest
+                            // Issue #698: opening a host (folder list / session)
+                            // is one of the maintainer's main entry points and
+                            // they skip the home screen, so fire the throttled
+                            // update check here too.
+                            if (dest is AppDestination.FolderList || dest is AppDestination.TmuxSession) {
+                                updateCheckScheduler.onHostOpened()
+                            }
+                        },
                         onComposerDraftChanged = { draft -> currentComposerDraft = draft },
                         initialComposerDraft = restoredComposerDraft,
                         onInitialComposerDraftConsumed = { restoredComposerDraft = "" },

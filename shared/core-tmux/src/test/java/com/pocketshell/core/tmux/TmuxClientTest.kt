@@ -166,6 +166,89 @@ class TmuxClientTest {
         }
     }
 
+    // ---- Issue #666: attach-only (createIfMissing=false) restore path ----
+
+    @Test
+    fun `attach-only connect to a gone session never issues a creating command`() = runBlocking {
+        // tmux has-session for a killed session exits non-zero.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = { ExecResult(stdout = "", stderr = "can't find session", exitCode = 1) },
+        )
+        val client = RealTmuxClient(session, scope, sessionName = "deploy", createIfMissing = false)
+        try {
+            val thrown = runCatching { client.connect() }.exceptionOrNull()
+            assertTrue(
+                "expected TmuxSessionNotFoundException, got $thrown",
+                thrown is TmuxSessionNotFoundException,
+            )
+            // The preflight ran exactly the has-session probe...
+            assertEquals(
+                listOf("tmux has-session -t 'deploy'"),
+                session.execCommands.toList(),
+            )
+            // ...and we NEVER opened a shell or wrote a `new-session` line, so
+            // the killed session cannot be resurrected on the restore path.
+            assertTrue(
+                "no creating command should be written, got `${shell.stdinAsString()}`",
+                shell.stdinBytes().isEmpty(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `attach-only connect to a live session attaches normally`() = runBlocking {
+        // tmux has-session for a live session exits zero -> attach proceeds.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = { ExecResult(stdout = "", stderr = "", exitCode = 0) },
+        )
+        val client = RealTmuxClient(session, scope, sessionName = "deploy", createIfMissing = false)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals(
+                listOf("tmux has-session -t 'deploy'"),
+                session.execCommands.toList(),
+            )
+            // A live session still attaches with the normal control-mode spawn.
+            assertEquals(
+                "tmux -CC new-session -A -s 'deploy'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `default create-if-missing connect skips the has-session preflight`() = runBlocking {
+        // The explicit user "new session" intent (createIfMissing=true) must
+        // create-or-attach without any preflight, preserving #634 warm-open.
+        val shell = FakeShell()
+        val session = FakeSession(shell) // exec is not stubbed -> must never be called
+        val client = RealTmuxClient(session, scope, sessionName = "deploy")
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertTrue("no has-session preflight expected", session.execCommands.isEmpty())
+            assertEquals(
+                "tmux -CC new-session -A -s 'deploy'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
     @Test
     fun `events flow surfaces structured notifications from tmux stdout`() = runBlocking {
         val shell = FakeShell()
@@ -1648,14 +1731,27 @@ class TmuxClientTest {
      * Minimal [SshSession] that returns a single, test-driven [SshShell]
      * from [startShell] and stubs every other method.
      */
-    private class FakeSession(private val shell: SshShell) : SshSession {
+    private class FakeSession(
+        private val shell: SshShell,
+        // Issue #666: a `tmux has-session` preflight runs over `exec` on the
+        // attach-only restore path. Tests that exercise it supply a stub; the
+        // default keeps every other test (which never preflights) unchanged.
+        private val execHandler: (suspend (String) -> ExecResult)? = null,
+    ) : SshSession {
         @Volatile
         private var closed = false
 
+        val execCommands: MutableList<String> =
+            Collections.synchronizedList(mutableListOf())
+
         override val isConnected: Boolean get() = !closed
 
-        override suspend fun exec(command: String): ExecResult =
-            error("not used in TmuxClient unit tests")
+        override suspend fun exec(command: String): ExecResult {
+            execCommands.add(command)
+            val handler = execHandler
+                ?: error("exec not stubbed in this TmuxClient unit test")
+            return handler(command)
+        }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job =
             error("not used in TmuxClient unit tests")

@@ -277,6 +277,22 @@ public interface TmuxClient : AutoCloseable {
 public class TmuxClientException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
 
+/**
+ * Issue #666: thrown by [TmuxClient.connect] when an attach-only connect
+ * (`createIfMissing == false`, e.g. a foreground cold-restore to the last
+ * session) finds that the target tmux session no longer exists on the
+ * server — it was killed elsewhere while the app was backgrounded.
+ *
+ * On this restore path the session must NOT be recreated. Callers catch
+ * this to surface "that session ended" and drop the user to the host /
+ * session list instead of silently resurrecting a session via
+ * `new-session -A`.
+ */
+public class TmuxSessionNotFoundException(
+    public val sessionName: String,
+    message: String = "tmux session '$sessionName' no longer exists",
+) : RuntimeException(message)
+
 public data class TmuxOutputBacklogOverflow(
     val paneId: String,
     val droppedEvents: Int,
@@ -338,6 +354,13 @@ internal class RealTmuxClient(
     scope: CoroutineScope,
     private val sessionName: String = DEFAULT_SESSION_NAME,
     private val startDirectory: String? = null,
+    // Issue #666: attach-OR-create vs attach-only. The default `true`
+    // preserves the explicit user "new/create session" intent (and reconnect
+    // to a live session) which uses `new-session -A` so a missing session is
+    // created. When `false` (the foreground cold-restore path) [connect] first
+    // runs a `tmux has-session` preflight and throws [TmuxSessionNotFoundException]
+    // for a session killed elsewhere, so a gone session is never resurrected.
+    private val createIfMissing: Boolean = true,
     private val commandTimeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
 ) : TmuxClient {
     private val clientId: Long = NEXT_CLIENT_ID.incrementAndGet()
@@ -437,6 +460,34 @@ internal class RealTmuxClient(
     override suspend fun connect() {
         if (connected) return
         if (closed) throw TmuxClientException("client is closed")
+        val resolvedSessionName = sessionName.trim().ifBlank { DEFAULT_SESSION_NAME }
+        // Issue #666: attach-only restore. Before opening any shell or writing
+        // a single byte, probe whether the target session still exists. tmux
+        // `has-session` exits 0 when the session is alive and non-zero when it
+        // is gone. A gone session must NOT be recreated — throw a distinct
+        // signal so the caller drops to the host/session list instead of
+        // resurrecting it via the `new-session -A` spawn below. We run this on
+        // a separate `exec` channel (not the control shell) so the absence
+        // check never touches the control-mode wire and never spawns tmux.
+        if (!createIfMissing) {
+            val probe = try {
+                withContext(Dispatchers.IO) {
+                    session.exec("tmux has-session -t '${escapeSingleQuoted(resolvedSessionName)}'")
+                }
+            } catch (t: Throwable) {
+                throw TmuxClientException(
+                    "failed to preflight tmux has-session for '$resolvedSessionName': ${t.message}",
+                    t,
+                )
+            }
+            if (probe.exitCode != 0) {
+                Log.i(
+                    ISSUE_105_DIAG_TAG,
+                    "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode}",
+                )
+                throw TmuxSessionNotFoundException(resolvedSessionName)
+            }
+        }
         // Open the SSH shell and launch the reader. We do not synchronously
         // wait for tmux to emit a marker before returning — control mode
         // produces events asynchronously and the caller may immediately want
@@ -458,7 +509,6 @@ internal class RealTmuxClient(
         // a new one — the right behaviour for "reattach across phone
         // reconnects" which is the whole point of running tmux remotely.
         try {
-            val resolvedSessionName = sessionName.trim().ifBlank { DEFAULT_SESSION_NAME }
             val resolvedStartDirectory = startDirectory?.trim().orEmpty()
             val command = buildString {
                 append("tmux -CC new-session -A -s '")

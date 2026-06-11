@@ -50,17 +50,26 @@ public class TmuxClientFactory(
      *   the same host. Defaults to `"pocketshell"`.
      * @param startDirectory optional tmux `-c` start directory for newly
      *   created sessions.
+     * @param createIfMissing Issue #666 — attach-OR-create (`true`, default) vs
+     *   attach-only (`false`). The default `true` keeps the explicit user
+     *   "new/create session" intent and reconnect-to-live behaviour, which use
+     *   `new-session -A` so a missing session is created. Pass `false` on the
+     *   foreground cold-restore path so [TmuxClient.connect] runs a
+     *   `tmux has-session` preflight and throws [TmuxSessionNotFoundException]
+     *   for a session killed elsewhere instead of resurrecting it.
      */
     @JvmOverloads
     public fun create(
         session: SshSession,
         sessionName: String = DEFAULT_SESSION_NAME,
         startDirectory: String? = null,
+        createIfMissing: Boolean = true,
     ): TmuxClient = RealTmuxClient(
         session = session,
         scope = scope,
         sessionName = sessionName,
         startDirectory = startDirectory,
+        createIfMissing = createIfMissing,
     )
 
     private companion object {

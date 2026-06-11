@@ -240,6 +240,13 @@ public fun TmuxSessionScreen(
     // restarting the session.
     settingsViewModel: SettingsViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
+    // Issue #666: the (re)attached session no longer exists on the server (it
+    // was killed elsewhere while the app was backgrounded). On a cold-restore
+    // the ViewModel surfaces this instead of resurrecting it; MainActivity
+    // wires this to clear the persisted last-session snapshot and drop to the
+    // host/session list. Defaults to [onBack] so the user always lands
+    // somewhere usable even if a caller does not override it.
+    onSessionEnded: (sessionName: String) -> Unit = { onBack() },
     onOpenTmuxSession: (sessionName: String, startDirectory: String?) -> Unit = { _, _ -> },
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
     onOpenJobs: () -> Unit = {},
@@ -725,6 +732,17 @@ public fun TmuxSessionScreen(
     LaunchedEffect(Unit) {
         viewModel.sessionSwitchRequest.collect { targetSessionName ->
             onReplaceTmuxSession(targetSessionName)
+        }
+    }
+
+    // Issue #666: the cold-restore attach found the persisted last session
+    // gone (killed elsewhere while backgrounded). Drop to the host/session
+    // list instead of resurrecting it. MainActivity wires onSessionEnded to
+    // also clear the persisted last-session snapshot so the next foreground
+    // does not retry the same gone session.
+    LaunchedEffect(Unit) {
+        viewModel.sessionEnded.collect { endedSessionName ->
+            onSessionEnded(endedSessionName)
         }
     }
 

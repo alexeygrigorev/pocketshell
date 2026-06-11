@@ -391,6 +391,10 @@ class MainActivity : FragmentActivity() {
                             pendingComposerAttachments = emptyList()
                         },
                         restoredTmuxDestination = restoredTmuxDestination,
+                        // Issue #666: clear the persisted last-session snapshot
+                        // when a restored session is found gone, so the next
+                        // foreground does not retry-and-resurrect it.
+                        onClearLastSession = { lastSessionStore.clear() },
                     )
                 }
             }
@@ -546,6 +550,10 @@ private fun AppNavigator(
     initialComposerAttachments: List<String> = emptyList(),
     onInitialComposerAttachmentsConsumed: () -> Unit = {},
     restoredTmuxDestination: AppDestination.TmuxSession? = null,
+    // Issue #666: clear the persisted last-session snapshot when the restored
+    // session is found gone on the server, so the next foreground does not
+    // retry-and-resurrect it. Wired by the activity to [LastSessionStore.clear].
+    onClearLastSession: () -> Unit = {},
 ) {
     // Issue #129: the activity scrapes the import payload out of a
     // `pocketshell://import?...` deep link before composition starts
@@ -1254,6 +1262,14 @@ private fun AppNavigator(
             startDirectory = dest.startDirectory,
             initialWindowIndex = dest.initialWindowIndex,
             onBack = ::back,
+            // Issue #666: the restored/last session no longer exists on the
+            // server (killed elsewhere while backgrounded). Clear the persisted
+            // snapshot so the next foreground does not retry-and-resurrect it,
+            // then drop to the previous screen (the host/session list).
+            onSessionEnded = {
+                onClearLastSession()
+                back()
+            },
             onOpenTmuxSession = { sessionName, startDirectory ->
                 navigate(
                     dest.copy(

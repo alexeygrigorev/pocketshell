@@ -83,9 +83,24 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 # BackgroundGraceReconnectE2eTest re-joins this subset (#707): the within-grace
 # `terminal_foreground_reattach` it forbade was a benign fan-out marker, not a
 # reconnect; the assertion is narrowed to genuine reconnect signals only.
+#
+# Issue #691 (STABILIZE): MultiSessionSwitchJourneyE2eTest is QUARANTINED from
+# this per-push subset — it wedges (never finishes) on the GitHub
+# android-emulator-runner AVD while passing on the local pooled AVD, hanging the
+# job to the 75-min cap. See the DEFERRED note inline below. The remaining 4
+# classes stay per-push. A per-test instrumentation timeout (timeout_msec) is
+# also passed below so ANY future wedge fails fast (~5 min) instead of hanging.
 JOURNEY_CLASSES=(
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
-  "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
+  # DEFERRED (#691): MultiSessionSwitchJourneyE2eTest wedges on the GitHub
+  # android-emulator-runner AVD (passes on the local pooled AVD). The hung run
+  # 27368527630 reports show its rapidMultiSessionSwitchAlwaysShowsCorrect...
+  # test STARTED (instrumentation current=3) but NEVER finished — the per-test
+  # logcat trails off into idle system noise with no `TestRunner: finished`,
+  # and the job burned ~67 min until the job timeout cancelled it. This is the
+  # picker/lease-enumeration wedge family (CI-AVD-only). Re-add after the wedge
+  # is fixed on the CI AVD (needs the terminal lane, locked by #708/#687).
+  # "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
@@ -110,8 +125,16 @@ echo "=========================================================="
 
 SECONDS_START=$SECONDS
 
+# Issue #691 (S2 defense-in-depth): pass AndroidJUnitRunner's per-test
+# `timeout_msec` so a wedged test is interrupted and FAILS FAST (~5 min) instead
+# of hanging the whole job to the 75-min runner cap. A hang is worse than a
+# clean fail (75 min burned + a failure email every push); the timeout converts
+# any future CI-AVD wedge into a fast, legible red. 300000 ms = 5 min/test is
+# far above the generous `pocketshellCi=true` E2E ceilings, so it never trips a
+# legitimately slow CI test — it only catches a genuine deadlock.
 "$GRADLEW" :app:connectedDebugAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+  -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
   -Pandroid.testInstrumentationRunnerArguments.class="$JOURNEY_CLASS_ARG" \
   --stacktrace
 JOURNEY_EXIT=$?

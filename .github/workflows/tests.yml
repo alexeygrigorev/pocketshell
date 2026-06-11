@@ -150,20 +150,16 @@ jobs:
   # never-black / wrong-session / EOF-on-switch regressions are caught at PR
   # time, not the next morning by nightly or at release by the gate.
   #
-  # Issue #705: the per-push proof now runs the picker-FREE
-  # DeepLinkSessionSwitchE2eTest AND three picker-driven journey classes
-  # (MultiSessionSwitchJourney, ColdRestoreGoneSessionNoResurrect,
-  # ReconnectRepaint). The session-PICKER enumeration that was wedged on the AVD
-  # is fixed (the lease-bound cold connect/handshake of #687 + the picker fix in
-  # #702), and the over-broad header assertion that collided with the #628
-  # previous-session toggle controls is scoped to the breadcrumb crumb in #705.
-  # Each re-added picker journey was proven GREEN on a pooled AVD before
-  # re-adding, so this job stays green (no CI email spam).
-  #
-  # BackgroundGraceReconnectE2eTest stays DEFERRED (#705): it is genuinely RED
-  # for a real production-behavior reason (a within-grace foreground still
-  # dispatches a terminal_foreground_reattach diagnostic the test forbids), NOT
-  # the picker wedge — re-add it only after that suppression behavior is fixed.
+  # Issue #691 (STABILIZE): MultiSessionSwitchJourneyE2eTest is QUARANTINED from
+  # this per-push subset — it WEDGES (its rapidMultiSessionSwitch... test starts
+  # but never finishes) on the GitHub android-emulator-runner AVD while passing
+  # on the local pooled AVD, hanging the job to the timeout cap. The per-push
+  # subset is now the picker-FREE DeepLinkSessionSwitchE2eTest plus
+  # ColdRestoreGoneSessionNoResurrectE2eTest, ReconnectRepaintE2eTest, and
+  # BackgroundGraceReconnectE2eTest (see scripts/ci-journey-suite.sh for the
+  # inline DEFERRED note). The suite also passes AndroidJUnitRunner's per-test
+  # `timeout_msec` so any future wedge fails fast instead of hanging, and the
+  # job `timeout-minutes` below is a 45-min backstop.
   #
   # This is intentionally the FAST subset (scripts/ci-journey-suite.sh), not the
   # full connected suite — the heavy/long-running + toxiproxy network-fault +
@@ -174,7 +170,11 @@ jobs:
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # Issue #691 (STABILIZE): lowered 75 -> 45 as a backstop. A wedging test
+    # should now fail fast via the per-test `timeout_msec` in
+    # scripts/ci-journey-suite.sh; this job cap only bounds the worst case so a
+    # hang can never again burn ~75 min + a failure email on every push.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -211,11 +211,12 @@ jobs:
       - name: Build SSH base image
         run: docker compose -f tests/docker/docker-compose.yml build sshd
 
-      # The selected journeys (DeepLinkSessionSwitch, MultiSessionSwitch,
-      # ColdRestoreGoneSessionNoResurrect, ReconnectRepaint) all drive the plain
-      # deterministic `agents` fixture on host port 2222 (emulator 10.0.2.2:2222)
-      # and NONE of them need the opt-in toxiproxy network-fault proxies. Bring
-      # up ONLY `agents` so the job is deterministic.
+      # The selected journeys (DeepLinkSessionSwitch,
+      # ColdRestoreGoneSessionNoResurrect, ReconnectRepaint,
+      # BackgroundGraceReconnect — MultiSessionSwitch quarantined per #691) all
+      # drive the plain deterministic `agents` fixture on host port 2222
+      # (emulator 10.0.2.2:2222) and NONE of them need the opt-in toxiproxy
+      # network-fault proxies. Bring up ONLY `agents` so the job is deterministic.
       - name: Start Docker fixture (agents)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents

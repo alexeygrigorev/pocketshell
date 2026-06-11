@@ -6,9 +6,11 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import androidx.core.app.NotificationCompat
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.portfwd.service.ForwardingService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -254,6 +256,65 @@ class ForwardingControllerTest {
         controller.forceReconnectNow()
         assertEquals(1, normalCalls.get())
         assertEquals(1, forceCalls.get())
+    }
+
+    @Test
+    fun `validated network change forces a reconnect on every active host`() {
+        // Issue #329 / #439: the port-forward sessions are independent
+        // transports from the terminal/tmux flow, so a wifi↔cellular
+        // handoff (which can leave sshj reporting "connected" while the
+        // forwards are dead) must reach the supervisor force-reconnect
+        // hook. The controller subscribes to the validated-default-network
+        // change signal and forces a rebuild on each emission.
+        val networkChanges = MutableSharedFlow<Any?>(extraBufferCapacity = 16)
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = networkChanges,
+        )
+        idleMainLooper()
+        val normalCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val forceCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        controller.registerActiveHost(
+            hostId = 1,
+            hostName = "alpha",
+            reconnectHook = { normalCalls.incrementAndGet() },
+            forceReconnectHook = { forceCalls.incrementAndGet() },
+        )
+
+        // A validated-network change forces a reconnect, not a no-churn one.
+        assertTrue(networkChanges.tryEmit(NetworkChangeMarker))
+        idleMainLooper()
+        assertEquals("validated-network change must force a reconnect", 1, forceCalls.get())
+        assertEquals("validated-network change must not use the no-churn hook", 0, normalCalls.get())
+
+        // A second handoff forces again — the subscription is durable.
+        assertTrue(networkChanges.tryEmit(NetworkChangeMarker))
+        idleMainLooper()
+        assertEquals(2, forceCalls.get())
+        assertEquals(0, normalCalls.get())
+    }
+
+    @Test
+    fun `validated network change with no active hosts is a no-op`() {
+        // Before any host is auto-forwarding, a network change must not
+        // crash or start the service — the fan-out is over an empty set.
+        val networkChanges = MutableSharedFlow<Any?>(extraBufferCapacity = 16)
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = networkChanges,
+        )
+        idleMainLooper()
+        drainStartedServices()
+
+        assertTrue(networkChanges.tryEmit(NetworkChangeMarker))
+        idleMainLooper()
+
+        assertEquals(0, controller.flowOfActiveHostCount().value)
+        assertNull("no service should start on a network change with no active hosts", shadow.nextStartedService)
     }
 
     @Test
@@ -557,6 +618,48 @@ class ForwardingControllerTest {
         while (shadow.nextStartedService != null) {
             // Iterate to clear the queue.
         }
+    }
+
+    /**
+     * Run any work the controller's network-change collector posted to the
+     * main looper. The test constructor collects on `Dispatchers.Main.immediate`,
+     * so emissions are delivered through Robolectric's main looper.
+     */
+    private fun idleMainLooper() {
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    /** Marker payload for the validated-network-change signal in tests. */
+    private object NetworkChangeMarker
+
+    private object TestUnavailableConnector : PortForwardConnector {
+        override suspend fun connect(
+            host: com.pocketshell.core.storage.entity.HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+        ): Result<com.pocketshell.core.ssh.SshSession> =
+            Result.failure(IllegalStateException("connector unavailable in test"))
+    }
+
+    private object TestEmptyRemappingDao :
+        com.pocketshell.core.storage.dao.PortRemappingDao {
+        override fun getByHostId(hostId: Long) =
+            kotlinx.coroutines.flow.flowOf(
+                emptyList<com.pocketshell.core.storage.entity.PortRemappingEntity>(),
+            )
+
+        override suspend fun getByRemotePort(
+            hostId: Long,
+            remotePort: Int,
+        ): com.pocketshell.core.storage.entity.PortRemappingEntity? = null
+
+        override suspend fun insert(
+            remapping: com.pocketshell.core.storage.entity.PortRemappingEntity,
+        ): Long = remapping.id
+
+        override suspend fun deleteByRemotePort(hostId: Long, remotePort: Int) = Unit
+
+        override suspend fun deleteByHostId(hostId: Long) = Unit
     }
 
     private class RejectingServiceContext(base: Context) : ContextWrapper(base) {

@@ -1,7 +1,9 @@
 package com.pocketshell.app.portfwd
 
 import android.content.Context
+import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.portfwd.service.ForwardingService
 import com.pocketshell.core.portfwd.AutoForwardConfig
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
@@ -15,10 +17,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -62,17 +66,32 @@ class ForwardingController(
     private val connector: PortForwardConnector,
     private val portRemappingDao: PortRemappingDao,
     private val scope: CoroutineScope,
+    /**
+     * Validated-default-network change signal (issue #329 / #439). Each
+     * emission is a real handoff of the validated default network (e.g.
+     * wifi ↔ cellular), which is exactly the case sshj can leave a
+     * port-forward session reporting "connected" while the phone-side
+     * forwards are already dead. The controller subscribes from the
+     * port-forward side and forces a transport rebuild so the user's
+     * forwards re-establish without toggling auto-forward off/on.
+     *
+     * Defaults to [emptyFlow] for the test constructor so unit tests that
+     * don't exercise the network path stay light.
+     */
+    validatedNetworkChanges: Flow<*> = emptyFlow<Any?>(),
 ) {
     @Inject
     constructor(
         @ApplicationContext appContext: Context,
         connector: PortForwardConnector,
         portRemappingDao: PortRemappingDao,
+        terminalNetworkObserver: TerminalNetworkObserver,
     ) : this(
         appContext = appContext,
         connector = connector,
         portRemappingDao = portRemappingDao,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        validatedNetworkChanges = terminalNetworkObserver.changes,
     )
 
     @VisibleForTesting
@@ -81,6 +100,21 @@ class ForwardingController(
         connector = UnavailablePortForwardConnector,
         portRemappingDao = EmptyPortRemappingDao,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+        validatedNetworkChanges = emptyFlow<Any?>(),
+    )
+
+    @VisibleForTesting
+    constructor(
+        appContext: Context,
+        connector: PortForwardConnector,
+        portRemappingDao: PortRemappingDao,
+        validatedNetworkChanges: Flow<*>,
+    ) : this(
+        appContext = appContext,
+        connector = connector,
+        portRemappingDao = portRemappingDao,
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+        validatedNetworkChanges = validatedNetworkChanges,
     )
 
     /**
@@ -100,6 +134,22 @@ class ForwardingController(
     private val hostConnectionStates =
         MutableStateFlow<Map<Long, AutoForwarderSupervisor.ConnectionState>>(emptyMap())
     private val hostErrors = MutableStateFlow<Map<Long, String?>>(emptyMap())
+
+    init {
+        // Subscribe to the validated-default-network change signal from the
+        // port-forward side (issue #329). A real handoff forces a transport
+        // rebuild on every active host's supervisor, mirroring what the
+        // terminal/tmux flow already does for its own sessions — but the
+        // port-forward sessions are independent transports and were missing
+        // this hook, so a clean wifi↔cellular handoff (onAvailable without a
+        // preceding onLost) left them stale-connected with dead forwards.
+        scope.launch {
+            validatedNetworkChanges.collect {
+                Log.i(TAG, "validated-network-change → forceReconnectNow active=${activeHosts.size}")
+                forceReconnectNow()
+            }
+        }
+    }
 
     fun flowOfActiveHostCount(): StateFlow<Int> = activeHostCount.asStateFlow()
     fun flowOfTotalTunnelCount(): StateFlow<Int> = totalTunnelCount.asStateFlow()
@@ -476,6 +526,10 @@ class ForwardingController(
             maxAutoPort = maxAutoPort,
             skipPortsBelow = skipPortsBelow,
         )
+
+    private companion object {
+        private const val TAG = "PsForwardingController"
+    }
 }
 
 data class ForwardingHostSnapshot(

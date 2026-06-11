@@ -115,7 +115,10 @@ production conversation-pane render with deterministic sample agent events.
   phone.
 - **Port forwarding.** Per-host forwarding tables and auto-forward controls are
   backed by the shared `core-portfwd` module. Active tunnels can survive panel
-  disposal/backgrounding through the scoped foreground-service carve-out.
+  disposal/backgrounding through the scoped foreground-service carve-out, and
+  re-establish automatically through transport drops, network recovery, and
+  validated wifi↔cellular handoffs without the user toggling auto-forward
+  off/on.
 - **Remote file and env tools.** The app includes remote file browsing/viewing,
   file-path tap handling from terminal output, `.env` / `.envrc` key management
   through `pocketshell env`, watched-folder management, and recurring jobs

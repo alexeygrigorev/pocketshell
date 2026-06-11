@@ -30,8 +30,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -68,6 +66,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -107,9 +106,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -194,7 +196,41 @@ public fun PromptComposerSheet(
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
     val context = LocalContext.current
-    var isImeVisible by remember { mutableStateOf(false) }
+
+    // Issue #615: the soft keyboard occluded the Send action on real devices
+    // even though our isolated `ModalBottomSheet` harness passed. Root cause:
+    // the sheet hosts its content in its own dialog window and that window's
+    // `WindowInsets.ime` is unreliable on the maintainer's phone — when it
+    // reads 0, the height-fraction + auto-expand machinery never fires and the
+    // inner `.imePadding()` adds nothing, so the action row sits under the
+    // keyboard. We instead read the IME bottom from the HOST activity window's
+    // root insets (the same signal the proof helper + every layout-aware screen
+    // uses), which is reliable, and drive both the IME-visible state and the
+    // action-row lift off that host-window value. `hostImeBottomPx` is updated
+    // by an inset listener registered on the host decor view while the sheet is
+    // in composition (no background work; removed on dispose, D21-clean).
+    val hostView = LocalView.current
+    var hostImeBottomPx by remember { mutableIntStateOf(0) }
+    DisposableEffect(hostView) {
+        val decor = hostView.rootView
+        val listener = androidx.core.view.OnApplyWindowInsetsListener { _, insets ->
+            hostImeBottomPx = insets.getInsets(
+                WindowInsetsCompat.Type.ime(),
+            ).bottom
+            insets
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(decor, listener)
+        // Seed from the current insets so a sheet that opens with the keyboard
+        // already up (rotation, re-open) lifts the action row immediately.
+        ViewCompat.getRootWindowInsets(decor)?.let { current ->
+            hostImeBottomPx = current.getInsets(WindowInsetsCompat.Type.ime()).bottom
+        }
+        ViewCompat.requestApplyInsets(decor)
+        onDispose {
+            ViewCompat.setOnApplyWindowInsetsListener(decor, null)
+        }
+    }
+    val isImeVisible = hostImeBottomPx > 0
 
     var showApiKeyDialog by remember { mutableStateOf(false) }
     // Issue #17: tracks whether the Snippets bottom sheet is currently
@@ -342,27 +378,23 @@ public fun PromptComposerSheet(
         contentColor = PocketShellColors.Text,
         modifier = modifier,
         // Issue #615: the primary Send action must remain visible while the
-        // draft field owns focus and the IME is open. `ModalBottomSheet`
-        // applies its `contentWindowInsets` before our content, so letting the
-        // default bottom/IME inset path run can consume the IME before
-        // `SheetContent`'s sticky controls row sees it. Keep the sheet's
-        // top/horizontal safe-area behavior, but leave bottom IME/navigation
-        // handling to `SheetContent` where the action row is anchored.
+        // draft field owns focus and the IME is open. The sheet's own dialog
+        // window does not reliably report `WindowInsets.ime` on every device,
+        // so we deliberately do NOT depend on it here: keep the sheet's
+        // top/horizontal safe-area behavior and lift the sticky action row in
+        // `SheetContent` using the HOST-window IME inset (`hostImeBottomPx`)
+        // captured above.
         contentWindowInsets = {
             WindowInsets.safeDrawing.only(
                 WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
             )
         },
     ) {
-        // Read IME visibility from inside the ModalBottomSheet content window.
-        // The sheet is hosted in its own dialog window; observing from the
-        // parent terminal composition can miss the keyboard that was raised by
-        // the draft field inside this sheet.
+        // Issue #615: convert the reliable host-window IME inset (px) into the
+        // Dp bottom padding the sticky action row needs to clear the keyboard.
         val sheetDensity = LocalDensity.current
-        val contentImeVisible = WindowInsets.ime.getBottom(sheetDensity) > 0
-        LaunchedEffect(contentImeVisible) {
-            isImeVisible = contentImeVisible
-        }
+        val contentImeVisible = isImeVisible
+        val imeBottomPadding = with(sheetDensity) { hostImeBottomPx.toDp() }
         // Issue #234: force the sheet content to be tall enough that
         // Material 3 actually populates the `PartiallyExpanded` anchor.
         //
@@ -388,11 +420,12 @@ public fun PromptComposerSheet(
         //
         // Issues #567/#615: when the soft keyboard opens from the draft
         // field, temporarily give the composer full-height sheet content and
-        // expand the sheet. The internal `.imePadding()` below still lifts the
-        // action row above the keyboard, but the extra measured height keeps
-        // the draft/status area from being crushed into a tiny strip.
+        // expand the sheet. The host-window IME padding below lifts the action
+        // row above the keyboard, and the extra measured height keeps the
+        // draft/status area from being crushed into a tiny strip.
         SheetContent(
             modifier = Modifier.fillMaxHeight(promptComposerSheetHeightFraction(contentImeVisible)),
+            imeBottomPadding = imeBottomPadding,
             state = state,
             onClose = dismissComposer,
             onDraftChange = viewModel::onDraftChange,
@@ -529,6 +562,12 @@ internal fun SheetContent(
     onMicTap: () -> Unit,
     onSend: (withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    // Issue #615: bottom padding to lift the sticky action row above the soft
+    // keyboard. Driven by the HOST activity window's IME inset (reliable across
+    // devices) rather than the sheet dialog window's `WindowInsets.ime`, which
+    // can read 0 on some devices and let Send slip under the keyboard. Defaults
+    // to 0.dp so previews/tests that host `SheetContent` directly are unaffected.
+    imeBottomPadding: Dp = 0.dp,
     onSnippets: (() -> Unit)? = null,
     onAttachFiles: (() -> Unit)? = null,
     // Issue #544/#566: remove a single staged attachment tile by remote path.
@@ -643,8 +682,20 @@ internal fun SheetContent(
         modifier = modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface)
-            .navigationBarsPadding()
-            .imePadding()
+            // Issue #615: lift the whole composer (and therefore the sticky
+            // action row at the bottom) above the soft keyboard using the
+            // host-window IME inset. When the keyboard is up, the IME inset
+            // already extends to the bottom of the screen (it covers the nav
+            // bar), so we apply the IME padding INSTEAD of the nav-bar padding
+            // to avoid double-counting; when the keyboard is down we fall back
+            // to the nav-bar padding so the controls clear the system nav bar.
+            .then(
+                if (imeBottomPadding > 0.dp) {
+                    Modifier.padding(bottom = imeBottomPadding)
+                } else {
+                    Modifier.navigationBarsPadding()
+                },
+            )
             .padding(horizontal = 18.dp)
             .padding(bottom = 26.dp),
     ) {

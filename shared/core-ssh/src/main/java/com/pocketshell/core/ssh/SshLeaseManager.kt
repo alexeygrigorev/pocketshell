@@ -6,6 +6,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -14,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * App-scoped, DI-ready SSH connection lease pool keyed by host and credential
@@ -29,6 +32,33 @@ public class SshLeaseManager(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val idleTtlMillis: Long = DEFAULT_IDLE_TTL_MILLIS,
     private val maxIdleLeases: Int = DEFAULT_MAX_IDLE_LEASES,
+    // Issue #687 (lease-acquire bounding): hard cap on how long a SINGLE owned
+    // cold connect/handshake may run before the lease forcibly aborts it and
+    // surfaces a bounded failure. The sshj handshake's blocking JDK socket read
+    // is NOT a kotlinx suspension point, so a wedged/slow peer can pin the
+    // acquire even when the caller wraps it in `withTimeout` — `withTimeout`
+    // cancels the coroutine but the cancellation cannot interrupt the in-flight
+    // blocking read. This bound runs the connect as a child the lease can
+    // CANCEL on expiry; cancelling that child propagates into
+    // `SshConnection.connect`'s `invokeOnCancellation`, which DISCONNECTS the
+    // half-open transport and unparks the blocking read (the same close-to-heal
+    // trick `SshFolderListGateway.execBounded` uses for reads). Without this the
+    // picker (#702 / #470) hangs forever in `Loading`: no `PsFolderProbe`, and
+    // even the downstream 12s reconcile timeout never fires because the wedge
+    // sits below a cancellable suspension. Must comfortably exceed the sshj
+    // `timeoutMs` (the per-attempt TCP/auth socket timeout) so the lease only
+    // trips when sshj's own bound has itself wedged.
+    private val connectTimeoutMillis: Long = DEFAULT_CONNECT_TIMEOUT_MILLIS,
+    // Issue #687: context the bounded connect (and its timeout clock) runs on.
+    // Defaults to [Dispatchers.IO] so the timeout uses a REAL wall-clock delay
+    // that races the blocking handshake — the handshake's blocking socket read
+    // happens on real time, so the bound must too (under a virtual-time
+    // `runTest` scheduler the clock would auto-advance past the bound while the
+    // real connect is still in flight and trip it spuriously, which is exactly
+    // why the bound has its own dispatcher rather than inheriting the caller's).
+    // Virtual-time unit tests inject a `StandardTestDispatcher(testScheduler)`
+    // to step the bound deterministically.
+    private val connectTimeoutContext: kotlin.coroutines.CoroutineContext = Dispatchers.IO,
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
 ) : AutoCloseable {
     private val mutex = Mutex()
@@ -54,6 +84,7 @@ public class SshLeaseManager(
     init {
         require(idleTtlMillis >= 0) { "idleTtlMillis must be >= 0" }
         require(maxIdleLeases >= 0) { "maxIdleLeases must be >= 0" }
+        require(connectTimeoutMillis > 0) { "connectTimeoutMillis must be > 0" }
     }
 
     public suspend fun acquire(target: SshLeaseTarget): Result<SshLease> {
@@ -162,10 +193,11 @@ public class SshLeaseManager(
     ): Result<SshLease> {
         val key = target.leaseKey
         try {
-            val session = connector.connect(target).getOrElse { error ->
-                // Connect failed: clear the in-flight slot, retract the
-                // optimistic Connecting hint, and wake any awaiters so they fall
-                // back to their own dial rather than blocking forever.
+            val session = boundedConnect(target).getOrElse { error ->
+                // Connect failed (including a bounded handshake timeout): clear
+                // the in-flight slot, retract the optimistic Connecting hint, and
+                // wake any awaiters so they fall back to their own dial rather
+                // than blocking forever.
                 mutex.withLock {
                     if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
                     retractConnectingHintLocked(key)
@@ -237,6 +269,63 @@ public class SshLeaseManager(
             }
         }
     }
+
+    /**
+     * Issue #687 (lease-acquire bounding): dial [target] under a hard
+     * [connectTimeoutMillis] cap that the lease enforces ITSELF rather than
+     * trusting the caller's `withTimeout`.
+     *
+     * The sshj handshake bottoms out in a blocking JDK socket read, which is
+     * NOT a kotlinx suspension point. A wedged/slow peer can therefore pin the
+     * acquire indefinitely: ordinary coroutine cancellation (what `withTimeout`
+     * does) unparks at the next suspension point, but the in-flight blocking
+     * read has none. We run the dial as a CHILD coroutine and, on bound expiry,
+     * CANCEL that child. Cancelling it propagates into
+     * [SshConnection.connect]'s `suspendCancellableCoroutine`, whose
+     * `invokeOnCancellation` disconnects the half-open client — closing the
+     * socket is what tears down the transport and unparks the blocking read
+     * (mirrors the close-to-heal trick `SshFolderListGateway.execBounded` uses
+     * for wedged exec reads). On timeout we surface a bounded
+     * [SshLeaseConnectTimeoutException] so callers (the picker) fall through /
+     * show a retryable error instead of hanging forever.
+     *
+     * On the healthy path the child completes well within the bound and the
+     * timeout coroutine is cancelled, so this adds no latency. Cancellation of
+     * the acquire itself still flows straight through (the child is cancelled
+     * with the parent), preserving the #620 coalescing cleanup contract.
+     */
+    private suspend fun boundedConnect(target: SshLeaseTarget): Result<SshSession> =
+        withContext(connectTimeoutContext) {
+            // Dial as a child of this withContext scope. The connector already
+            // returns Result, so a normal connect failure is a value, not a
+            // thrown child failure; a defensively caught throw is folded into a
+            // failure Result too so a misbehaving connector can never crash the
+            // lease scope.
+            val dial = async {
+                try {
+                    connector.connect(target)
+                } catch (ce: kotlinx.coroutines.CancellationException) {
+                    throw ce // never swallow cancellation
+                } catch (t: Throwable) {
+                    // A misbehaving connector that THROWS instead of returning a
+                    // failure Result must not crash the lease scope.
+                    Result.failure(t)
+                }
+            }
+            withTimeoutOrNull(connectTimeoutMillis) { dial.await() }
+                ?: run {
+                    // Stop awaiting the wedged handshake so this coroutine can
+                    // resume; cancelling the child fires
+                    // SshConnection.connect's invokeOnCancellation, which
+                    // disconnects the half-open transport and unparks the
+                    // blocking read. NonCancellable + cancelAndJoin guards the
+                    // cleanup so the disconnect actually runs and the child is
+                    // fully settled (never left dangling) before we return,
+                    // even if the acquire itself is racing cancellation.
+                    withContext(NonCancellable) { dial.cancelAndJoin() }
+                    Result.failure(SshLeaseConnectTimeoutException(target.leaseKey, connectTimeoutMillis))
+                }
+        }
 
     /**
      * Issue #620: retract the optimistic [SshLeaseConnectionState.Connecting]
@@ -498,6 +587,19 @@ public class SshLeaseManager(
     public companion object {
         public const val DEFAULT_IDLE_TTL_MILLIS: Long = 60_000L
         public const val DEFAULT_MAX_IDLE_LEASES: Int = 2
+
+        /**
+         * Issue #687: default hard cap on a single owned cold connect/handshake.
+         *
+         * sshj's own per-attempt socket timeout ([SshConnection.DEFAULT_TIMEOUT_MS]
+         * = 30s) bounds an ordinary unreachable host. This lease-level cap is the
+         * backstop for the case where sshj's bound itself fails to trip (a
+         * half-open peer that accepts the TCP connection but stalls mid-handshake,
+         * leaving the JDK read blocked). It sits comfortably above sshj's 30s so a
+         * normal slow-but-progressing connect is never cut short, yet it
+         * guarantees the acquire — and therefore the picker — always resolves.
+         */
+        public const val DEFAULT_CONNECT_TIMEOUT_MILLIS: Long = 35_000L
         private const val STATE_EVENT_BUFFER_CAPACITY: Int = 64
     }
 }
@@ -587,3 +689,20 @@ public class SshLease internal constructor(
 }
 
 public class SshLeaseManagerClosedException : IllegalStateException("SSH lease manager is closed")
+
+/**
+ * Issue #687 (lease-acquire bounding): a single owned cold connect/handshake
+ * exceeded [SshLeaseManager]'s `connectTimeoutMillis` and was forcibly aborted
+ * (the half-open transport disconnected to unpark the wedged blocking read).
+ *
+ * This is a BOUNDED, retryable failure — callers (e.g. the session picker)
+ * should fall through / surface a retry affordance rather than hang. It is
+ * distinct from an ordinary connect failure so callers can tell a wedged
+ * handshake apart from a refused/auth/DNS error.
+ */
+public class SshLeaseConnectTimeoutException(
+    public val key: SshLeaseKey,
+    public val timeoutMillis: Long,
+) : IllegalStateException(
+    "SSH lease connect to ${key.user}@${key.host}:${key.port} exceeded ${timeoutMillis}ms and was aborted",
+)

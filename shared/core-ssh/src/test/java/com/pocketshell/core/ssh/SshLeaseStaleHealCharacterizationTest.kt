@@ -2,6 +2,7 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -194,6 +195,7 @@ class SshLeaseStaleHealCharacterizationTest {
             scope = this,
             idleTtlMillis = idleTtlMillis,
             maxIdleLeases = maxIdleLeases,
+            connectTimeoutContext = StandardTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 

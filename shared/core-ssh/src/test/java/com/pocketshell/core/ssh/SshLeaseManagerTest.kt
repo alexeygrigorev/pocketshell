@@ -5,6 +5,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -81,6 +82,7 @@ class SshLeaseManagerTest {
         val manager = SshLeaseManager(
             connector = QueueLeaseConnector(session),
             scope = this,
+            connectTimeoutContext = StandardTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 
@@ -634,6 +636,7 @@ class SshLeaseManagerTest {
             scope = this,
             idleTtlMillis = idleTtlMillis,
             maxIdleLeases = maxIdleLeases,
+            connectTimeoutContext = StandardTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 

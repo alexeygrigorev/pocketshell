@@ -3,13 +3,19 @@ package com.pocketshell.app.git
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -101,7 +107,9 @@ sealed interface CreateIssueUiState {
  * operations here.
  */
 @HiltViewModel
-class GitHistoryViewModel @Inject constructor() : ViewModel() {
+class GitHistoryViewModel @Inject constructor(
+    private val sshLeaseManager: SshLeaseManager,
+) : ViewModel() {
 
     private val _state = MutableStateFlow<GitHistoryUiState>(
         GitHistoryUiState.Loading(dir = ""),
@@ -113,7 +121,11 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
     val createState: StateFlow<CreateIssueUiState> = _createState.asStateFlow()
 
     private var request: Request? = null
-    private var session: SshSession? = null
+    // Issue #699: the screen borrows ONE warm lease from the app-wide
+    // @Singleton SshLeaseManager (keyed identically to the live session
+    // screens, so it shares the same transport per host) and reuses
+    // lease.session for every git read/write. Released on onCleared().
+    private var lease: SshLease? = null
     private var loadJob: Job? = null
     private var createJob: Job? = null
 
@@ -269,26 +281,47 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
         }
     }
 
+    /**
+     * Issue #699: borrow the warm transport from the app-wide
+     * [SshLeaseManager] instead of dialing a fresh SSH connection per screen.
+     * The lease is acquired once (keyed identically to the live session
+     * screens via [Request.toLeaseTarget], so it shares the same per-host
+     * transport — no extra handshake when a session is already warm) and its
+     * [SshSession] is reused for every subsequent git read/write. Released in
+     * [onCleared].
+     */
     private suspend fun ensureSession(req: Request): SshSession? {
-        session?.let { if (it.isConnected) return it }
-        val opened = SshConnection.connect(
-            host = req.hostname,
-            port = req.port,
-            user = req.username,
-            key = SshKey.Path(File(req.keyPath)),
-            passphrase = req.passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrNull()
-        session = opened
-        return opened
+        lease?.let { if (it.session.isConnected) return it.session }
+        // A stale lease (transport dropped) is released before re-acquiring so
+        // the next acquire opens or reuses a healthy transport.
+        lease?.let { stale ->
+            withContext(NonCancellable) { runCatching { stale.release() } }
+            lease = null
+        }
+        val acquired = sshLeaseManager.acquire(req.toLeaseTarget()).getOrNull()
+        lease = acquired
+        return acquired?.session
     }
 
     override fun onCleared() {
-        super.onCleared()
         loadJob?.cancel()
         createJob?.cancel()
-        runCatching { session?.close() }
-        session = null
+        // Issue #699: refcount-- the warm transport SYNCHRONOUSLY before the VM
+        // dies. A viewModelScope.launch here would race the framework's
+        // post-onCleared scope cancellation and could leak the refcount, so we
+        // release on a bounded IO hop — mirroring TmuxSessionViewModel's
+        // teardown. Releasing only decrements the pool refcount; the warm
+        // transport itself stays pooled (idle-TTL) for the next surface.
+        val toRelease = lease
+        lease = null
+        if (toRelease != null) {
+            runCatching {
+                runBlocking(Dispatchers.IO + NonCancellable) {
+                    withTimeoutOrNull(LEASE_RELEASE_TIMEOUT_MS) { toRelease.release() }
+                }
+            }
+        }
+        super.onCleared()
     }
 
     /**
@@ -296,6 +329,14 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
      * credential shape used by sibling per-host screens.
      */
     data class Request(
+        /**
+         * Persistent host identifier — issue #699. Keys the warm SSH lease
+         * identically to the live session screens
+         * ([com.pocketshell.app.tmux.TmuxSessionViewModel]'s
+         * `credentialId = "$hostId:$keyPath"`) so git history shares the one
+         * warm transport per host instead of dialing a second connection.
+         */
+        val hostId: Long,
         val hostname: String,
         val port: Int,
         val username: String,
@@ -303,9 +344,30 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
         val passphrase: CharArray?,
         val dir: String,
     ) {
+        /**
+         * Issue #699: build the lease key the SAME way the live session screen
+         * does — `credentialId = "$hostId:$keyPath"`, `knownHostsId =
+         * "accept-all"` — so an already-warm host transport is reused rather
+         * than a fresh handshake dialed.
+         */
+        fun toLeaseTarget(): SshLeaseTarget =
+            SshLeaseTarget(
+                leaseKey = SshLeaseKey(
+                    host = hostname,
+                    port = port,
+                    user = username,
+                    credentialId = "$hostId:$keyPath",
+                    knownHostsId = "accept-all",
+                ),
+                key = SshKey.Path(File(keyPath)),
+                passphrase = passphrase?.copyOf(),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            )
+
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Request) return false
+            if (hostId != other.hostId) return false
             if (hostname != other.hostname) return false
             if (port != other.port) return false
             if (username != other.username) return false
@@ -319,7 +381,8 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
         }
 
         override fun hashCode(): Int {
-            var result = hostname.hashCode()
+            var result = hostId.hashCode()
+            result = 31 * result + hostname.hashCode()
             result = 31 * result + port
             result = 31 * result + username.hashCode()
             result = 31 * result + keyPath.hashCode()
@@ -330,6 +393,9 @@ class GitHistoryViewModel @Inject constructor() : ViewModel() {
     }
 
     companion object {
+        /** Bound the synchronous lease release at teardown (#699). */
+        private const val LEASE_RELEASE_TIMEOUT_MS: Long = 2_000L
+
         /** Cap the history so a giant repo doesn't blow up the listing. */
         const val COMMIT_LIMIT: Int = GitHistoryGateway.DEFAULT_LIMIT
 

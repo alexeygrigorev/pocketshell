@@ -1179,6 +1179,7 @@ private fun AppNavigator(
         )
 
         is AppDestination.GitHistory -> GitHistoryScreen(
+            hostId = dest.hostId,
             hostName = dest.hostName,
             hostname = dest.hostname,
             port = dest.port,
@@ -1193,6 +1194,7 @@ private fun AppNavigator(
             val jobsViewModel = hiltViewModel<RecurringJobsViewModel>()
             androidx.compose.runtime.LaunchedEffect(dest) {
                 jobsViewModel.load(
+                    hostId = dest.hostId,
                     hostName = dest.hostName,
                     hostname = dest.hostname,
                     port = dest.port,
@@ -1254,6 +1256,7 @@ private fun AppNavigator(
             onOpenJobs = {
                 navigate(
                     AppDestination.RecurringJobs(
+                        hostId = dest.hostId,
                         hostName = dest.hostName,
                         hostname = dest.hostname,
                         port = dest.port,

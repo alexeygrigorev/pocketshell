@@ -318,6 +318,13 @@ sealed interface AppDestination {
 
     /** Per-session recurring jobs backed by the host's `pocketshell jobs` CLI. */
     data class RecurringJobs(
+        /**
+         * Persistent host identifier — issue #699. Keys the warm SSH lease
+         * identically to the live session screens so the jobs screen shares
+         * the one warm transport per host instead of dialing a second
+         * connection.
+         */
+        val hostId: Long,
         val hostName: String,
         val hostname: String,
         val port: Int,

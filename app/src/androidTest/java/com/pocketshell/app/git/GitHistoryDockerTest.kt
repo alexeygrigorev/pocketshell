@@ -13,9 +13,14 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -26,6 +31,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Connected Docker test for the Git history screen (issue #646).
@@ -102,8 +108,12 @@ class GitHistoryDockerTest {
             } ?: error("could not connect to seed git repo")
         }
 
+        // Issue #699: count the real SSH handshakes the warm-lease pool makes
+        // while the whole screen (history + overview + github + gh probes) loads.
+        val dialCount = AtomicInteger(0)
         composeRule.setContent {
             GitHistoryScreen(
+                hostId = 646L,
                 hostName = "proj",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -112,7 +122,7 @@ class GitHistoryDockerTest {
                 passphrase = null,
                 dir = repo,
                 onBack = {},
-                viewModel = GitHistoryViewModel(),
+                viewModel = newGitHistoryViewModel(dialCount),
             )
         }
 
@@ -128,6 +138,15 @@ class GitHistoryDockerTest {
             composeRule.onAllNodesWithTextExists("Add b.txt") &&
                 composeRule.onAllNodesWithTextExists("Add a.txt")
         }
+        // Issue #699: the entire screen rode ONE warm transport — a single SSH
+        // handshake — instead of a fresh per-action dial. (Many git execs, one
+        // lease.) The lease self-heals on a stale transport, so allow at most a
+        // single heal re-dial; the per-action regression would be >>1.
+        assertEquals(
+            "git history should reuse ONE warm lease, not dial per action (#699)",
+            1,
+            dialCount.get(),
+        )
         WalkthroughScreenshotArtifacts.capture("issue646-git-history")
     }
 
@@ -164,6 +183,7 @@ class GitHistoryDockerTest {
 
         composeRule.setContent {
             GitHistoryScreen(
+                hostId = 647L,
                 hostName = "proj",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -172,7 +192,7 @@ class GitHistoryDockerTest {
                 passphrase = null,
                 dir = repo,
                 onBack = {},
-                viewModel = GitHistoryViewModel(),
+                viewModel = newGitHistoryViewModel(),
             )
         }
 
@@ -220,6 +240,7 @@ class GitHistoryDockerTest {
 
         composeRule.setContent {
             GitHistoryScreen(
+                hostId = 648L,
                 hostName = "proj",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -228,7 +249,7 @@ class GitHistoryDockerTest {
                 passphrase = null,
                 dir = repo,
                 onBack = {},
-                viewModel = GitHistoryViewModel(),
+                viewModel = newGitHistoryViewModel(),
             )
         }
 
@@ -273,6 +294,7 @@ class GitHistoryDockerTest {
 
         composeRule.setContent {
             GitHistoryScreen(
+                hostId = 649L,
                 hostName = "proj",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -281,7 +303,7 @@ class GitHistoryDockerTest {
                 passphrase = null,
                 dir = repo,
                 onBack = {},
-                viewModel = GitHistoryViewModel(),
+                viewModel = newGitHistoryViewModel(),
             )
         }
 
@@ -313,6 +335,7 @@ class GitHistoryDockerTest {
 
         composeRule.setContent {
             GitHistoryScreen(
+                hostId = 6460L,
                 hostName = "plain",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -321,7 +344,7 @@ class GitHistoryDockerTest {
                 passphrase = null,
                 dir = root,
                 onBack = {},
-                viewModel = GitHistoryViewModel(),
+                viewModel = newGitHistoryViewModel(),
             )
         }
 
@@ -340,6 +363,33 @@ class GitHistoryDockerTest {
         knownHosts = KnownHostsPolicy.AcceptAll,
         timeoutMs = 10_000,
     ).getOrNull()
+
+    /**
+     * Issue #699: build the screen's view-model over a REAL [SshLeaseManager]
+     * (the same warm-lease pool the live session screens use) so the Docker
+     * test exercises the shared transport, not a fresh per-screen dial. The
+     * wrapping [DialCountingConnector] records how many real SSH handshakes the
+     * pool performed; one screen render runs many git execs over ONE lease.
+     */
+    private fun newGitHistoryViewModel(
+        dialCount: AtomicInteger = AtomicInteger(0),
+    ): GitHistoryViewModel =
+        GitHistoryViewModel(
+            sshLeaseManager = SshLeaseManager(
+                connector = DialCountingConnector(dialCount),
+            ),
+        )
+
+    private class DialCountingConnector(
+        private val dialCount: AtomicInteger,
+    ) : SshLeaseConnector {
+        private val real = DefaultSshLeaseConnector()
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            dialCount.incrementAndGet()
+            return real.connect(target)
+        }
+    }
 }
 
 private fun ComposeContentTestRule.onAllNodesWithTagExists(tag: String): Boolean =

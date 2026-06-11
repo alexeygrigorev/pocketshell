@@ -117,6 +117,7 @@ const val GIT_CREATE_ISSUE_OPEN_TAG = "gitCreateIssueOpen"
  */
 @Composable
 fun GitHistoryScreen(
+    hostId: Long,
     hostName: String,
     hostname: String,
     port: Int,
@@ -128,9 +129,10 @@ fun GitHistoryScreen(
     modifier: Modifier = Modifier,
     viewModel: GitHistoryViewModel = hiltViewModel(),
 ) {
-    LaunchedEffect(hostname, port, username, keyPath, dir) {
+    LaunchedEffect(hostId, hostname, port, username, keyPath, dir) {
         viewModel.start(
             GitHistoryViewModel.Request(
+                hostId = hostId,
                 hostname = hostname,
                 port = port,
                 username = username,

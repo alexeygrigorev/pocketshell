@@ -3,15 +3,22 @@ package com.pocketshell.app.jobs
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import javax.inject.Inject
 
@@ -20,6 +27,13 @@ public class RecurringJobsViewModel @Inject constructor(
     private val remoteSource: PocketshellJobsRemoteSource,
     private val connector: RecurringJobsSshConnector,
 ) : ViewModel() {
+
+    // Issue #699: the connector now borrows ONE warm lease from the app-wide
+    // @Singleton SshLeaseManager (keyed identically to the live session
+    // screens, so it shares the same transport per host) instead of dialing a
+    // fresh SSH connection. The lease is held for the screen's lifetime,
+    // lease.session reused for every jobs read/write, and released in
+    // onCleared().
 
     private val _state: MutableStateFlow<RecurringJobsScreenState> =
         MutableStateFlow(
@@ -33,9 +47,10 @@ public class RecurringJobsViewModel @Inject constructor(
     public val state: StateFlow<RecurringJobsScreenState> = _state.asStateFlow()
 
     private var target: Target? = null
-    private var session: SshSession? = null
+    private var lease: SshLease? = null
 
     public fun load(
+        hostId: Long,
         hostName: String,
         hostname: String,
         port: Int,
@@ -44,11 +59,10 @@ public class RecurringJobsViewModel @Inject constructor(
         passphrase: CharArray?,
         sessionName: String,
     ) {
-        val next = Target(hostName, hostname, port, username, keyPath, passphrase, sessionName)
+        val next = Target(hostId, hostName, hostname, port, username, keyPath, passphrase, sessionName)
         if (next == target) return
         target = next
-        session?.let { runCatching { it.close() } }
-        session = null
+        releaseLease()
         _state.value = RecurringJobsScreenState(
             hostName = hostName,
             sessionName = sessionName,
@@ -127,16 +141,27 @@ public class RecurringJobsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #699: borrow the warm transport from the app-wide
+     * [SshLeaseManager] (via [connector]) instead of dialing a fresh SSH
+     * connection per screen. The lease is acquired once (keyed identically to
+     * the live session screens via [Target.toLeaseTarget], so an already-warm
+     * host transport is reused — no extra handshake) and its [SshSession] is
+     * reused for every jobs read/write. Released in [onCleared] / [load].
+     */
     private suspend fun ensureSession(target: Target): SshSession? {
-        session?.let { return it }
+        lease?.let { if (it.session.isConnected) return it.session }
+        // A stale lease (transport dropped) is released before re-acquiring so
+        // the next acquire opens or reuses a healthy transport.
+        releaseLease()
         return try {
-            connector.connect(target).getOrElse { error ->
+            connector.acquire(target).getOrElse { error ->
                 _state.value = _state.value.copy(
                     loading = false,
                     error = "connect failed: ${error.message}",
                 )
                 return null
-            }.also { session = it }
+            }.also { lease = it }.session
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -148,13 +173,45 @@ public class RecurringJobsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Release the held warm lease (refcount-- on the pooled transport) while
+     * the screen is still alive — e.g. when [load] rebinds to a different
+     * session. The viewModelScope is live here, so an async release is safe.
+     */
+    private fun releaseLease() {
+        val toRelease = lease ?: return
+        lease = null
+        viewModelScope.launch(Dispatchers.IO + NonCancellable) {
+            runCatching { toRelease.release() }
+        }
+    }
+
     override fun onCleared() {
-        session?.let { runCatching { it.close() } }
-        session = null
+        // Issue #699: refcount-- the warm transport SYNCHRONOUSLY before the VM
+        // dies. A viewModelScope.launch here would race the framework's
+        // post-onCleared scope cancellation and could leak the refcount, so we
+        // release on a bounded IO hop — mirroring TmuxSessionViewModel's
+        // teardown. Releasing only decrements the pool refcount; the warm
+        // transport itself stays pooled (idle-TTL) for the next surface.
+        val toRelease = lease
+        lease = null
+        if (toRelease != null) {
+            runCatching {
+                runBlocking(Dispatchers.IO + NonCancellable) {
+                    withTimeoutOrNull(LEASE_RELEASE_TIMEOUT_MS) { toRelease.release() }
+                }
+            }
+        }
         super.onCleared()
     }
 
+    private companion object {
+        /** Bound the synchronous lease release at teardown (#699). */
+        const val LEASE_RELEASE_TIMEOUT_MS: Long = 2_000L
+    }
+
     public data class Target(
+        val hostId: Long,
         val hostName: String,
         val hostname: String,
         val port: Int,
@@ -162,22 +219,41 @@ public class RecurringJobsViewModel @Inject constructor(
         val keyPath: String,
         val passphrase: CharArray?,
         val sessionName: String,
-    )
-
-    public interface RecurringJobsSshConnector {
-        public suspend fun connect(target: Target): Result<SshSession>
-    }
-
-    public class DefaultRecurringJobsSshConnector @Inject constructor() : RecurringJobsSshConnector {
-        override suspend fun connect(target: Target): Result<SshSession> =
-            SshConnection.connect(
-                host = target.hostname,
-                port = target.port,
-                user = target.username,
-                key = SshKey.Path(File(target.keyPath)),
-                passphrase = target.passphrase?.copyOf(),
+    ) {
+        /**
+         * Issue #699: build the lease key the SAME way the live session screen
+         * does — `credentialId = "$hostId:$keyPath"`, `knownHostsId =
+         * "accept-all"` — so an already-warm host transport is reused rather
+         * than a fresh handshake dialed.
+         */
+        public fun toLeaseTarget(): SshLeaseTarget =
+            SshLeaseTarget(
+                leaseKey = SshLeaseKey(
+                    host = hostname,
+                    port = port,
+                    user = username,
+                    credentialId = "$hostId:$keyPath",
+                    knownHostsId = "accept-all",
+                ),
+                key = SshKey.Path(File(keyPath)),
+                passphrase = passphrase?.copyOf(),
                 knownHosts = KnownHostsPolicy.AcceptAll,
             )
+    }
+
+    /**
+     * Issue #699: vends a warm [SshLease] from the shared pool. Replaces the
+     * old fresh-dial connector (D22 hard-cut: no fallback connect path).
+     */
+    public interface RecurringJobsSshConnector {
+        public suspend fun acquire(target: Target): Result<SshLease>
+    }
+
+    public class DefaultRecurringJobsSshConnector @Inject constructor(
+        private val sshLeaseManager: SshLeaseManager,
+    ) : RecurringJobsSshConnector {
+        override suspend fun acquire(target: Target): Result<SshLease> =
+            sshLeaseManager.acquire(target.toLeaseTarget())
     }
 }
 

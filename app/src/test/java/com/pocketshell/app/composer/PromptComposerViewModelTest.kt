@@ -2852,6 +2852,184 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun failedAttachmentSendPreservesAttachmentPathsForResend() = runTest {
+        // Issue #694: the maintainer's "I can't send attachments anymore"
+        // turned out to be a degraded-connection "Not sent" failure. The
+        // worry is that the attachments get SILENTLY DROPPED on the failed
+        // send so the reconnect-then-resend goes out without them.
+        //
+        // The composer folds the staged attachment paths into the outgoing
+        // prompt's "Attached files:" suffix at send time. When the host
+        // reports the send failed, [restoreFailedSend] must put that EXACT
+        // payload (text + attachment paths) back in the draft so a resend
+        // after reconnect still carries the attachments — not a silent drop.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onDraftChange("Review these")
+        vm.attachFiles(count = 2) {
+            Result.success(
+                listOf(
+                    "~/.pocketshell/attachments/host-1/20260611-120000-01-report.txt",
+                    "~/.pocketshell/attachments/host-1/20260611-120000-02-data.csv",
+                ),
+            )
+        }
+        advanceUntilIdle()
+
+        // First send: capture the composed prompt the sheet would route to
+        // the host's `onSend`.
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        assertEquals(1, sent.size)
+        val composed = sent[0]
+        // The composed prompt carries both files.
+        assertTrue(composed.text.contains("20260611-120000-01-report.txt"))
+        assertTrue(composed.text.contains("20260611-120000-02-data.csv"))
+        // The optimistic clear already emptied the draft + chips.
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+
+        // The host reports the write failed (degraded connection). The sheet
+        // routes the exact request back into [restoreFailedSend].
+        vm.restoreFailedSend(composed)
+
+        // The restored draft carries the attachment paths verbatim, so the
+        // user sees their prompt + files and can retry after reconnect.
+        assertEquals(composed.text, vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.draft.contains("20260611-120000-01-report.txt"))
+        assertTrue(vm.uiState.value.draft.contains("20260611-120000-02-data.csv"))
+        assertEquals(
+            "Not sent. Reconnect, then send again or discard the draft.",
+            vm.uiState.value.error,
+        )
+
+        // Resend after reconnect: the FSM is Idle and the chips are gone, but
+        // the paths live in the restored draft. [appendAttachmentPaths] with
+        // an empty chip list leaves the draft untouched, so the resend STILL
+        // includes both attachments — never a silent drop.
+        val resent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val resendJob: Job = launch { vm.sendRequests.collect { resent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        resendJob.cancelAndJoin()
+
+        assertEquals(1, resent.size)
+        assertEquals(composed.text, resent[0].text)
+        assertTrue(resent[0].text.contains("20260611-120000-01-report.txt"))
+        assertTrue(resent[0].text.contains("20260611-120000-02-data.csv"))
+    }
+
+    @Test
+    fun attachThenTypeKeepsBothVisibleInState() = runTest {
+        // Issue #694 (second report): "when I attach something and then I want
+        // to type, I get strange composer behavior where I don't see
+        // anything." The state contract: attaching a file adds a chip WITHOUT
+        // mutating the draft, and typing afterwards updates the draft WITHOUT
+        // clearing the chips. Both must remain observable so the UI can render
+        // the typed text AND the attachment tile at the same time.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/shot.png"))
+        }
+        advanceUntilIdle()
+
+        // After attach: one chip, draft still empty (attach never touches text).
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals("", vm.uiState.value.draft)
+
+        // Now type. The draft updates and the chip survives.
+        vm.onDraftChange("look at this")
+        assertEquals("look at this", vm.uiState.value.draft)
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals(
+            "~/.pocketshell/attachments/host-1/shot.png",
+            vm.uiState.value.attachments.single().remotePath,
+        )
+
+        // Send composes both: typed text + the attachment suffix.
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        assertEquals(1, sent.size)
+        assertTrue(sent[0].text.startsWith("look at this"))
+        assertTrue(sent[0].text.contains("shot.png"))
+    }
+
+    @Test
+    fun successfulSendClearsDraftSoSheetDismissesEveryTime() = runTest {
+        // Issue #695: "when I'm sending a message, first the message
+        // disappears from the Composer and then sometimes the Composer stays
+        // on the screen." The sheet dismisses on the SUCCESS path only
+        // (`if (onSend(...)) onDismiss()`), and a SUCCESSFUL send must emit a
+        // SendRequest and leave the draft empty every time — so a host that
+        // returns success always dismisses, with no leftover draft that would
+        // make the sheet re-render with stale content.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+
+        // Repeat to catch any "sometimes stays open" intermittency in the
+        // dispatch/clear ordering. A fresh collector per iteration mirrors the
+        // sheet's real lifecycle: the `sendRequests` collector is torn down on
+        // dismiss and re-created on the next open (#254), so each send is
+        // consumed by exactly one collector — the same drain the success path
+        // depends on to dismiss.
+        repeat(3) { i ->
+            vm.onDraftChange("message $i")
+            val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+            val job: Job = launch { vm.sendRequests.collect { sent += it } }
+            vm.requestSend(withEnter = true)
+            advanceUntilIdle()
+            job.cancelAndJoin()
+
+            // Each send dispatches exactly one request and leaves the draft
+            // empty, so the success path has nothing stale to re-render.
+            assertEquals(1, sent.size)
+            assertEquals("message $i", sent[0].text)
+            assertEquals("", vm.uiState.value.draft)
+            assertNull(vm.uiState.value.error)
+        }
+    }
+
+    @Test
+    fun failedSendKeepsDraftWithTextForRetryNotDismiss() = runTest {
+        // Issue #695 acceptance #3 / #390: a FAILED send must keep the
+        // composer open WITH the text (so the user can retry after
+        // reconnecting), while a successful send dismisses. The dismiss is
+        // conditional on the host's `onSend` returning true; the failure path
+        // routes through [restoreFailedSend], which re-populates the draft and
+        // surfaces the "Not sent" banner — the state the sheet renders to keep
+        // itself open.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onDraftChange("ship it")
+
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        assertEquals(1, sent.size)
+        // Optimistic clear already emptied the draft (the sheet had not yet
+        // learned the send failed).
+        assertEquals("", vm.uiState.value.draft)
+
+        // Host reports failure → restore. The draft comes back with the exact
+        // text + an actionable banner; the sheet stays open on this state.
+        vm.restoreFailedSend(sent[0])
+        assertEquals("ship it", vm.uiState.value.draft)
+        assertEquals(
+            "Not sent. Reconnect, then send again or discard the draft.",
+            vm.uiState.value.error,
+        )
+        assertEquals(PromptComposerViewModel.RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
     fun sendDispatchedDuringSubscriberGapIsDeliveredToNextCollector() = runTest {
         // Issue #254 root cause + regression pin. The composer sheet's
         // `sendRequests` collector lives in the sheet's composition: it is

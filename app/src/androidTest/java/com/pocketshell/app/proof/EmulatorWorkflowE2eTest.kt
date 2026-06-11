@@ -23,7 +23,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.session.SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -84,108 +83,6 @@ class EmulatorWorkflowE2eTest {
         launchedActivity?.close()
         launchedActivity = null
         clearLastSessionPrefs()
-    }
-
-    @Test
-    fun realAppRawSshJourneyRunsShellCommandsAndInteractiveTui() = runBlocking {
-        // Issue #171 (round 2, D22 hard-cut): the "Continue with SSH"
-        // raw-shell escape hatch lived on the inline
-        // HostTmuxSessionPickerSheet that we deleted when the post-tap
-        // surface flipped to FolderListScreen. The folder UI is
-        // tmux-first; raw-SSH attach paths are no longer reachable
-        // from the dashboard nav graph. The journey covered by this
-        // test (open raw SSH → interactive TUI) is now an
-        // architecturally dead path on the host-list flow. Skip the
-        // test rather than carry a back-compat shim — per D22 the
-        // older surface is deleted in the same PR that introduces the
-        // replacement.
-        Assume.assumeTrue(
-            "Raw-SSH escape hatch removed by #171 (D22 hard-cut). " +
-                "Tmux-attach + folder grouping is the only post-host-tap path.",
-            false,
-        )
-        // Issue #143: the Alpine MOTD ("Welcome to Alpine!" … "/etc/motd")
-        // renders before the remote shell finishes attaching the PTY and
-        // is ready to read stdin. A blank-text readiness predicate matches
-        // the MOTD and races the subsequent `printf 'PTY-...'; stty size`
-        // send, which the remote shell then drops because the input
-        // arrived too early. Wait specifically for a shell prompt sentinel
-        // — the Alpine busybox `ash` default for a non-root login is
-        // `<hostname>:~$ ` (e.g. `b0d42b7bd223:~$`) and switches to
-        // `<hostname>:<cwd>$ ` after `cd`. The regex also accepts `#` for
-        // the root prompt in case the fixture user changes.
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-        val marker = "psraw${System.currentTimeMillis()}"
-        val hostRowTag = seedDockerHost(key, "Workflow Raw Docker $marker")
-
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-        openHostPicker(hostRowTag, "Workflow Raw Docker $marker")
-        val openStart = SystemClock.elapsedRealtime()
-        waitForPickerAction("Continue with SSH")
-        compose.onNodeWithText("Continue with SSH").performClick()
-        compose.onNodeWithTag(SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
-        waitForTerminalViewAttached()
-        waitForVisibleTerminalText("raw ssh prompt") { it.containsShellPrompt() }
-        recordTiming("raw_connect_to_prompt_ms", SystemClock.elapsedRealtime() - openStart)
-        val prompt = captureAndAssert("raw-01-connected-prompt", minBrightPixels = 1_500)
-
-        assertRemotePtyMatchesTerminalGrid("raw", marker)
-
-        val workDir = "/tmp/pocketshell-e2e-$marker/alpha"
-        val commandStart = SystemClock.elapsedRealtime()
-        sendText(
-            "mkdir -p '$workDir'; cd '$workDir'; " +
-                "printf 'PWD-$marker '; pwd; " +
-                "touch ls-visible-$marker.txt; " +
-                "printf 'LS-$marker\\n'; ls -1",
-            withEnter = true,
-        )
-        waitForVisibleTerminalText("mkdir cd ls output") {
-            "PWD-$marker $workDir" in it &&
-                "LS-$marker" in it &&
-                "ls-visible-$marker.txt" in it
-        }
-        recordTiming("raw_command_to_output_ls_mkdir_cd_ms", SystemClock.elapsedRealtime() - commandStart)
-        val shellCommands = captureAndAssert("raw-02-ls-mkdir-cd", minBrightPixels = 4_000)
-        assertNotEquals(
-            "expected shell command viewport to differ from prompt baseline",
-            prompt.sha256,
-            shellCommands.sha256,
-        )
-
-        sendText("pocketshell-tui-smoke", withEnter = true)
-        waitForVisibleTerminalText("tui started") {
-            "PocketShell interactive TUI smoke" in it && "draft:" in it
-        }
-        val tuiStart = captureAndAssert("raw-03-tui-started", minBrightPixels = 4_000)
-
-        val input = terminalInputConnection()
-        val inputStart = SystemClock.elapsedRealtime()
-        input.commitText("abc", 1)
-        waitForVisibleTerminalText("tui draft abc") { it.hasVisibleDraft("abc") }
-        // Backspace via direct key dispatch on the TerminalView, not
-        // through `input.deleteSurroundingText(1, 0)`. The
-        // InputConnection path enqueues a KeyEvent on the IMF
-        // dispatcher, which has been observed to silently defer the
-        // event on the CI emulator under contention (issue #130: the
-        // type/abc commit just before this one was visible in <1 s,
-        // but the backspace never reached the TUI even after 180 s,
-        // leaving `draft:abc` instead of `draft:ab`). Direct dispatch
-        // matches what real users feel pressing a key-bar key.
-        dispatchKeyOnTerminal(android.view.KeyEvent.KEYCODE_DEL)
-        waitForVisibleTerminalText("tui draft ab") { it.hasVisibleDraft("ab") }
-        input.commitText("d", 1)
-        waitForVisibleTerminalText("tui draft abd") { it.hasVisibleDraft("abd") }
-        recordTiming("raw_tui_input_to_visible_state_ms", SystemClock.elapsedRealtime() - inputStart)
-        val tuiInput = captureAndAssert("raw-04-tui-input-effect", minBrightPixels = 4_000)
-        assertNotEquals(
-            "expected TUI input viewport to differ from initial TUI viewport",
-            tuiStart.sha256,
-            tuiInput.sha256,
-        )
-
-        writeSummary("raw-ssh-workflow")
     }
 
     @Test

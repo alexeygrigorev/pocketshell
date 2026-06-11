@@ -63,8 +63,6 @@ import com.pocketshell.app.projects.WatchedFoldersScreen
 import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.session.LastSessionStore
-import com.pocketshell.app.session.SessionScreen
-import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteRemoteSource
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteTarget
 import com.pocketshell.app.startup.StartupTiming
@@ -103,7 +101,7 @@ import javax.inject.Inject
  *
  * - [AppDestination.HostList] (landing) — list of saved SSH hosts.
  * - [AppDestination.AddHost] / [AppDestination.EditHost] — host form.
- * - [AppDestination.Session] — live SSH session for a selected host.
+ * - [AppDestination.TmuxSession] — live tmux session for a selected host.
  *
  * The Phase 0 `ProofOfLifeScreen` is kept on disk (the
  * `ProofPipelineTest` still imports its helper functions) but is no
@@ -113,9 +111,8 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class MainActivity : FragmentActivity() {
 
-    // SessionViewModel stays activity-scoped: we only have one live
+    // The tmux session VM stays activity-scoped: we only have one live
     // session at a time today; multi-pane lifecycle arrives with #22.
-    private val sessionViewModel: SessionViewModel by viewModels()
     private val tmuxSessionViewModel: TmuxSessionViewModel by viewModels()
     private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
 
@@ -370,7 +367,6 @@ class MainActivity : FragmentActivity() {
                     color = MaterialTheme.colorScheme.background,
                 ) {
                     AppNavigator(
-                        sessionViewModel = sessionViewModel,
                         tmuxSessionViewModel = tmuxSessionViewModel,
                         startDirectoryAutocomplete = startDirectoryAutocomplete,
                         hostDetailViewMode = settings.hostDetailViewMode,
@@ -525,7 +521,6 @@ private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
  */
 @Composable
 private fun AppNavigator(
-    sessionViewModel: SessionViewModel,
     tmuxSessionViewModel: TmuxSessionViewModel,
     startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource,
     hostDetailViewMode: HostDetailViewMode,
@@ -642,16 +637,13 @@ private fun AppNavigator(
     // (see MainActivity.onCreate), so each destination owns its own keyboard
     // behaviour. Text-entry screens (host form, settings, jobs, env, folder
     // list, etc.) opt back into `.imePadding()` here so their fields still
-    // float above the soft keyboard exactly as before. The terminal screens
-    // ([AppDestination.Session] / [AppDestination.TmuxSession]) are excluded:
-    // they keep full height under the keyboard and PAN the terminal viewport
-    // up instead of resizing the pane, which avoids the tmux reflow + full
-    // redraw jank.
+    // float above the soft keyboard exactly as before. The terminal screen
+    // ([AppDestination.TmuxSession]) is excluded: it keeps full height under
+    // the keyboard and PANs the terminal viewport up instead of resizing the
+    // pane, which avoids the tmux reflow + full redraw jank.
     val activeDestination = current
     val keyboardAvoidanceModifier =
-        if (activeDestination is AppDestination.Session ||
-            activeDestination is AppDestination.TmuxSession
-        ) {
+        if (activeDestination is AppDestination.TmuxSession) {
             Modifier.fillMaxSize()
         } else {
             Modifier.fillMaxSize().imePadding()
@@ -659,7 +651,7 @@ private fun AppNavigator(
     // Issue #520: the hand-rolled navigator owns the system/gesture Back
     // button for every non-root destination. Without this, screens that do
     // not register their own `BackHandler` (host-detail FolderList, the
-    // plain-SSH Session, RepoBrowser, FileViewer, EnvFiles, Usage, AiCosts,
+    // tmux session, RepoBrowser, FileViewer, EnvFiles, Usage, AiCosts,
     // CrashReports, WatchedFolders, RecurringJobs, QR scanner) fall through
     // to the Activity default, which finishes the app — so system Back exits
     // to the launcher instead of returning to the previous screen, the
@@ -831,64 +823,6 @@ private fun AppNavigator(
                         hostId = host.id,
                         keyPath = keyPath,
                         passphrase = passphrase,
-                    ),
-                )
-            },
-        )
-
-        is AppDestination.Session -> SessionScreen(
-            viewModel = sessionViewModel,
-            host = dest.hostname,
-            port = dest.port,
-            user = dest.username,
-            keyPath = dest.keyPath,
-            passphrase = dest.passphrase,
-            // Issue #17: the session screen surfaces the snippet picker
-            // off the chip row + the composer's Snippets button. Both
-            // need the persisted host id to scope the library.
-            hostId = dest.hostId,
-            onBack = ::back,
-            onOpenJobs = {
-                navigate(
-                    AppDestination.RecurringJobs(
-                        hostName = dest.hostName,
-                        hostname = dest.hostname,
-                        port = dest.port,
-                        username = dest.username,
-                        keyPath = dest.keyPath,
-                        passphrase = dest.passphrase,
-                        sessionName = DefaultTmuxSessionName,
-                    ),
-                )
-            },
-            onOpenUsage = { navigate(AppDestination.Usage) },
-            onAssistantNavigate = ::navigate,
-            onOpenFile = { path, cwd ->
-                navigate(
-                    AppDestination.FileViewer(
-                        hostId = dest.hostId,
-                        hostName = dest.hostName,
-                        hostname = dest.hostname,
-                        port = dest.port,
-                        username = dest.username,
-                        keyPath = dest.keyPath,
-                        passphrase = dest.passphrase,
-                        remotePath = path,
-                        cwd = cwd,
-                    ),
-                )
-            },
-            onBrowseFiles = { startDir ->
-                navigate(
-                    AppDestination.FileExplorer(
-                        hostId = dest.hostId,
-                        hostName = dest.hostName,
-                        hostname = dest.hostname,
-                        port = dest.port,
-                        username = dest.username,
-                        keyPath = dest.keyPath,
-                        passphrase = dest.passphrase,
-                        startDir = startDir,
                     ),
                 )
             },
@@ -1257,15 +1191,11 @@ private fun AppNavigator(
             )
         }
 
-        // Issue #45: tmux control-mode session. The view model is
-        // obtained via `hiltViewModel()` — distinct from the
-        // activity-scoped `sessionViewModel` above so each navigation to
-        // a tmux destination spins up its own client (and tears it down
-        // when the user navigates away). Once the host bootstrap from
-        // #49 detects tmux on a host, the picker can route here in place
-        // of [AppDestination.Session]; today the picker still routes to
-        // plain SSH and this branch is reached only by future deep-link
-        // / explicit-route wiring.
+        // Issue #45: tmux control-mode session — the live terminal route.
+        // The folder-list / session picker, share-into-session intents, and
+        // last-session restore all land here. The view model is activity-
+        // scoped (see `tmuxSessionViewModel` above) so the live client
+        // survives navigation within the session.
         is AppDestination.TmuxSession -> TmuxSessionScreen(
             viewModel = tmuxSessionViewModel,
             hostId = dest.hostId,
@@ -1628,7 +1558,6 @@ internal fun AppDestination.timingName(): String = when (this) {
     AppDestination.Usage -> "Usage"
     AppDestination.AiCosts -> "AiCosts"
     AppDestination.PortForwardChooser -> "PortForwardChooser"
-    is AppDestination.Session -> "Session(hostId=$hostId)"
     is AppDestination.PortForwardPanel -> "PortForwardPanel(hostId=$hostId)"
     is AppDestination.WatchedFolders -> "WatchedFolders(hostId=$hostId)"
     is AppDestination.TmuxSession -> "TmuxSession(hostId=$hostId,session=$sessionName)"
@@ -1651,7 +1580,6 @@ internal fun AppDestination.diagnosticRouteName(): String = when (this) {
     AppDestination.Usage -> "Usage"
     AppDestination.AiCosts -> "AiCosts"
     AppDestination.PortForwardChooser -> "PortForwardChooser"
-    is AppDestination.Session -> "Session"
     is AppDestination.PortForwardPanel -> "PortForwardPanel"
     is AppDestination.WatchedFolders -> "WatchedFolders"
     is AppDestination.TmuxSession -> "TmuxSession"
@@ -1677,12 +1605,6 @@ internal fun AppDestination.crashReportContext(): CrashReportContext = when (thi
     AppDestination.Usage -> CrashReportContext(screen = "Usage")
     AppDestination.AiCosts -> CrashReportContext(screen = "AI costs")
     AppDestination.PortForwardChooser -> CrashReportContext(screen = "Port forwarding chooser")
-    is AppDestination.Session -> CrashReportContext(
-        screen = "SSH session",
-        hostName = hostName,
-        hostname = hostname,
-        username = username,
-    )
     is AppDestination.PortForwardPanel -> CrashReportContext(
         screen = "Port forwarding",
         action = listOfNotNull(

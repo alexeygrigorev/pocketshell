@@ -57,7 +57,7 @@ sealed interface AppDestination {
      * [com.pocketshell.app.usage.UsageScreen] populated from every
      * bootstrapped host whose `pocketshell` detection succeeded. Reachable
      * from the Settings → Diagnostics row and from the in-session
-     * kebab menus in [Session] / [TmuxSession]. Fix B and Fix C add
+     * kebab menu in [TmuxSession]. Fix B and Fix C add
      * a host-list dashboard strip and a bootstrap-driven CTA — out of
      * scope for this destination.
      */
@@ -73,24 +73,6 @@ sealed interface AppDestination {
 
     /** Host chooser opened from Android system forwarding surfaces such as the QS tile. */
     data object PortForwardChooser : AppDestination
-
-    /**
-     * Open a live session for the host identified by [hostId].
-     *
-     * [keyPath] is the resolved absolute path of the host's private key on
-     * disk (read from the corresponding [com.pocketshell.core.storage.entity.SshKeyEntity]
-     * by `HostListScreen`). The session screen does not look it up itself
-     * — it consumes the resolved values directly.
-     */
-    data class Session(
-        val hostId: Long,
-        val hostName: String,
-        val hostname: String,
-        val port: Int,
-        val username: String,
-        val keyPath: String,
-        val passphrase: CharArray?,
-    ) : AppDestination
 
     /** Per-host auto-forward panel backed by `core-portfwd`. */
     data class PortForwardPanel(
@@ -128,7 +110,7 @@ sealed interface AppDestination {
      * @property hostname / [port] / [username] / [keyPath] resolved SSH
      *   connection parameters used by the optional discover button.
      *   Null means "no SSH credentials are available in this navigator
-     *   slot" — see [Session] for the analogous routing.
+     *   slot" — see [TmuxSession] for the analogous routing.
      * @property passphrase already-unlocked key passphrase, if the key is
      *   passphrase-protected. The caller is responsible for zeroing it
      *   after navigation per the existing host-list contract.
@@ -146,23 +128,22 @@ sealed interface AppDestination {
     /**
      * Open a live `tmux -CC` session — see [com.pocketshell.app.tmux.TmuxSessionScreen].
      *
-     * Distinct from [Session] (which is plain-SSH per #18). Per
+     * This is the live terminal route. Per
      * [D5](../../../../../../../../docs/decisions.md) / [D6] tmux drives
      * per-pane rendering with swipe navigation; the screen materialises
      * one [com.pocketshell.app.tmux.TmuxPaneState] per tmux pane and binds
      * each to its own [com.pocketshell.core.terminal.ui.TerminalSurface].
      *
-     * Issue #45 only wires this destination; the host picker swap from
-     * [Session] → [TmuxSession] (so opening a host that has tmux installed
-     * lands here automatically) is the follow-up #48 lifecycle work.
+     * Reached from the folder-list / session picker, share-into-session
+     * intents, and last-session restore.
      *
-     * @property hostId persistent host identifier — same shape as
-     *   [Session.hostId]. Kept on the destination so future deep-link
-     *   restoration can re-resolve the host without re-opening the picker.
+     * @property hostId persistent host identifier. Kept on the destination
+     *   so future deep-link restoration can re-resolve the host without
+     *   re-opening the picker.
      * @property hostName user-facing saved-host label used by the dashboard
      *   registry and session rows.
      * @property hostname / [port] / [username] / [keyPath] resolved SSH
-     *   connection parameters; same fields as [Session].
+     *   connection parameters.
      * @property sessionName tmux session name to attach to (or create via
      *   `new-session -A -s`). Today defaulted by the caller to
      *   `"pocketshell"` to match

@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-06-03T14:05:02.806775926Z"
+exclude-newer = "2026-06-04T12:10:15.307134225Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -143,7 +143,7 @@ wheels = [
 
 [[package]]
 name = "pocketshell"
-version = "0.3.30"
+version = "0.3.32"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

@@ -27,49 +27,6 @@ class ConversationToolResultPairingE2eTest {
     val compose = createComposeRule()
 
     @Test
-    fun adjacentToolResultDetailsAreMergedIntoExpandedToolCall() {
-        val events = listOf(
-            ConversationEvent.ToolCall(
-                id = "tool-1",
-                agent = AgentKind.Codex,
-                name = "exec_command",
-                input = """{"cmd":"./gradlew test"}""",
-            ),
-            ConversationEvent.ToolResult(
-                id = "result-1",
-                agent = AgentKind.Codex,
-                output = "raw-adjacent-output-only",
-                isError = false,
-            ),
-        )
-
-        compose.setContent {
-            PocketShellTheme {
-                ConversationPane(
-                    events = events,
-                    onSendToAgent = { true },
-                )
-            }
-        }
-
-        compose.onNodeWithTag(SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")
-            .assertIsDisplayed()
-        compose.onAllNodesWithText("raw-adjacent-output-only")
-            .fetchSemanticsNodes()
-            .let { assertEquals(0, it.size) }
-
-        compose.onNodeWithTag(SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")
-            .performClick()
-        compose.waitForIdle()
-        compose.onAllNodes(
-            hasText("raw-adjacent-output-only") and
-                hasAnyAncestor(hasTestTag(SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")),
-            useUnmergedTree = true,
-        ).fetchSemanticsNodes()
-            .let { assertEquals(1, it.size) }
-    }
-
-    @Test
     fun codexLinkedToolResultDetailsAreMergedIntoExpandedTmuxToolCall() {
         val events = listOf(
             ConversationEvent.ToolCall(

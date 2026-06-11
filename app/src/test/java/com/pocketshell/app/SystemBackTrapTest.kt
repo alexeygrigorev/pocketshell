@@ -27,7 +27,7 @@ class SystemBackTrapTest {
         passphrase = null,
     )
 
-    private fun session() = AppDestination.Session(
+    private fun session() = AppDestination.TmuxSession(
         hostId = 1L,
         hostName = "dev",
         hostname = "host.example",
@@ -35,6 +35,7 @@ class SystemBackTrapTest {
         username = "user",
         keyPath = "/key",
         passphrase = null,
+        sessionName = "pocketshell",
     )
 
     @Test

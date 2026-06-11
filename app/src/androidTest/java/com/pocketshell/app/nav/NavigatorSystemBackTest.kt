@@ -48,7 +48,7 @@ class NavigatorSystemBackTest {
         passphrase = null,
     )
 
-    private fun session() = AppDestination.Session(
+    private fun session() = AppDestination.TmuxSession(
         hostId = 1L,
         hostName = "dev",
         hostname = "host.example",
@@ -56,6 +56,7 @@ class NavigatorSystemBackTest {
         username = "user",
         keyPath = "/key",
         passphrase = null,
+        sessionName = "pocketshell",
     )
 
     /**

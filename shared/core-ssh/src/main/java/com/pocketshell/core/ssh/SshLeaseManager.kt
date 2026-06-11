@@ -115,6 +115,23 @@ public class SshLeaseManager(
         }
     }
 
+    /**
+     * Read-only probe: does the pool currently hold a live (still
+     * `isConnected`) transport for [key], whether it is actively leased or
+     * sitting warm/idle? Used by the tmux attach flow to tell a genuine COLD
+     * connect (no live transport — full-screen Connecting overlay is correct)
+     * apart from a WARM open of a session on a host whose SSH lease is already
+     * up (#634 — attach instantly, no "Reconnecting", no blanking overlay).
+     *
+     * This does NOT acquire, retain, evict, or otherwise mutate any lease — it
+     * only reads pool state, so calling it never changes the lease lifecycle.
+     */
+    public suspend fun hasLiveLease(key: SshLeaseKey): Boolean =
+        mutex.withLock {
+            if (closed) return@withLock false
+            entries[key]?.session?.isConnected == true
+        }
+
     public suspend fun closeIdle() {
         val idleEntries = mutex.withLock {
             entries.values

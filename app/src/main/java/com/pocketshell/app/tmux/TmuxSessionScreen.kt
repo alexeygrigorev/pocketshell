@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -738,12 +739,30 @@ public fun TmuxSessionScreen(
     // whether the pager has realigned to the current nav target and suppress
     // settle-driven switches until it has, so the explicit tap always wins.
     var pagerAlignedSession by remember { mutableStateOf<String?>(null) }
+    // Issue #634: did the user physically DRAG the pager since it last aligned
+    // to the current nav target? Only a real drag makes a cross-session settle
+    // a genuine swipe; the app's own realignment scroll and any stale-index
+    // recomposition echo (which is what bled session C back into A on the
+    // return-to-origin switch) never raise a drag interaction. Reset to false
+    // every time the pager (re)aligns to the nav target, so each deliberate
+    // switch starts from a clean "no swipe yet" state.
+    var userDraggedSinceAlignment by remember { mutableStateOf(false) }
+    LaunchedEffect(pagerState) {
+        pagerState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start) {
+                userDraggedSinceAlignment = true
+            }
+        }
+    }
     // A new nav target invalidates the previous alignment immediately (before
     // the list even rebuilds) so the settle collector below suppresses any
     // stale-index event from the moment the tap is observed.
     LaunchedEffect(sessionName) {
         if (pagerAlignedSession != sessionName) {
             pagerAlignedSession = null
+            // A deliberate switch is starting; any drag from before it must
+            // not count toward the new session's swipe detection.
+            userDraggedSinceAlignment = false
         }
     }
     LaunchedEffect(sessionName, unifiedPanes) {
@@ -763,7 +782,36 @@ public fun TmuxSessionScreen(
         if (currentSession != sessionName) {
             pagerState.scrollToPage(targetPage)
         }
-        pagerAlignedSession = sessionName
+    }
+
+    // Issue #661 / #634 / #636: re-arm cross-session swipe detection ONLY once
+    // the pager has GENUINELY come to rest on the nav target's page. The old
+    // code marked the pager "aligned" the instant the snap effect *issued* a
+    // [scrollToPage] — but the scroll had not landed, so
+    // [pagerState.settledPage] could still report the previous session's stale
+    // page while we had already declared alignment. The settle collector then
+    // treated that stale page as a deliberate cross-session swipe and yanked
+    // the user back to the session they just left (the wrong/stale-session +
+    // content-bleed regression). Driving alignment off the *settled* page,
+    // reactively, means a deliberate tap can never be undone by a lagging
+    // settle: until the pager actually settles on the target session, settles
+    // stay suppressed.
+    LaunchedEffect(sessionName, unifiedPanes) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            val settledSession = unifiedPanes.getOrNull(page)
+                ?.let { viewModel.sessionNameForUnifiedPane(it) }
+            if (settledSession == sessionName) {
+                pagerAlignedSession = sessionName
+                // Issue #634: whenever the pager comes to rest on the nav
+                // target, the user is now sitting on the target's page, so
+                // any prior drag is consumed. Clear the drag flag so the NEXT
+                // cross-session settle is only honored if it follows a FRESH
+                // user drag away from the target. This makes a stale settle
+                // echo (no fresh drag) arriving just after the return-to-A
+                // alignment impossible to mistake for a swipe back to C.
+                userDraggedSinceAlignment = false
+            }
+        }
     }
 
     // Issue #626/#652: detect a genuine user-driven cross-session swipe and
@@ -779,6 +827,7 @@ public fun TmuxSessionScreen(
                 settledPaneSession = settledSession,
                 navTargetSession = sessionName,
                 pagerAlignedToNavTarget = aligned,
+                userDraggedSinceAlignment = userDraggedSinceAlignment,
             )
             if (switchTo != null) {
                 viewModel.onUnifiedPageSettled(page)
@@ -2492,8 +2541,22 @@ internal fun settleSessionSwitchTarget(
     settledPaneSession: String?,
     navTargetSession: String,
     pagerAlignedToNavTarget: Boolean,
+    // Issue #634 (C->A return-to-origin content-bleed): a settle is only a
+    // GENUINE cross-session swipe if the user physically dragged the pager
+    // since it last aligned to the nav target. The app's own
+    // `scrollToPage` realignment after a switch — and any lagging
+    // stale-index recomposition echo that resolves to the session we JUST
+    // LEFT — produces a settle with NO preceding user drag. Honoring those
+    // drag-less settles is exactly what intermittently warm-switched the
+    // user back to session C right after they returned to A (both sessions'
+    // frames then co-resident in the viewport). Requiring a real drag makes
+    // the deliberate return-to-origin switch impossible to undo by a phantom
+    // settle, while a real finger swipe (which always raises a drag
+    // interaction) still switches.
+    userDraggedSinceAlignment: Boolean,
 ): String? {
     if (!pagerAlignedToNavTarget) return null
+    if (!userDraggedSinceAlignment) return null
     if (settledPaneSession == null) return null
     if (settledPaneSession == navTargetSession) return null
     return settledPaneSession

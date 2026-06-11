@@ -284,10 +284,34 @@ public class TmuxSessionViewModel @Inject constructor(
         val active = activeTarget ?: return
         // Check if this pane belongs to a different session
         val paneSessionName = sessionNameForUnifiedPane(pane)
-        if (paneSessionName != null && paneSessionName != active.sessionName) {
-            viewModelScope.launch {
-                _sessionSwitchRequest.emit(paneSessionName)
-            }
+        if (paneSessionName == null || paneSessionName == active.sessionName) return
+        // Issue #661 / #634 / #636: suppress a settle-driven auto-switch that
+        // would yank the user back to the session they are LEAVING while a
+        // deliberate connect to a DIFFERENT session is still in flight. The
+        // dogfood repro: tap session A from the host list; the unified pager
+        // still carries the previous session C's panes and momentarily settles
+        // on a C page before it realigns to A. Acting on that stale settle fired
+        // a warm switch back to C — so after deliberately opening A the user was
+        // looking at (and typing into) C's content (the wrong/stale-session +
+        // content-bleed regression). [connectingTarget] is the user's CURRENT
+        // deliberate destination (set synchronously in [connect] before any
+        // coroutine runs); while a connect to a different session is in flight,
+        // a settle to anything other than that destination is a stale-index
+        // artifact and must be ignored. The deliberate tap always wins.
+        val pendingTarget = connectingTarget
+        if (connectJob?.isActive == true &&
+            pendingTarget != null &&
+            pendingTarget.sessionName != paneSessionName
+        ) {
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-settle-switch-suppressed stale settle to '$paneSessionName' " +
+                    "while connecting to '${pendingTarget.sessionName}' (active='${active.sessionName}')",
+            )
+            return
+        }
+        viewModelScope.launch {
+            _sessionSwitchRequest.emit(paneSessionName)
         }
     }
 
@@ -402,6 +426,35 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private var sessionRef: SshSession? = null
     private var leaseRef: SshLease? = null
+
+    // Issue #634: a lock-free snapshot of the lease keys the pool currently
+    // holds a live (Connected/Idle) transport for, kept in sync with
+    // [SshLeaseManager.stateEvents]. The pool's authoritative `hasLiveLease`
+    // probe is `suspend` (mutex-guarded), but [connect] needs to choose the
+    // initial status SYNCHRONOUSLY — before the connect coroutine runs — so a
+    // warm open never flashes the amber "Connecting" overlay even for one
+    // frame. This set lets the synchronous flip pick the green [Switching]
+    // ("Attaching") affordance for a warm open; the connect coroutine then
+    // re-confirms with the authoritative `hasLiveLease` and downgrades to the
+    // cold [Connecting] overlay if the lease turned out to be gone. Eventual
+    // consistency is fine: it is only the initial UI hint, corrected within
+    // milliseconds by the coroutine.
+    private val liveLeaseKeys: MutableSet<SshLeaseKey> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    init {
+        viewModelScope.launch {
+            sshLeaseManager.stateEvents.collect { event ->
+                when (event.state) {
+                    com.pocketshell.core.ssh.SshLeaseConnectionState.Connected,
+                    com.pocketshell.core.ssh.SshLeaseConnectionState.Idle,
+                    -> liveLeaseKeys.add(event.key)
+                    com.pocketshell.core.ssh.SshLeaseConnectionState.Closed,
+                    -> liveLeaseKeys.remove(event.key)
+                }
+            }
+        }
+    }
     private var clientRef: TmuxClient? = null
     private var clientRegistration: ActiveTmuxClients.Registration? = null
     private var registeredHostId: Long? = null
@@ -755,8 +808,19 @@ public class TmuxSessionViewModel @Inject constructor(
                 closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
                 connectingTarget = target
                 refreshReconnectAvailability()
-                _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
-                runConnect(target, attempt, effectiveTrigger)
+                // Issue #634: warm-open aware even on the cached-activation
+                // fallback (the runtime cache had an entry but could not be
+                // pointer-swapped). If the host's SSH lease is still live, attach
+                // instantly under the green [Switching] affordance rather than the
+                // blanking [Connecting] overlay (see the slow-path branch below).
+                val warmOpen = !shouldForceFreshLease(effectiveTrigger) &&
+                    sshLeaseManager.hasLiveLease(target.toSshLeaseTarget().leaseKey)
+                _connectionStatus.value = if (warmOpen) {
+                    ConnectionStatus.Switching(host, port, user)
+                } else {
+                    ConnectionStatus.Connecting(host, port, user)
+                }
+                runConnect(target, attempt, effectiveTrigger, warmReveal = warmOpen)
             }
             return
         }
@@ -798,7 +862,20 @@ public class TmuxSessionViewModel @Inject constructor(
         // in the background and flips to [Connected] once panes are ready.
         // The full-screen [Connecting] overlay is reserved for a genuine
         // first-connect to a host.
-        _connectionStatus.value = if (willFastSwitch) {
+        //
+        // Issue #634: a "warm open" — a first open of a session on a host whose
+        // SSH lease pool already holds a live transport for this credential —
+        // also reuses the warm transport (no handshake), so it too must show the
+        // green [Switching] "Attaching" affordance, NOT the amber [Connecting]
+        // overlay. We decide this SYNCHRONOUSLY off [liveLeaseKeys] so the warm
+        // open never flashes the overlay even for one frame; the connect
+        // coroutine re-confirms authoritatively and downgrades to [Connecting]
+        // if the lease turned out to be gone. A reconnect / network-reattach
+        // deliberately forces a fresh transport, so it is never a warm open.
+        val warmOpenHint = !willFastSwitch &&
+            !shouldForceFreshLease(effectiveTrigger) &&
+            liveLeaseKeys.contains(target.toSshLeaseTarget().leaseKey)
+        _connectionStatus.value = if (willFastSwitch || warmOpenHint) {
             ConnectionStatus.Switching(host, port, user)
         } else {
             ConnectionStatus.Connecting(host, port, user)
@@ -896,10 +973,51 @@ public class TmuxSessionViewModel @Inject constructor(
                     runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
                 } else {
                     // Slow path: full teardown of both the tmux client
-                    // and the SSH session before the fresh
-                    // SSH lease acquisition.
+                    // and the SSH session before the SSH lease acquisition.
                     closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
-                    runConnect(target, attempt, effectiveTrigger)
+                    // Issue #634: a "warm open" — a first open of a session on
+                    // a host whose SSH lease pool already holds a live (idle or
+                    // active) transport for this exact credential. This is the
+                    // maintainer's dogfood case: connect a host, back out, then
+                    // open one of its sessions. The pooled lease is reused (no
+                    // SSH handshake) so it must NOT show the full-screen
+                    // [Connecting] overlay / amber "Reconnecting" pill, nor be
+                    // reveal-gated behind a full reseed. We attach instantly like
+                    // a desktop `tmux attach`: flip to the green [Switching]
+                    // "Attaching" affordance and reveal as soon as panes are
+                    // seeded. A genuine COLD connect (no live pooled lease) keeps
+                    // the [Connecting] overlay. We must NOT mistake a reconnect /
+                    // network-reattach trigger for a warm open: those deliberately
+                    // force a fresh transport ([shouldForceFreshLease]).
+                    val warmOpen = !shouldForceFreshLease(effectiveTrigger) &&
+                        sshLeaseManager.hasLiveLease(target.toSshLeaseTarget().leaseKey)
+                    if (warmOpen) {
+                        recordWarmSwitchMilestone(
+                            attempt = attempt,
+                            target = target,
+                            startedAtMs = fastSwitchStartedAtMs.takeIf { it != 0L }
+                                ?: SystemClock.elapsedRealtime(),
+                            name = "warm_open_live_lease",
+                            trigger = effectiveTrigger,
+                        )
+                        // Confirm the green Switching affordance (the synchronous
+                        // [warmOpenHint] above already chose it for a live pooled
+                        // lease; re-assert here in case anything raced).
+                        if (_connectionStatus.value !is ConnectionStatus.Switching) {
+                            _connectionStatus.value = ConnectionStatus.Switching(host, port, user)
+                        }
+                    } else if (_connectionStatus.value is ConnectionStatus.Switching) {
+                        // The synchronous hint said warm, but the authoritative
+                        // pool probe found no live lease (it was evicted / closed
+                        // between the hint and now). This is a genuine COLD dial:
+                        // downgrade to the full-screen [Connecting] overlay and
+                        // blank the (empty) pane area so the cold reveal path
+                        // behaves exactly as a never-warm first connect.
+                        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+                        _panes.value = emptyList()
+                        rebuildUnifiedPanes()
+                    }
+                    runConnect(target, attempt, effectiveTrigger, warmReveal = warmOpen)
                 }
             }
         }
@@ -2615,6 +2733,16 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         attempt: Int,
         trigger: TmuxConnectTrigger,
+        // Issue #634: a "warm open" reuses an already-live pooled SSH lease,
+        // so it attaches like a desktop `tmux attach` — instantly, under the
+        // green [Switching] "Attaching" affordance — instead of the blanking
+        // full-screen [Connecting] overlay a genuine cold connect shows. When
+        // true we reveal as soon as every visible pane is seeded by
+        // [awaitPanesReadyForAttach]'s [preloadVisibleContentForNewPanes],
+        // skipping the extra reveal-gating reseed pass; when false this is a
+        // cold connect and the [Connecting] overlay + full reseed-before-reveal
+        // is preserved unchanged.
+        warmReveal: Boolean = false,
     ) {
         val startedAtMs = SystemClock.elapsedRealtime()
         // Issue #440: a fresh attempt starts with no recorded failure so a
@@ -2715,13 +2843,24 @@ public class TmuxSessionViewModel @Inject constructor(
             // re-captures panes *reused* across a racing reconcile / reattach
             // (the #553 safety net) — it skips panes already seeded this attach,
             // so a cold open pays no duplicate capture pass.
-            reseedAllVisiblePanes(
-                RuntimeRefreshGuard(
-                    generation = connectGeneration,
-                    target = target,
-                    client = client,
-                ),
-            )
+            //
+            // Issue #634: a warm open already seeded every freshly-created pane
+            // via [preloadVisibleContentForNewPanes] during
+            // [awaitPanesReadyForAttach] (all panes are new on a first open of
+            // this session, so [panesSeededThisAttach] covers them) — the
+            // [reseedAllVisiblePanes] pass below would be a pure no-op there. We
+            // skip it to keep the warm reveal as tight as a fast switch; the
+            // safety-net reseed still runs for the cold path where a racing
+            // reconcile may have left a *reused* pane unseeded.
+            if (!warmReveal) {
+                reseedAllVisiblePanes(
+                    RuntimeRefreshGuard(
+                        generation = connectGeneration,
+                        target = target,
+                        client = client,
+                    ),
+                )
+            }
 
             // Issue #640: reveal the Connected surface only AFTER every visible
             // pane has been seeded above, so the first frame the user sees is

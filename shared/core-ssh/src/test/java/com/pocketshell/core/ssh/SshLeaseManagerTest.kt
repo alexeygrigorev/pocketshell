@@ -132,6 +132,60 @@ class SshLeaseManagerTest {
     }
 
     @Test
+    fun `hasLiveLease reflects active idle and closed transports without mutating the pool`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(QueueLeaseConnector(session), idleTtlMillis = 1_000)
+
+        // No lease yet.
+        assertFalse(
+            "no lease acquired: pool must report no live lease for the key",
+            manager.hasLiveLease(TARGET.leaseKey),
+        )
+        assertFalse(
+            "an unrelated key must report no live lease",
+            manager.hasLiveLease(OTHER_TARGET.leaseKey),
+        )
+
+        // Actively leased -> live.
+        val lease = manager.acquire(TARGET).getOrThrow()
+        assertTrue("actively leased transport is live", manager.hasLiveLease(TARGET.leaseKey))
+
+        // Released but warm/idle within TTL -> still live, and the probe itself
+        // must NOT close it (no mutation).
+        lease.release()
+        advanceTimeBy(999)
+        runCurrent()
+        assertTrue("warm idle lease within TTL is live", manager.hasLiveLease(TARGET.leaseKey))
+        assertFalse("hasLiveLease must not close the idle transport", session.closed)
+
+        // After the idle TTL expires -> the transport closes -> not live.
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(session.closed)
+        assertFalse(
+            "closed transport must report no live lease",
+            manager.hasLiveLease(TARGET.leaseKey),
+        )
+    }
+
+    @Test
+    fun `hasLiveLease is false for a transport that dropped while pooled`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(QueueLeaseConnector(session), idleTtlMillis = 60_000)
+
+        manager.acquire(TARGET).getOrThrow().release()
+        assertTrue(manager.hasLiveLease(TARGET.leaseKey))
+
+        // The transport silently dies while still pooled (network drop). The
+        // pooled entry remains, but the session is no longer connected.
+        session.closed = true
+        assertFalse(
+            "a dropped pooled transport must report no live lease",
+            manager.hasLiveLease(TARGET.leaseKey),
+        )
+    }
+
+    @Test
     fun `idle cap closes oldest released session`() = runTest {
         val first = FakeSshSession()
         val second = FakeSshSession()

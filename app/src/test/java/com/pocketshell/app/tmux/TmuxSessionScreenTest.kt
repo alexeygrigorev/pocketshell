@@ -106,6 +106,7 @@ class TmuxSessionScreenTest {
             settledPaneSession = "project-b",
             navTargetSession = "project-a",
             pagerAlignedToNavTarget = false,
+            userDraggedSinceAlignment = false,
         )
 
         assertNull(
@@ -122,6 +123,7 @@ class TmuxSessionScreenTest {
             settledPaneSession = "project-a",
             navTargetSession = "project-a",
             pagerAlignedToNavTarget = true,
+            userDraggedSinceAlignment = true,
         )
 
         assertNull(switchTo)
@@ -129,15 +131,42 @@ class TmuxSessionScreenTest {
 
     @Test
     fun settleOnDifferentSessionWhenAlignedIsAGenuineUserSwipe() {
-        // A real cross-session swipe: pager already aligned to A, user swipes
-        // onto a B pane. THIS is the legitimate #626 warm-switch trigger.
+        // A real cross-session swipe: pager already aligned to A, the user
+        // physically dragged the pager (userDraggedSinceAlignment = true) and
+        // it settled on a B pane. THIS is the legitimate #626 warm-switch
+        // trigger.
         val switchTo = settleSessionSwitchTarget(
             settledPaneSession = "project-b",
             navTargetSession = "project-a",
             pagerAlignedToNavTarget = true,
+            userDraggedSinceAlignment = true,
         )
 
         assertEquals("project-b", switchTo)
+    }
+
+    @Test
+    fun settleOnDifferentSessionWithoutAUserDragIsIgnored() {
+        // Issue #634 (C->A return-to-origin content-bleed): the pager is
+        // aligned to A, but the cross-session settle to a DIFFERENT session
+        // arrived WITHOUT the user dragging the pager — it is a stale-index
+        // recomposition echo of the switch we just performed (or the app's own
+        // realignment scroll), NOT a genuine swipe. Honoring it warm-switched
+        // the user back to the session they just left, leaving both sessions'
+        // frames co-resident in the viewport. With no user drag, it must be
+        // ignored so the deliberate return-to-origin switch sticks.
+        val switchTo = settleSessionSwitchTarget(
+            settledPaneSession = "project-c",
+            navTargetSession = "project-a",
+            pagerAlignedToNavTarget = true,
+            userDraggedSinceAlignment = false,
+        )
+
+        assertNull(
+            "a cross-session settle with no preceding user drag is a stale " +
+                "echo and must NOT switch sessions",
+            switchTo,
+        )
     }
 
     @Test
@@ -147,6 +176,7 @@ class TmuxSessionScreenTest {
             settledPaneSession = null,
             navTargetSession = "project-a",
             pagerAlignedToNavTarget = true,
+            userDraggedSinceAlignment = true,
         )
 
         assertNull(switchTo)

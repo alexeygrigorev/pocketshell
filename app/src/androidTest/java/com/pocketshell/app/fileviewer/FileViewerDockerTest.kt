@@ -23,6 +23,8 @@ import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseTarget
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -55,11 +57,19 @@ class FileViewerDockerTest {
     private lateinit var keyFile: File
     private val seededPaths = mutableListOf<String>()
 
+    /**
+     * App-wide warm lease the viewer borrows from (issue #697). [handshakeCount]
+     * tracks real cold SSH handshakes: a viewer open on a host whose lease is
+     * already warm must NOT advance it (no per-open ~3-4s handshake).
+     */
+    private lateinit var leasing: CountingLeaseManager
+
     @Before
     fun setUp(): Unit = runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
+        leasing = CountingLeaseManager()
         val cacheDir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
         keyFile = File(cacheDir, "issue497-file-viewer-key").apply {
             parentFile?.mkdirs()
@@ -82,6 +92,7 @@ class FileViewerDockerTest {
             }
         }
         runCatching { keyFile.delete() }
+        runCatching { leasing.manager.close() }
     }
 
     @Test
@@ -109,6 +120,7 @@ class FileViewerDockerTest {
         // ---- Image preview ----
         composeRule.setContent {
             FileViewerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -120,6 +132,7 @@ class FileViewerDockerTest {
                 onBack = {},
                 viewModel = FileViewerViewModel(
                     InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                    leasing.manager,
                 ),
             )
         }
@@ -145,6 +158,7 @@ class FileViewerDockerTest {
 
         composeRule.setContent {
             FileViewerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -156,6 +170,7 @@ class FileViewerDockerTest {
                 onBack = {},
                 viewModel = FileViewerViewModel(
                     InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                    leasing.manager,
                 ),
             )
         }
@@ -185,6 +200,7 @@ class FileViewerDockerTest {
 
         composeRule.setContent {
             FileViewerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -196,6 +212,7 @@ class FileViewerDockerTest {
                 onBack = {},
                 viewModel = FileViewerViewModel(
                     InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                    leasing.manager,
                 ),
             )
         }
@@ -249,6 +266,7 @@ class FileViewerDockerTest {
 
         composeRule.setContent {
             FileViewerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -260,6 +278,7 @@ class FileViewerDockerTest {
                 onBack = {},
                 viewModel = FileViewerViewModel(
                     InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                    leasing.manager,
                 ),
             )
         }
@@ -290,6 +309,71 @@ class FileViewerDockerTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag(FILE_VIEWER_AUDIO_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue499-audio-after-seek")
+    }
+
+    @Test
+    fun opensAFileReusingTheWarmLeaseInsteadOfHandshakingAgain(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val textPath = "/tmp/issue697-viewer-$suffix.txt"
+        val textBody = "issue #697 — file open reuses the warm transport\nno per-open handshake\n"
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec("cat > '$textPath' <<'PSEOF'\n$textBody\nPSEOF")
+                assertEquals("seed text exit", 0, exit.exitCode)
+                seededPaths += textPath
+            } ?: error("could not connect to seed fixture file")
+        }
+
+        // Pre-warm: a sibling screen (session/folder/tmux/explorer) already holds
+        // a live lease for this host, keyed IDENTICALLY to what the viewer uses.
+        val warmTarget = SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                credentialId = "$TEST_HOST_ID:${keyFile.absolutePath}",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(keyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
+        val warmLease = withTimeout(30_000) { leasing.manager.acquire(warmTarget).getOrThrow() }
+        val afterWarm = leasing.handshakeCount.get()
+        assertEquals("pre-warm dials exactly one handshake", 1, afterWarm)
+
+        // Open the file in the viewer; it must borrow the warm transport.
+        composeRule.setContent {
+            FileViewerScreen(
+                hostId = TEST_HOST_ID,
+                hostName = "agents",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                remotePath = textPath,
+                cwd = null,
+                onBack = {},
+                viewModel = FileViewerViewModel(
+                    InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                    leasing.manager,
+                ),
+            )
+        }
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(FILE_VIEWER_TEXT_TAG)
+        }
+        composeRule.onNodeWithTag(FILE_VIEWER_TEXT_TAG).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue697-viewer-warm-lease-reuse")
+
+        // The viewer rode the warm transport — NO new ~3-4s handshake.
+        assertEquals(
+            "file open must reuse the warm lease, not handshake again",
+            afterWarm,
+            leasing.handshakeCount.get(),
+        )
+        warmLease.release()
     }
 
     private suspend fun connect() = SshConnection.connect(
@@ -371,6 +455,16 @@ class FileViewerDockerTest {
         writeIntLE(dataSize)
         repeat(dataSize) { out.write(0) }
         return out.toByteArray()
+    }
+
+    private companion object {
+        /**
+         * Stable host id for the viewer's lease key (issue #697). The viewer
+         * keys its lease as `"$hostId:$keyPath"`; the warm-reuse test pre-warms a
+         * sibling lease with this same id so the pool hands back the SAME warm
+         * transport.
+         */
+        const val TEST_HOST_ID: Long = 497L
     }
 }
 

@@ -108,6 +108,7 @@ class LinkTapParsingDockerTest {
 
         composeRule.setContent {
             FileViewerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -117,7 +118,7 @@ class LinkTapParsingDockerTest {
                 remotePath = tildePath,
                 cwd = null,
                 onBack = {},
-                viewModel = FileViewerViewModel(targetAppContext()),
+                viewModel = FileViewerViewModel(targetAppContext(), realLeaseManager()),
             )
         }
         // The image rendering (NOT a CannotPreview "No such file") proves the
@@ -157,6 +158,7 @@ class LinkTapParsingDockerTest {
 
         composeRule.setContent {
             FileViewerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -166,7 +168,7 @@ class LinkTapParsingDockerTest {
                 remotePath = relInput,
                 cwd = cwd,
                 onBack = {},
-                viewModel = FileViewerViewModel(targetAppContext()),
+                viewModel = FileViewerViewModel(targetAppContext(), realLeaseManager()),
             )
         }
         composeRule.waitUntil(timeoutMillis = 30_000) {
@@ -223,7 +225,8 @@ class LinkTapParsingDockerTest {
                 // the detected relative path resolved against the pane cwd, the
                 // same wiring TmuxSessionScreen.onConversationLinkTap uses.
                 FileViewerScreen(
-                    hostName = "agents",
+                    hostId = TEST_HOST_ID,
+                hostName = "agents",
                     hostname = DEFAULT_HOST,
                     port = DEFAULT_PORT,
                     username = DEFAULT_USER,
@@ -232,7 +235,7 @@ class LinkTapParsingDockerTest {
                     remotePath = tappedLink.value!!.text,
                     cwd = cwd,
                     onBack = {},
-                    viewModel = FileViewerViewModel(targetAppContext()),
+                    viewModel = FileViewerViewModel(targetAppContext(), realLeaseManager()),
                 )
             }
         }
@@ -291,6 +294,12 @@ class LinkTapParsingDockerTest {
         assertTrue(bmp.compress(Bitmap.CompressFormat.PNG, 100, out))
         bmp.recycle()
         return out.toByteArray()
+    }
+
+    private companion object {
+        // Stable host id for the viewer's lease key (issue #697). These tests
+        // don't pre-warm a sibling lease, so any value works.
+        const val TEST_HOST_ID: Long = 558L
     }
 }
 

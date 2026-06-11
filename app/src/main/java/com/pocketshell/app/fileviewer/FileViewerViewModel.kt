@@ -3,11 +3,11 @@ package com.pocketshell.app.fileviewer
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.core.ssh.SshFileNotFoundException
 import com.pocketshell.core.ssh.SshFileTooLargeException
-import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -100,9 +100,13 @@ sealed interface FileViewerUiState {
  * Responsibilities:
  *  - Resolve a relative/`~`/absolute path against the session cwd
  *    ([RemotePathResolver]).
- *  - Open a one-shot [SshSession] from the host credentials (same per-action
- *    pattern as [com.pocketshell.app.projects.RepoBrowserViewModel]) and read
- *    the file over SFTP/`cat` with a hard size cap ([MAX_PREVIEW_BYTES]).
+ *  - Borrow a session from the app-wide warm [SshLeaseManager] transport — the
+ *    LITERALLY-same per-host connection the session / folder / tmux / explorer
+ *    screens hold ([LeaseSessionExec]) — and read the file over SFTP/`cat` on a
+ *    channel of that already-warm transport, with a hard size cap
+ *    ([MAX_PREVIEW_BYTES]). No per-open cold ~3-4s SSH handshake (issue #697):
+ *    the lease is RELEASED (refcount decrement), never `close()`d, so the pool
+ *    keeps the transport warm for the next open / the session screen.
  *  - Decide image-vs-text-vs-binary ([FileTypeDetector]); cache image bytes
  *    to the app cache dir so the Compose image loader reads them off disk.
  *
@@ -112,6 +116,7 @@ sealed interface FileViewerUiState {
 @HiltViewModel
 class FileViewerViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
+    private val sshLeaseManager: SshLeaseManager,
     private val prefs: FileViewerPrefsStore = FileViewerPrefsStore(appContext),
 ) : ViewModel() {
 
@@ -135,6 +140,24 @@ class FileViewerViewModel @Inject constructor(
 
     private var loadJob: Job? = null
     private var lastRequest: Request? = null
+
+    /**
+     * Tiny bounded LRU of already-rendered viewer states keyed by the request
+     * (issue #697). Re-opening a file you just viewed paints the cached result
+     * instantly (the VS-Code-Remote-SSH "feels local" re-open trick) while a
+     * fresh fetch reconciles in the background and the live result always wins.
+     * Image/PDF/audio/binary entries that wrote bytes to the on-disk cache are
+     * skipped — that cached file may have been swept, so they always re-fetch.
+     */
+    private val contentCache = object : LinkedHashMap<Request, FileViewerUiState>(
+        CONTENT_CACHE_CAP + 1,
+        0.75f,
+        true,
+    ) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<Request, FileViewerUiState>,
+        ): Boolean = size > CONTENT_CACHE_CAP
+    }
 
     /** Toggle word wrap and persist the choice. */
     fun toggleWordWrap() {
@@ -172,18 +195,34 @@ class FileViewerViewModel @Inject constructor(
             remoteHome = conventionalRemoteHome(request.username),
         )
         loadJob?.cancel()
-        _state.value = FileViewerUiState.Loading(displayPath = resolved)
+        // Re-open of a just-viewed text file paints instantly from the LRU; a
+        // fresh fetch still runs underneath and the live result wins (#697).
+        val cached = contentCache[request]
+        _state.value = cached ?: FileViewerUiState.Loading(displayPath = resolved)
         loadJob = viewModelScope.launch {
-            _state.value = withContext(Dispatchers.IO) { fetch(request, resolved) }
+            val fetched = withContext(Dispatchers.IO) { fetch(request, resolved) }
+            cacheIfReusable(request, fetched)
+            _state.value = fetched
         }
     }
 
     private suspend fun fetch(request: Request, fallbackResolved: String): FileViewerUiState {
-        val session = connect(request)
-            ?: return FileViewerUiState.CannotPreview(
+        val result = LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = request.toLeaseTarget(),
+        ) { session ->
+            readFromSession(request, session)
+        }
+        return result.getOrElse { error ->
+            if (error is CancellationException) throw error
+            FileViewerUiState.CannotPreview(
                 displayPath = fallbackResolved,
                 message = "Couldn't reach ${request.username}@${request.hostname}.",
             )
+        }
+    }
+
+    private suspend fun readFromSession(request: Request, session: SshSession): FileViewerUiState {
         val resolved = RemotePathResolver.resolve(
             input = request.path,
             cwd = request.cwd,
@@ -248,8 +287,18 @@ class FileViewerViewModel @Inject constructor(
                 displayPath = resolved,
                 message = "Couldn't read the file: ${t.message ?: t.javaClass.simpleName}",
             )
-        } finally {
-            runCatching { session.close() }
+        }
+    }
+
+    /**
+     * Cache only the states that re-paint correctly off in-memory data — i.e.
+     * decoded text. Image/PDF/audio/binary depend on the on-disk cache file
+     * (which may have been swept), and the can't-reach / not-found / too-large
+     * failures should always be re-tried, so they are not cached.
+     */
+    private fun cacheIfReusable(request: Request, state: FileViewerUiState) {
+        if (state is FileViewerUiState.TextContent) {
+            contentCache[request] = state
         }
     }
 
@@ -275,16 +324,6 @@ class FileViewerViewModel @Inject constructor(
         return file
     }
 
-    private suspend fun connect(request: Request): SshSession? =
-        SshConnection.connect(
-            host = request.hostname,
-            port = request.port,
-            user = request.username,
-            key = SshKey.Path(File(request.keyPath)),
-            passphrase = request.passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrNull()
-
     private suspend fun remoteHomeDirectory(session: SshSession): String? {
         val result = try {
             session.exec("printf '%s\\n' \"\$HOME\"")
@@ -306,14 +345,21 @@ class FileViewerViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         loadJob?.cancel()
+        contentCache.clear()
     }
 
     /**
      * Host credentials + the remote path to open. Mirrors the credential
      * shape used by sibling per-host screens; the path is resolved against
      * [cwd] before the SFTP read.
+     *
+     * [hostId] is the persisted host row id; it feeds the lease key
+     * (`"$hostId:$keyPath"`) so the borrow is keyed BYTE-IDENTICALLY to the
+     * session / folder / tmux / explorer screens and the pool hands back the
+     * literally-same warm transport (issue #697).
      */
     data class Request(
+        val hostId: Long,
         val hostname: String,
         val port: Int,
         val username: String,
@@ -322,9 +368,20 @@ class FileViewerViewModel @Inject constructor(
         val path: String,
         val cwd: String?,
     ) {
+        internal fun toLeaseTarget(): LeaseSessionTarget =
+            LeaseSessionTarget(
+                hostId = hostId,
+                hostname = hostname,
+                port = port,
+                username = username,
+                keyPath = keyPath,
+                passphrase = passphrase,
+            )
+
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Request) return false
+            if (hostId != other.hostId) return false
             if (hostname != other.hostname) return false
             if (port != other.port) return false
             if (username != other.username) return false
@@ -339,7 +396,8 @@ class FileViewerViewModel @Inject constructor(
         }
 
         override fun hashCode(): Int {
-            var result = hostname.hashCode()
+            var result = hostId.hashCode()
+            result = 31 * result + hostname.hashCode()
             result = 31 * result + port
             result = 31 * result + username.hashCode()
             result = 31 * result + keyPath.hashCode()
@@ -395,6 +453,14 @@ class FileViewerViewModel @Inject constructor(
         internal fun audioExceedsCap(sizeBytes: Long): Boolean = sizeBytes > MAX_AUDIO_BYTES
 
         internal const val CACHE_SUBDIR = "file-viewer"
+
+        /**
+         * Max number of already-rendered text states kept in the re-open LRU
+         * (issue #697). Small on purpose — it only serves an instant first
+         * paint on re-open; the live fetch reconciles right after, so a bigger
+         * cache buys little and the cap keeps the held decoded strings bounded.
+         */
+        internal const val CONTENT_CACHE_CAP = 8
 
         internal fun conventionalRemoteHome(username: String): String? {
             val user = username.trim()

@@ -126,6 +126,7 @@ class TerminalFilePathTapToViewerDockerTest {
         // RemotePathResolver joins them server-side.
         composeRule.setContent {
             FileViewerScreen(
+                hostId = 500L,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -137,6 +138,7 @@ class TerminalFilePathTapToViewerDockerTest {
                 onBack = {},
                 viewModel = FileViewerViewModel(
                     InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                    realLeaseManager(),
                 ),
             )
         }

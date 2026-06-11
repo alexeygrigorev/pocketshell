@@ -119,6 +119,7 @@ const val FILE_VIEWER_FILE_NAME_TAG = "fileViewerFileName"
  */
 @Composable
 fun FileViewerScreen(
+    hostId: Long,
     hostName: String,
     hostname: String,
     port: Int,
@@ -131,9 +132,10 @@ fun FileViewerScreen(
     modifier: Modifier = Modifier,
     viewModel: FileViewerViewModel = hiltViewModel(),
 ) {
-    LaunchedEffect(hostname, port, username, keyPath, remotePath, cwd) {
+    LaunchedEffect(hostId, hostname, port, username, keyPath, remotePath, cwd) {
         viewModel.bind(
             FileViewerViewModel.Request(
+                hostId = hostId,
                 hostname = hostname,
                 port = port,
                 username = username,

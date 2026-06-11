@@ -1139,6 +1139,7 @@ private fun AppNavigator(
         )
 
         is AppDestination.FileViewer -> FileViewerScreen(
+            hostId = dest.hostId,
             hostName = dest.hostName,
             hostname = dest.hostname,
             port = dest.port,

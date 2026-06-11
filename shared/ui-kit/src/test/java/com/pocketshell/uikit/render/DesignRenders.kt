@@ -223,6 +223,96 @@ class DesignRenders {
         }
     }
 
+    /**
+     * Issue #675: the decluttered multi-window agent tree. A session with two
+     * Claude windows (w0, w1) is broken out into per-window child rows. The
+     * agent type is shown ONCE per window (the `w0 claude` / `w1 claude` titles
+     * + the status dot) — NOT three times. So:
+     *  - the host header counts agent WINDOWS ("2 agents", not "1"),
+     *  - the parent session row carries NO inline `w0 Claude · idle · w1 Claude`
+     *    summary and NO trailing agent badge,
+     *  - the window child rows carry NO per-row agent badge.
+     *
+     * For contrast the fixture leads with a single-window agent session that
+     * KEEPS its concise trailing badge — the redundancy collapse is specific to
+     * multi-window expanded sessions.
+     *
+     * `FolderListScreen` and its `WorkspaceSessionRow` / `WorkspaceSessionWindowRow`
+     * are app-module private composables, so this mirrors them with the shared
+     * ui-kit primitives the screen composes ([ListRow] + [StatusDot] + [Badge]).
+     */
+    @Test
+    fun hostDetailMultiWindowAgentTree() = render("host-detail-multi-window-agent-tree") {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            // Header counts agent WINDOWS: this folder's one session has two
+            // Claude windows, so "2 agents" (the bug showed "1 agent").
+            TreeRootHeader(
+                label = "ai-shipping-labs-workshops-raw",
+                count = "2 agents",
+            )
+
+            // A single-window agent session KEEPS its concise trailing badge.
+            ListRow(
+                title = "git-pocketshell-c",
+                leading = { StatusDot(status = ConnectionStatus.Connected) },
+                trailing = { Badge(label = "Claude", role = BadgeRole.Agent) },
+                onClick = {},
+                modifier = Modifier
+                    .background(
+                        PocketShellColors.Surface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(start = 16.dp),
+            )
+
+            // Multi-window PARENT row: NO inline window summary, NO trailing
+            // badge — the window child rows below carry the detail.
+            ListRow(
+                title = "git-ai-shipping-labs-workshops-raw",
+                leading = { StatusDot(status = ConnectionStatus.Connected) },
+                onClick = {},
+                modifier = Modifier
+                    .background(
+                        PocketShellColors.Surface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(start = 16.dp),
+            )
+
+            // Window child rows: dot + `w<n> claude` title, NO per-row badge.
+            DeclutteredWindowRow(title = "w0 claude")
+            DeclutteredWindowRow(title = "w1 claude")
+        }
+    }
+
+    /**
+     * Mirror of the app's `WorkspaceSessionWindowRow` AFTER #675: an indented
+     * window child row that leads with a status dot and the `w<n> claude` title
+     * and carries NO trailing agent badge (the dot + the title already name the
+     * agent — repeating it on a badge was the third duplication).
+     */
+    @Composable
+    private fun DeclutteredWindowRow(title: String) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 40.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatusDot(status = ConnectionStatus.Connected)
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = title,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+
     /** Mirror of the app's tree-root header (title + muted-mono count subtitle). */
     @Composable
     private fun TreeRootHeader(label: String, count: String) {

@@ -1720,6 +1720,7 @@ private fun FolderGroup(
                             is FolderTreeSessionChildRow.Session -> WorkspaceSessionRow(
                                 folderPath = folder.path,
                                 session = row.session,
+                                expandedIntoWindows = row.expandedIntoWindows,
                                 onClick = { onSessionClick(folder.path, row.session.sessionName, null) },
                                 onRename = { onRenameSession(row.session.sessionName) },
                                 onStop = { onStopSession(row.session.sessionName) },
@@ -1845,7 +1846,17 @@ private fun FolderHeader(
 }
 
 internal sealed interface FolderTreeSessionChildRow {
-    data class Session(val session: FolderSessionEntry) : FolderTreeSessionChildRow
+    /**
+     * A session parent row. [expandedIntoWindows] is true when this session is
+     * broken out into per-window [Window] child rows below it (multi-window).
+     * When true the parent row drops its redundant inline window-agent summary
+     * and trailing agent badge — the window child rows already carry that
+     * detail, so the agent type is shown once per window, not three times (#675).
+     */
+    data class Session(
+        val session: FolderSessionEntry,
+        val expandedIntoWindows: Boolean = false,
+    ) : FolderTreeSessionChildRow
     data class Window(
         val sessionName: String,
         val window: FolderSessionWindowEntry,
@@ -1860,7 +1871,7 @@ internal fun folderTreeSessionChildRows(
         if (windows.size <= 1) {
             listOf(FolderTreeSessionChildRow.Session(session))
         } else {
-            listOf(FolderTreeSessionChildRow.Session(session)) +
+            listOf(FolderTreeSessionChildRow.Session(session, expandedIntoWindows = true)) +
                 windows.map { window ->
                     FolderTreeSessionChildRow.Window(
                         sessionName = session.sessionName,
@@ -1893,6 +1904,11 @@ private fun WorkspaceSessionRow(
     onRename: () -> Unit,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
+    // True when this session is broken out into per-window child rows below it
+    // (#675). The window rows already carry each window's status + identity, so
+    // the parent drops its inline `w0 Claude · idle · w1 Claude` window summary
+    // and its trailing agent badge to avoid repeating the agent type 3×.
+    expandedIntoWindows: Boolean = false,
 ) {
     // Option A: the session row stays quiet — no inline kebab. Tap opens the
     // session; long-press opens the action menu (Open / Rename / Stop). The
@@ -1919,30 +1935,30 @@ private fun WorkspaceSessionRow(
             modifier = Modifier.testTag(folderSessionStatusDotTestTag(folderPath, session.sessionName)),
         )
         Spacer(modifier = Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = sessionDisplayTitle(session),
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            sessionSecondaryText(session)?.let { secondary ->
-                Text(
-                    text = secondary,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        Spacer(modifier = Modifier.width(8.dp))
-        AgentTypeBadge(
-            session = session,
-            modifier = Modifier.testTag(folderSessionBadgeTestTag(folderPath, session.sessionName)),
+        // No inline window-agent summary on the parent: a multi-window session is
+        // already expanded into per-window child rows (which carry each window's
+        // status + identity), and a single-window session has nothing to
+        // summarise. The old `w0 Claude · idle · w1 Claude` subtitle was one of
+        // three places that repeated the agent type, so it is gone (#675).
+        Text(
+            text = sessionDisplayTitle(session),
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
+        // The parent's trailing agent badge is also redundant once the windows
+        // are broken out (each window row carries the agent identity in its
+        // title), so it is dropped on an expanded session (#675).
+        if (!expandedIntoWindows) {
+            Spacer(modifier = Modifier.width(8.dp))
+            AgentTypeBadge(
+                session = session,
+                modifier = Modifier.testTag(folderSessionBadgeTestTag(folderPath, session.sessionName)),
+            )
+        }
         // Zero-size anchor for the long-press action menu at the row's trailing
         // edge — no visible affordance, so the row stays quiet until pressed.
         Box {
@@ -2085,6 +2101,11 @@ private fun WorkspaceSessionWindowRow(
             ),
         )
         Spacer(modifier = Modifier.width(8.dp))
+        // The window title (`w0 claude`) already names the agent and the status
+        // dot conveys active/idle, so the per-row agent badge is dropped (#675):
+        // on a multi-window agent session "Claude" was repeated 3× (parent inline
+        // summary + parent badge + per-window badge). One indication per window —
+        // the dot + the title — is enough.
         Text(
             text = windowDisplayTitle(window),
             color = PocketShellColors.Text,
@@ -2093,21 +2114,6 @@ private fun WorkspaceSessionWindowRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        AgentTypeBadge(
-            label = sessionBadgeLabel(
-                FolderSessionEntry(
-                    sessionName = sessionName,
-                    lastActivity = null,
-                    attached = false,
-                    agentKind = window.agentKind,
-                ),
-            ),
-            isAgent = isAgent,
-            modifier = Modifier.testTag(
-                folderSessionWindowBadgeTestTag(folderPath, sessionName, window.index, window.name),
-            ),
         )
     }
 }
@@ -2386,13 +2392,46 @@ private val FolderRow.isActive: Boolean
 
 internal fun projectCountText(folder: FolderRow): String {
     val sessions = folder.sessions.size
-    val agents = folder.sessions.count { it.agentKind.isAgent() }
+    val agents = folderAgentWindowCount(folder)
+    // #675: the agent count now sums agent WINDOWS, so it can exceed the session
+    // count (a 2-window Claude session = 2 agents in 1 session). The collapse to
+    // a bare "N agents" therefore keys on "every session here is an agent
+    // session" (no plain shells), not on `agents == sessions` — otherwise a
+    // pure-agent folder with one multi-window session reads "1 session · 2
+    // agents" instead of the maintainer's expected "2 agents".
+    val allSessionsAreAgents = folder.sessions.isNotEmpty() &&
+        folder.sessions.all { it.agentKind.isAgent() }
     return when {
-        agents > 0 && agents == sessions -> agents.countLabel("agent")
+        agents > 0 && allSessionsAreAgents -> agents.countLabel("agent")
         agents > 0 -> "${sessions.countLabel("session")} · ${agents.countLabel("agent")}"
         else -> sessions.countLabel("session")
     }
 }
+
+/**
+ * Count of agent WINDOWS under a folder — issue #675.
+ *
+ * The header's "N agent(s)" count must reflect how the tree breaks sessions out
+ * into per-window child rows. A multi-window session (e.g. two Claude windows
+ * `w0`/`w1`) shows two agent rows, so it must contribute 2 to the count, not 1.
+ *
+ * Consistency rule (matches [folderTreeSessionChildRows], which only expands a
+ * session into window child rows when it has >1 window):
+ *  - Multi-window session (`windows.size > 1`): count the windows whose
+ *    [FolderSessionWindowEntry.agentKind] is an agent kind.
+ *  - Single-window / no-window session: count 1 when the session's own
+ *    [FolderSessionEntry.agentKind] is an agent kind, else 0.
+ */
+internal fun folderAgentWindowCount(folder: FolderRow): Int =
+    folder.sessions.sumOf { session ->
+        if (session.windows.size > 1) {
+            session.windows.count { it.agentKind.isAgent() }
+        } else if (session.agentKind.isAgent()) {
+            1
+        } else {
+            0
+        }
+    }
 
 private fun Int.countLabel(noun: String): String =
     if (this == 1) "$this $noun" else "$this ${noun}s"
@@ -2453,26 +2492,6 @@ private fun sessionDisplayTitle(session: FolderSessionEntry): String {
     val raw = session.sessionName.trim()
     if (raw.isBlank()) return "Tmux session"
     return raw
-}
-
-private fun sessionSecondaryText(session: FolderSessionEntry): String? {
-    val windows = sortedSessionWindows(session)
-    if (windows.size <= 1) return null
-    val visible = windows.take(3).joinToString(" · ") { window ->
-        val identity = window.index?.let { "w$it" } ?: "window"
-        val hint = when {
-            window.agentKind.isAgent() -> sessionKindLabel(
-                session.copy(agentKind = window.agentKind, attached = false, windows = emptyList()),
-            )
-            !window.command.isNullOrBlank() -> window.command
-            !window.name.isNullOrBlank() -> window.name
-            window.active -> "active"
-            else -> null
-        }
-        if (hint == null) identity else "$identity $hint"
-    }
-    val remaining = windows.size - 3
-    return if (remaining > 0) "$visible · +$remaining" else visible
 }
 
 private fun sortedSessionWindows(session: FolderSessionEntry): List<FolderSessionWindowEntry> =
@@ -2762,12 +2781,6 @@ fun folderSessionWindowTileTestTag(
     windowIndex: Int?,
     windowName: String?,
 ): String = "${folderSessionWindowRowTestTag(folderPath, sessionName, windowIndex, windowName)}:tile"
-fun folderSessionWindowBadgeTestTag(
-    folderPath: String,
-    sessionName: String,
-    windowIndex: Int?,
-    windowName: String?,
-): String = "${folderSessionWindowRowTestTag(folderPath, sessionName, windowIndex, windowName)}:badge"
 fun folderTreeRootTestTag(path: String): String = "folder-list:tree-root:$path"
 fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:label"
 fun folderTreeRootCountTag(path: String): String = "folder-list:tree-root:$path:count"

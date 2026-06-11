@@ -429,7 +429,13 @@ class FolderListGroupingTest {
 
         assertEquals(4, rows.size)
         assertEquals("plain-shell", (rows[0] as FolderTreeSessionChildRow.Session).session.sessionName)
+        // Single-window session: NOT expanded into window child rows, so the
+        // parent keeps its concise indicator (#675).
+        assertFalse((rows[0] as FolderTreeSessionChildRow.Session).expandedIntoWindows)
         assertEquals("git-zoom-calls", (rows[1] as FolderTreeSessionChildRow.Session).session.sessionName)
+        // Multi-window session: parent is flagged expanded so the screen drops
+        // its inline window summary + trailing badge (the window rows carry it).
+        assertTrue((rows[1] as FolderTreeSessionChildRow.Session).expandedIntoWindows)
         assertEquals(0, (rows[2] as FolderTreeSessionChildRow.Window).window.index)
         assertEquals(SessionAgentKind.Claude, (rows[2] as FolderTreeSessionChildRow.Window).window.agentKind)
         assertEquals(1, (rows[3] as FolderTreeSessionChildRow.Window).window.index)
@@ -979,6 +985,74 @@ class FolderListGroupingTest {
                     entry("codex", 1_000L, kind = SessionAgentKind.Codex),
                 ),
             ),
+        )
+    }
+
+    @Test
+    fun agentCountCountsAgentWindowsNotSessionsForMultiWindowSessions() {
+        // #675: a single session with TWO Claude windows (w0, w1) is broken out
+        // into two agent rows, so the header must report "2 agents", not "1".
+        val twoClaudeWindows = FolderSessionEntry(
+            sessionName = "ai-shipping-labs-workshops-raw",
+            lastActivity = 2_000L,
+            attached = false,
+            agentKind = SessionAgentKind.Claude,
+            windows = listOf(
+                FolderSessionWindowEntry(
+                    index = 0,
+                    name = "claude",
+                    active = false,
+                    command = "claude",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+                FolderSessionWindowEntry(
+                    index = 1,
+                    name = "claude",
+                    active = true,
+                    command = "claude",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+        )
+        assertEquals(2, folderAgentWindowCount(folderWithSessions(twoClaudeWindows)))
+        assertEquals("2 agents", projectCountText(folderWithSessions(twoClaudeWindows)))
+    }
+
+    @Test
+    fun agentCountOnlyCountsAgentWindowsInAMixedMultiWindowSession() {
+        // #675: a session with one Claude window + one plain-shell window
+        // contributes only the ONE agent window to the count.
+        val agentPlusShell = FolderSessionEntry(
+            sessionName = "git-zoom-calls",
+            lastActivity = 2_000L,
+            attached = false,
+            agentKind = SessionAgentKind.Claude,
+            windows = listOf(
+                FolderSessionWindowEntry(
+                    index = 0,
+                    name = "claude",
+                    active = true,
+                    command = "claude",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+                FolderSessionWindowEntry(
+                    index = 1,
+                    name = "bash",
+                    active = false,
+                    command = "bash",
+                    agentKind = SessionAgentKind.Shell,
+                ),
+            ),
+        )
+        assertEquals(1, folderAgentWindowCount(folderWithSessions(agentPlusShell)))
+
+        // A single-window / window-less agent session still counts as 1 agent,
+        // and the windows across multiple sessions sum (2 here: one from the
+        // simple Claude session + one agent window from the mixed session).
+        val simpleClaude = entry("claude-simple", 1_000L, kind = SessionAgentKind.Claude)
+        assertEquals(
+            2,
+            folderAgentWindowCount(folderWithSessions(simpleClaude, agentPlusShell)),
         )
     }
 

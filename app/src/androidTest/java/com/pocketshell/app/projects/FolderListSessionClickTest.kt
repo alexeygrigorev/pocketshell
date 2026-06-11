@@ -18,6 +18,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
@@ -378,6 +379,131 @@ class FolderListSessionClickTest {
             compose.onAllNodesWithTag(folderHeaderLabelTag(cableWorldPath), useUnmergedTree = true)
                 .fetchSemanticsNodes().isEmpty(),
         )
+    }
+
+    @Test
+    fun multiWindowAgentSessionDoesNotRepeatAgentTypeOrBadges() {
+        // #675: a session with TWO Claude windows (w0, w1) is broken out into
+        // per-window child rows. The agent type used to render THREE times: the
+        // parent's inline `w0 Claude · idle · w1 Claude` summary, the parent
+        // badge, and each window-row badge. After the fix the parent drops the
+        // summary + badge and the window rows drop their badges, so "Claude"
+        // appears once per window (in the `w0 claude` / `w1 claude` titles) and
+        // NO capitalized "Claude" badge/summary text survives.
+        runBlocking {
+            db.projectRootDao().insert(
+                ProjectRootEntity(
+                    hostId = hostId,
+                    label = "git",
+                    path = "/home/alexey/git",
+                ),
+            )
+        }
+        val projectPath = "/home/alexey/git/ai-shipping-labs-workshops-raw"
+        val sessionName = "git-ai-shipping-labs-workshops-raw"
+        val fakeGateway = StaticGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = sessionName,
+                    lastActivity = 1_700_000_100L,
+                    attached = false,
+                    cwd = projectPath,
+                    agentKind = SessionAgentKind.Claude,
+                    windows = listOf(
+                        FolderSessionWindowRow(
+                            sessionName = sessionName,
+                            index = 0,
+                            name = "claude",
+                            active = false,
+                            cwd = projectPath,
+                            tty = "/dev/pts/4",
+                            command = "claude",
+                            agentKind = SessionAgentKind.Claude,
+                        ),
+                        FolderSessionWindowRow(
+                            sessionName = sessionName,
+                            index = 1,
+                            name = "claude",
+                            active = true,
+                            cwd = projectPath,
+                            tty = "/dev/pts/5",
+                            command = "claude",
+                            agentKind = SessionAgentKind.Claude,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val viewModel = constructViewModelOnMainThread(fakeGateway)
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "h",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue675",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                    hostDetailViewMode = HostDetailViewMode.Tree,
+                )
+            }
+        }
+
+        // The active agent folder auto-expands, so the window child rows render.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(
+                folderSessionWindowRowTestTag(projectPath, sessionName, 0, "claude"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Both window rows are present, each titled `w<n> claude`.
+        compose.onNodeWithTag(
+            folderSessionWindowRowTestTag(projectPath, sessionName, 0, "claude"),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        compose.onNodeWithTag(
+            folderSessionWindowRowTestTag(projectPath, sessionName, 1, "claude"),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithText("w0 claude").assertExists()
+        compose.onNodeWithText("w1 claude").assertExists()
+
+        // The parent's trailing agent badge is gone.
+        assertTrue(
+            "parent session badge should not render on a multi-window session",
+            compose.onAllNodesWithTag(
+                folderSessionBadgeTestTag(projectPath, sessionName),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+
+        // No capitalized "Claude" badge / inline-summary text survives — the
+        // agent type is conveyed only via the lowercase `w0 claude` titles and
+        // the status dots. (Window titles use the lowercase command.)
+        assertTrue(
+            "capitalized Claude badge/summary text should not appear thrice",
+            compose.onAllNodesWithText("Claude", useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
+
+        // And the inline window-summary separator pattern is gone.
+        assertTrue(
+            compose.onAllNodesWithText("Claude · Idle", useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
+
+        // Full-device evidence of the decluttered tree for the issue (#675).
+        WalkthroughScreenshotArtifacts.capture("issue675-multi-window-decluttered-tree")
     }
 
     @Test

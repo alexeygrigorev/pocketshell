@@ -985,23 +985,21 @@ class SshFolderListGateway internal constructor(
             if (createResult.exitCode != 0 && createResult.stderr.isNotBlank()) {
                 throw RuntimeException(createResult.stderr.trim())
             }
-            // Launch the start command via send-keys if requested. tmux
-            // 's `send-keys ... Enter` sequence pipes the literal
-            // command followed by a carriage return — same shape used
-            // by the existing voice + planner paths.
+            // Launch the start command via send-keys if requested. tmux's
+            // `send-keys ... Enter` sequence pipes the literal command
+            // followed by a carriage return — same shape used by the
+            // existing voice + planner paths.
+            //
+            // Issue #703: for agents the start command is now the SHORT
+            // server-side wrapper line `pocketshell agent <kind> --dir
+            // '<dir>' …`. The wrapper itself merges the folder's
+            // .env/.envrc (replacing the old `eval "$(pocketshell env
+            // export …)"` prelude — hard-cut, D22), strips the provider
+            // env vars for OpenCode, and suppresses each agent's first-run
+            // modal so the agent is immediately usable. The app just types
+            // the one short line verbatim.
             if (startCommand != null) {
-                // Issue #263: auto-export the folder's .env / .envrc vars
-                // into the new pane's shell BEFORE the agent CLI starts, so
-                // the agent inherits them. The values are pulled via command
-                // substitution (`eval "$(...)"`) so only the literal
-                // `eval "$(pocketshell env export ...)"` text is echoed into
-                // the pane — secret values never appear in the visible
-                // terminal. Degrades gracefully: if `pocketshell` is missing
-                // the substitution errors to a no-op (command-not-found is
-                // swallowed inside `$()`), and if no env files exist the
-                // export prints nothing — either way the agent still starts.
-                val payload = composeStartCommand(cwd, startCommand)
-                val quotedCommand = shellQuote(payload)
+                val quotedCommand = shellQuote(startCommand)
                 session.exec(
                     pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
                 )
@@ -1409,29 +1407,6 @@ class SshFolderListGateway internal constructor(
             return if (parent.isEmpty() || parent == "/") "/$childName" else "$parent/$childName"
         }
 
-        /**
-         * Issue #263: compose the literal command typed into a freshly
-         * created pane. When [startCommand] is present, prepend an
-         * env-export prelude so the folder's `.env` / `.envrc` variables
-         * are live before the agent CLI runs:
-         *
-         * ```
-         * eval "$(pocketshell env export --dir '<cwd>')"; <startCommand>
-         * ```
-         *
-         * `<cwd>` is shell-quoted so a hostile or unusual folder path
-         * cannot inject shell. The values are merged in via command
-         * substitution, so only this literal text is echoed into the
-         * visible terminal — the secret values are not. The prelude
-         * degrades to a no-op when `pocketshell` is absent (the inner
-         * command-not-found error is swallowed inside `$()`) or when the
-         * folder has no env files (export prints nothing), so the agent
-         * always launches.
-         */
-        internal fun composeStartCommand(cwd: String, startCommand: String): String {
-            val quotedDir = shellQuoteValue(cwd)
-            return "eval \"\$(pocketshell env export --dir $quotedDir)\"; $startCommand"
-        }
 
         // tmux's `-F` format spec replaces tab bytes (0x09) in the
         // rendered output with `_` so a multi-field row delimited by

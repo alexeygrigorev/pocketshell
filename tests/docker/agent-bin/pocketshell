@@ -64,6 +64,51 @@ case "${1:-}" in
     printf 'pocketshell fixture %s\n' "$(fixture_version)"
     exit 0
     ;;
+  agent)
+    # Issue #703: the app now launches agents via the short server-side
+    # wrapper `pocketshell agent <kind> --dir <dir> [--no-skip-permissions]
+    # [--config-dir <dir>]` instead of a giant inline env-strip line. This
+    # fixture mirrors the real wrapper's observable behaviour: parse the
+    # short argv, cd into --dir, then exec the (fake) agent so the
+    # AgentLaunchCommandDockerTest sees the agent's ready output land in the
+    # pane — proving the wrapper exec'd the agent, not just that text was
+    # typed. The real wrapper additionally merges .env/.envrc, strips the
+    # provider env for opencode, and suppresses first-run prompts; the fake
+    # agents have no such prompts so nothing extra is needed here.
+    shift
+    agent_kind="${1:-}"
+    shift || true
+    agent_dir=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --dir)
+          agent_dir="${2:-}"
+          shift 2
+          ;;
+        --skip-permissions|--no-skip-permissions)
+          shift
+          ;;
+        --config-dir)
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ -n "$agent_dir" ]; then
+      cd "$agent_dir" 2>/dev/null || true
+    fi
+    case "$agent_kind" in
+      codex|claude|opencode)
+        exec "$agent_kind"
+        ;;
+      *)
+        printf 'pocketshell agent fixture supports: codex|claude|opencode\n' >&2
+        exit 64
+        ;;
+    esac
+    ;;
   usage)
     shift
     if [ "${1:-}" = "--json" ]; then

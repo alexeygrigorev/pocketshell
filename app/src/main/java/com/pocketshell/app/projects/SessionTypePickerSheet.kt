@@ -211,7 +211,8 @@ internal fun SessionTypePickerContent(
                     // OpenCode: its per-action permissions are config-driven
                     // in opencode.json, not a CLI flag, so the checkbox would
                     // be a no-op there. OpenCode is always launched
-                    // env-stripped (subscription auth) regardless.
+                    // env-stripped (subscription auth) by the wrapper
+                    // regardless (issue #703).
                     if (agentKind != AgentCli.OpenCode) {
                         SkipPermissionsRow(
                             checked = skipPermissions,
@@ -377,19 +378,33 @@ data class SessionTypeChoice(
     /**
      * The start command to invoke inside the new tmux pane after
      * creation. `null` for plain shell sessions (which need no extra
-     * command beyond the user's default shell). For agents it is the
-     * full, self-contained invocation PocketShell types into the pane
-     * (issue #428) — including the skip-permissions flag and, for
-     * OpenCode, the provider-API-key env strip — so it does not depend
-     * on the maintainer's shell aliases being sourced on the remote host.
+     * command beyond the user's default shell).
      *
-     * For Claude Code (issue #627), the command is env-stripped (same 71
-     * provider API-key vars as OpenCode) and optionally prefixed with
-     * `CLAUDE_CONFIG_DIR=<path>` when a non-default profile is selected.
+     * For agents this is the SHORT server-side wrapper invocation
+     * (issue #703):
      *
-     * For Codex (issue #631), the command is env-stripped (same 71 vars)
-     * and optionally prefixed with `CODEX_HOME=<path>` when a non-default
-     * profile is selected.
+     * ```
+     * pocketshell agent <kind> --dir '<dir>' [--no-skip-permissions] [--config-dir '<path>']
+     * ```
+     *
+     * The wrapper (`tools/pocketshell` `agent` subcommand) does everything
+     * the old ~1500-char inline `env -u …(71)… <agent>` line did and more:
+     * it merges the folder's `.env`/`.envrc`, strips the provider API-key
+     * env vars ONLY for OpenCode (subscription billing — codex/claude pass
+     * the env through, matching the maintainer's `csp`/`cy` aliases which
+     * do not strip), suppresses each agent's first-run modal (codex update
+     * check / claude folder-trust) so the agent is immediately usable, then
+     * `execvpe`s the agent.
+     *
+     * Hard-cut (D22): the old inline env-strip builders and the
+     * `eval "$(pocketshell env export …)"` prelude are gone — this is the
+     * one and only launch path.
+     *
+     * - Skip-permissions defaults ON in the wrapper, so `--no-skip-permissions`
+     *   is emitted only when the user turned it OFF (and never for OpenCode,
+     *   where it is a no-op).
+     * - The Claude (#627) / Codex (#631) profile maps to `--config-dir`
+     *   (the wrapper turns it into `CLAUDE_CONFIG_DIR` / `CODEX_HOME`).
      */
     fun startCommand(
         claudeProfiles: List<ClaudeProfile> = emptyList(),
@@ -397,7 +412,7 @@ data class SessionTypeChoice(
     ): String? = when (type) {
         SessionType.Shell -> null
         SessionType.Agent -> agent?.launchCommand(
-            skipPermissions, claudeProfileName, claudeProfiles,
+            startDirectory, skipPermissions, claudeProfileName, claudeProfiles,
             codexProfileName, codexProfiles,
         )
     }
@@ -412,208 +427,77 @@ enum class AgentCli(val command: String) {
     ;
 
     /**
-     * Build the full launch command typed into the new pane (issue
-     * #428). PocketShell emits the explicit command itself (approach (b)
-     * in the issue) rather than invoking a remote shell alias, so the
-     * behaviour is identical on any host regardless of whether the
-     * maintainer's dotfiles are sourced on the remote host.
+     * Build the SHORT `pocketshell agent <kind> --dir <dir> …` line typed
+     * into the new pane (issue #703). The server-side wrapper owns the env
+     * merge, the OpenCode-only env strip, the per-agent first-run-prompt
+     * suppression, and the `execvpe`. The app's only job is to assemble the
+     * short, shell-safe argv.
      *
-     * - Claude (alias `csp`): env-stripped (issue #627, same 71 provider
-     *   API-key vars as OpenCode) and optionally `CLAUDE_CONFIG_DIR=<path>`
-     *   when a non-default profile is selected. `--dangerously-skip-permissions`
-     *   when [skipPermissions].
-     * - Codex (alias `cy`): env-stripped (issue #631, same 71 vars) and
-     *   optionally `CODEX_HOME=<path>` when a non-default profile is selected.
-     *   `--dangerously-bypass-approvals-and-sandbox` when [skipPermissions].
-     * - OpenCode (function `oc`): ALWAYS env-stripped. [skipPermissions]
-     *   is a no-op for OpenCode because its per-action permissions are
-     *   config-driven in `opencode.json`, not a CLI flag. The env strip
-     *   is about *billing*, not permissions: unsetting the provider
-     *   API-key vars forces OpenCode onto the maintainer's subscription
-     *   auth instead of a per-token env key.
+     * - [directory] → `--dir '<dir>'` (shell-quoted; the wrapper validates
+     *   and `cd`s into it).
+     * - [skipPermissions] defaults ON in the wrapper, so the app emits
+     *   `--no-skip-permissions` only when it is OFF. OpenCode never gets a
+     *   skip flag (it is a no-op there — permissions are config-driven).
+     * - A non-default Claude (#627) / Codex (#631) profile → `--config-dir
+     *   '<path>'` (the wrapper maps it to `CLAUDE_CONFIG_DIR` / `CODEX_HOME`).
+     *   OpenCode has no profile config dir.
      */
     fun launchCommand(
+        directory: String,
         skipPermissions: Boolean,
         claudeProfileName: String? = null,
         claudeProfiles: List<ClaudeProfile> = emptyList(),
         codexProfileName: String? = null,
         codexProfiles: List<CodexProfile> = emptyList(),
-    ): String = when (this) {
-        Claude -> claudeLaunchCommand(skipPermissions, claudeProfileName, claudeProfiles)
-        Codex -> codexLaunchCommand(skipPermissions, codexProfileName, codexProfiles)
-        OpenCode -> openCodeLaunchCommand()
+    ): String {
+        val configDir: String? = when (this) {
+            Claude -> claudeProfiles.firstOrNull { it.name == claudeProfileName }?.configDir
+            Codex -> codexProfiles.firstOrNull { it.name == codexProfileName }?.configDir
+            OpenCode -> null
+        }?.trim()?.takeIf { it.isNotBlank() }
+
+        // OpenCode's skip-permissions checkbox is a no-op, so never emit the
+        // flag for it; for claude/codex the wrapper defaults ON, so we only
+        // speak up to turn it OFF.
+        val emitNoSkip = this != OpenCode && !skipPermissions
+
+        return buildAgentCommand(
+            kind = command,
+            directory = directory,
+            noSkipPermissions = emitNoSkip,
+            configDir = configDir,
+        )
     }
 
     companion object {
         /**
-         * Provider API-key environment variables unset before launching
-         * OpenCode (issue #428), mirroring the maintainer's `oc` shell
-         * function. With these unset, OpenCode falls back to the
-         * maintainer's *subscription* auth instead of an env API key,
-         * which would otherwise bill per token.
-         *
-         * CANONICAL SOURCE: the maintainer's dotfiles at
-         * `config/opencode/env_unset.txt` (installed as
-         * `~/git/.claude/config/opencode/env_unset.txt`). This list is a
-         * verbatim copy of that file (71 entries). When the dotfiles list
-         * changes, update this copy to match. Keeping the list here lets
-         * PocketShell be self-contained — it does not require the `oc`
-         * function or `env_unset.txt` to be present on the remote host.
+         * Assemble `pocketshell agent <kind> --dir '<dir>' [--no-skip-permissions]
+         * [--config-dir '<path>']` (issue #703). Paths are single-quoted so a
+         * folder path with spaces or shell metacharacters cannot break out of
+         * the argument or inject a command. The whole line is single-quoted
+         * again by the gateway when it is passed to `tmux send-keys`.
          */
-        val OPENCODE_ENV_UNSET_VARS: List<String> = listOf(
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "AWS_PROFILE",
-            "AWS_REGION",
-            "AWS_BEARER_TOKEN_BEDROCK",
-            "AWS_WEB_IDENTITY_TOKEN_FILE",
-            "AWS_ROLE_ARN",
-            "OPENAI_API_KEY",
-            "OPENAI_BASE_URL",
-            "OPENAI_ORG_ID",
-            "OPENAI_PROJECT_ID",
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_AUTH_TOKEN",
-            "GROQ_API_KEY",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "GOOGLE_CLOUD_PROJECT",
-            "GOOGLE_API_KEY",
-            "VERTEX_LOCATION",
-            "VERTEX_AI_PROJECT",
-            "DEEPSEEK_API_KEY",
-            "XAI_API_KEY",
-            "FIREWORKS_API_KEY",
-            "CEREBRAS_API_KEY",
-            "OPENROUTER_API_KEY",
-            "TOGETHER_API_KEY",
-            "TOGETHER_AI_API_KEY",
-            "AZURE_API_KEY",
-            "AZURE_RESOURCE_NAME",
-            "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME",
-            "AZURE_OPENAI_API_KEY",
-            "AZURE_OPENAI_ENDPOINT",
-            "CLOUDFLARE_API_TOKEN",
-            "CLOUDFLARE_ACCOUNT_ID",
-            "CLOUDFLARE_GATEWAY_ID",
-            "CLOUDFLARE_API_KEY",
-            "HUGGING_FACE_API_KEY",
-            "HF_TOKEN",
-            "HF_API_TOKEN",
-            "MOONSHOT_API_KEY",
-            "MOONSHOTAI_API_KEY",
-            "MINIMAX_API_KEY",
-            "NEBIUS_API_KEY",
-            "DEEPINFRA_API_KEY",
-            "BASETEN_API_KEY",
-            "VENICE_API_KEY",
-            "SCALEWAY_API_KEY",
-            "OVH_API_KEY",
-            "CORTECS_API_KEY",
-            "IONET_API_KEY",
-            "VERCEL_API_KEY",
-            "ZENMUX_API_KEY",
-            "ZAI_API_KEY",
-            "HELICONE_API_KEY",
-            "OPENCODE_API_KEY",
-            "OPENCODE_ZEN_API_KEY",
-            "GITLAB_TOKEN",
-            "GITLAB_INSTANCE_URL",
-            "GITLAB_AI_GATEWAY_URL",
-            "GITLAB_OAUTH_CLIENT_ID",
-            "AICORE_SERVICE_KEY",
-            "AICORE_DEPLOYMENT_ID",
-            "AICORE_RESOURCE_GROUP",
-            "OPENAI_COMPATIBLE_API_KEY",
-            "LMSTUDIO_API_KEY",
-            "OLLAMA_API_KEY",
-            "302AI_API_KEY",
-            "FIRMWARE_API_KEY",
-            "2AI_API_KEY",
-            "GEMINI_API_KEY",
-        )
-
-        /**
-         * `env -u VAR1 -u VAR2 ... opencode` — the env-stripped OpenCode
-         * launch (issue #428). The variable names are validated to be
-         * plain env identifiers, so no shell quoting is required; the
-         * whole command is still single-quoted again when the gateway
-         * passes it to `tmux send-keys`.
-         */
-        internal fun openCodeLaunchCommand(): String {
-            val unsetArgs = OPENCODE_ENV_UNSET_VARS.joinToString(" ") { name ->
-                require(name.matches(ENV_VAR_NAME_REGEX)) {
-                    "Refusing to build OpenCode env strip: invalid env var name '$name'"
-                }
-                "-u $name"
-            }
-            return "env $unsetArgs opencode"
-        }
-
-        /**
-         * Env-stripped Claude Code launch (issue #627). Same 71 provider
-         * API-key vars as OpenCode, plus optional `CLAUDE_CONFIG_DIR=<path>`
-         * when a non-default profile is selected. The env strip ensures
-         * Claude Code uses its own credentials from the config directory,
-         * not leaked host env vars.
-         */
-        internal fun claudeLaunchCommand(
-            skipPermissions: Boolean,
-            profileName: String? = null,
-            profiles: List<ClaudeProfile> = emptyList(),
+        internal fun buildAgentCommand(
+            kind: String,
+            directory: String,
+            noSkipPermissions: Boolean,
+            configDir: String?,
         ): String {
-            val unsetArgs = OPENCODE_ENV_UNSET_VARS.joinToString(" ") { name ->
-                require(name.matches(ENV_VAR_NAME_REGEX)) {
-                    "Refusing to build Claude env strip: invalid env var name '$name'"
-                }
-                "-u $name"
+            val parts = StringBuilder("pocketshell agent ")
+            parts.append(kind)
+            parts.append(" --dir ").append(shellQuote(directory))
+            if (noSkipPermissions) {
+                parts.append(" --no-skip-permissions")
             }
-            val configDir = profiles.firstOrNull { it.name == profileName }?.configDir
-                ?.trim()?.takeIf { it.isNotBlank() }
-            val flag = if (skipPermissions) " --dangerously-skip-permissions" else ""
-            return if (configDir != null) {
-                // Shell-quote the config dir path to prevent injection.
-                val quotedDir = "'${configDir.replace("'", "'\\''")}'"
-                "env $unsetArgs CLAUDE_CONFIG_DIR=$quotedDir claude$flag"
-            } else {
-                "env $unsetArgs claude$flag"
+            if (configDir != null) {
+                parts.append(" --config-dir ").append(shellQuote(configDir))
             }
+            return parts.toString()
         }
 
-        /**
-         * Env-stripped Codex launch (issue #631). Same 71 provider API-key
-         * vars as OpenCode, plus optional `CODEX_HOME=<path>` when a
-         * non-default profile is selected. The env strip ensures Codex
-         * uses its own credentials, not leaked host env vars.
-         */
-        internal fun codexLaunchCommand(
-            skipPermissions: Boolean,
-            profileName: String? = null,
-            profiles: List<CodexProfile> = emptyList(),
-        ): String {
-            val unsetArgs = OPENCODE_ENV_UNSET_VARS.joinToString(" ") { name ->
-                require(name.matches(ENV_VAR_NAME_REGEX)) {
-                    "Refusing to build Codex env strip: invalid env var name '$name'"
-                }
-                "-u $name"
-            }
-            val configDir = profiles.firstOrNull { it.name == profileName }?.configDir
-                ?.trim()?.takeIf { it.isNotBlank() }
-            val flag = if (skipPermissions) " --dangerously-bypass-approvals-and-sandbox" else ""
-            return if (configDir != null) {
-                // Shell-quote the config dir path to prevent injection.
-                val quotedDir = "'${configDir.replace("'", "'\\''")}'"
-                "env $unsetArgs CODEX_HOME=$quotedDir codex$flag"
-            } else {
-                "env $unsetArgs codex$flag"
-            }
-        }
-
-        // Env var names per POSIX: letters, digits, underscore; we also
-        // permit a leading digit because the maintainer's list includes
-        // `302AI_API_KEY` and `2AI_API_KEY`.
-        private val ENV_VAR_NAME_REGEX = Regex("^[A-Za-z0-9_]+$")
+        /** Single-quote a value for safe inclusion in a shell command. */
+        private fun shellQuote(value: String): String =
+            "'" + value.replace("'", "'\\''") + "'"
     }
 }
 

@@ -318,6 +318,45 @@ public enum class TmuxDisconnectReason(public val logValue: String) {
 }
 
 /**
+ * Issue #676: injectable gate for the per-command response timeout, so the
+ * timeout→close→fail-visibly sequence is testable without a wall-clock race.
+ *
+ * [run] has the exact contract of [kotlinx.coroutines.withTimeoutOrNull]:
+ * it runs [body] and returns its result, or `null` if the deadline elapsed
+ * first (cancelling [body]). Production wires [RealTime], which delegates
+ * straight to `withTimeoutOrNull(timeoutMs)`, so runtime behaviour is
+ * unchanged. Unit tests inject a deterministic gate that fires the timeout on
+ * an explicit signal instead of a `delay`, removing the slow-runner flake.
+ */
+internal interface CommandTimeoutGate {
+    /**
+     * Runs [body] under a [timeoutMs] deadline, returning its result or `null`
+     * if the deadline elapsed first (cancelling [body]), exactly like
+     * [kotlinx.coroutines.withTimeoutOrNull]. [body] receives a [Checkpoint]
+     * it invokes once it has finished its synchronous setup (the command write)
+     * and is about to wait for the response. The production gate ignores the
+     * checkpoint; the deterministic test gate uses it to know the timeout is now
+     * being observed as a post-write event, so it can release a pending test
+     * signal without racing the runner's wall clock (issue #676).
+     */
+    suspend fun <T> run(timeoutMs: Long, body: suspend (Checkpoint) -> T): T?
+
+    /** Invoked by a command body once its write has completed. */
+    fun interface Checkpoint {
+        fun writeCompleted()
+    }
+
+    companion object {
+        private val NOOP_CHECKPOINT = Checkpoint { }
+
+        val RealTime: CommandTimeoutGate = object : CommandTimeoutGate {
+            override suspend fun <T> run(timeoutMs: Long, body: suspend (Checkpoint) -> T): T? =
+                withTimeoutOrNull(timeoutMs) { body(NOOP_CHECKPOINT) }
+        }
+    }
+}
+
+/**
  * Real implementation of [TmuxClient] backed by an [SshSession]'s shell
  * channel.
  *
@@ -362,6 +401,13 @@ internal class RealTmuxClient(
     // for a session killed elsewhere, so a gone session is never resurrected.
     private val createIfMissing: Boolean = true,
     private val commandTimeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
+    // Issue #676: seam for the per-command response timeout. Production uses
+    // the real wall-clock gate ([CommandTimeoutGate.RealTime]); unit tests
+    // inject a deterministic gate so the timeout fires exactly when the test
+    // releases it instead of racing a tight wall-clock window against the
+    // runner's scheduler load. Default keeps production behaviour identical to
+    // a bare `withTimeoutOrNull(commandTimeoutMs)`.
+    private val commandTimeoutGate: CommandTimeoutGate = CommandTimeoutGate.RealTime,
 ) : TmuxClient {
     private val clientId: Long = NEXT_CLIENT_ID.incrementAndGet()
     private val clientHash: Int = System.identityHashCode(this)
@@ -587,9 +633,10 @@ internal class RealTmuxClient(
             var writeCompleted = false
 
             try {
-                val capture = withTimeoutOrNull(commandTimeoutMs) {
+                val capture = commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
                     writeResult.await()
                     writeCompleted = true
+                    checkpoint.writeCompleted()
                     capturePending.deferred.await()
                 } ?: run {
                     // Capture itself timed out: tear down both pending entries
@@ -603,7 +650,8 @@ internal class RealTmuxClient(
                 }
                 // The cursor block is best-effort: a slow/absent reply degrades
                 // to no explicit cursor restore rather than failing the seed.
-                val cursorReply = withTimeoutOrNull(commandTimeoutMs) {
+                val cursorReply = commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
+                    checkpoint.writeCompleted()
                     cursorPending.deferred.await()
                 }
                     ?.takeUnless { it.isError }
@@ -687,9 +735,10 @@ internal class RealTmuxClient(
             var writeCompleted = false
 
             val response = try {
-                withTimeoutOrNull(commandTimeoutMs) {
+                commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
                     writeResult.await()
                     writeCompleted = true
+                    checkpoint.writeCompleted()
                     deferred.await()
                 }
             } catch (t: Throwable) {
@@ -730,7 +779,8 @@ internal class RealTmuxClient(
                     "tmux-command-${effectiveTimeoutMode.logName}-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
                         "lateDrainMs=$BEST_EFFORT_LATE_RESPONSE_DRAIN_MS",
                 )
-                val lateResponse = withTimeoutOrNull(BEST_EFFORT_LATE_RESPONSE_DRAIN_MS) {
+                val lateResponse = commandTimeoutGate.run(BEST_EFFORT_LATE_RESPONSE_DRAIN_MS) { checkpoint ->
+                    checkpoint.writeCompleted()
                     deferred.await()
                 }
                 if (lateResponse != null) {

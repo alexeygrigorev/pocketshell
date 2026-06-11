@@ -7,18 +7,22 @@ import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import java.util.concurrent.LinkedBlockingDeque
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -481,7 +485,14 @@ class TmuxClientTest {
     fun `setWindowSizeLatest timeout fails open without disconnecting client`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        // Issue #676: deterministic timeout gate (fail-open: primary + late-drain).
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
         try {
             client.connect()
             withTimeout(2_000) {
@@ -489,9 +500,15 @@ class TmuxClientTest {
             }
             shell.resetStdin()
 
-            val outcome = withTimeout(3_000) {
-                runCatching { client.setWindowSizeLatest("work") }
+            val sent = scope.async { runCatching { client.setWindowSizeLatest("work") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "set-window-option -t 'work' window-size latest\n") {
+                    yield(); delay(10)
+                }
             }
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(3_000) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -588,7 +605,14 @@ class TmuxClientTest {
     fun `refreshClientSize timeout fails open without disconnecting client`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        // Issue #676: deterministic timeout gate (fail-open: primary + late-drain).
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
         try {
             client.connect()
             withTimeout(2_000) {
@@ -596,9 +620,13 @@ class TmuxClientTest {
             }
             shell.resetStdin()
 
-            val outcome = withTimeout(3_000) {
-                runCatching { client.refreshClientSize(cols = 62, rows = 52) }
+            val sent = scope.async { runCatching { client.refreshClientSize(cols = 62, rows = 52) } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "refresh-client -C 62x52\n") { yield(); delay(10) }
             }
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(3_000) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -973,7 +1001,16 @@ class TmuxClientTest {
     fun `send-keys timeout after completed write fails open and does not mis-correlate next command`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        // Issue #676: deterministic timeout gate. send-keys is a fail-open
+        // command, so the production path fires the primary response timeout
+        // and then a best-effort late-response drain — we fire both signals.
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
         val diagnosticEvents = Collections.synchronizedList(
             mutableListOf<Pair<String, Map<String, Any?>>>(),
         )
@@ -990,9 +1027,15 @@ class TmuxClientTest {
             }
             shell.resetStdin()
 
-            val outcome = withTimeout(2_000) {
-                runCatching { client.sendCommand("send-keys -t %0 Enter") }
+            val sent = scope.async { runCatching { client.sendCommand("send-keys -t %0 Enter") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
             }
+            // Primary response timeout, then the fail-open late-drain timeout
+            // (no late response is fed, so the quarantine expires).
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(3_000) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -1048,7 +1091,16 @@ class TmuxClientTest {
     fun `non send-keys sendCommand timeout closes client and fails visibly`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        // Issue #676: drive the response timeout via a deterministic gate
+        // (explicit fire signal) instead of a wall-clock window so the
+        // timeout->close->fail-visibly sequence does not race the runner.
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
         val diagnosticEvents = Collections.synchronizedList(
             mutableListOf<Pair<String, Map<String, Any?>>>(),
         )
@@ -1065,9 +1117,14 @@ class TmuxClientTest {
             }
             shell.resetStdin()
 
-            val outcome = withTimeout(2_000) {
-                runCatching { client.sendCommand("kill-pane -t %0") }
+            val sent = scope.async { runCatching { client.sendCommand("kill-pane -t %0") } }
+            // Wait for the command bytes to land (write completed) before
+            // firing the deterministic timeout.
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "kill-pane -t %0\n") { yield(); delay(10) }
             }
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(3_000) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -1121,7 +1178,14 @@ class TmuxClientTest {
     fun `best-effort command timeout without late response does not disconnect or mis-correlate next command`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        // Issue #676: deterministic timeout gate (best-effort: primary + late-drain).
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
         val command = "capture-pane -p -e -S -200 -t %0"
         try {
             client.connect()
@@ -1130,9 +1194,15 @@ class TmuxClientTest {
             }
             shell.resetStdin()
 
-            val outcome = withTimeout(3_000) {
-                runCatching { client.sendBestEffortCommand(command) }
+            val sent = scope.async { runCatching { client.sendBestEffortCommand(command) } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "$command\n") { yield(); delay(10) }
             }
+            // No late response is fed, so both the primary timeout and the
+            // best-effort late-drain quarantine expire deterministically.
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(3_000) { sent.await() }
 
             assertTrue("expected best-effort timeout, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -1205,7 +1275,16 @@ class TmuxClientTest {
     fun `sendCommand timeout covers blocking stdin write and closes client`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        // Issue #676: deterministic timeout gate. Here the stdin write blocks
+        // forever, so the write never completes — the timeout is fired before
+        // the body's write checkpoint (writeCompleted = false -> FatalClose).
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
         try {
             client.connect()
             withTimeout(2_000) {
@@ -1219,6 +1298,7 @@ class TmuxClientTest {
             }
 
             assertTrue("expected stdin write to block", shell.awaitBlockedStdinWrite(2_000))
+            timeoutGate.fireNextTimeout(afterWrite = false)
             val outcome = withTimeout(2_000) { response.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
@@ -1625,7 +1705,17 @@ class TmuxClientTest {
     ) {
         val shell = FakeShell()
         val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        // Issue #676: deterministic timeout gate. The primary response timeout
+        // is fired explicitly; the late-response that follows is then drained by
+        // the best-effort late-drain `run` (whose body wins the race), so no
+        // second fire is needed.
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
         try {
             client.connect()
             withTimeout(2_000) {
@@ -1652,7 +1742,9 @@ class TmuxClientTest {
             val outputs = withTimeout(2_000) { outputEvents.await() }
             assertEquals(2, outputs.size)
 
-            delay(150)
+            // Fire the primary response timeout, then deliver the late response
+            // so the best-effort drain picks it up rather than disconnecting.
+            timeoutGate.fireNextTimeout()
             shell.feed(
                 "%begin 1 10 0\n" +
                     "late-response\n" +
@@ -1711,6 +1803,91 @@ class TmuxClientTest {
             }
             error("unreachable")
         }
+
+    /**
+     * Issue #676: deterministic [CommandTimeoutGate] for the timeout-path
+     * tests. Instead of a wall-clock `delay(commandTimeoutMs)` racing the CI
+     * runner's scheduler, the test fires each command's response timeout on an
+     * explicit signal via [fireNextTimeout]. The gate runs the production
+     * `body` (write-await -> mark write complete -> response-await) verbatim,
+     * so the timeout->close->fail-visibly behaviour is exactly the same as in
+     * production — only the *when* is made deterministic.
+     *
+     * Each `run` invocation registers a fresh "fire" signal; [fireNextTimeout]
+     * arms and releases the next one in FIFO order. If a response arrives
+     * before the test fires (e.g. the late-drain after a fed response), the
+     * body wins the race and its result is returned, matching real time.
+     */
+    private class DeterministicCommandTimeoutGate : CommandTimeoutGate {
+        private class Pending {
+            // Completes once the command body has written and is about to wait
+            // for the response (via CommandTimeoutGate.Checkpoint).
+            val parked = CompletableDeferred<Unit>()
+
+            // Completed by the test (carrying whether to wait for the write to
+            // complete before tripping) to deterministically fire this command's
+            // timeout.
+            val fire = CompletableDeferred<Boolean>()
+        }
+
+        // FIFO of in-flight `run` slots. Thread-safe because the body runs on
+        // Dispatchers.IO while the test fires from the runBlocking thread.
+        private val pendings = LinkedBlockingDeque<Pending>()
+
+        override suspend fun <T> run(timeoutMs: Long, body: suspend (CommandTimeoutGate.Checkpoint) -> T): T? =
+            coroutineScope {
+                val slot = Pending()
+                pendings.putLast(slot)
+                // UNDISPATCHED so the body runs up to its first real suspension,
+                // mirroring how `withTimeoutOrNull` enters the body eagerly.
+                val bodyDeferred = async(start = CoroutineStart.UNDISPATCHED) {
+                    body { slot.parked.complete(Unit) }
+                }
+                try {
+                    select {
+                        bodyDeferred.onAwait { it }
+                        slot.fire.onAwait { waitForWrite ->
+                            // For a post-write timeout, wait until the body has
+                            // actually parked on the response wait (write
+                            // completed) so the timeout observes
+                            // writeCompleted = true, exactly like real time. For
+                            // a blocking-write timeout the write never completes,
+                            // so we trip immediately (writeCompleted = false).
+                            if (waitForWrite) slot.parked.await()
+                            bodyDeferred.cancel()
+                            null
+                        }
+                    }
+                } finally {
+                    pendings.remove(slot)
+                }
+            }
+
+        /**
+         * Deterministically fire the next in-flight command's response timeout.
+         * Waits for the matching `run` to register, then completes its fire
+         * signal; the gate's select branch waits for the body to park on the
+         * response before tripping, so ordering is deterministic regardless of
+         * runner speed.
+         *
+         * @param afterWrite when `true` (the default), the timeout is observed
+         *   as a completed-write event (the common case). Pass `false` for the
+         *   blocking-write case where the stdin write never completes, so the
+         *   timeout must trip before the body reaches its write checkpoint.
+         */
+        suspend fun fireNextTimeout(afterWrite: Boolean = true) {
+            val slot = withTimeout(3_000) {
+                var pending = pendings.pollFirst()
+                while (pending == null) {
+                    yield()
+                    delay(1)
+                    pending = pendings.pollFirst()
+                }
+                pending
+            }
+            slot.fire.complete(afterWrite)
+        }
+    }
 
     private fun installDiagnosticsForClient(
         client: RealTmuxClient,

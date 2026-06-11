@@ -12,9 +12,8 @@ import kotlinx.coroutines.launch
 /**
  * Reusable holder for one session screen's assistant run (issue #266).
  *
- * Extracted from the big [com.pocketshell.app.session.SessionViewModel] /
- * [com.pocketshell.app.tmux.TmuxSessionViewModel] so both routes share the
- * exact same confirm-or-correct state machine without duplicating it. The
+ * Extracted from the big [com.pocketshell.app.tmux.TmuxSessionViewModel] so the
+ * route shares one confirm-or-correct state machine without duplicating it. The
  * owning view model supplies its [CoroutineScope] (its `viewModelScope`) and
  * a factory that builds a fresh [AssistantLlmClient] + [AssistantActions] per
  * run (so the latest provider key / connection params flow in).

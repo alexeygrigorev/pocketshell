@@ -185,9 +185,9 @@ internal fun readKeyFromRawResource(context: Context): String {
  * the user's first resume after backgrounding (reproduced on Pixel 7a /
  * Android 16, v0.2.7).
  *
- * Ending the flow cleanly lets [SessionViewModel] observe the producer job's
+ * Ending the flow cleanly lets the session view model observe the producer job's
  * completion via `invokeOnCompletion` and transition the connection state to
- * [com.pocketshell.app.session.SessionViewModel.ConnectionStatus.Failed], which
+ * [com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus.Failed], which
  * is the no-background-work behaviour the app already wants on resume (the
  * user re-establishes via the reconnect path rather than us keeping the
  * socket alive in the background).

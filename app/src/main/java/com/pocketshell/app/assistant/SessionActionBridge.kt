@@ -7,12 +7,11 @@ import com.pocketshell.app.nav.AppDestination
  * [AppAssistantActions] for terminal-mode actions and navigation
  * (issue #266).
  *
- * The big [com.pocketshell.app.session.SessionViewModel] /
- * [com.pocketshell.app.tmux.TmuxSessionViewModel] keep ownership of the
+ * The big [com.pocketshell.app.tmux.TmuxSessionViewModel] keeps ownership of the
  * terminal byte path (`sendText` / `writeInputToPane`) and the live
  * connection metadata; the assistant only reaches them through this thin
  * interface so the agent loop stays decoupled from the 1000+-line session
- * view models and stays unit-testable.
+ * view model and stays unit-testable.
  */
 internal interface SessionActionBridge {
 

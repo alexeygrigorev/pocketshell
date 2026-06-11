@@ -62,8 +62,7 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Shared voice-surface composables used by both
- * [com.pocketshell.app.session.SessionScreen] (raw-SSH route) and
+ * Shared voice-surface composables used by
  * [com.pocketshell.app.tmux.TmuxSessionScreen] (tmux -CC route).
  *
  * Extracted from the original `SessionScreen.kt` (issue #123 follow-up) so
@@ -516,9 +515,8 @@ private fun PrimaryChipCluster(
 }
 
 /**
- * Bottom chip strip surfaced when the IME is hidden. Both
- * [SessionScreen][com.pocketshell.app.session.SessionScreen] and
- * [TmuxSessionScreen][com.pocketshell.app.tmux.TmuxSessionScreen] mount
+ * Bottom chip strip surfaced when the IME is hidden.
+ * [TmuxSessionScreen][com.pocketshell.app.tmux.TmuxSessionScreen] mounts
  * this as the bottom band of the per-session input controls.
  *
  * Layout (left → right):

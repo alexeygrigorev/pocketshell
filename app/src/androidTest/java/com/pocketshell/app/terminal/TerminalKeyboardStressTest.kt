@@ -55,7 +55,7 @@ import kotlin.system.measureTimeMillis
  *
  * 1. Open a live SSH shell against the Docker fixture via
  *    [TerminalLabActivity] (same `controller.sendText` + IME path the real
- *    [com.pocketshell.app.session.SessionScreen] uses).
+ *    [com.pocketshell.app.tmux.TmuxSessionScreen] uses).
  * 2. Kick a continuous remote print loop so the emulator is constantly
  *    being repainted (this is the load the phone user sees when an agent
  *    is generating output).

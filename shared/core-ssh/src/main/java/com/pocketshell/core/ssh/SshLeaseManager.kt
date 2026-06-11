@@ -302,24 +302,6 @@ public class SshLeaseManager(
             inFlightConnects.containsKey(key)
         }
 
-    public suspend fun closeIdle() {
-        val idleEntries = mutex.withLock {
-            entries.values
-                .filter { it.refCount == 0 }
-                .also { idle ->
-                    idle.forEach {
-                        entries.remove(it.key)
-                        emitStateLocked(
-                            key = it.key,
-                            state = SshLeaseConnectionState.Closed,
-                            closeReason = SshLeaseCloseReason.ExplicitDisconnect,
-                        )
-                    }
-                }
-        }
-        idleEntries.forEach { it.close() }
-    }
-
     public suspend fun disconnect(key: SshLeaseKey) {
         val entry = mutex.withLock {
             entries.remove(key)?.also {

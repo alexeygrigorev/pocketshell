@@ -47,8 +47,7 @@ internal const val OPTIMISTIC_USER_MESSAGE_ID_PREFIX: String = "optimistic:"
 
 /**
  * Issue #160 (review round 2): single source of truth for the
- * conversation-feed dedup contract used by both
- * [com.pocketshell.app.session.SessionViewModel] (raw-SSH session) and
+ * conversation-feed dedup contract used by
  * [com.pocketshell.app.tmux.TmuxSessionViewModel] (tmux pane).
  *
  * Combines three rules in a single pass over [events] (in insertion

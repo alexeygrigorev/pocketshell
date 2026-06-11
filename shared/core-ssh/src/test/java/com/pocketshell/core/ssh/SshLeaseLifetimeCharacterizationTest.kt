@@ -2,7 +2,6 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -30,16 +29,15 @@ import java.io.InputStream
  *  - acquire/release REFCOUNT: multiple holders, last-release closes;
  *  - WARM-LEASE REUSE (no fresh dial) vs FRESH DIAL after the warm window drains;
  *  - the warm lease stays live across a partial release (a remaining holder
- *    keeps the transport alive);
- *  - `closeIdle()` behavior — NOTE: this entry point has NO production caller and
- *    NO sibling unit test; per the #684 A4 audit it is a DEAD/superseded API and
- *    a Phase-2 hard-cut candidate. We pin its current behavior here so the
- *    deletion is a deliberate, reviewed removal, NOT a silent behavior drop.
+ *    keeps the transport alive).
+ *
+ * (The dead `closeIdle()` API and its two characterization tests were removed in
+ * #684 once the deletion was reviewed — a deliberate D22 hard-cut, not a silent
+ * behavior drop.)
  *
  * These MUST stay green on current code.
  *
- * Learning map: #620 (warm-lease lifetime / first-open-instant); D22 hard-cut
- * candidate flag for `closeIdle`.
+ * Learning map: #620 (warm-lease lifetime / first-open-instant).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SshLeaseLifetimeCharacterizationTest {
@@ -138,60 +136,6 @@ class SshLeaseLifetimeCharacterizationTest {
         assertTrue("the released lease closes exactly at the 60s boundary", session.closed)
     }
 
-    @Test
-    fun `closeIdle closes only zero-ref leases and leaves active holders untouched`() = runTest {
-        // DEAD-API CHARACTERIZATION (#684 A4): closeIdle() has no production
-        // caller and no sibling unit test — it is a Phase-2 hard-cut deletion
-        // candidate. We pin its CURRENT contract so the removal is reviewed, not
-        // silent: it closes every zero-ref (idle) lease immediately, and leaves
-        // an actively-held lease alone.
-        val active = FakeSshSession()
-        val idle = FakeSshSession()
-        val connector = QueueLeaseConnector(active, idle)
-        val manager = leaseManager(connector, idleTtlMillis = 60_000)
-
-        val activeLease = manager.acquire(TARGET).getOrThrow() // refcount 1, stays
-        manager.acquire(OTHER_TARGET).getOrThrow().release() // refcount 0, idle/warm
-
-        assertFalse("the idle lease is still warm before closeIdle", idle.closed)
-
-        manager.closeIdle()
-
-        assertTrue("closeIdle closes the zero-ref idle lease immediately", idle.closed)
-        assertFalse("closeIdle must leave an actively-held lease open", active.closed)
-
-        // The active holder's transport is still usable and still warm.
-        assertTrue(manager.hasLiveLease(TARGET.leaseKey))
-        activeLease.release()
-    }
-
-    @Test
-    fun `closeIdle emits an explicit-disconnect close event for the evicted idle lease`() = runTest {
-        // Companion characterization of the dead closeIdle() API: it surfaces the
-        // idle lease's close as ExplicitDisconnect on the state-event stream. Pin
-        // it so a Phase-2 deletion that re-routes this signal is a deliberate
-        // edit (the #329/#679 lifecycle-signal seam must stay honest).
-        val idle = FakeSshSession()
-        val manager = leaseManager(QueueLeaseConnector(idle), idleTtlMillis = 60_000)
-
-        val events = mutableListOf<SshLeaseStateEvent>()
-        val collector = backgroundScope.launch { manager.stateEvents.collect { events.add(it) } }
-        runCurrent()
-
-        manager.acquire(TARGET).getOrThrow().release() // -> warm/idle
-        manager.closeIdle()
-        runCurrent()
-        collector.cancel()
-
-        assertTrue(
-            "closeIdle emits Closed/ExplicitDisconnect for the evicted idle lease",
-            events.any {
-                it.key == TARGET.leaseKey &&
-                    it.state == SshLeaseConnectionState.Closed &&
-                    it.closeReason == SshLeaseCloseReason.ExplicitDisconnect
-            },
-        )
-    }
 
     // ---- harness ----
 
@@ -271,16 +215,6 @@ class SshLeaseLifetimeCharacterizationTest {
                 credentialId = "/tmp/key-a",
             ),
             key = SshKey.Path(File("/tmp/key-a")),
-        )
-
-        val OTHER_TARGET: SshLeaseTarget = SshLeaseTarget(
-            leaseKey = SshLeaseKey(
-                host = "example.test",
-                port = 22,
-                user = "deploy",
-                credentialId = "/tmp/key-b",
-            ),
-            key = SshKey.Path(File("/tmp/key-b")),
         )
     }
 }

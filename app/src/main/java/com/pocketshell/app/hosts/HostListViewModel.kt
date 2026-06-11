@@ -99,7 +99,7 @@ import javax.inject.Inject
  * [installTmuxOnPendingHost], [dismissBootstrapAndOpen].
  *
  * `@ApplicationContext` is the project's standard for injecting a Context
- * into a `ViewModel` (see [SessionViewModel][com.pocketshell.app.session.SessionViewModel]).
+ * into a `ViewModel` (see [TmuxSessionViewModel][com.pocketshell.app.tmux.TmuxSessionViewModel]).
  * It avoids the `AndroidViewModel` subclass dependency while still giving
  * us access to `PackageManager` for reading the installed `versionName`.
  */

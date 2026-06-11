@@ -104,7 +104,7 @@ import kotlin.math.sin
  * The screen does not own a connection — it resolves the host's key on
  * tap and hands the tuple to the caller, which routes to the session
  * screen. This keeps the list a pure read surface; the
- * [SessionViewModel][com.pocketshell.app.session.SessionViewModel]
+ * [TmuxSessionViewModel][com.pocketshell.app.tmux.TmuxSessionViewModel]
  * runs the connect under its own Hilt scope.
  *
  * `onEditHost` routes to the edit-host screen by host id. The

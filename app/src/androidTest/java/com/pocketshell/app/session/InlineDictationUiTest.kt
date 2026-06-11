@@ -1,8 +1,5 @@
 package com.pocketshell.app.session
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -14,9 +11,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
-import com.pocketshell.app.composer.PromptComposerViewModel
-import com.pocketshell.app.composer.composerAttachmentChipTestTag
-import com.pocketshell.app.composer.composerAttachmentRemoveTestTag
 import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
@@ -104,13 +98,14 @@ class InlineDictationUiTest {
     }
 
     @Test
-    fun rawSshStagedAttachmentRemainsRemovableAfterComposerSheetIsClosed() {
-        val attachment = PromptComposerViewModel.StagedAttachment(
-            remotePath = "~/.pocketshell/attachments/raw-host/shot.png",
-            displayName = "shot.png",
-        )
-        var staged by mutableStateOf(listOf(attachment))
-
+    fun rawSshNoStagedAttachmentGridInSessionViewAfterComposerSheetIsClosed() {
+        // Issue #673: after staging attachments in the Prompt Composer and
+        // closing the sheet, the raw-SSH session bottom area must NOT show a
+        // staged-attachment chip/grid. #669 asserted the opposite; the
+        // maintainer reversed it — attachments are only visible inside the
+        // Prompt Composer sheet. The attachment STATE still persists in the
+        // composer ViewModel (covered by the JVM unit test
+        // `stagedAttachmentsAndDraftPersistAcrossComposerCloseAndSessionSwitch`).
         compose.setContent {
             PocketShellTheme {
                 RawSessionBottomControls(
@@ -123,23 +118,11 @@ class InlineDictationUiTest {
                     onShowKeyboardTap = {},
                     onAddSnippetTap = null,
                     onProjectNavigationTap = {},
-                    stagedAttachments = staged,
-                    onRemoveStagedAttachment = { remotePath ->
-                        staged = staged.filterNot { it.remotePath == remotePath }
-                    },
                 )
             }
         }
 
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
     }
 
     @Test
@@ -172,13 +155,8 @@ class InlineDictationUiTest {
     }
 
     @Test
-    fun rawSshKeyboardOpenAccessoryKeepsStagedAttachmentRemovable() {
+    fun rawSshKeyboardOpenAccessoryNeverRendersStagedAttachmentGrid() {
         val keyTaps = mutableListOf<String>()
-        val attachment = PromptComposerViewModel.StagedAttachment(
-            remotePath = "~/.pocketshell/attachments/raw-host/shot.png",
-            displayName = "shot.png",
-        )
-        var staged by mutableStateOf(listOf(attachment))
         compose.setContent {
             PocketShellTheme {
                 RawSessionBottomControls(
@@ -191,23 +169,14 @@ class InlineDictationUiTest {
                     onShowKeyboardTap = {},
                     onAddSnippetTap = null,
                     onProjectNavigationTap = {},
-                    stagedAttachments = staged,
-                    onRemoveStagedAttachment = { remotePath ->
-                        staged = staged.filterNot { it.remotePath == remotePath }
-                    },
                 )
             }
         }
 
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertDoesNotExist()
+        // Issue #673: the raw-SSH terminal accessory never renders the staged
+        // attachment grid; attachments belong only inside the Prompt Composer
+        // sheet (reversing #669). The hotkey row shows, no attachment chips.
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
 
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("Ctrl-C").assertIsDisplayed()

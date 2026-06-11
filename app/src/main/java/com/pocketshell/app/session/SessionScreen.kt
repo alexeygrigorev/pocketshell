@@ -78,7 +78,6 @@ import com.pocketshell.app.conversation.timelineActorLabel
 import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.conversation.toolResultPairing
-import com.pocketshell.app.composer.AttachmentTileGrid
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.UnsentPromptBanner
@@ -235,7 +234,6 @@ public fun SessionScreen(
     val assistantState by viewModel.assistantState.collectAsState()
     val projectNavigation by viewModel.projectNavigation.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
-    val promptComposerState by promptComposerViewModel.uiState.collectAsState()
     val appSettings by settingsViewModel.state.collectAsState()
     val keyBarModifierStates = remember(modifierStates) {
         modifierStates.mapKeys { (modifier, _) -> modifier.keyBarLabel }
@@ -441,8 +439,10 @@ public fun SessionScreen(
                     { showSnippetPicker = true }
                 } else null,
                 onProjectNavigationTap = { showProjectNavigation = true },
-                stagedAttachments = promptComposerState.attachments,
-                onRemoveStagedAttachment = promptComposerViewModel::removeAttachment,
+                // Issue #673: staged composer attachments are NOT rendered in
+                // the raw-session bottom area. They live only inside the Prompt
+                // Composer sheet; the staged-attachment state persists in the
+                // composer ViewModel across session switches.
                 modifier = bottomControlsModifier,
             )
         }
@@ -1634,8 +1634,6 @@ internal fun RawSessionBottomControls(
     onShowKeyboardTap: () -> Unit,
     onAddSnippetTap: (() -> Unit)?,
     onProjectNavigationTap: () -> Unit,
-    stagedAttachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
-    onRemoveStagedAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val showHotkeyAccessory = isImeVisible && !showConversation
@@ -1645,14 +1643,10 @@ internal fun RawSessionBottomControls(
             .heightIn(min = SessionBottomControlsMinHeight)
             .background(color = PocketShellColors.Surface),
     ) {
-        if (stagedAttachments.isNotEmpty()) {
-            AttachmentTileGrid(
-                attachments = stagedAttachments,
-                onRemove = onRemoveStagedAttachment,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            )
-        }
-        // Raw SSH mirrors the tmux route: terminal key rows are Terminal-only.
+        // Issue #673: staged composer attachments are NOT rendered in the
+        // raw-session bottom area; they live only inside the Prompt Composer
+        // sheet. Raw SSH mirrors the tmux route: terminal key rows are
+        // Terminal-only.
         // Conversation always sends through the unified composer surface, even if
         // the IME is visible from an earlier terminal interaction.
         if (showHotkeyAccessory) {

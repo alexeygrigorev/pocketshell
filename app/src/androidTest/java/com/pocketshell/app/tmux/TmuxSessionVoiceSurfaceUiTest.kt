@@ -22,9 +22,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
-import com.pocketshell.app.composer.PromptComposerViewModel
-import com.pocketshell.app.composer.composerAttachmentChipTestTag
-import com.pocketshell.app.composer.composerAttachmentRemoveTestTag
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
@@ -64,13 +61,8 @@ class TmuxSessionVoiceSurfaceUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun tmuxKeyboardOpenAccessoryKeepsStagedAttachmentRemovable() {
+    fun tmuxKeyboardOpenAccessoryNeverRendersStagedAttachmentGrid() {
         val keyTaps = mutableListOf<String>()
-        val attachment = PromptComposerViewModel.StagedAttachment(
-            remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
-            displayName = "shot.png",
-        )
-        var staged by mutableStateOf(listOf(attachment))
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
@@ -86,23 +78,16 @@ class TmuxSessionVoiceSurfaceUiTest {
                     onEnterTap = {},
                     onShowKeyboardTap = {},
                     onAddSnippetTap = {},
-                    stagedAttachments = staged,
-                    onRemoveStagedAttachment = { remotePath ->
-                        staged = staged.filterNot { it.remotePath == remotePath }
-                    },
                 )
             }
         }
 
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertDoesNotExist()
+        // Issue #673: staged composer attachments are NEVER rendered in the
+        // tmux terminal accessory. #669 previously asserted the in-session grid
+        // was visible/removable while typing; the maintainer reversed that —
+        // attachments belong only inside the Prompt Composer sheet. The
+        // terminal accessory shows the hotkey row, no attachment grid.
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
 
         compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertIsDisplayed()
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
@@ -163,12 +148,11 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun tmuxConversationImeOpenRendersOnlyStagedAttachmentStripWhenNeeded() {
-        val attachment = PromptComposerViewModel.StagedAttachment(
-            remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
-            displayName = "shot.png",
-        )
-        var staged by mutableStateOf(listOf(attachment))
+    fun tmuxConversationImeOpenRendersNoAttachmentStrip() {
+        // Issue #673: the conversation IME-open mode renders no accessory at
+        // all. #669 had it render the staged-attachment strip; the maintainer
+        // reversed that — attachments are only visible inside the Prompt
+        // Composer sheet, never in the session view (even in conversation mode).
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
@@ -184,25 +168,15 @@ class TmuxSessionVoiceSurfaceUiTest {
                     onEnterTap = {},
                     onShowKeyboardTap = {},
                     onAddSnippetTap = {},
-                    stagedAttachments = staged,
-                    onRemoveStagedAttachment = { remotePath ->
-                        staged = staged.filterNot { it.remotePath == remotePath }
-                    },
                     modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
                 )
             }
         }
 
-        compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
         compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertDoesNotExist()
     }
 
     /**
@@ -448,12 +422,16 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun stagedAttachmentRemainsRemovableAfterComposerSheetIsClosed() {
-        val attachment = PromptComposerViewModel.StagedAttachment(
-            remotePath = "~/.pocketshell/attachments/host-1-git-pocketshell-c/shot.png",
-            displayName = "shot.png",
-        )
-        var staged by mutableStateOf(listOf(attachment))
+    fun noStagedAttachmentGridInSessionViewAfterComposerSheetIsClosed() {
+        // Issue #673: after the user stages an attachment in the Prompt
+        // Composer and closes the sheet, the session/terminal bottom area must
+        // NOT show a staged-attachment chip/grid. #669 asserted the opposite
+        // (the grid stayed visible/removable in-session); the maintainer
+        // reversed that decision. The attachment STATE still lives in the
+        // composer ViewModel (covered by the JVM unit test
+        // `stagedAttachmentsAndDraftPersistAcrossComposerCloseAndSessionSwitch`),
+        // so re-opening the composer shows it again — but the session view
+        // stays clean.
         var composerOpen by mutableStateOf(true)
 
         compose.setContent {
@@ -472,10 +450,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                         onEnterTap = {},
                         onShowKeyboardTap = {},
                         onAddSnippetTap = {},
-                        stagedAttachments = staged,
-                        onRemoveStagedAttachment = { remotePath ->
-                            staged = staged.filterNot { it.remotePath == remotePath }
-                        },
                     )
                 }
             }
@@ -483,15 +457,11 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         compose.runOnIdle { composerOpen = false }
 
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertDoesNotExist()
+        // The composer has closed: the session band renders, but no staged
+        // attachment grid appears in it.
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
+        captureViewportArtifact("issue673-tmux-closed-composer-no-attachment-chip.png")
     }
 
     @Test

@@ -547,6 +547,49 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun stagedAttachmentsAndDraftPersistAcrossComposerCloseAndSessionSwitch() = runTest {
+        // Issue #673: attachments are no longer shown in the session/terminal
+        // bottom area — they live only inside the Prompt Composer sheet. The
+        // maintainer's desired workflow ("insert prompt → close composer →
+        // switch session → send elsewhere") relies on the staged-attachment
+        // STATE surviving the composer being dismissed and the session being
+        // switched. The composer ViewModel is retained across both, so there is
+        // no clear-on-close path: closing the sheet and switching sessions
+        // must leave the draft + attachments intact so re-opening shows them.
+        val vm = newVm()
+        val first = "~/.pocketshell/attachments/host-1/20260610-120000-01-shot.png"
+        val second = "~/.pocketshell/attachments/host-1/20260610-120000-02-data.csv"
+        vm.onDraftChange("deploy the staging build")
+        vm.seedAttachment(first)
+        vm.seedAttachment(second)
+
+        // Snapshot the staged state as it is when the user closes the sheet.
+        val afterCompose = vm.uiState.value
+
+        // Dismissing the composer sheet and switching sessions does NOT touch
+        // the ViewModel state — no clear-on-close, no clear-on-switch hook. The
+        // only thing that clears attachments is an explicit send. Re-reading the
+        // state (as a re-opened sheet would) shows the same draft + chips.
+        val afterReopen = vm.uiState.value
+        assertEquals("deploy the staging build", afterReopen.draft)
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = first,
+                    displayName = "20260610-120000-01-shot.png",
+                ),
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = second,
+                    displayName = "20260610-120000-02-data.csv",
+                ),
+            ),
+            afterReopen.attachments,
+        )
+        assertEquals(afterCompose.draft, afterReopen.draft)
+        assertEquals(afterCompose.attachments, afterReopen.attachments)
+    }
+
+    @Test
     fun seedAttachmentDeDuplicatesAndIgnoresBlank() = runTest {
         val vm = newVm()
         val path = "~/.pocketshell/attachments/host-7-scratch/shot.png"

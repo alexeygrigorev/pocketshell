@@ -1,8 +1,5 @@
 package com.pocketshell.app.session
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
@@ -14,9 +11,6 @@ import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
-import com.pocketshell.app.composer.PromptComposerViewModel
-import com.pocketshell.app.composer.composerAttachmentChipTestTag
-import com.pocketshell.app.composer.composerAttachmentRemoveTestTag
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -83,14 +77,9 @@ class RawSessionBottomControlsUiTest {
     }
 
     @Test
-    fun keyboardOpenAccessoryShowsRawHotkeysAndKeepsStagedAttachmentRemovable() {
+    fun keyboardOpenAccessoryShowsRawHotkeysAndNeverRendersStagedAttachmentGrid() {
         val keyTaps = mutableListOf<String>()
         var keyboardTaps = 0
-        val attachment = PromptComposerViewModel.StagedAttachment(
-            remotePath = "~/.pocketshell/attachments/raw-host/shot.png",
-            displayName = "shot.png",
-        )
-        var staged by mutableStateOf(listOf(attachment))
 
         compose.setContent {
             PocketShellTheme {
@@ -104,27 +93,15 @@ class RawSessionBottomControlsUiTest {
                     onShowKeyboardTap = { keyboardTaps++ },
                     onAddSnippetTap = {},
                     onProjectNavigationTap = {},
-                    stagedAttachments = staged,
-                    onRemoveStagedAttachment = { remotePath ->
-                        staged = staged.filterNot { it.remotePath == remotePath }
-                    },
                 )
             }
         }
 
-        // Mirrors the tmux terminal accessory (TmuxSessionVoiceSurfaceUiTest):
-        // with the IME up, the raw hotkey accessory keeps the staged attachment
-        // grid visible and removable so the user can manage attachments while
-        // typing into the terminal. The composer launcher / chips stay absent.
-        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-        compose.onNodeWithTag(composerAttachmentRemoveTestTag(attachment.remotePath))
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-        compose.onNodeWithTag(composerAttachmentChipTestTag(attachment.remotePath))
-            .assertDoesNotExist()
+        // Issue #673: staged composer attachments are NEVER rendered in the
+        // raw-session bottom area. #669 previously asserted the in-session grid
+        // was shown so the user could manage attachments while typing; the
+        // maintainer reversed that — attachments belong only inside the Prompt
+        // Composer sheet. The session view shows the raw hotkey row, no chips.
         compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
 
         compose.onNodeWithText("Esc").assertIsDisplayed()
@@ -177,6 +154,10 @@ class RawSessionBottomControlsUiTest {
         compose.onNodeWithText("Ctrl-C").assertDoesNotExist()
         compose.onNodeWithText("Ctrl-D").assertDoesNotExist()
         compose.onNodeWithText("Tab").assertDoesNotExist()
+
+        // Issue #673: with the IME hidden (the band that hosts the composer
+        // launcher), still no staged-attachment grid in the session view.
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
 
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
             .assertIsDisplayed()

@@ -112,7 +112,6 @@ import com.pocketshell.app.conversation.timelineActorLabel
 import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.conversation.toolResultPairing
-import com.pocketshell.app.composer.AttachmentTileGrid
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -1394,8 +1393,12 @@ public fun TmuxSessionScreen(
                 } else {
                     Modifier.navigationBarsPadding()
                 }
-                TmuxTerminalBottomControlsWithComposerAttachments(
-                    promptComposerViewModel = promptComposerViewModel,
+                // Issue #673: staged composer attachments are NOT shown in the
+                // session/terminal bottom area. They live only inside the
+                // Prompt Composer sheet (state persists in the composer
+                // ViewModel across session switches), so the terminal controls
+                // never receive the staged-attachment list.
+                TmuxTerminalBottomControls(
                     isImeVisible = isImeVisible,
                     showConversation = showConversation,
                     sessionLive = sessionLive,
@@ -5299,56 +5302,13 @@ internal const val TmuxKeyBarCollapseLabel: String = "×"
  *
  * Issue #584 is preserved by keeping the key bar behind [isImeVisible]; when
  * the keyboard is hidden, the normal composer/chip band is shown instead.
+ *
+ * Issue #673: staged composer attachments are NOT rendered here. They are
+ * visible only inside the Prompt Composer sheet; the staged-attachment STATE
+ * still lives in the composer ViewModel (persisting across session switches),
+ * so re-opening the composer shows them again. The session/terminal bottom
+ * area never surfaces an attachment chip/grid.
  */
-@Composable
-private fun TmuxTerminalBottomControlsWithComposerAttachments(
-    promptComposerViewModel: PromptComposerViewModel,
-    isImeVisible: Boolean,
-    showConversation: Boolean,
-    sessionLive: Boolean,
-    isAgentPane: Boolean,
-    keyBarExpanded: Boolean,
-    onKeyBarExpandedChange: (Boolean) -> Unit,
-    onKey: (KeyBinding) -> Unit,
-    modifierStates: Map<String, KeyModifierState> = emptyMap(),
-    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
-    onChipTap: (String) -> Unit,
-    onDictateTap: (() -> Unit)?,
-    onEnterTap: (() -> Unit)?,
-    onShowKeyboardTap: (() -> Unit)?,
-    onAddSnippetTap: (() -> Unit)?,
-    onAgentCommandsTap: (() -> Unit)? = null,
-    // Issue #628: toggle chip for switching back to the previous tmux session.
-    previousSessionName: String? = null,
-    onTogglePreviousSession: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
-) {
-    val promptComposerState by promptComposerViewModel.uiState.collectAsState()
-    TmuxTerminalBottomControls(
-        isImeVisible = isImeVisible,
-        showConversation = showConversation,
-        sessionLive = sessionLive,
-        isAgentPane = isAgentPane,
-        keyBarExpanded = keyBarExpanded,
-        onKeyBarExpandedChange = onKeyBarExpandedChange,
-        onKey = onKey,
-        modifierStates = modifierStates,
-        onModifierStateChange = onModifierStateChange,
-        onChipTap = onChipTap,
-        onDictateTap = onDictateTap,
-        onEnterTap = onEnterTap,
-        onShowKeyboardTap = onShowKeyboardTap,
-        onAddSnippetTap = onAddSnippetTap,
-        onAgentCommandsTap = onAgentCommandsTap,
-        // Issue #628: forward the toggle chip parameters.
-        previousSessionName = previousSessionName,
-        onTogglePreviousSession = onTogglePreviousSession,
-        stagedAttachments = promptComposerState.attachments,
-        onRemoveStagedAttachment = promptComposerViewModel::removeAttachment,
-        modifier = modifier,
-    )
-}
-
 @Composable
 internal fun TmuxTerminalBottomControls(
     isImeVisible: Boolean,
@@ -5369,8 +5329,6 @@ internal fun TmuxTerminalBottomControls(
     // Issue #628: toggle chip for switching back to the previous tmux session.
     previousSessionName: String? = null,
     onTogglePreviousSession: (() -> Unit)? = null,
-    stagedAttachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
-    onRemoveStagedAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val chromeMode = tmuxTerminalKeyboardChromeMode(
@@ -5378,21 +5336,10 @@ internal fun TmuxTerminalBottomControls(
         showConversation = showConversation,
     )
     when (chromeMode) {
-        TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> {
-            if (stagedAttachments.isNotEmpty()) {
-                Column(
-                    modifier = modifier
-                        .fillMaxWidth()
-                        .background(color = PocketShellColors.Surface),
-                ) {
-                    AttachmentTileGrid(
-                        attachments = stagedAttachments,
-                        onRemove = onRemoveStagedAttachment,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                }
-            }
-        }
+        // Issue #673: the conversation IME-open mode renders no accessory at
+        // all. Staged attachments used to surface here; they now live only
+        // inside the Prompt Composer sheet.
+        TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> Unit
         TmuxTerminalKeyboardChromeMode.HiddenImeControls,
         TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> {
             Column(
@@ -5401,13 +5348,6 @@ internal fun TmuxTerminalBottomControls(
                     .heightIn(min = SessionBottomControlsMinHeight)
                     .background(color = PocketShellColors.Surface),
             ) {
-                if (stagedAttachments.isNotEmpty()) {
-                    AttachmentTileGrid(
-                        attachments = stagedAttachments,
-                        onRemove = onRemoveStagedAttachment,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                }
                 if (chromeMode == TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys) {
                     KeyBar(
                         keys = tmuxKeyBarLayout(

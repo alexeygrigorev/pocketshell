@@ -42,6 +42,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -166,7 +168,25 @@ class TmuxSessionViewModelTest {
             runCatching { vm.clearForTest() }
         }
         createdViewModels.clear()
+        // Issue #708 follow-up: cancel AND JOIN the real-`Dispatchers.IO`
+        // factory scope before returning. `factoryScope.cancel()` only
+        // *requests* cancellation; cancellation is cooperative, so a
+        // TmuxClientFactory IO read/feed coroutine can still be unwinding
+        // (and may touch `Dispatchers.Main` as it completes) when this test's
+        // `MainDispatcherRule` runs its `finally { resetMain() }`. If that
+        // unwind races the NEXT test class's `setMain`, kotlinx-coroutines
+        // throws "Dispatchers.Main is used concurrently with setting it" and
+        // the suite flakes inter-class (~50%/full run). Joining the scope's
+        // children here makes tear-down fully quiescent: no IO coroutine
+        // survives past `@After`, so nothing touches Main after `resetMain`.
+        // A bounded wait keeps a genuinely wedged coroutine from hanging the
+        // suite — it would surface as a real failure rather than the flake.
         factoryScope.cancel()
+        runBlocking {
+            withTimeoutOrNull(5_000) {
+                factoryScope.coroutineContext.job.children.forEach { it.join() }
+            }
+        }
     }
 
     @Test

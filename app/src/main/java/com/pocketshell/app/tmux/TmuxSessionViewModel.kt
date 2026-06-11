@@ -2956,6 +2956,26 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.user,
             )
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
+            // Issue #662: black-pane safety net for the open/switch path even
+            // when the phone grid happens to MATCH tmux's current size (so
+            // [maybeRefreshControlClientSize] short-circuits and its
+            // resize-completion blank-reseed never fires). A pane whose
+            // attach-time `capture-pane` seed failed/timed out under real-network
+            // latency would then stay black on a live connection with no resize
+            // to heal it. Defer one blank-only re-seed so any still-black visible
+            // pane is re-captured from tmux's grid; a no-op for panes that
+            // already painted (the common case) and for the resize path (already
+            // healed). Guarded so a superseded runtime never re-seeds.
+            val blankReseedGuard = RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+            bridgeScope.launch {
+                delay(BLANK_PANE_RESEED_DELAY_MS)
+                if (!isCurrentRuntime(blankReseedGuard)) return@launch
+                reseedBlankVisiblePanes(blankReseedGuard)
+            }
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
@@ -6235,6 +6255,75 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #662: re-seed any visible pane whose local emulator is rendering a
+     * BLANK (black) screen from a fresh `capture-pane`, so a live connection can
+     * never strand the user on a black pane.
+     *
+     * The maintainer's dogfood symptom: a session with multiple windows where
+     * EVERY window renders black (just a cursor at home), and switching windows
+     * does not recover it. Root cause: a full-screen remote app (an agent / a
+     * pager) paints its frame once and then stays IDLE — it emits no further
+     * `%output`. Its ONLY on-screen content source after attach is the
+     * attach-time `capture-pane` seed. If that seed never lands for a pane —
+     * because the combined capture round-trip failed/timed out (real-network
+     * latency, a slow agent capture), OR because the post-attach control-client
+     * resize reflowed the pane AFTER the seed and the idle app emitted no fresh
+     * redraw — the pane stays black. #634's warm reveal made this worse by
+     * skipping the post-attach [reseedAllVisiblePanes] safety net for a warm
+     * open, on the assumption every pane was already seeded by
+     * [preloadVisibleContentForNewPanes]; a pane whose capture failed slips
+     * through that assumption.
+     *
+     * tmux's grid still HOLDS the content for an idle app even after a reflow
+     * (verified: `capture-pane` post-resize returns the content), so a fresh
+     * capture restores it. This pass is the universal safety net: it runs after
+     * the surface reveals (and after the control-client resize settles) and on
+     * every window switch, re-capturing ONLY panes whose emulator is actually
+     * blank — so it costs nothing for panes that already painted, and always
+     * heals a black pane on a live connection.
+     */
+    private suspend fun reseedBlankVisiblePanes(refreshGuard: RuntimeRefreshGuard? = null) {
+        val client = clientRef ?: return
+        val panes = paneRows.values.toList()
+        for (pane in panes) {
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
+            if (!pane.terminalState.visibleScreenIsBlank()) continue
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-blank-pane-reseed pane=${pane.paneId} window=${pane.windowId} " +
+                    "session=${activeTarget?.sessionName} status=${_connectionStatus.value}",
+            )
+            seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = false)
+        }
+    }
+
+    /**
+     * Issue #662: re-seed a single visible pane from `capture-pane` if its
+     * emulator is rendering a blank (black) screen. Called when the user
+     * switches to a window: tmux `-CC` never re-emits an idle window's existing
+     * content, so a window that was never successfully seeded (or whose seed was
+     * wiped by a reflow) would otherwise stay black no matter how many times the
+     * user switches to it. A no-op when the pane already shows content.
+     */
+    public fun reseedVisiblePaneIfBlank(paneId: String) {
+        val pane = paneRows[paneId] ?: return
+        val client = clientRef ?: return
+        if (client.disconnected.value) return
+        if (!pane.terminalState.visibleScreenIsBlank()) return
+        bridgeScope.launch {
+            // Re-check inside the coroutine: the pane may have painted between
+            // the synchronous guard and dispatch (a late `%output` landed).
+            if (!pane.terminalState.visibleScreenIsBlank()) return@launch
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-blank-pane-reseed-on-switch pane=$paneId window=${pane.windowId} " +
+                    "session=${activeTarget?.sessionName}",
+            )
+            seedPaneFromCapture(client, pane, refreshGuard = null, recordMilestone = false)
+        }
+    }
+
+    /**
      * Capture a single pane's current content with `capture-pane -p -e` and
      * feed it (with the restored cursor) into the pane's emulator, restoring
      * the visible screen + colors after a tmux reattach. Returns true when a
@@ -8047,6 +8136,25 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                 }
             }
+            // Issue #662: the control-client resize just reflowed every visible
+            // pane to the phone grid. For an IDLE full-screen remote app (agent /
+            // pager) the reflow can leave the LOCAL emulator blank (the seeded
+            // pre-resize frame is wiped and the idle app emits no fresh redraw),
+            // which is the maintainer's every-window-black symptom. tmux's grid
+            // still HOLDS the reflowed content, so re-seed ONLY the panes whose
+            // emulator is now blank from a fresh `capture-pane`. Runs on every
+            // attach path (cold, warm, fast-switch, reconnect) because all of
+            // them flow through this resize-completion block; a no-op for panes
+            // that already render content. Skipped if the runtime moved on.
+            if (clientRef === client) {
+                reseedBlankVisiblePanes(
+                    RuntimeRefreshGuard(
+                        generation = attachGeneration,
+                        target = target,
+                        client = client,
+                    ),
+                )
+            }
         }
     }
 
@@ -9688,6 +9796,17 @@ internal data class TmuxPaneCursor(val column: Int, val row: Int)
  * paint slower (per the #640 diagnosis), so it stays at the prior value.
  */
 internal const val SEED_SCROLLBACK_LINES: Int = 200
+
+/**
+ * Issue #662: how long the post-reveal black-pane safety net waits before
+ * deciding a visible pane is genuinely blank and re-seeding it. The wait lets
+ * the first post-reveal Compose layout report the phone grid and the
+ * control-client resize round-trip settle, so the re-seed captures tmux's
+ * REFLOWED frame rather than the pre-resize one (and so a pane that paints from
+ * a late `%output` within this window is never needlessly re-captured). Kept
+ * short so a genuinely-black pane heals within a blink on a live connection.
+ */
+internal const val BLANK_PANE_RESEED_DELAY_MS: Long = 350L
 
 /**
  * Parse a tmux `display-message -p '#{cursor_x},#{cursor_y}'` reply line

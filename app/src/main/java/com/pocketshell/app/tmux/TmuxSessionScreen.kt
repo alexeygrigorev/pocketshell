@@ -852,6 +852,20 @@ public fun TmuxSessionScreen(
         }
     }
 
+    // Issue #662: when the user switches windows (the pager settles on a
+    // different pane), re-seed that pane from `capture-pane` if its local
+    // emulator is rendering BLACK. tmux `-CC` never re-emits an idle window's
+    // existing content, so a window whose attach-time seed was missing or wiped
+    // would otherwise stay black no matter how many times the user switches to
+    // it — exactly the maintainer's "switching Window 1 <-> Window 2 does not
+    // recover" report. A no-op when the settled pane already shows content.
+    LaunchedEffect(unifiedPanes, sessionName) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            val settledPane = unifiedPanes.getOrNull(page) ?: return@collect
+            viewModel.reseedVisiblePaneIfBlank(settledPane.paneId)
+        }
+    }
+
     @Composable
     fun AnchoredTmuxMoreMenu() {
         TmuxMoreMenu(

@@ -402,6 +402,32 @@ class TerminalSurfaceState(
     internal fun currentMatcher(): TerminalMatcher = matcher
 
     /**
+     * Issue #662: true when the attached emulator's visible screen has rendered
+     * NOTHING — every cell is blank/whitespace. A black pane on a LIVE tmux
+     * connection (the maintainer's "every window is black, just a cursor"
+     * symptom) is exactly this state: the grid was cleared (capture-pane seed
+     * never landed, or a reflow/resize wiped it) and the idle remote app emits
+     * no fresh `%output` to repaint it. The tmux ViewModel polls this after a
+     * warm attach / window-switch and re-seeds a blank pane from a fresh
+     * `capture-pane` so the user never stares at a black pane while tmux's grid
+     * still holds the content.
+     *
+     * Returns false (NOT blank) when no emulator is attached yet — an
+     * unattached surface is "not yet a black pane", and re-seeding it would be
+     * premature. The emulator can throw mid-resize; that is treated as
+     * "unknown", i.e. not blank, so we never spuriously re-seed on a transient.
+     */
+    fun visibleScreenIsBlank(): Boolean {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        val text = try {
+            emulator.screen.transcriptText
+        } catch (_: Throwable) {
+            return false
+        }
+        return text.isBlank()
+    }
+
+    /**
      * Pull the current visible-transcript text from the attached session and
      * run the matcher across it. Returns an empty list when no session is
      * attached or the session has no emulator yet (the View has not yet laid

@@ -46,6 +46,7 @@ import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.HostCard
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
@@ -53,6 +54,8 @@ import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.HostStatus
+import com.pocketshell.uikit.model.KeyBinding
+import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
@@ -94,6 +97,50 @@ import org.robolectric.annotation.GraphicsMode
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class DesignRenders {
+
+    /**
+     * Issue #616: the terminal hotkey `KeyBar` (Ctrl/Tab/Esc/arrows) as it must
+     * appear directly ABOVE the soft keyboard while the IME is up. The bug was
+     * that on the maintainer's device the keybar collapsed into the IME-hidden
+     * chip strip — only Gboard's toolbar showed. This render is the fast
+     * JVM-level visual check that the full-height bar + every key renders;
+     * the emulator keyboard-up screenshot is the acceptance.
+     *
+     * A grey block below the bar stands in for the soft keyboard so the
+     * "directly above the keyboard" framing reads at a glance.
+     */
+    @Test
+    fun keyBarAboveKeyboard() = render("keybar-above-keyboard") {
+        Spacer(modifier = Modifier.height(420.dp))
+        Surface(color = PocketShellColors.Surface) {
+            KeyBar(
+                keys = listOf(
+                    KeyBinding("Esc", KeyKind.Regular),
+                    KeyBinding("Ctrl", KeyKind.Modifier),
+                    KeyBinding("^C", KeyKind.Regular),
+                    KeyBinding("⏎", KeyKind.Regular),
+                    KeyBinding("^D", KeyKind.Regular),
+                    KeyBinding("Tab", KeyKind.Regular),
+                    KeyBinding("⋯", KeyKind.Regular),
+                ),
+                onKey = {},
+            )
+        }
+        // Soft-keyboard stand-in so the framing reads "keybar sits above it".
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(260.dp)
+                .background(Color(0xFF202124)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "soft keyboard (system IME)",
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+            )
+        }
+    }
 
     /** Host-list header (`ScreenHeader`) with a trailing status pill. */
     @Test

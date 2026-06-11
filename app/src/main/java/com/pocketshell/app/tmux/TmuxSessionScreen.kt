@@ -32,7 +32,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -117,6 +116,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
+import com.pocketshell.app.layout.rememberHostImeBottomPx
 import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
@@ -414,7 +414,15 @@ public fun TmuxSessionScreen(
     val pagerState = rememberPagerState(pageCount = { unifiedPanes.size })
 
     val density = LocalDensity.current
-    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    // Issue #616 / #615: read the IME inset from the HOST activity window, not
+    // from Compose's `WindowInsets.ime`. The local read returns 0 on the
+    // maintainer's real device even while the soft keyboard is up, so
+    // `isImeVisible` stayed false and the terminal hotkey KeyBar collapsed into
+    // the IME-hidden chip strip exactly when the user was typing. The host
+    // window's IME inset is reliable; `rememberHostImeBottomPx` is the single
+    // shared source (composer + terminal) so they can never drift. Hard-cut: the
+    // old `WindowInsets.ime` read is gone (D22, no fallback).
+    val imeBottomPx by rememberHostImeBottomPx()
     val navBarBottomPx = WindowInsets.navigationBars.getBottom(density)
     val isImeVisible = imeBottomPx > 0
     // Issue #457 (Part 1): the height in pixels that the soft keyboard

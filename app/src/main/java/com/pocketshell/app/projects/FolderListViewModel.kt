@@ -23,6 +23,7 @@ import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.portfwd.ForwardingHostSnapshot
 import com.pocketshell.app.portfwd.InterestingPortFilter
 import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
@@ -34,6 +35,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.uikit.model.SessionAgentKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -49,7 +51,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -311,6 +317,14 @@ class FolderListViewModel internal constructor(
     // Issue #464: cross-view-model fan-out so a confirmed Kill session on
     // the per-session screen drops the dead row from this tree promptly.
     private val sessionLifecycleSignals: com.pocketshell.app.tmux.SessionLifecycleSignals? = null,
+    // Issue #706: the app-scoped registry of live `tmux -CC` control clients.
+    // When the bound host has a live client we subscribe to its
+    // `%sessions-changed` (ControlEvent.SessionsChanged) event and treat it as a
+    // DEBOUNCED, foreground-only reconcile trigger so an OUT-OF-BAND session
+    // create/kill (another terminal, an agent spawning one) appears in the
+    // picker within seconds — not the 15-min staleness gate. Null in unit tests
+    // that don't exercise the live-event trigger.
+    private val activeTmuxClients: ActiveTmuxClients? = null,
     // Issue #430: when true the view model attaches a
     // [ProcessLifecycleOwner] observer in [init] so the session-discovery
     // poll loop is gated on the whole-process foreground signal. Always
@@ -350,6 +364,10 @@ class FolderListViewModel internal constructor(
         reposRemoteSource: ReposRemoteSource?,
         forwardingController: ForwardingController,
         sessionLifecycleSignals: com.pocketshell.app.tmux.SessionLifecycleSignals,
+        // Issue #706: inject the SAME app-scoped singleton registry the gateway
+        // and the dashboard use, so the live-`-CC`-client `%sessions-changed`
+        // subscription rides the already-open control channel.
+        activeTmuxClients: ActiveTmuxClients,
     ) : this(
         gateway = gateway,
         hostDao = hostDao,
@@ -361,6 +379,7 @@ class FolderListViewModel internal constructor(
         reposRemoteSource = reposRemoteSource,
         forwardingController = forwardingController,
         sessionLifecycleSignals = sessionLifecycleSignals,
+        activeTmuxClients = activeTmuxClients,
         attachLifecycle = true,
     )
 
@@ -423,6 +442,15 @@ class FolderListViewModel internal constructor(
     internal var reconcileTimeoutMs: Long = RECONCILE_TIMEOUT_MS
     private var watchedFoldersJob: Job? = null
     private var probeJob: Job? = null
+
+    /**
+     * Issue #706: subscription to the bound host's live `tmux -CC` client's
+     * `%sessions-changed` (ControlEvent.SessionsChanged) event. Re-bound per
+     * [bind] call (and torn down on host change / [stopPolling]) so it always
+     * tracks the currently-shown host. A burst of `%sessions-changed` is
+     * debounced into a single reconcile trigger.
+     */
+    private var sessionsChangedJob: Job? = null
 
     /**
      * EPIC #679 — the maintained in-memory project tree. Held across opens of
@@ -612,6 +640,11 @@ class FolderListViewModel internal constructor(
         )
         warmReleaseJob?.cancel()
         warmReleaseJob = null
+        // Issue #706: (re)subscribe to the bound host's live `-CC`
+        // `%sessions-changed` event so an out-of-band create/kill triggers a
+        // debounced reconcile. Idempotent per host — restarted here on every
+        // bind so it tracks the currently-shown host.
+        startSessionsChangedSubscription(params)
         // EPIC #679 requirement #1: opening the host detail renders the HELD
         // tree INSTANTLY. Re-binding the SAME host reuses the maintained tree
         // (no probe-on-open, no loading flash) and only kicks a reconcile if one
@@ -1050,10 +1083,14 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * EPIC #679 requirement #2: a foreground/resume reconciles the held tree
-     * only when it is stale (or never reconciled). Replaces the legacy
-     * "probe on every foreground" so a quick background→foreground bounce does
-     * NOT re-probe. D21-clean: rides the [ProcessLifecycleOwner] signal.
+     * EPIC #679 requirement #2 + issue #706: a foreground/resume reconciles the
+     * held tree when it is even mildly stale (older than [RESUME_FRESHEN_MS]),
+     * NOT only past the 15-min held-tree gate. This closes the "created in
+     * another terminal / by an agent while I was away, switch back" case: a real
+     * foreground return freshens the picker within seconds. A rapid in-place
+     * background→foreground bounce (held tree younger than [RESUME_FRESHEN_MS])
+     * still does NOT re-probe, preserving #679's "no constant poll" intent.
+     * D21-clean: rides the [ProcessLifecycleOwner] signal, no background timer.
      */
     private fun maybeReconcileOnResume() {
         val params = bound ?: return
@@ -1061,10 +1098,71 @@ class FolderListViewModel internal constructor(
         // Only react to a genuine new foreground generation.
         if (foregroundGeneration == lastResumeGenerationHandled) return
         lastResumeGenerationHandled = foregroundGeneration
-        if (tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = HostTreeModel.RECONCILE_STALENESS_MS)) {
+        if (tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = RESUME_FRESHEN_MS)) {
             launchReconcile(params)
         }
     }
+
+    /**
+     * Issue #706: subscribe the held tree to the bound host's live `tmux -CC`
+     * client's `%sessions-changed` (ControlEvent.SessionsChanged) event and treat
+     * it as a DEBOUNCED, foreground-only reconcile trigger. This is the core fix
+     * for the out-of-band-session gap: a session created/killed outside the app
+     * (another terminal, an agent spawning one) emits `%sessions-changed` on the
+     * already-open control channel, which here schedules a debounced reconcile so
+     * the new/dead row appears within seconds — instead of staying invisible
+     * until the 15-min staleness gate or a manual pull-to-refresh.
+     *
+     * D21-clean: NO poll, NO Timer/AlarmManager/WorkManager. It rides the
+     * existing hot `-CC` event bus (the SAME `%sessions-changed`
+     * [TmuxSessionViewModel]/[SessionsDashboardViewModel] already consume) and
+     * the reconcile itself is foreground-gated inside [launchReconcile]
+     * (`processStarted.first { it }`), so nothing runs while backgrounded.
+     *
+     * Tracks [ActiveTmuxClients.clients] with [collectLatest] so the
+     * subscription always follows the live client for [params]'s host: if the
+     * client (re)registers (a reconnect), the event collector re-attaches to the
+     * fresh client; if it deregisters, the inner collector is cancelled and we
+     * idle until one reappears. [debounce] coalesces a `%sessions-changed` burst
+     * into one reconcile.
+     */
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private fun startSessionsChangedSubscription(params: BoundParams) {
+        val registry = activeTmuxClients ?: return
+        sessionsChangedJob?.cancel()
+        sessionsChangedJob = viewModelScope.launch {
+            registry.clients
+                .map { snapshot -> snapshot[params.hostId]?.takeIf { it.matches(params) }?.client }
+                .distinctUntilChanged()
+                .collectLatest { client ->
+                    if (client == null) return@collectLatest
+                    client.events
+                        .filter { it is ControlEvent.SessionsChanged }
+                        .debounce(SESSIONS_CHANGED_DEBOUNCE_MS)
+                        .collect {
+                            // Only react while this host is still the bound one and
+                            // the tree is initialised. The reconcile is itself
+                            // foreground-gated inside launchReconcile.
+                            if (bound == params && rootSnapshotLoaded) {
+                                launchReconcile(params)
+                            }
+                        }
+                }
+        }
+    }
+
+    /**
+     * Issue #706: does this live-client registry entry describe the SAME host
+     * connection as [params]? Mirrors the gateway's
+     * `ActiveTmuxClients.Entry.matches` (host/port/user/keyPath) so the
+     * `%sessions-changed` subscription only fires for the host actually shown,
+     * never a same-id-but-different-credential entry.
+     */
+    private fun ActiveTmuxClients.Entry.matches(params: BoundParams): Boolean =
+        hostname == params.hostname &&
+            port == params.port &&
+            username == params.username &&
+            keyPath == params.keyPath
 
     /**
      * Force a reconcile NOW regardless of staleness — the explicit
@@ -1107,6 +1205,11 @@ class FolderListViewModel internal constructor(
     fun stopPolling() {
         probeJob?.cancel()
         probeJob = null
+        // Issue #706: navigating away tears down the `%sessions-changed`
+        // subscription too so a reconcile cannot fire for a screen that is no
+        // longer composed. Re-entry runs bind() again, which re-subscribes.
+        sessionsChangedJob?.cancel()
+        sessionsChangedJob = null
         scheduleWarmRelease()
     }
 
@@ -1306,6 +1409,7 @@ class FolderListViewModel internal constructor(
 
     override fun onCleared() {
         probeJob?.cancel()
+        sessionsChangedJob?.cancel()
         warmJob?.cancel()
         warmReleaseJob?.cancel()
         runBlocking {
@@ -1452,6 +1556,31 @@ class FolderListViewModel internal constructor(
          * an indefinite `Loading`.
          */
         const val RECONCILE_TIMEOUT_MS: Long = 12_000L
+
+        /**
+         * Issue #706: foreground-resume "freshen" window — much shorter than the
+         * 15-min held-tree staleness gate ([HostTreeModel.RECONCILE_STALENESS_MS]).
+         * When the user returns to PocketShell after even a brief background bounce,
+         * an out-of-band session created while away (another terminal, an agent)
+         * should appear without a 15-min wait. A resume re-probes when the held
+         * tree is older than this window, so a real foreground return freshens the
+         * picker promptly while a rapid in-place bounce (held tree younger than
+         * this) still does NOT re-probe — preserving EPIC #679's "no constant poll"
+         * intent. D21-clean: evaluated on the [ProcessLifecycleOwner] resume
+         * signal, never a Timer/AlarmManager/WorkManager.
+         */
+        const val RESUME_FRESHEN_MS: Long = 10_000L
+
+        /**
+         * Issue #706: debounce window for the live-`-CC`-client
+         * `%sessions-changed` reconcile trigger. tmux can emit a burst of
+         * `%sessions-changed` (e.g. a create immediately followed by a
+         * window-add), so we coalesce the burst into a single reconcile rather
+         * than firing one per event — keeping the trigger cheap and honouring
+         * #679's "infrequent reconcile" intent. Small enough that an out-of-band
+         * create still surfaces within a couple of seconds.
+         */
+        const val SESSIONS_CHANGED_DEBOUNCE_MS: Long = 400L
 
         /**
          * Canonicalise a `pane_current_path` / `session_path` value

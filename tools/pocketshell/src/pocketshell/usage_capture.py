@@ -177,14 +177,39 @@ def write_capture(
     captured_at = captured_at or _now_iso()
     records = _parse_ndjson_records(stdout)
 
+    # Read the PREVIOUS cached reading BEFORE we overwrite it, so reset
+    # detection (#690) can compare the current reading to the last one.
+    previous_cache = read_cache(paths)
+
     cache_obj: dict[str, Any] = {
         "captured_at": captured_at,
         "records": records,
     }
     _write_private(paths.cache_file, json.dumps(cache_obj, sort_keys=True) + "\n")
+
+    # Reset detection (#690) is best-effort: a bad reading must never wedge
+    # the #689 cache write the app's stale-while-revalidate render depends
+    # on, so the whole detect+log step is wrapped and swallows errors. New
+    # reset events are appended to the dedicated reset-events log (the
+    # de-dup source of truth) and embedded in this capture's history entry.
+    history_entry: dict[str, Any] = cache_obj
+    try:
+        # Lazy import avoids the usage_capture <-> usage_reset circular import.
+        from pocketshell import usage_reset as _reset
+
+        reset_events = _reset.record_resets(
+            previous_cache,
+            cache_obj,
+            paths=paths,
+        )
+        if reset_events:
+            history_entry = {**cache_obj, "reset_events": reset_events}
+    except Exception:
+        history_entry = cache_obj
+
     _append_history(
         paths.history_file,
-        cache_obj,
+        history_entry,
         history_max_lines=history_max_lines,
     )
     return cache_obj

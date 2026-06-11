@@ -556,6 +556,17 @@ def _try_daemon_usage_fetch(
         "render. Exits non-zero if no capture exists yet. Implies --json."
     ),
 )
+@click.option(
+    "--reset-events",
+    "reset_events",
+    is_flag=True,
+    help=(
+        "Emit the recorded limit/session reset events (#690) as a JSON "
+        "document {reset_events: [...]} from the history log. The app reads "
+        "this to surface 'limits reset at <time>' on next open. Emits an "
+        "empty list when no resets have been detected yet. Implies --json."
+    ),
+)
 @click.pass_context
 def usage_command(
     ctx: click.Context,
@@ -565,6 +576,7 @@ def usage_command(
     no_cache: bool = False,
     capture: bool = False,
     cached: bool = False,
+    reset_events: bool = False,
 ) -> None:
     """Report quota / usage for coding-agent providers on this host.
 
@@ -584,6 +596,11 @@ def usage_command(
     # `--cached` emits the last captured reading instantly; `--capture`
     # fetches live and persists the cache + history. Both bypass the
     # normal stdout-proxy path below. They imply JSON output.
+    if reset_events:
+        exit_code = _emit_reset_events()
+        if exit_code != 0:
+            ctx.exit(exit_code)
+        return
     if cached:
         exit_code = _emit_cached_usage()
         if exit_code != 0:
@@ -706,6 +723,19 @@ def _emit_cached_usage() -> int:
         )
         return 3
     sys.stdout.write(document)
+    return 0
+
+
+def _emit_reset_events() -> int:
+    """Emit recorded reset events (#690) as a JSON document.
+
+    Always exits 0: the document is ``{"reset_events": [...]}`` (empty list
+    when no resets have been detected/logged yet), so the app can read it
+    unconditionally and surface "limits reset at <time>" when present.
+    """
+    from pocketshell import usage_reset as _reset
+
+    sys.stdout.write(_reset.reset_events_document())
     return 0
 
 

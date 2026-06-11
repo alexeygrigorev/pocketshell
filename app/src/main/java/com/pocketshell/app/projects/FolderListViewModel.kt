@@ -53,6 +53,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import javax.inject.Inject
 
@@ -204,6 +205,20 @@ sealed interface FolderActionStatus {
     data object Idle : FolderActionStatus
     data class Failed(val message: String) : FolderActionStatus
 }
+
+/**
+ * Issue #702: surfaced as a retryable [FolderListUiState.ConnectError] when a
+ * whole [FolderListViewModel] reconcile out-waits its outer bound. The gateway
+ * already self-bounds its live `-CC` enumeration (#702) and its SSH-lease exec
+ * reads (#470); this is the last-line defence so a future unbounded gateway
+ * path can never pin the session picker in `Loading`. The user gets a Retry
+ * panel instead of an indefinite spinner.
+ */
+class FolderReconcileTimeoutException(
+    timeoutMs: Long,
+) : RuntimeException(
+    "Session list didn't load within ${timeoutMs}ms. Tap to retry.",
+)
 
 /**
  * Active/idle split of the flat host-detail session list (#489).
@@ -392,6 +407,20 @@ class FolderListViewModel internal constructor(
     internal var warmLeaseAcquiredForTest: (() -> Unit)? = null
     @androidx.annotation.VisibleForTesting
     internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    /**
+     * Issue #702: outer bound on a single [runReconcile] gateway call so NO
+     * gateway path (now or in future) can pin the picker in `Loading` forever.
+     * The gateway already bounds its live `-CC` enumeration (#702) and its
+     * SSH-lease exec reads (#470), but this is the last-line defence at the view
+     * model: if the whole reconcile somehow out-waits those inner bounds, the
+     * picker surfaces a retryable `ConnectError` panel instead of an indefinite
+     * spinner. Generous relative to the sum of the inner bounds (live-enum +
+     * lease enum + agent detection + watched-root expansion) so it only fires on
+     * a true wedge, never on a slow-but-progressing reconcile. Test-overridable.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var reconcileTimeoutMs: Long = RECONCILE_TIMEOUT_MS
     private var watchedFoldersJob: Job? = null
     private var probeJob: Job? = null
 
@@ -1087,11 +1116,20 @@ class FolderListViewModel internal constructor(
             _state.value = FolderListUiState.Failed("Host not found.")
             return
         }
-        val result = gateway.listSessionsWithFolder(
-            host = host,
-            keyPath = params.keyPath,
-            passphrase = params.passphrase,
-            watchedRoots = lastWatchedFolders,
+        // Issue #702: bound the whole reconcile. The gateway already self-bounds
+        // its live `-CC` enumeration and SSH-lease reads, but a `withTimeout`
+        // here guarantees that NO gateway path can ever pin the picker in
+        // `Loading` indefinitely — on expiry we surface a retryable error panel
+        // instead of an endless spinner.
+        val result = withTimeoutOrNull(reconcileTimeoutMs) {
+            gateway.listSessionsWithFolder(
+                host = host,
+                keyPath = params.keyPath,
+                passphrase = params.passphrase,
+                watchedRoots = lastWatchedFolders,
+            )
+        } ?: FolderListResult.ConnectFailed(
+            FolderReconcileTimeoutException(reconcileTimeoutMs),
         )
         if (bound != params) return
         when (result) {
@@ -1396,6 +1434,24 @@ class FolderListViewModel internal constructor(
         // on a stale foreground/resume ([HostTreeModel.RECONCILE_STALENESS_MS])
         // and on the explicit pull-to-refresh swipe — never on a tight loop.
         const val WARM_RELEASE_DELAY_MS: Long = 10_000L
+
+        /**
+         * Issue #702: outer bound on a single [runReconcile] gateway call. Sized
+         * above the sum of the gateway's inner bounds — the live `-CC`
+         * enumeration ([SshFolderListGateway.LIVE_ENUM_TIMEOUT_MS], 3.5s) plus,
+         * when it falls through, the SSH-lease enumeration exec
+         * ([SshFolderListGateway.EXEC_READ_TIMEOUT_MS], 3.5s) plus per-session
+         * agent detection and watched-root expansion — so a slow-but-progressing
+         * reconcile is never tripped. Kept comfortably BELOW the session-picker
+         * readiness bound (#470, 20s) so a truly wedged reconcile surfaces the
+         * retryable `ConnectError` panel with time to spare for the user (or the
+         * picker-readiness Retry) to re-probe, rather than racing the picker's
+         * own deadline. The remaining unbounded wait this defends against — the
+         * SSH lease ACQUIRE/coalesce itself — is structurally bounded in #687;
+         * until then this view-model bound guarantees the picker never pins in
+         * an indefinite `Loading`.
+         */
+        const val RECONCILE_TIMEOUT_MS: Long = 12_000L
 
         /**
          * Canonicalise a `pane_current_path` / `session_path` value

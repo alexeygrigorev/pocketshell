@@ -273,6 +273,18 @@ class SshFolderListGateway internal constructor(
     // on a real dispatcher without virtual-vs-real time racing. Kept off the
     // @Inject constructor below so Hilt never has to provide a raw Long.
     private val execReadTimeoutMs: Long,
+    // Issue #702: bound on the LIVE `-CC` client enumeration round-trip. The
+    // live path (listSessionRowsFromLiveClient) serves the picker enumeration
+    // off the already-open shared `-CC` control channel, which serializes on
+    // ONE single-flight mutex against the in-session terminal's own control
+    // traffic. If a holder never releases, the enumeration parks forever and
+    // pins the picker in `Loading` (no SSH socket, no PsFolderProbe). Even
+    // though TmuxClient.sendChainedCommands now self-bounds its acquire (#702),
+    // we keep a defence-in-depth bound HERE so the live path can never out-wait
+    // the bounded SSH-lease fall-through. On timeout we return null → the caller
+    // dials the already-bounded lease enumeration instead of stalling. Defaults
+    // to [LIVE_ENUM_TIMEOUT_MS]; the unit test overrides it to a small value.
+    private val liveEnumTimeoutMs: Long = LIVE_ENUM_TIMEOUT_MS,
 ) : FolderListGateway {
 
     // Hilt entry point. The injectable surface is unchanged from before
@@ -1228,9 +1240,24 @@ class SshFolderListGateway internal constructor(
             ?.takeUnless { it.client.disconnected.value }
             ?: return null
         return try {
-            val responses = entry.client.sendChainedCommands(
-                listOf(CONTROL_LIST_SESSIONS_COMMAND, CONTROL_LIST_PANES_COMMAND),
-            )
+            // Issue #702: bound the live-client enumeration so a wedged shared
+            // `-CC` control channel (single-flight mutex held by never-releasing
+            // in-session traffic) can't pin the picker. On timeout we return
+            // null and the caller falls through to the bounded SSH-lease
+            // enumeration (execBounded). `sendChainedCommands` itself also
+            // self-bounds its acquire (#702); this is the gateway-side defence.
+            val responses = withTimeoutOrNull(liveEnumTimeoutMs) {
+                entry.client.sendChainedCommands(
+                    listOf(CONTROL_LIST_SESSIONS_COMMAND, CONTROL_LIST_PANES_COMMAND),
+                )
+            } ?: run {
+                Log.w(
+                    PROBE_LOG_TAG,
+                    "live -CC enumeration wedged >${liveEnumTimeoutMs}ms; " +
+                        "falling through to bounded SSH-lease enumeration.",
+                )
+                return null
+            }
             val listSessions = responses.getOrNull(0) ?: return null
             val listPanes = responses.getOrNull(1)
             when {
@@ -1329,6 +1356,24 @@ class SshFolderListGateway internal constructor(
          * just protects the single in-flight reconcile probe.)
          */
         const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
+
+        /**
+         * Issue #702: upper bound on the LIVE `-CC` client enumeration
+         * round-trip ([listSessionRowsFromLiveClient]). The live path serves
+         * the picker-gating session enumeration off the already-open shared
+         * `-CC` control channel, which is strictly single-flight: every command
+         * serializes on one `sendMutex`. When the picker enumerates while the
+         * in-session terminal still holds that mutex (a Back-tap from a live
+         * session, or a mid-attach/teardown window) and the holder never
+         * releases, an UNBOUNDED enumeration would park forever and pin the
+         * picker in `Loading` — zero new SSH sockets, no `PsFolderProbe`, the
+         * #470 wedge signature. This bound makes the live path degrade to the
+         * already-bounded SSH-lease enumeration ([execBounded]) instead. Sized
+         * the same as [EXEC_READ_TIMEOUT_MS] so a healthy control round-trip
+         * (tens of ms) is never tripped, yet a fully wedged channel surfaces the
+         * lease fall-through within a few seconds.
+         */
+        const val LIVE_ENUM_TIMEOUT_MS: Long = 3_500L
 
         /**
          * Single-quote a value for safe interpolation into a POSIX shell

@@ -180,8 +180,22 @@ internal class FakeTmuxClient(
      */
     val chainedCommandBatches: MutableList<List<String>> = mutableListOf()
 
+    /**
+     * Issue #702: when true, [sendChainedCommands] parks forever (never
+     * returns) — modelling a wedged shared `-CC` control channel whose
+     * single-flight mutex is held by an in-session command that never
+     * releases. The folder-list live-client enumeration must NOT hang on this:
+     * it bounds the call with `withTimeoutOrNull` and falls through to the
+     * bounded SSH-lease enumeration.
+     */
+    @Volatile
+    var wedgeChainedCommandsForever: Boolean = false
+
     override suspend fun sendChainedCommands(commands: List<String>): List<CommandResponse> {
         chainedCommandBatches += commands
+        if (wedgeChainedCommandsForever) {
+            CompletableDeferred<Unit>().await()
+        }
         return commands.map { handleCommand(it, bestEffort = false) }
     }
 

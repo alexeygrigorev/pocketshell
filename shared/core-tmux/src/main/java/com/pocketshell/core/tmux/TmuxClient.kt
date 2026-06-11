@@ -745,7 +745,61 @@ internal class RealTmuxClient(
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
         val chained = commands.joinToString(separator = " ; ")
-        return sendMutex.withLock {
+        // Issue #702: bound the SINGLE-FLIGHT ACQUIRE itself, not the per-block
+        // drain inside the lock. `commandTimeoutGate.run(...)` below only wraps
+        // the writes/awaits AFTER the mutex is held; the wait to ACQUIRE the
+        // mutex had no deadline of its own. The folder-list picker enumeration
+        // reaches here on the one shared per-host `-CC` client and serializes
+        // against the in-session terminal's own control traffic. If a current
+        // holder never releases (e.g. a stalled command during an attach/
+        // teardown window) the enumeration would park on the acquire forever
+        // and pin the session picker in `Loading` (no SSH socket, no
+        // `PsFolderProbe` — exactly the #470 capture). `Mutex.lock()` IS a
+        // cancellable suspension point, so we bound ONLY the acquire with
+        // `withTimeoutOrNull` and, on a wedged channel, degrade to best-effort
+        // error responses instead of hanging. We deliberately do NOT wrap the
+        // drain in the same bound: the drain has its own per-block timeouts and
+        // a healthy trailing block can legitimately take up to `commandTimeoutMs`
+        // to arrive — wrapping both would race the two deadlines and could turn
+        // a delivered first block into a spurious error. The caller (folder-list
+        // discovery) treats an all-error result as a signal to fall through to
+        // the bounded SSH-lease enumeration. Structural fix to make the bare
+        // acquire bounded everywhere (sendCommand/captureWithCursor too) is #687.
+        val acquired = withTimeoutOrNull(commandTimeoutMs) {
+            sendMutex.lock()
+            true
+        }
+        if (acquired != true) {
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux chained command acquire wedged >${commandTimeoutMs}ms; " +
+                    "degrading to error responses so the caller can fall back. " +
+                    "n=${commands.size}",
+            )
+            return commands.map {
+                CommandResponse(number = -1L, output = emptyList(), isError = true)
+            }
+        }
+        return try {
+            drainChainedUnderLock(commands, chained)
+        } finally {
+            sendMutex.unlock()
+        }
+    }
+
+    /**
+     * Issue #692/#702: the body of [sendChainedCommands] that runs WHILE the
+     * single-flight [sendMutex] is held. Extracted so the ACQUIRE can be bounded
+     * separately (#702) from the per-block drain. Returns one [CommandResponse]
+     * per command in submission order; a slow/absent individual block degrades
+     * to a synthetic error response (best-effort) rather than failing the whole
+     * enumeration.
+     */
+    private suspend fun drainChainedUnderLock(
+        commands: List<String>,
+        chained: String,
+    ): List<CommandResponse> {
+        return run {
             if (closed) throw TmuxClientException("client is closed")
             if (!connected) throw TmuxClientException("client is not connected")
             val sh = shell ?: throw TmuxClientException("client has no active shell")

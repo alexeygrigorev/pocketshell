@@ -18,6 +18,7 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -96,6 +97,78 @@ class FolderListGatewayLiveClientTest {
                 ),
             ),
             client.chainedCommandBatches,
+        )
+    }
+
+    @Test
+    fun wedgedLiveClientEnumerationFallsThroughToLeaseInsteadOfHanging() = runBlocking {
+        // Issue #702: the live `-CC` enumeration serves the picker probe off
+        // the one shared per-host control client, which serializes on a SINGLE
+        // single-flight mutex against the in-session terminal's own traffic. If
+        // a holder never releases (a Back-tap from a live session, or a
+        // mid-attach/teardown window), an UNBOUNDED enumeration parks forever
+        // and pins the picker in `Loading` — zero new SSH sockets, no
+        // PsFolderProbe (the #470 wedge). The gateway must bound the live call
+        // and FALL THROUGH to the already-bounded SSH-lease enumeration so the
+        // picker populates (or surfaces a bounded result) instead of hanging.
+        //
+        // Runs on a REAL dispatcher (runBlocking) with a small injected
+        // liveEnumTimeoutMs: the wedged fake parks forever via an unresolved
+        // CompletableDeferred (past the bound), so if the bound DID NOT fire
+        // this test would hang — completing at all is the load-bearing proof.
+        val wedgedClient = FakeTmuxClient().apply { wedgeChainedCommandsForever = true }
+        activeTmuxClients.register(
+            hostId = HOST.id,
+            hostName = HOST.name,
+            hostname = HOST.hostname,
+            port = HOST.port,
+            username = HOST.username,
+            keyPath = KEY_PATH,
+            client = wedgedClient,
+        )
+        val leaseSession = RecordingSshSession()
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = SshLeaseManager(
+                connector = object : SshLeaseConnector {
+                    override suspend fun connect(target: SshLeaseTarget) = Result.success<SshSession>(leaseSession)
+                },
+                idleTtlMillis = 0L,
+            ),
+            sessionListParser = com.pocketshell.app.sessions.HostTmuxSessionListParser(),
+            execReadTimeoutMs = SshFolderListGateway.EXEC_READ_TIMEOUT_MS,
+            // Short, real bound: the wedged live call parks far past this, so
+            // the bound fires and the gateway dials the lease. Deterministic.
+            liveEnumTimeoutMs = 250L,
+        )
+
+        val result = gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
+
+        // The wedged live client WAS attempted (one chained batch enqueued)…
+        assertEquals(
+            listOf(
+                listOf(
+                    SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND,
+                    SshFolderListGateway.CONTROL_LIST_PANES_COMMAND,
+                ),
+            ),
+            wedgedClient.chainedCommandBatches,
+        )
+        // …but the bound fired and the gateway FELL THROUGH to the SSH lease
+        // (the lease was dialed and at least the enumeration exec ran). The mere
+        // fact that `listSessionsWithFolder` RETURNED proves it did not hang on
+        // the wedged control channel.
+        assertTrue(
+            "live enumeration wedge must fall through to the SSH-lease enumeration; got ${leaseSession.execCommands}",
+            leaseSession.execCommands.any { it.contains("tmux list-sessions") },
+        )
+        // The result is a bounded FolderListResult (NOT a permanent Loading
+        // hang). With the empty-success lease there are no live sessions, so an
+        // empty Sessions list is the expected populated-but-empty picker state.
+        assertTrue(
+            "wedged live path must surface a bounded result, got $result",
+            result is FolderListResult.Sessions,
         )
     }
 

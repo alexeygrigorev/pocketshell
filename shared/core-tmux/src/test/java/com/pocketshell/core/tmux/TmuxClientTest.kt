@@ -538,6 +538,65 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `sendChainedCommands bounds the acquire and degrades to errors when the mutex is wedged`() = runBlocking {
+        // Issue #702: the picker enumeration reaches sendChainedCommands on the
+        // ONE shared per-host -CC client and serializes on the single-flight
+        // sendMutex against the in-session terminal's own control traffic. If a
+        // holder never releases the mutex, an UNBOUNDED acquire would park the
+        // enumeration forever and pin the session picker in `Loading`. The
+        // acquire must be BOUNDED: when it can't be taken within commandTimeoutMs
+        // the call degrades to best-effort error responses so the folder-list
+        // gateway falls through to its bounded SSH-lease enumeration.
+        //
+        // A blocking `sendCommand` whose response/timeout never fires HOLDS the
+        // mutex (its deterministic gate is never released). A concurrent
+        // sendChainedCommands then cannot acquire and must return one error
+        // response per command within the real acquire bound — NOT hang.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        // Small REAL acquire bound; the holder keeps the mutex indefinitely so
+        // the chained acquire trips this bound deterministically.
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 200L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            // Holder grabs and HOLDS the mutex: it writes, then parks on the
+            // response wait whose deterministic timeout is never fired and whose
+            // block is never fed — so the mutex stays held.
+            val holder = scope.async { runCatching { client.sendCommand("holder-cmd") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "holder-cmd\n") { yield(); delay(10) }
+            }
+
+            // Concurrent enumeration can't acquire the wedged mutex; the bounded
+            // acquire must degrade to error responses rather than hang.
+            val responses = withTimeout(3_000) {
+                client.sendChainedCommands(listOf("list-sessions", "list-panes -a"))
+            }
+            assertEquals(2, responses.size)
+            assertTrue("wedged-acquire chained call must degrade to errors", responses.all { it.isError })
+
+            // The holder is still parked (it never got its response). Releasing
+            // its timeout lets it finish so the test tears down cleanly.
+            timeoutGate.fireNextTimeout()
+            withTimeout(3_000) { holder.await() }
+            Unit
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `setWindowSizeLatest sends window option command and shell-quotes target`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

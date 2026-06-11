@@ -124,9 +124,14 @@ jobs:
       - name: Verify Docker is available
         run: docker info
 
+      # Issue #691: core-tmux:integrationTest (Testcontainers, no emulator) is
+      # added here so the control-mode contract — `tmux -CC` spawns, structural
+      # events surface, one-command-at-a-time framing, list-sessions/new-session
+      # round-trips — is pinned on EVERY push, not only nightly. Cheap win: it
+      # runs on the same plain Docker runner as the other integration tests.
       - name: Run integration tests
         timeout-minutes: 45
-        run: ./gradlew :app:integrationTest :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest --no-daemon --stacktrace
+        run: ./gradlew :app:integrationTest :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest :shared:core-tmux:integrationTest --no-daemon --stacktrace
 
       - name: Upload integration test reports on failure
         if: failure()
@@ -137,3 +142,148 @@ jobs:
             **/build/reports/tests/
             **/build/test-results/
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Per-push emulator-journey job (issue #691, the #638 mandate that never
+  # landed). Runs the LOAD-BEARING terminal-attach/switch JOURNEY proof on the
+  # emulator + deterministic Docker `agents:2222` fixture on EVERY push, so the
+  # never-black / wrong-session / EOF-on-switch regressions are caught at PR
+  # time, not the next morning by nightly or at release by the gate.
+  #
+  # Issue #470: the per-push proof is currently the picker-FREE
+  # DeepLinkSessionSwitchE2eTest (it deep-links straight onto the TmuxSession
+  # screen and exercises the real `tmux -CC` attach/switch), because the shared
+  # session-PICKER enumeration is wedged on the AVD (a production-side defect
+  # tracked for the terminal/lease cluster, #661/#692). The picker-driven
+  # journey classes (MultiSessionSwitchJourney, BackgroundGraceReconnect, etc.)
+  # re-join scripts/ci-journey-suite.sh the moment that enumeration is fixed —
+  # wiring them in now would make this job RED on every push (CI email spam).
+  #
+  # This is intentionally the FAST subset (scripts/ci-journey-suite.sh), not the
+  # full connected suite — the heavy/long-running + toxiproxy network-fault +
+  # bootstrap-matrix suites stay in nightly-extensive.yml. The selected proof
+  # needs no toxiproxy proxy family, so this job brings up ONLY the
+  # deterministic `agents` fixture, keeping it deterministic (the maintainer
+  # already gets CI email spam — a flaky per-push job would make that worse).
+  emulator-journey:
+    name: Emulator journey subset (load-bearing, Docker agents)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew + suite script executable
+        run: chmod +x ./gradlew scripts/ci-journey-suite.sh
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build SSH base image
+        run: docker compose -f tests/docker/docker-compose.yml build sshd
+
+      # The selected journeys (BackgroundGraceReconnect, MultiSessionSwitch,
+      # ColdRestoreGoneSessionNoResurrect, ReconnectRepaint) all drive the plain
+      # deterministic `agents` fixture on host port 2222 (emulator 10.0.2.2:2222)
+      # and NONE of them need the opt-in toxiproxy network-fault proxies. Bring
+      # up ONLY `agents` so the job is deterministic.
+      - name: Start Docker fixture (agents)
+        run: |
+          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents
+
+      - name: Wait for the agents fixture to report healthy
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
+          cat /tmp/agents-health.log
+
+      - name: Verify agent SSH target tool surface
+        run: |
+          chmod 600 tests/docker/test_key
+          ssh -i tests/docker/test_key -p 2222 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=2 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
+
+      - name: Run load-bearing journey subset on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-boot-timeout: 900
+          script: scripts/ci-journey-suite.sh
+
+      - name: Collect Docker logs
+        if: always()
+        run: |
+          mkdir -p artifacts/docker
+          docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log 2>/dev/null || true
+          docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
+
+      - name: Publish journey suite summary
+        if: always()
+        run: |
+          if [[ -f artifacts/ci-journey/summary.md ]]; then
+            cat artifacts/ci-journey/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Per-push CI journey suite — summary"
+              echo
+              echo "No suite summary was written (the suite script may have aborted before writing it)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Android test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: emulator-journey-android-test-reports
+          path: |
+            **/build/reports/androidTests/
+            **/build/outputs/androidTest-results/
+            **/build/outputs/connected_android_test_additional_output/
+            artifacts/ci-journey/
+          if-no-files-found: ignore
+
+      - name: Upload Docker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: emulator-journey-docker-logs
+          path: artifacts/docker/
+          if-no-files-found: ignore
+
+      - name: Stop Docker fixture
+        if: always()
+        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans

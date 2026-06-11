@@ -11,8 +11,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -158,19 +156,42 @@ class TmuxClientIntegrationTest {
                 client.use {
                     // Subscribe BEFORE connect so we don't miss the very
                     // first events tmux emits.
-                    val collected = scope.async {
-                        // tmux's exact opening sequence is version-
-                        // dependent. Alpine's tmux 3.x emits an initial
-                        // `%begin`/`%end` framing block (the equivalent
-                        // of an empty command response that closes the
-                        // handshake), followed by structural notifications
-                        // (`%window-add`, `%sessions-changed`). We collect
-                        // a known-stable prefix of 3 events.
-                        it.events.take(3).toList()
+                    //
+                    // tmux's exact opening sequence is version-dependent.
+                    // Alpine's tmux 3.x emits an initial `%begin`/`%end`
+                    // framing block (the equivalent of an empty command
+                    // response that closes the handshake), followed by the
+                    // structural notifications (`%window-add`,
+                    // `%sessions-changed`) — but the relative order and gap of
+                    // those two notifications is NOT stable across tmux builds
+                    // (some builds emit `%window-add` before `%sessions-changed`
+                    // lands, several events apart). Asserting on a fixed prefix
+                    // length (`take(3)`) is therefore brittle: it fails purely
+                    // on event ordering, not on the contract under test. We
+                    // instead collect the opening events into a shared buffer
+                    // and stop as soon as BOTH structural events have been seen
+                    // (or a generous timeout elapses), then assert on the
+                    // buffer — independent of order. (#691: wired into per-push
+                    // CI, so it must pin the contract, not the ordering.)
+                    val opening = java.util.Collections.synchronizedList(
+                        mutableListOf<ControlEvent>(),
+                    )
+                    val collector = scope.launch {
+                        it.events.collect { evt ->
+                            opening.add(evt)
+                        }
                     }
                     it.connect()
-                    val events = withTimeout(10_000) { collected.await() }
-                    assertEquals(3, events.size)
+                    withTimeout(10_000) {
+                        while (
+                            opening.none { e -> e is ControlEvent.WindowAdd } ||
+                            opening.none { e -> e is ControlEvent.SessionsChanged }
+                        ) {
+                            delay(50)
+                        }
+                    }
+                    collector.cancel()
+                    val events = opening.toList()
                     assertTrue(
                         "expected a WindowAdd in tmux's opening events: $events",
                         events.any { e -> e is ControlEvent.WindowAdd },

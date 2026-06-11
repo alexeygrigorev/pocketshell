@@ -48,6 +48,13 @@ public data class UsageScreenState(
      * "refreshing…" affordance over the populated cached value.
      */
     val showingCached: Boolean = false,
+    /**
+     * Issue #690: the resolved "limits just reset" banner content, or null when
+     * no recent reset was detected. The non-push fallback — read from the
+     * server's `pocketshell usage --reset-events` log on app open so the
+     * maintainer sees "limits reset at <time>" even before/without FCM push.
+     */
+    val resetBanner: UsageResetBannerState? = null,
 ) {
     /**
      * Issue #689: the most recent capture timestamp across all hosts whose

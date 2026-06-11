@@ -52,6 +52,15 @@ public interface HostUsageFetcher {
      * [fetch]. The default no-ops so test doubles need not override it.
      */
     public suspend fun fetchCached(host: HostEntity): HostCachedUsage = HostCachedUsage.None
+
+    /**
+     * Read this host's detected usage-reset events (#690) for the in-app reset
+     * banner — the non-push fallback that surfaces "limits reset at <time>" on
+     * app open. Returns an empty list when no reset has been detected, the host
+     * cannot be reached, or its key is unavailable, so the banner is simply
+     * absent. The default no-ops so test doubles need not override it.
+     */
+    public suspend fun fetchResetEvents(host: HostEntity): List<UsageResetEvent> = emptyList()
 }
 
 public sealed interface HostUsageFetch {
@@ -96,6 +105,7 @@ internal fun interface SshHostUsageConnector {
 public class SshHostUsageFetcher : HostUsageFetcher {
     private val sshKeyDao: SshKeyDao
     private val remoteSource: UsageRemoteSource
+    private val resetEventsSource: UsageResetEventsRemoteSource
     private val connector: SshHostUsageConnector
 
     // `UsageRemoteSource` carries a default-arg constructor that, combined
@@ -107,6 +117,7 @@ public class SshHostUsageFetcher : HostUsageFetcher {
     public constructor(sshKeyDao: SshKeyDao) : this(
         sshKeyDao = sshKeyDao,
         remoteSource = UsageRemoteSource(),
+        resetEventsSource = UsageResetEventsRemoteSource(),
         connector = SshHostUsageConnector { host, keyFile ->
             SshConnection.connect(
                 host = host.hostname,
@@ -122,9 +133,11 @@ public class SshHostUsageFetcher : HostUsageFetcher {
         sshKeyDao: SshKeyDao,
         remoteSource: UsageRemoteSource,
         connector: SshHostUsageConnector,
+        resetEventsSource: UsageResetEventsRemoteSource = UsageResetEventsRemoteSource(),
     ) {
         this.sshKeyDao = sshKeyDao
         this.remoteSource = remoteSource
+        this.resetEventsSource = resetEventsSource
         this.connector = connector
     }
 
@@ -190,6 +203,27 @@ public class SshHostUsageFetcher : HostUsageFetcher {
 
                 CachedUsageResult.Empty -> HostCachedUsage.None
             }
+        } finally {
+            runCatching { session.close() }
+        }
+    }
+
+    override suspend fun fetchResetEvents(host: HostEntity): List<UsageResetEvent> {
+        val key = sshKeyDao.getById(host.keyId) ?: return emptyList()
+        val keyFile = File(key.privateKeyPath)
+        if (!keyFile.exists()) return emptyList()
+        if (key.hasPassphrase) return emptyList()
+
+        val session: SshSession = try {
+            connector.connect(host, keyFile).getOrNull() ?: return emptyList()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            return emptyList()
+        }
+
+        return try {
+            resetEventsSource.fetchResetEvents(session)
         } finally {
             runCatching { session.close() }
         }
@@ -393,6 +427,10 @@ open class UsageViewModel internal constructor(
             },
             isRefreshing = false,
             showingCached = false,
+            // Issue #690: keep any banner already on screen through a stale
+            // refresh — the reset doesn't un-happen because the live fetch
+            // timed out.
+            resetBanner = current.resetBanner,
         )
     }
 
@@ -414,6 +452,10 @@ open class UsageViewModel internal constructor(
         val missing = mutableListOf<UsageMissingToolHost>()
         val failed = mutableListOf<UsageFailedHost>()
         val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()
+        // Issue #690: collect each host's detected reset events for the in-app
+        // "limits just reset" banner (the non-push fallback). Best-effort —
+        // a host that can't serve them just contributes nothing.
+        val resetEvents = mutableListOf<UsageResetEvent>()
 
         // Issue #689: when a host's live refresh fails but we still hold its
         // cached reading, keep the cached value on screen flagged stale
@@ -477,7 +519,14 @@ open class UsageViewModel internal constructor(
                     }
                 }
             }
+
+            // Issue #690: read this host's detected reset events for the banner.
+            // Independent of the usage fetch above so a "tool missing" host can
+            // still surface a reset that an earlier, healthier capture logged.
+            resetEvents += runCatching { fetcher.fetchResetEvents(host) }.getOrElse { emptyList() }
         }
+
+        val resetBanner = usageResetBannerState(resetEvents)
 
         return UsageRefreshResult(
             state = UsageScreenState(
@@ -485,6 +534,7 @@ open class UsageViewModel internal constructor(
                 missingToolHosts = missing,
                 failedHosts = failed,
                 isRefreshing = false,
+                resetBanner = resetBanner,
             ),
             schedulerUpdates = schedulerUpdates,
         )

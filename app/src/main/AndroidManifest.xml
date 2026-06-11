@@ -301,6 +301,26 @@
                 android:value="Keeps SSH port-forwarding tunnels alive while the app is backgrounded, scoped to hosts the user explicitly enabled auto-forward on." />
         </service>
 
+        <!--
+            Issue #690: Firebase Cloud Messaging receiver for usage-limit reset
+            pushes. D21-safe: Google Play Services (NOT this app) holds the push
+            connection, so there is no app-side background work — the OS wakes
+            this service only when a push arrives. The service turns a
+            `usage_reset` data message into a notification that deep-links to the
+            Usage screen.
+
+            Not exported: only the FCM library binds it (it enforces the
+            `com.google.android.c2dm.permission.SEND` permission on the dispatch
+            intent), so third-party apps cannot deliver fake pushes.
+        -->
+        <service
+            android:name=".messaging.PocketShellMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>

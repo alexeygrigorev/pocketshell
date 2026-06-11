@@ -6,6 +6,17 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// Firebase Cloud Messaging (issue #690). The `google-services` plugin is
+// applied ONLY when `app/google-services.json` exists. Without a configured
+// Firebase project that file is absent, and the app still builds + ships the
+// in-app reset banner fallback — the FCM messaging code compiles regardless
+// (the SDK is on the classpath), it just won't actually receive pushes until
+// the maintainer creates a Firebase project and drops in google-services.json.
+// See the issue #690 status comment for the one-time setup step.
+if (file("google-services.json").exists()) {
+    apply(plugin = libs.plugins.google.services.get().pluginId)
+}
+
 // sshj pulls in BouncyCastle (bcpkix-jdk18on, bcprov-jdk18on,
 // bcutil-jdk18on) and jspecify, all of which ship duplicate Java
 // resources. The app APK and androidTest APK are packaged separately, so both
@@ -166,6 +177,14 @@ dependencies {
     // based scanner Activity + a Compose-friendly `DecoratedBarcodeView`
     // on top of the existing `com.google.zxing:core` decoder.
     implementation(libs.zxing.android.embedded)
+
+    // Firebase Cloud Messaging (issue #690). Google Play Services holds the
+    // push connection, so this is the D21-safe (no app-side background work)
+    // push-delivery path. The SDK compiles + the messaging service is on the
+    // classpath whether or not `google-services.json` is present; an actual
+    // push only flows once the maintainer configures a Firebase project.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

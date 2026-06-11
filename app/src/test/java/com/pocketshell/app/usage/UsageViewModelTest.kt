@@ -333,6 +333,65 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun refresh_surfacesRecentResetBannerFromDetectedEvents() = runTest {
+        // Issue #690: a recently-detected reset (read via fetchResetEvents)
+        // populates the in-app "limits just reset" banner — the non-push
+        // fallback shown on app open.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "agents", hostname = "reset.example", username = "u", keyId = keyId),
+        )
+        val records = PocketshellUsageJsonParser().parse(
+            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":100.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val recentReset = UsageResetEvent(
+            provider = "codex",
+            window = "short_term",
+            detectedAt = Instant.now().minusSeconds(600),
+            statedResetAt = Instant.now().plusSeconds(900),
+            newResetAt = Instant.now().plusSeconds(3600),
+            timing = "early",
+            minutesEarly = 15,
+            resetKey = "codex|short_term|recent",
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf("reset.example" to HostUsageFetch.Records(records, Instant.now())),
+            resetScripts = mapOf("reset.example" to listOf(recentReset)),
+        )
+
+        val viewModel = testViewModel(fetcher, testScheduler)
+        advanceUntilIdle()
+
+        val banner = viewModel.state.value.resetBanner
+        assertNotNull("recent reset should populate the banner", banner)
+        assertEquals("codex|short_term|recent", banner!!.resetKey)
+        assertTrue(banner.title.startsWith("Codex limits reset"))
+    }
+
+    @Test
+    fun refresh_noResetEvents_leavesBannerNull() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "agents", hostname = "noreset.example", username = "u", keyId = keyId),
+        )
+        val records = PocketshellUsageJsonParser().parse(
+            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":50.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf("noreset.example" to HostUsageFetch.Records(records, Instant.now())),
+        )
+
+        val viewModel = testViewModel(fetcher, testScheduler)
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.resetBanner)
+    }
+
+    @Test
     fun exhaustedCodexRecord_isNotDroppedAndReachesExceededState() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
@@ -627,6 +686,7 @@ class UsageViewModelTest {
     private class FakeFetcher(
         private val scripts: Map<String, HostUsageFetch>,
         private val cachedScripts: Map<String, HostCachedUsage> = emptyMap(),
+        private val resetScripts: Map<String, List<UsageResetEvent>> = emptyMap(),
     ) : HostUsageFetcher {
         var callCount: Int = 0
             private set
@@ -644,6 +704,9 @@ class UsageViewModelTest {
             cachedCallCount += 1
             return cachedScripts[host.hostname] ?: HostCachedUsage.None
         }
+
+        override suspend fun fetchResetEvents(host: HostEntity): List<UsageResetEvent> =
+            resetScripts[host.hostname] ?: emptyList()
     }
 
     private class HangingFetcher : HostUsageFetcher {

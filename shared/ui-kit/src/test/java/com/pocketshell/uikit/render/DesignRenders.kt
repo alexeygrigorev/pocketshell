@@ -938,6 +938,42 @@ class DesignRenders {
     }
 
     /**
+     * Issue #690: the in-app "limits just reset" banner (the non-push fallback).
+     *
+     * Caveat (#555): the real `UsageResetBanner` lives in the `app` module, which
+     * the ui-kit render harness can't import. This is a faithful static mirror of
+     * its layout — a [SurfaceElev] rounded card with a [Green] border, the green
+     * "<Provider> limits reset at <time>" title, and the muted detail line —
+     * built from the same ui-kit theme tokens the real banner uses, so the design
+     * (color, weight, spacing) is visually checkable here. The app-module
+     * composable itself is validated on the emulator.
+     */
+    @Test
+    fun usageResetBanner() = render("usage-reset-banner") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+                .border(width = 1.dp, color = PocketShellColors.Green, shape = RoundedCornerShape(10.dp))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+        ) {
+            Text(
+                text = "Codex limits reset at 5:00 PM",
+                color = PocketShellColors.Green,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "Heavy work can resume. · ~15m earlier than stated",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
+
+    /**
      * Renders [content] wrapped in the real [PocketShellTheme] on the app's dark
      * background and snapshots the composition to `build/renders/<name>.png`.
      */

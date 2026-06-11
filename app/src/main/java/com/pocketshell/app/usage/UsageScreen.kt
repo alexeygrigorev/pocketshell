@@ -72,6 +72,14 @@ fun UsageScreen(
 
         UsageMeta(state = state)
 
+        // Issue #690: prominent "limits just reset" banner (the non-push
+        // fallback) — surfaced on app open from the server's detected reset
+        // log so the maintainer learns the moment heavy work can resume even
+        // before/without FCM push being wired.
+        state.resetBanner?.let { banner ->
+            UsageResetBanner(state = banner)
+        }
+
         state.hosts.forEach { host ->
             host.records.forEach { record ->
                 UsageProviderCard(record = record, now = now, host = host)

@@ -97,6 +97,16 @@ androidx-security-crypto = "1.1.0"
 # not a replacement for the emulator release-validation gate.
 roborazzi = "1.46.1"
 
+# Firebase Cloud Messaging (issue #690). The BoM aligns all Firebase artifact
+# versions; we only pull `firebase-messaging`. Picked because Google Play
+# Services — NOT the app — holds the push connection, so this is the only D21-safe
+# (no app-side background work) push-delivery path. The `google-services` plugin
+# (33.x line) processes `app/google-services.json`; build.gradle applies it
+# ONLY when that file is present so the build still passes without a Firebase
+# project configured (the in-app reset banner fallback works regardless).
+firebase-bom = "33.7.0"
+google-services = "4.4.2"
+
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
@@ -164,6 +174,11 @@ roborazzi = { group = "io.github.takahirom.roborazzi", name = "roborazzi", versi
 roborazzi-compose = { group = "io.github.takahirom.roborazzi", name = "roborazzi-compose", version.ref = "roborazzi" }
 roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "roborazzi-junit-rule", version.ref = "roborazzi" }
 
+# Firebase Cloud Messaging (issue #690). Version-less artifacts; the
+# `firebase-bom` platform aligns them.
+firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebase-bom" }
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
@@ -174,3 +189,7 @@ ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 # Roborazzi (issue #555). The Gradle plugin wires the `recordRoborazziDebug` /
 # `verifyRoborazziDebug` tasks onto the module's unit-test source set.
 roborazzi = { id = "io.github.takahirom.roborazzi", version.ref = "roborazzi" }
+# Firebase Cloud Messaging (issue #690). Processes `app/google-services.json`.
+# `app/build.gradle.kts` applies it conditionally (only when that file exists)
+# so the build still passes without a configured Firebase project.
+google-services = { id = "com.google.gms.google-services", version.ref = "google-services" }

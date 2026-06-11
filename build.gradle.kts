@@ -11,4 +11,9 @@ plugins {
     alias(libs.plugins.ksp) apply false
     // Roborazzi (issue #555): fast JVM screenshot rendering for design iteration.
     alias(libs.plugins.roborazzi) apply false
+    // Firebase Cloud Messaging (issue #690): declared here so the version
+    // resolves once; `app/build.gradle.kts` applies it only when a
+    // `google-services.json` is present (so the build passes without a
+    // configured Firebase project).
+    alias(libs.plugins.google.services) apply false
 }

@@ -115,6 +115,100 @@ class FileViewerScaffoldTest {
         audioFile.delete()
     }
 
+    // ---- Issue #696: word-wrap toggle + Markdown render-vs-raw ----
+
+    @Test
+    fun textStateShowsWrapToggleButNotMarkdownToggle() {
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/tmp/main.kt",
+                        content = "fun main() {}",
+                        sizeBytes = 13,
+                    ),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_VIEWER_WRAP_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_RENDER_MD_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun wrapToggleInvokesCallback() {
+        var toggles = 0
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/tmp/long.log",
+                        content = "a very long line ".repeat(40),
+                        sizeBytes = 700,
+                    ),
+                    readingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
+                    onBack = {},
+                    onRetry = {},
+                    onToggleWordWrap = { toggles++ },
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_VIEWER_WRAP_TAG).performClick()
+        compose.waitForIdle()
+        assertEquals(1, toggles)
+    }
+
+    @Test
+    fun markdownFileRenderedShowsFormattedAndMarkdownToggle() {
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/tmp/README.md",
+                        content = "# Heading One\n\nSome **bold** body text.\n\n" +
+                            "```python\nprint('hi')\n```",
+                        sizeBytes = 60,
+                    ),
+                    readingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        // Markdown toggle is offered for a .md file.
+        compose.onNodeWithTag(FILE_VIEWER_RENDER_MD_TAG).assertIsDisplayed()
+        // The rendered Markdown surface is shown (heading text is present).
+        compose.onNodeWithTag(FILE_VIEWER_MARKDOWN_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Heading One").assertIsDisplayed()
+    }
+
+    @Test
+    fun markdownFileRawShowsSourceNotRendered() {
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/tmp/README.md",
+                        content = "# Heading One\n\nbody",
+                        sizeBytes = 20,
+                    ),
+                    readingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = false),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        // Raw mode: the monospace text surface shows the literal `#` source and
+        // the rendered Markdown surface is absent.
+        compose.onNodeWithTag(FILE_VIEWER_MARKDOWN_TAG).assertDoesNotExist()
+        compose.onNodeWithText("# Heading One\n\nbody").assertIsDisplayed()
+    }
+
     /**
      * Build a minimal valid PCM WAV of [millis] of silence (16-bit mono, 8 kHz)
      * so MediaPlayer can prepare it without a codec — enough to exercise the

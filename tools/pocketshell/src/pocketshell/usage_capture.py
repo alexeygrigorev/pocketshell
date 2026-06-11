@@ -204,6 +204,13 @@ def write_capture(
         )
         if reset_events:
             history_entry = {**cache_obj, "reset_events": reset_events}
+            # Push delivery (#690) is best-effort and fail-soft: a new reset
+            # event triggers an FCM data push to the registered device, but a
+            # missing credential / token / google-auth never breaks the hourly
+            # capture (push_reset_events itself no-ops and never raises).
+            from pocketshell import push as _push
+
+            _push.push_reset_events(reset_events, paths=paths)
     except Exception:
         history_entry = cache_obj
 

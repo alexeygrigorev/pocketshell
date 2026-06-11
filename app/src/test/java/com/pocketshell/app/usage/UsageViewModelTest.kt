@@ -395,6 +395,117 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun refresh_registersPushTokenOverLiveSession_whenNeedsRegistration() = runTest {
+        // Issue #690 R3: a pending, undelivered FCM token is registered over the
+        // host's live Usage SSH session (`registerPushToken` with the PATH-robust
+        // `push register-token '<token>'` command), then `markRegistered()` once
+        // the host confirms the write — no second connect.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "agents", hostname = "push.example", username = "u", keyId = keyId),
+        )
+        val records = PocketshellUsageJsonParser().parse(
+            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf("push.example" to HostUsageFetch.Records(records, Instant.now())),
+        )
+        val registrar = FakePushTokenRegistrar(token = "tok-xyz", needsRegistration = true)
+
+        val viewModel = testViewModel(fetcher, testScheduler, pushTokenRegistrar = registrar)
+        advanceUntilIdle()
+
+        val expectedCommand =
+            com.pocketshell.app.messaging.FcmTokenRegistrar.registerCommand("tok-xyz")
+        assertEquals(listOf("push.example" to expectedCommand), fetcher.registerCalls)
+        assertEquals(1, registrar.markRegisteredCount)
+    }
+
+    @Test
+    fun refresh_doesNotRegisterPushToken_whenAlreadyRegistered() = runTest {
+        // Already-delivered token: no register exec, no markRegistered.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "agents", hostname = "noreg.example", username = "u", keyId = keyId),
+        )
+        val records = PocketshellUsageJsonParser().parse(
+            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf("noreg.example" to HostUsageFetch.Records(records, Instant.now())),
+        )
+        val registrar = FakePushTokenRegistrar(token = "tok-xyz", needsRegistration = false)
+
+        val viewModel = testViewModel(fetcher, testScheduler, pushTokenRegistrar = registrar)
+        advanceUntilIdle()
+
+        assertTrue("no token delivery when already registered", fetcher.registerCalls.isEmpty())
+        assertEquals(0, registrar.markRegisteredCount)
+    }
+
+    @Test
+    fun refresh_doesNotMarkRegistered_whenHostDeliveryFails() = runTest {
+        // The host exec failed (exit != 0 -> registerPushToken false): the token
+        // stays pending so the next foreground refresh retries; do NOT mark.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "agents", hostname = "failreg.example", username = "u", keyId = keyId),
+        )
+        val records = PocketshellUsageJsonParser().parse(
+            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf("failreg.example" to HostUsageFetch.Records(records, Instant.now())),
+            registerOutcomes = mapOf("failreg.example" to false),
+        )
+        val registrar = FakePushTokenRegistrar(token = "tok-xyz", needsRegistration = true)
+
+        val viewModel = testViewModel(fetcher, testScheduler, pushTokenRegistrar = registrar)
+        advanceUntilIdle()
+
+        // Delivery was attempted exactly once, but not marked (host didn't confirm).
+        assertEquals(1, fetcher.registerCalls.size)
+        assertEquals(0, registrar.markRegisteredCount)
+    }
+
+    @Test
+    fun refresh_registersPushTokenOnlyOnce_acrossMultipleHosts() = runTest {
+        // Once one host confirms the write, the remaining hosts this refresh are
+        // not re-asked (the device-level token is delivered).
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "a", hostname = "h-a.example", username = "u", keyId = keyId),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "b", hostname = "h-b.example", username = "u", keyId = keyId),
+        )
+        val records = PocketshellUsageJsonParser().parse(
+            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf(
+                "h-a.example" to HostUsageFetch.Records(records, Instant.now()),
+                "h-b.example" to HostUsageFetch.Records(records, Instant.now()),
+            ),
+        )
+        val registrar = FakePushTokenRegistrar(token = "tok-xyz", needsRegistration = true)
+
+        val viewModel = testViewModel(fetcher, testScheduler, pushTokenRegistrar = registrar)
+        advanceUntilIdle()
+
+        assertEquals("token delivered to exactly one host", 1, fetcher.registerCalls.size)
+        assertEquals(1, registrar.markRegisteredCount)
+    }
+
+    @Test
     fun exhaustedCodexRecord_isNotDroppedAndReachesExceededState() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
@@ -698,12 +809,18 @@ class UsageViewModelTest {
         private val scripts: Map<String, HostUsageFetch>,
         private val cachedScripts: Map<String, HostCachedUsage> = emptyMap(),
         private val resetScripts: Map<String, List<UsageResetEvent>> = emptyMap(),
+        // Issue #690 R3: per-host registerPushToken outcome (default success).
+        private val registerOutcomes: Map<String, Boolean> = emptyMap(),
     ) : HostUsageFetcher {
         var callCount: Int = 0
             private set
         var cachedCallCount: Int = 0
             private set
         val fetchedHostnames: MutableList<String> = mutableListOf()
+
+        // Issue #690 R3: records each (hostname, command) the view model asked
+        // to deliver the FCM token with.
+        val registerCalls: MutableList<Pair<String, String>> = mutableListOf()
 
         override suspend fun fetch(host: HostEntity): HostUsageFetch {
             callCount += 1
@@ -718,6 +835,35 @@ class UsageViewModelTest {
 
         override suspend fun fetchResetEvents(host: HostEntity): List<UsageResetEvent> =
             resetScripts[host.hostname] ?: emptyList()
+
+        override suspend fun registerPushToken(host: HostEntity, command: String): Boolean {
+            registerCalls += host.hostname to command
+            return registerOutcomes[host.hostname] ?: true
+        }
+    }
+
+    /**
+     * Issue #690 R3: a fake [PushTokenRegistrar] with a settable token +
+     * registration gate so the view-model wiring can be asserted without
+     * Android `SharedPreferences`.
+     */
+    private class FakePushTokenRegistrar(
+        private val token: String?,
+        needsRegistration: Boolean,
+    ) : PushTokenRegistrar {
+        private var needs = needsRegistration
+        var markRegisteredCount: Int = 0
+            private set
+
+        override fun pendingToken(): String? = token
+        override fun needsRegistration(): Boolean = needs
+        override fun markRegistered() {
+            markRegisteredCount += 1
+            needs = false
+        }
+
+        override fun registerCommand(token: String): String =
+            com.pocketshell.app.messaging.FcmTokenRegistrar.registerCommand(token)
     }
 
     private class HangingFetcher : HostUsageFetcher {
@@ -750,10 +896,12 @@ class UsageViewModelTest {
         fetcher: HostUsageFetcher,
         testScheduler: TestCoroutineScheduler,
         refreshTimeoutMillis: Long = UsageViewModel.DEFAULT_REFRESH_TIMEOUT_MILLIS,
+        pushTokenRegistrar: PushTokenRegistrar? = null,
     ): UsageViewModel = UsageViewModel(
         hostDao = db.hostDao(),
         fetcher = fetcher,
         usageScheduler = null,
+        pushTokenRegistrar = pushTokenRegistrar,
         refreshDispatcher = UnconfinedTestDispatcher(testScheduler),
         refreshTimeoutMillis = refreshTimeoutMillis,
     )

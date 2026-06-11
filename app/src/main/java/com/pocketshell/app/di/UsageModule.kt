@@ -1,9 +1,11 @@
 package com.pocketshell.app.di
 
 import android.content.Context
+import com.pocketshell.app.messaging.FcmTokenRegistrar
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.usage.DefaultUsageNotifier
 import com.pocketshell.app.usage.HostUsageFetcher
+import com.pocketshell.app.usage.PushTokenRegistrar
 import com.pocketshell.app.usage.SshHostUsageFetcher
 import com.pocketshell.app.usage.SharedPreferencesUsageNotificationStateStore
 import com.pocketshell.app.usage.UsageNotifier
@@ -54,6 +56,19 @@ object UsageProvidersModule {
     @Provides
     @Singleton
     fun provideUsageRemoteSource(): UsageRemoteSource = UsageRemoteSource()
+
+    /**
+     * Issue #690 R3: the FCM device-token registrar [UsageViewModel] uses to
+     * hand the token to the host over its live foreground Usage SSH session.
+     * Wraps the real [FcmTokenRegistrar] (SharedPreferences-backed token cache)
+     * in the [PushTokenRegistrar.Fcm] adapter so the view model stays testable
+     * without Android prefs.
+     */
+    @Provides
+    @Singleton
+    fun providePushTokenRegistrar(
+        @ApplicationContext context: Context,
+    ): PushTokenRegistrar = PushTokenRegistrar.Fcm(FcmTokenRegistrar(context))
 
     @Provides
     @Singleton

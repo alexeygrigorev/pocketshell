@@ -30,6 +30,7 @@ from pocketshell.hooks import hooks_group
 from pocketshell.jobs import jobs_group
 from pocketshell.logs import logs_group
 from pocketshell.prune_attachments import prune_attachments_command
+from pocketshell.push import push_group
 from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
 from pocketshell.sessions import sessions_group
@@ -62,6 +63,7 @@ cli.add_command(env_group, name="env")
 cli.add_command(hooks_group, name="hooks")
 cli.add_command(logs_group, name="logs")
 cli.add_command(prune_attachments_command, name="prune-attachments")
+cli.add_command(push_group, name="push")
 cli.add_command(qr_share_command, name="qr-share")
 
 

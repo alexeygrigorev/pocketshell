@@ -33,6 +33,11 @@ classifiers = [
 # in directly later. Pin lower-bound only.
 dependencies = [
     "click>=8.2.0",
+    # FCM HTTP v1 push delivery (#690): service-account OAuth2 bearer minting
+    # for `pocketshell push` / the `usage --capture` reset-push send. Imported
+    # lazily and fail-soft — a host without it (or without a Firebase
+    # credential) simply no-ops the send, so the lower bound is advisory.
+    "google-auth>=2.0.0",
 ]
 
 [project.scripts]

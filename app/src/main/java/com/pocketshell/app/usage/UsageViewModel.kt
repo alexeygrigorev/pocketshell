@@ -61,6 +61,20 @@ public interface HostUsageFetcher {
      * absent. The default no-ops so test doubles need not override it.
      */
     public suspend fun fetchResetEvents(host: HostEntity): List<UsageResetEvent> = emptyList()
+
+    /**
+     * Deliver the device's FCM token to [host] (#690 R3) by running [command]
+     * (built by `FcmTokenRegistrar.registerCommand`) over the SAME warm SSH
+     * lease the usage read already uses — NOT a second connect. The server's
+     * `pocketshell push register-token` stores it for reset-push delivery.
+     *
+     * Returns true only when the command ran and exited 0, so the caller can
+     * gate `markRegistered()` on a confirmed host-side write. Best-effort: a
+     * host that can't be reached / has no usable key / fails the exec returns
+     * false and the token stays pending for the next foreground refresh. The
+     * default no-ops so test doubles need not override it.
+     */
+    public suspend fun registerPushToken(host: HostEntity, command: String): Boolean = false
 }
 
 public sealed interface HostUsageFetch {
@@ -196,6 +210,20 @@ public class SshHostUsageFetcher : HostUsageFetcher {
         }
     }
 
+    override suspend fun registerPushToken(host: HostEntity, command: String): Boolean {
+        // Issue #690 R3: deliver the FCM token over the SAME warm lease the
+        // usage / reset-events read uses. The lease key is byte-identical to
+        // those reads, so `withSession` borrows the host's pooled transport
+        // rather than dialing a second connect.
+        val key = sshKeyDao.getById(host.keyId) ?: return false
+        if (!File(key.privateKeyPath).exists()) return false
+        if (key.hasPassphrase) return false
+
+        return withSession(host, key.privateKeyPath, onFail = { false }) { session ->
+            session.exec(command).exitCode == 0
+        }
+    }
+
     /**
      * Issue #699: borrow the host's WARM transport from the app-wide
      * [SshLeaseManager] (reference-counted, released — never closed — when
@@ -265,6 +293,12 @@ open class UsageViewModel internal constructor(
     // UsageScreen"). Nullable + defaulted on the Hilt constructor so
     // production injection can omit it when the scheduler is absent.
     private val usageScheduler: UsageScheduler?,
+    // Issue #690 R3: the FCM device-token registrar. The Usage refresh is a
+    // live FOREGROUND SSH path (D21), so it is the carrier that hands the
+    // token to the host over the SAME warm lease the usage read uses. Nullable
+    // + defaulted on the Hilt constructor so the panel keeps working when FCM
+    // isn't configured (no google-services.json) and there's nothing to deliver.
+    private val pushTokenRegistrar: PushTokenRegistrar? = null,
     private val refreshDispatcher: CoroutineDispatcher,
     private val refreshTimeoutMillis: Long,
 ) : ViewModel() {
@@ -274,10 +308,12 @@ open class UsageViewModel internal constructor(
         hostDao: HostDao,
         fetcher: HostUsageFetcher,
         usageScheduler: UsageScheduler? = null,
+        pushTokenRegistrar: PushTokenRegistrar? = null,
     ) : this(
         hostDao = hostDao,
         fetcher = fetcher,
         usageScheduler = usageScheduler,
+        pushTokenRegistrar = pushTokenRegistrar,
         refreshDispatcher = Dispatchers.IO,
         refreshTimeoutMillis = DEFAULT_REFRESH_TIMEOUT_MILLIS,
     )
@@ -460,6 +496,13 @@ open class UsageViewModel internal constructor(
         // instead of replacing it with a scary failure panel.
         val cachedByHost = cachedFallback?.hosts?.associateBy { it.hostId } ?: emptyMap()
 
+        // Issue #690 R3: deliver the cached FCM device token to the host over
+        // the live foreground SSH session this refresh already opens — only
+        // when a token is pending AND not yet delivered. Resolved once up front
+        // so a token that rotates mid-loop doesn't flip the gate per host.
+        var pendingTokenToRegister: String? =
+            pushTokenRegistrar?.takeIf { it.needsRegistration() }?.pendingToken()
+
         hosts.forEach { host ->
             when (val result = fetcher.fetch(host)) {
                 is HostUsageFetch.Records -> {
@@ -522,6 +565,23 @@ open class UsageViewModel internal constructor(
             // Independent of the usage fetch above so a "tool missing" host can
             // still surface a reset that an earlier, healthier capture logged.
             resetEvents += runCatching { fetcher.fetchResetEvents(host) }.getOrElse { emptyList() }
+
+            // Issue #690 R3: deliver the FCM token over the SAME warm lease this
+            // host's usage read uses (no second connect). Once a host confirms
+            // the write (exit 0), mark the token delivered and stop attempting
+            // for the remaining hosts this refresh. Best-effort: a host that
+            // can't be reached just leaves the token pending for next refresh.
+            val token = pendingTokenToRegister
+            val registrar = pushTokenRegistrar
+            if (token != null && registrar != null) {
+                val delivered = runCatching {
+                    fetcher.registerPushToken(host, registrar.registerCommand(token))
+                }.getOrElse { false }
+                if (delivered) {
+                    registrar.markRegistered()
+                    pendingTokenToRegister = null
+                }
+            }
         }
 
         val resetBanner = usageResetBannerState(resetEvents)

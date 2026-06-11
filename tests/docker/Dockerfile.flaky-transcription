@@ -1,0 +1,21 @@
+# Controllable-failure Whisper-style transcription endpoint — issue #688.
+#
+# Serves a flaky `/v1/audio/transcriptions` so the voice-transcription retry
+# path (timeout -> auto-retry -> manual Retry) can be reproduced
+# deterministically in Docker and in regular CI (:app:integrationTest).
+#
+# Pure Python stdlib server — no pip install, so the image builds fast and
+# offline. See flaky-transcription/server.py for the schedule semantics.
+FROM python:3.12-slim
+
+COPY flaky-transcription/server.py /usr/local/bin/flaky-transcription-server.py
+RUN chmod +x /usr/local/bin/flaky-transcription-server.py
+
+EXPOSE 8089
+
+# Container readiness: the integration test waits on /healthz before driving
+# the retry journey.
+HEALTHCHECK --interval=2s --timeout=2s --retries=15 \
+    CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8089/healthz').read()==b'ok' else 1)" || exit 1
+
+ENTRYPOINT ["python3", "/usr/local/bin/flaky-transcription-server.py"]

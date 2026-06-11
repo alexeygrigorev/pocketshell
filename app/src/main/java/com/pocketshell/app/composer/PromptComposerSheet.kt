@@ -800,6 +800,7 @@ internal fun SheetContent(
             if (pendingItems.isNotEmpty()) {
                 PendingTranscriptionsBanner(
                     items = pendingItems,
+                    retryingIds = state.retryingIds,
                     expanded = pendingListExpanded,
                     onToggle = onTogglePendingList,
                     onRetry = onRetryPending,
@@ -1897,6 +1898,7 @@ internal fun barEnvelopeHeightDp(index: Int): Float {
 @Composable
 private fun PendingTranscriptionsBanner(
     items: List<PendingTranscriptionItem>,
+    retryingIds: Set<String>,
     expanded: Boolean,
     onToggle: () -> Unit,
     onRetry: (String) -> Unit,
@@ -1964,6 +1966,7 @@ private fun PendingTranscriptionsBanner(
             items.forEach { item ->
                 PendingTranscriptionRow(
                     item = item,
+                    retrying = item.id in retryingIds,
                     onRetry = { onRetry(item.id) },
                     onDiscard = { onDiscard(item.id) },
                     onSaveAsAudio = { onSaveAsAudio(item.id) },
@@ -1979,6 +1982,7 @@ private fun PendingTranscriptionsBanner(
 @Composable
 private fun PendingTranscriptionRow(
     item: PendingTranscriptionItem,
+    retrying: Boolean,
     onRetry: () -> Unit,
     onDiscard: () -> Unit,
     onSaveAsAudio: () -> Unit,
@@ -1995,7 +1999,12 @@ private fun PendingTranscriptionRow(
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
         )
+        // Issue #688: a retry in flight shows immediate "Retrying…" feedback
+        // so the Retry tap is never a silent no-op. The status line takes
+        // priority over the prior error/waiting text while the round-trip
+        // is open.
         val statusText = when {
+            retrying -> PENDING_RETRYING_MESSAGE
             item.isWaitingForNetwork -> PendingTranscriptionItem.NETWORK_WAITING_MESSAGE
             item.lastErrorMessage != null -> item.lastErrorMessage
             else -> "Queued — tap retry to send"
@@ -2038,8 +2047,12 @@ private fun PendingTranscriptionRow(
                     modifier = Modifier.testTag(composerPendingDiscardTestTag(item.id)),
                 )
                 PendingActionButton(
-                    label = "Retry",
+                    // Issue #688: the button label flips to "Retrying…" and
+                    // the click is gated while a round-trip is in flight, so
+                    // a second tap cannot stack a duplicate retry on top.
+                    label = if (retrying) "Retrying…" else "Retry",
                     primary = true,
+                    enabled = !retrying,
                     onClick = onRetry,
                     modifier = Modifier.testTag(composerPendingRetryTestTag(item.id)),
                 )
@@ -2071,24 +2084,33 @@ private fun PendingActionButton(
     primary: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
+    val containerColor = if (primary) PocketShellColors.Accent else PocketShellColors.SurfaceElev
+    val borderColor = if (primary) PocketShellColors.Accent else PocketShellColors.Border
+    val contentColor = if (primary) PocketShellColors.OnAccent else PocketShellColors.Text
+    val alpha = if (enabled) 1f else 0.5f
     Box(
         modifier = modifier
-            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .clickable(
+                enabled = enabled,
+                role = androidx.compose.ui.semantics.Role.Button,
+                onClick = onClick,
+            )
             .background(
-                color = if (primary) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                color = containerColor.copy(alpha = alpha),
                 shape = RoundedCornerShape(6.dp),
             )
             .border(
                 width = 1.dp,
-                color = if (primary) PocketShellColors.Accent else PocketShellColors.Border,
+                color = borderColor.copy(alpha = alpha),
                 shape = RoundedCornerShape(6.dp),
             )
             .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
         Text(
             text = label,
-            color = if (primary) PocketShellColors.OnAccent else PocketShellColors.Text,
+            color = contentColor.copy(alpha = alpha),
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
         )
@@ -2369,6 +2391,13 @@ private val PromptComposerScrollRegionMaxHeight = 360.dp
 internal const val COMPOSER_PENDING_BANNER_TAG = "prompt-composer-pending-banner"
 internal const val COMPOSER_PENDING_TOGGLE_TAG = "prompt-composer-pending-toggle"
 internal const val COMPOSER_PENDING_SAVED_BANNER_TAG = "prompt-composer-pending-saved"
+
+/**
+ * Issue #688: status text shown on a pending row while its retry round-trip
+ * is in flight, so a Retry tap gives immediate visible feedback instead of
+ * looking like a no-op.
+ */
+internal const val PENDING_RETRYING_MESSAGE = "Retrying…"
 
 internal fun composerPendingItemRowTestTag(id: String): String =
     "prompt-composer-pending-row:$id"

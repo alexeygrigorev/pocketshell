@@ -149,6 +149,19 @@ public class PromptComposerViewModel @Inject constructor(
 
     private var recordingJob: Job? = null
     private var transcribeJob: Job? = null
+
+    /**
+     * Issue #688: ids of pending-transcription rows with a retry round-trip
+     * currently in flight. A row's id is claimed synchronously when
+     * [retryPending] is called (an atomic check-and-add) and released in the
+     * coroutine's `finally`. In production every trigger arrives on the
+     * single-threaded main dispatcher, but the set is a thread-safe
+     * concurrent set so the claim is correct even if a caller ever dispatches
+     * a retry off-Main — the dedupe must never lose to a data race, since a
+     * lost claim is exactly the duplicate-insert bug this issue fixes.
+     */
+    private val inFlightRetryIds: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
     private var speechRecognitionSession: SpeechRecognitionSession? = null
     private var speechRecognitionGeneration: Long = 0L
     private var activeProvider: VoiceTranscriptionProvider? = null
@@ -1548,72 +1561,107 @@ public class PromptComposerViewModel @Inject constructor(
      *    UI hides the Retry button at the cap).
      */
     public fun retryPending(id: String) {
+        // Issue #688: idempotency guard. N overlapping retry triggers for
+        // the SAME row — auto-retry on foreground-resume + one or more
+        // manual Retry taps — must collapse to a SINGLE round-trip. Without
+        // this guard every trigger ran a separate `client.transcribe` and
+        // each appended the transcript on success, duplicating the inserted
+        // text N times (the dogfood report). The first trigger claims the
+        // id synchronously here, on the single-threaded viewModelScope main
+        // dispatcher, so a racing tap that arrives before the coroutine
+        // suspends still sees the id already in flight and short-circuits.
+        if (!inFlightRetryIds.add(id)) return
+        // Publish the visible "retrying" state immediately so the manual
+        // Retry tap is never a silent no-op — the row shows feedback the
+        // instant the tap lands, before the network round-trip even starts.
+        _uiState.update { it.copy(retryingIds = it.retryingIds + id, error = null) }
+
         viewModelScope.launch {
-            val row = pendingTranscriptionStore.snapshot().firstOrNull { it.id == id }
-                ?: return@launch
-            if (row.atRetryCap) return@launch
+            try {
+                val row = pendingTranscriptionStore.snapshot().firstOrNull { it.id == id }
+                    ?: return@launch
+                if (row.atRetryCap) return@launch
 
-            val client = whisperClientFactory.create() ?: run {
-                _uiState.update {
-                    it.copy(error = "No OpenAI API key saved. Open settings to add one.")
-                }
-                return@launch
-            }
-            val audio = pendingTranscriptionStore.loadAudio(id) ?: run {
-                // Orphan row — clean it up and clear any stale banner.
-                runCatching { pendingTranscriptionStore.markSucceeded(id) }
-                return@launch
-            }
-
-            // Refuse to fire while offline — the user would just waste
-            // another retry slot on a guaranteed-to-fail upload. Surface
-            // the "waiting for network" hint as a no-op banner.
-            if (!connectivity.refresh()) {
-                _uiState.update {
-                    it.copy(error = PendingTranscriptionItem.NETWORK_WAITING_MESSAGE)
-                }
-                return@launch
-            }
-
-            _uiState.update { it.copy(error = null) }
-            val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
-            result.fold(
-                onSuccess = { text ->
-                    val trimmed = text.trim()
-                    if (trimmed.isEmpty()) {
-                        runCatching {
-                            pendingTranscriptionStore.markFailure(
-                                id,
-                                EMPTY_TRANSCRIPTION_RETRY_MESSAGE,
-                            )
-                        }
-                        _uiState.update { it.copy(error = EMPTY_TRANSCRIPTION_RETRY_MESSAGE) }
-                        return@fold
-                    }
-                    if (SpeechAudioGuard.isLikelyHallucination(trimmed)) {
-                        runCatching {
-                            pendingTranscriptionStore.markFailure(
-                                id,
-                                NO_SPEECH_DETECTED_MESSAGE,
-                            )
-                        }
-                        _uiState.update { it.copy(error = NO_SPEECH_DETECTED_MESSAGE) }
-                        return@fold
-                    }
-                    runCatching { pendingTranscriptionStore.markSucceeded(id) }
+                val client = whisperClientFactory.create() ?: run {
                     _uiState.update {
-                        val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
-                        val newDraft = it.draft + sep + trimmed
-                        savedStateHandle[KEY_DRAFT] = newDraft
-                        it.copy(draft = newDraft, error = null)
+                        it.copy(error = "No OpenAI API key saved. Open settings to add one.")
                     }
-                },
-                onFailure = { t ->
-                    val msg = userFacingWhisperError(t)
-                    runCatching { pendingTranscriptionStore.markFailure(id, msg) }
-                    _uiState.update { it.copy(error = msg) }
-                },
-            )
+                    return@launch
+                }
+                val audio = pendingTranscriptionStore.loadAudio(id) ?: run {
+                    // Orphan row — clean it up and clear any stale banner.
+                    runCatching { pendingTranscriptionStore.markSucceeded(id) }
+                    return@launch
+                }
+
+                // Refuse to fire while offline — the user would just waste
+                // another retry slot on a guaranteed-to-fail upload. Surface
+                // the "waiting for network" hint as a no-op banner.
+                if (!connectivity.refresh()) {
+                    _uiState.update {
+                        it.copy(error = PendingTranscriptionItem.NETWORK_WAITING_MESSAGE)
+                    }
+                    return@launch
+                }
+
+                val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
+                result.fold(
+                    onSuccess = { text ->
+                        val trimmed = text.trim()
+                        if (trimmed.isEmpty()) {
+                            runCatching {
+                                pendingTranscriptionStore.markFailure(
+                                    id,
+                                    EMPTY_TRANSCRIPTION_RETRY_MESSAGE,
+                                )
+                            }
+                            _uiState.update { it.copy(error = EMPTY_TRANSCRIPTION_RETRY_MESSAGE) }
+                            return@fold
+                        }
+                        if (SpeechAudioGuard.isLikelyHallucination(trimmed)) {
+                            runCatching {
+                                pendingTranscriptionStore.markFailure(
+                                    id,
+                                    NO_SPEECH_DETECTED_MESSAGE,
+                                )
+                            }
+                            _uiState.update { it.copy(error = NO_SPEECH_DETECTED_MESSAGE) }
+                            return@fold
+                        }
+                        // Issue #688: drop a LATE success for an
+                        // already-resolved / superseded row. A timeout that
+                        // actually succeeded server-side, or a straggler
+                        // round-trip whose sibling already inserted (or whose
+                        // row the user discarded) while this call was in
+                        // flight, must NOT append a second copy. Re-check the
+                        // store right before inserting: if the row is gone,
+                        // the transcript was already handled (or intentionally
+                        // dropped) and inserting again would duplicate it.
+                        val stillPending = pendingTranscriptionStore.snapshot()
+                            .any { it.id == id }
+                        if (!stillPending) {
+                            return@fold
+                        }
+                        runCatching { pendingTranscriptionStore.markSucceeded(id) }
+                        _uiState.update {
+                            val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
+                            val newDraft = it.draft + sep + trimmed
+                            savedStateHandle[KEY_DRAFT] = newDraft
+                            it.copy(draft = newDraft, error = null)
+                        }
+                    },
+                    onFailure = { t ->
+                        val msg = userFacingWhisperError(t)
+                        runCatching { pendingTranscriptionStore.markFailure(id, msg) }
+                        _uiState.update { it.copy(error = msg) }
+                    },
+                )
+            } finally {
+                // Always release the id — success, failure, drop, or an
+                // early return — so a later legitimate retry is not blocked.
+                inFlightRetryIds.remove(id)
+                _uiState.update { it.copy(retryingIds = it.retryingIds - id) }
+            }
         }
     }
 
@@ -1992,6 +2040,15 @@ public class PromptComposerViewModel @Inject constructor(
          */
         val recordingElapsedMs: Long = 0L,
         val liveTranscript: String? = null,
+        /**
+         * Issue #688: ids of pending-transcription rows that currently have
+         * a retry round-trip in flight. The composer banner renders a
+         * "Retrying…" state and disables the Retry button for these rows so
+         * the user gets immediate feedback on tap and cannot stack a second
+         * round-trip on top of an in-flight one. Cleared per id when its
+         * retry resolves (success, failure, or drop).
+         */
+        val retryingIds: Set<String> = emptySet(),
     )
 
     /**

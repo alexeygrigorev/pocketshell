@@ -5,6 +5,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -336,6 +338,100 @@ class PromptComposerPendingTranscriptionTest {
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 5_000) { queue.savedIds.contains("capped") }
         assertTrue(queue.savedIds.contains("capped"))
+    }
+
+    /**
+     * Issue #688 on-device journey: a flaky-network row is retried by both
+     * the foreground-resume auto-retry AND the user's manual Retry tap,
+     * overlapping the SAME row. The transcript must be inserted EXACTLY
+     * ONCE (no duplication), the row must show immediate "Retrying…"
+     * feedback while in flight, and the pending queue must fully clear so
+     * a composer reopen shows no stale pending blob.
+     *
+     * The Whisper client is gated so the two triggers are provably
+     * concurrent before either resolves — the only way to reproduce the
+     * duplicate-insert race on a real device deterministically.
+     */
+    @Test
+    fun overlappingRetryInsertsOnceAndShowsRetryingFeedback() {
+        val mic = TestMicCapture()
+        val whisperCalls = AtomicInteger(0)
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(
+                audio: ByteArray,
+                language: String?,
+            ): Result<String> {
+                whisperCalls.incrementAndGet()
+                gate.await()
+                return Result.success("flaky transcript")
+            }
+        }
+        val queue = InMemoryQueue()
+        queue.nextId = "flaky-device"
+        // Queued "waiting for network" so onForegroundResume auto-retries it.
+        kotlinx.coroutines.runBlocking {
+            queue.enqueueAudio(
+                SpeechAudioGuard.speechWavForTesting(),
+                "composer",
+                PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+            )
+        }
+
+        val vm = PromptComposerViewModel(
+            audioRecorder = mic,
+            whisperClientFactory = WhisperClientFactory { whisper },
+            apiKeyStorage = TestVault(),
+            voiceSettings = TestVoiceSettings(),
+            pendingTranscriptionStore = queue,
+            connectivity = TestConnectivity(initial = true),
+        )
+
+        compose.setContent {
+            PocketShellTheme {
+                val state by vm.uiState.collectAsState()
+                val pending by vm.pendingItems.collectAsState()
+                SheetContent(
+                    state = state,
+                    onClose = {},
+                    onDraftChange = vm::onDraftChange,
+                    onMicTap = { },
+                    onSend = { _ -> },
+                    pendingItems = pending,
+                    pendingListExpanded = true,
+                    onRetryPending = vm::retryPending,
+                    onDiscardPending = vm::discardPending,
+                    onSavePendingAsAudio = vm::savePendingAsAudioFile,
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        // Trigger 1: auto-retry. Trigger 2..n: manual Retry taps, all on the
+        // same row while the first round-trip is gated open.
+        compose.runOnUiThread { vm.onForegroundResume() }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            vm.uiState.value.retryingIds.contains("flaky-device")
+        }
+        // Visible feedback: both the status line and the Retry button label
+        // flip to "Retrying…" while the round-trip is in flight (two nodes),
+        // so the tap is never a silent no-op.
+        compose.onAllNodesWithText("Retrying…").onFirst().assertIsDisplayed()
+        repeat(3) { compose.runOnUiThread { vm.retryPending("flaky-device") } }
+        compose.waitForIdle()
+
+        // Release the gated round-trip(s).
+        compose.runOnUiThread { gate.complete(Unit) }
+        compose.waitUntil(timeoutMillis = 10_000) {
+            vm.pendingItems.value.isEmpty()
+        }
+
+        // Exactly one round-trip fired and exactly one insertion happened.
+        assertEquals(1, whisperCalls.get())
+        assertEquals("flaky transcript", vm.uiState.value.draft)
+        assertTrue(queue.snapshotSync().isEmpty())
+        // Retrying flag cleared.
+        assertTrue(vm.uiState.value.retryingIds.isEmpty())
     }
 }
 

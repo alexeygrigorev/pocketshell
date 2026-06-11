@@ -1789,6 +1789,34 @@ class PromptComposerViewModelTest {
         override fun refresh(): Boolean = online
     }
 
+    /**
+     * Issue #688: a [WhisperClient] that holds every transcribe call open
+     * until [releaseAll] is invoked. Lets the test make two retry triggers
+     * provably concurrent (both in-flight at the same time) before either
+     * resolves — the only way to reproduce the duplicate-insert race
+     * deterministically. [callCount] records how many round-trips actually
+     * fired, so the test can assert the in-flight guard deduped them.
+     */
+    private class GatedWhisperClient(
+        private val result: Result<String>,
+    ) : WhisperClient {
+        private val gate = CompletableDeferred<Unit>()
+
+        @Volatile
+        var callCount: Int = 0
+            private set
+
+        override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+            callCount++
+            gate.await()
+            return result
+        }
+
+        fun releaseAll() {
+            if (!gate.isCompleted) gate.complete(Unit)
+        }
+    }
+
     private fun newVmWithQueue(
         mic: PromptComposerViewModel.MicCapture = FakeMicCapture(),
         whisper: WhisperClient? = fakeWhisperClient { Result.success("hello world") },
@@ -2192,6 +2220,215 @@ class PromptComposerViewModelTest {
         vm.discardPending("to-discard")
         advanceUntilIdle()
         assertTrue(queue.discardedIds.contains("to-discard"))
+    }
+
+    // -- Issue #688: retry idempotency + clear-pending state ----------------
+
+    /**
+     * Issue #688 regression: a flaky-network retry must insert the
+     * transcript EXACTLY ONCE no matter how many retry triggers overlap.
+     *
+     * Reproduces the maintainer's dogfood report: a recording fails
+     * (Network error: timeout) and lands in the pending queue marked
+     * "waiting for network". An auto-retry (foreground-resume) and a manual
+     * Retry tap then race the SAME row. Before the fix both round-trips ran
+     * to completion and BOTH appended the transcript → the draft was
+     * duplicated. After the fix the second trigger is a no-op while the
+     * first is in flight, so the transcript is inserted once.
+     *
+     * The [GatedWhisperClient] holds every transcribe call open until the
+     * test releases it, so the two triggers are provably concurrent.
+     */
+    @Test
+    fun overlappingAutoRetryAndManualRetryInsertTranscriptExactlyOnce() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "flaky-1"
+        // Queued as "waiting for network" so onForegroundResume auto-retries it.
+        queue.enqueueAudio(
+            ByteArray(8) { 1 },
+            "composer",
+            initialError = com.pocketshell.app.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+        )
+
+        val whisper = GatedWhisperClient(result = Result.success("hello world"))
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+            connectivity = FakeConnectivity(initial = true),
+        )
+
+        // Trigger 1: foreground-resume auto-retry for the waiting row.
+        vm.onForegroundResume()
+        runCurrent()
+        // The first round-trip is now open (gated). Trigger 2: the user taps
+        // Retry on the very same row while the auto-retry is still in flight.
+        vm.retryPending("flaky-1")
+        runCurrent()
+
+        // Let every gated transcribe call resolve.
+        whisper.releaseAll()
+        advanceUntilIdle()
+
+        // Exactly one insertion — the draft is NOT "hello world hello world".
+        assertEquals("hello world", vm.uiState.value.draft)
+        // The round-trip ran at most once for this row (the duplicate
+        // trigger was deduped, not just deduped at insert time).
+        assertEquals(1, whisper.callCount)
+        assertTrue(queue.succeededIds.contains("flaky-1"))
+        // The pending queue is fully cleared — no stale row remains.
+        assertTrue(queue.snapshot().isEmpty())
+    }
+
+    /**
+     * Issue #688: a late success for a row that another retry already
+     * inserted (or the user discarded) must be DROPPED, not appended a
+     * second time. Simulates the "timeout that actually succeeded
+     * server-side" the report calls out: the row is gone by the time the
+     * straggler round-trip returns, so its transcript must not land.
+     */
+    @Test
+    fun lateSuccessForAlreadyResolvedRowIsDropped() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "straggler"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+        queue.markFailure("straggler", "Network error: timeout")
+
+        val whisper = GatedWhisperClient(result = Result.success("late transcript"))
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+            connectivity = FakeConnectivity(initial = true),
+        )
+
+        vm.retryPending("straggler")
+        runCurrent()
+        // While the retry round-trip is open, the user discards the row
+        // (or a sibling resolved it). The store no longer has it.
+        queue.markSucceeded("straggler")
+        runCurrent()
+
+        // Now the straggler round-trip returns success.
+        whisper.releaseAll()
+        advanceUntilIdle()
+
+        // The transcript must NOT be inserted — the row was already gone.
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(queue.snapshot().isEmpty())
+    }
+
+    /**
+     * Issue #688: while a retry round-trip is in flight, the row must
+     * advertise a visible "retrying" state so the user gets immediate
+     * feedback rather than a dead button. Once it resolves the flag clears.
+     */
+    @Test
+    fun retryPublishesRetryingFeedbackWhileInFlight() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "feedback-1"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+        queue.markFailure("feedback-1", "Network error: timeout")
+
+        val whisper = GatedWhisperClient(result = Result.success("done"))
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+            connectivity = FakeConnectivity(initial = true),
+        )
+
+        vm.retryPending("feedback-1")
+        runCurrent()
+        // Mid-flight: the row is marked retrying.
+        assertTrue(vm.uiState.value.retryingIds.contains("feedback-1"))
+
+        whisper.releaseAll()
+        advanceUntilIdle()
+        // Resolved: the retrying flag is cleared.
+        assertFalse(vm.uiState.value.retryingIds.contains("feedback-1"))
+    }
+
+    /**
+     * Issue #688: a manual Retry tap while an auto-retry for the same row
+     * is already in flight must NOT start a second round-trip. The duplicate
+     * tap is a no-op (deduped by the in-flight guard).
+     */
+    @Test
+    fun manualRetryWhileAutoRetryInFlightDoesNotStack() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "no-stack"
+        queue.enqueueAudio(
+            ByteArray(8) { 1 },
+            "composer",
+            initialError = com.pocketshell.app.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+        )
+
+        val whisper = GatedWhisperClient(result = Result.success("once"))
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+            connectivity = FakeConnectivity(initial = true),
+        )
+
+        vm.onForegroundResume()
+        runCurrent()
+        repeat(5) {
+            vm.retryPending("no-stack")
+            runCurrent()
+        }
+        whisper.releaseAll()
+        advanceUntilIdle()
+
+        assertEquals("only one transcribe call may fire for a row", 1, whisper.callCount)
+        assertEquals("once", vm.uiState.value.draft)
+    }
+
+    /**
+     * Issue #688: once the retry cap is hit, nothing auto-inserts. The
+     * foreground-resume sweep must not re-fire a capped row, and a manual
+     * Retry is gated at the cap.
+     */
+    @Test
+    fun cappedRowNeverAutoInsertsOnForegroundResume() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "capped-row"
+        // Cap via three failures while flagged as a network-waiting row so
+        // a naive auto-retry sweep would still try it.
+        queue.enqueueAudio(
+            ByteArray(8) { 1 },
+            "composer",
+            initialError = com.pocketshell.app.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+        )
+        queue.markFailure("capped-row", "Network error: timeout")
+        queue.markFailure("capped-row", "Network error: timeout")
+        queue.markFailure("capped-row", "Network error: timeout")
+
+        var whisperCalls = 0
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls++
+                return Result.success("should never insert")
+            }
+        }
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+            connectivity = FakeConnectivity(initial = true),
+        )
+
+        vm.onForegroundResume()
+        advanceUntilIdle()
+        vm.retryPending("capped-row")
+        advanceUntilIdle()
+
+        assertEquals("a capped row must not call Whisper", 0, whisperCalls)
+        assertEquals("", vm.uiState.value.draft)
+        // Row is still present in the explicit failed state, audio preserved.
+        assertTrue(queue.snapshot().any { it.id == "capped-row" && it.atRetryCap })
+        assertNotNull(queue.storedAudio("capped-row"))
     }
 
     @Test

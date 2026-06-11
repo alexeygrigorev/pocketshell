@@ -1,19 +1,17 @@
 package com.pocketshell.app.env
 
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
-import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
-import java.io.File
 import java.nio.charset.StandardCharsets
 import javax.inject.Inject
 
@@ -73,13 +71,13 @@ sealed interface EnvOpResult {
  * Backed entirely by the server-side `pocketshell env ...` CLI (#262).
  * The phone holds no secrets; all file I/O happens on the dev box.
  *
- * Kept deliberately separate from
- * [com.pocketshell.app.projects.FolderListGateway] (which #263 is
- * concurrently editing): this gateway opens its OWN short-lived
- * [SshConnection] per operation, mirroring the
- * [com.pocketshell.app.projects.SshFolderListGateway] /
- * [com.pocketshell.app.jobs.PocketshellJobsRemoteSource] exec pattern
- * (`session.exec(pathAware(...))`).
+ * Issue #699: this gateway borrows a reference-counted lease on the app-wide
+ * `@Singleton` [SshLeaseManager] (via
+ * [com.pocketshell.app.sessions.LeaseSessionExec]) for each operation, keyed
+ * IDENTICALLY to the session screens / folder discovery, so every env op
+ * reuses the host's WARM transport instead of dialing a fresh SSH handshake.
+ * It mirrors the [com.pocketshell.app.projects.SshFolderListGateway] exec
+ * pattern (`session.exec(pathAware(...))`).
  *
  * ## D24 secret-safety contract
  *
@@ -143,7 +141,9 @@ interface EnvGateway {
     ): EnvOpResult
 }
 
-class SshEnvGateway @Inject constructor() : EnvGateway {
+class SshEnvGateway @Inject constructor(
+    private val sshLeaseManager: SshLeaseManager,
+) : EnvGateway {
 
     override suspend fun listKeys(
         host: HostEntity,
@@ -270,27 +270,34 @@ class SshEnvGateway @Inject constructor() : EnvGateway {
         }
     }
 
+    /**
+     * Issue #699: borrow the host's WARM transport from the app-wide
+     * `@Singleton` [SshLeaseManager] (reference-counted, released — not closed —
+     * when [block] returns) instead of dialing a fresh [SshConnection] per env
+     * op. The lease key is byte-identical to the session screens', so an env
+     * read/write reuses the same pooled connection the user's session holds.
+     * A connect failure is surfaced through [onConnectFail]; a stale-channel
+     * symptom heals + retries once inside [LeaseSessionExec].
+     */
     private suspend fun <T> withSession(
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
         onConnectFail: (Throwable) -> T,
         block: suspend (SshSession) -> T,
-    ): T {
-        val session = SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-            key = SshKey.Path(File(keyPath)),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse { return onConnectFail(it) }
-        return try {
-            block(session)
-        } finally {
-            session.close()
-        }
-    }
+    ): T =
+        LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = LeaseSessionTarget(
+                hostId = host.id,
+                hostname = host.hostname,
+                port = host.port,
+                username = host.username,
+                keyPath = keyPath,
+                passphrase = passphrase,
+            ),
+            block = block,
+        ).getOrElse { onConnectFail(it) }
 
     // Route every `pocketshell env ...` invocation through the centralised
     // PATH-robust resolver (issue #484) so the CLI is found even when the

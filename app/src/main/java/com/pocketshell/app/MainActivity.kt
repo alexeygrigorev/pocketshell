@@ -1058,6 +1058,7 @@ private fun AppNavigator(
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
                     target = StartDirectoryAutocompleteTarget(
+                        hostId = dest.hostId,
                         hostname = dest.hostname,
                         port = dest.port,
                         username = dest.username,
@@ -1125,6 +1126,7 @@ private fun AppNavigator(
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
                     target = StartDirectoryAutocompleteTarget(
+                        hostId = dest.hostId,
                         hostname = dest.hostname,
                         port = dest.port,
                         username = dest.username,
@@ -1345,6 +1347,7 @@ private fun AppNavigator(
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
                     target = StartDirectoryAutocompleteTarget(
+                        hostId = dest.hostId,
                         hostname = dest.hostname,
                         port = dest.port,
                         username = dest.username,

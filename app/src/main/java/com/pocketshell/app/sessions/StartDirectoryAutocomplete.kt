@@ -36,11 +36,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.uikit.theme.PocketShellColors
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -48,10 +45,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.io.File
 import javax.inject.Inject
 
 data class StartDirectoryAutocompleteTarget(
+    // Issue #699: the host row id, so the autocomplete probe keys its lease
+    // IDENTICALLY to the session screens (`"$hostId:$keyPath"`) and reuses the
+    // host's warm transport instead of dialing a fresh SSH handshake PER
+    // keystroke.
+    val hostId: Long,
     val hostname: String,
     val port: Int,
     val username: String,
@@ -59,7 +60,21 @@ data class StartDirectoryAutocompleteTarget(
     val passphrase: CharArray?,
 )
 
-class StartDirectoryAutocompleteRemoteSource @Inject constructor() {
+/**
+ * Suggests start-directory completions over SSH — issue #699.
+ *
+ * Previously this dialed a brand-new [com.pocketshell.core.ssh.SshConnection]
+ * (the full ~3-4s handshake) for EVERY debounced keystroke, which was the worst
+ * per-action handshake offender in the audit (#687). It now borrows a
+ * reference-counted lease on the app-wide `@Singleton` [SshLeaseManager] via
+ * [LeaseSessionExec], so each completion probe reuses the host's WARM transport
+ * (the same one the session screens hold) and releases the refcount without
+ * tearing the connection down. Typing a path now runs a channel exec on an
+ * already-open connection instead of paying a fresh handshake each time.
+ */
+class StartDirectoryAutocompleteRemoteSource @Inject constructor(
+    private val sshLeaseManager: SshLeaseManager,
+) {
     suspend fun suggestions(
         target: StartDirectoryAutocompleteTarget,
         typedPrefix: String,
@@ -72,31 +87,24 @@ class StartDirectoryAutocompleteRemoteSource @Inject constructor() {
             port = target.port,
             user = target.username,
         )
-        val session = SshConnection.connect(
-            host = target.hostname,
-            port = target.port,
-            user = target.username,
-            key = SshKey.Path(File(target.keyPath)),
-            passphrase = target.passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse {
-            return emptyList()
-        }
-
-        return try {
+        return LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = LeaseSessionTarget(
+                hostId = target.hostId,
+                hostname = target.hostname,
+                port = target.port,
+                username = target.username,
+                keyPath = target.keyPath,
+                passphrase = target.passphrase,
+            ),
+        ) { session ->
             val result = session.exec(startDirectoryAutocompleteCommand(request))
             if (result.exitCode == 0) {
                 parseStartDirectoryAutocompleteOutput(request, result.stdout)
             } else {
                 emptyList()
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            emptyList()
-        } finally {
-            session.close()
-        }
+        }.getOrDefault(emptyList())
     }
 }
 

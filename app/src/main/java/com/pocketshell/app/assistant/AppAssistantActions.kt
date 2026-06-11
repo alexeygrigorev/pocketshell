@@ -4,15 +4,14 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
 import com.pocketshell.app.repos.ReposRemoteSource
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
+import com.pocketshell.app.sessions.SharedSshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
-import java.io.File
 
 /**
  * SSH connection parameters for the host the assistant acts against. Supplied
@@ -37,30 +36,71 @@ internal interface AssistantSshExecutor {
     suspend fun <T> withSession(params: AssistantSshParams, block: suspend (SshSession) -> T): Result<T>
 }
 
-/** Production executor: opens, runs, and closes a real SSH session. */
-internal class RealAssistantSshExecutor : AssistantSshExecutor {
+/**
+ * Production executor — issue #699.
+ *
+ * Borrows a reference-counted lease on the app-wide `@Singleton`
+ * [SshLeaseManager] (resolved via [SharedSshLeaseManager] since this is
+ * built field-side in view models with no DI graph access) and runs the tool's
+ * exec on a channel of the host's WARM transport, releasing the refcount — NOT
+ * closing the transport — when done. Previously every inspect/exec tool call
+ * dialed a fresh ~3-4s SSH handshake; it now reuses the same pooled connection
+ * the session screens hold, keyed identically on `"$hostId:$keyPath"`.
+ */
+internal class RealAssistantSshExecutor(
+    private val leaseManager: SshLeaseManager = SharedSshLeaseManager.get(),
+) : AssistantSshExecutor {
     override suspend fun <T> withSession(
         params: AssistantSshParams,
         block: suspend (SshSession) -> T,
-    ): Result<T> {
-        val session = SshConnection.connect(
-            host = params.hostname,
-            port = params.port,
-            user = params.username,
-            key = SshKey.Path(File(params.keyPath)),
-            passphrase = params.passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse { return Result.failure(it) }
-        return try {
-            Result.success(block(session))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            Result.failure(t)
-        } finally {
-            session.close()
-        }
-    }
+    ): Result<T> =
+        LeaseSessionExec.withSession(
+            leaseManager = leaseManager,
+            target = LeaseSessionTarget(
+                hostId = params.hostId,
+                hostname = params.hostname,
+                port = params.port,
+                username = params.username,
+                keyPath = params.keyPath,
+                passphrase = params.passphrase,
+            ),
+            block = block,
+        )
+}
+
+/**
+ * Issue #699: connected-test access to the production [RealAssistantSshExecutor]
+ * so a Docker instrumentation test can prove the assistant SSH path reuses the
+ * app-wide warm lease instead of dialing a fresh handshake per tool call. The
+ * executor + its params are `internal`, so this shim exposes the minimum the
+ * test needs (build the executor on a given [SshLeaseManager], run one exec).
+ */
+@androidx.annotation.VisibleForTesting
+internal object AssistantSshExecutorTestAccess {
+    fun real(leaseManager: SshLeaseManager): AssistantSshExecutor =
+        RealAssistantSshExecutor(leaseManager)
+
+    suspend fun exec(
+        executor: AssistantSshExecutor,
+        hostId: Long,
+        hostName: String,
+        hostname: String,
+        port: Int,
+        username: String,
+        keyPath: String,
+        command: String,
+    ): Result<com.pocketshell.core.ssh.ExecResult> =
+        executor.withSession(
+            AssistantSshParams(
+                hostId = hostId,
+                hostName = hostName,
+                hostname = hostname,
+                port = port,
+                username = username,
+                keyPath = keyPath,
+                passphrase = null,
+            ),
+        ) { session -> session.exec(command) }
 }
 
 /**

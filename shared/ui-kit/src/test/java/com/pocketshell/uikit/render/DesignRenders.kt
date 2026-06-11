@@ -38,8 +38,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.TextButton
 import com.github.takahirom.roborazzi.captureRoboImage
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Warning
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
@@ -1191,6 +1196,44 @@ class DesignRenders {
             ) {
                 Text(body, color = PocketShellColors.TermText, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
             }
+        }
+    }
+
+    /**
+     * Issue #461 (slice 1): the shared [Banner] callout in all four semantic
+     * roles. Proves each [BannerRole] paints its own foreground (text + icon +
+     * border) + 12%-alpha fill purely from `LocalPocketShellSemantic` — Info
+     * cyan, Warning amber, Error red, AgentHint purple — under the real theme.
+     * Also shows the no-icon variant (Error here) so the icon slot is verified
+     * as optional.
+     */
+    @Test
+    fun bannerRoles() = render("banner-roles") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Banner(
+                text = "Tap to review folders under this root.",
+                role = BannerRole.Info,
+                leadingIcon = Icons.Filled.Info,
+            )
+            Banner(
+                text = "This host needs setup before sessions can start.",
+                role = BannerRole.Warning,
+                leadingIcon = Icons.Filled.Warning,
+            )
+            Banner(
+                text = "Disconnected — could not reach the remote.",
+                role = BannerRole.Error,
+            )
+            Banner(
+                text = "Sends here route to the agent, not the shell.",
+                role = BannerRole.AgentHint,
+                leadingIcon = Icons.Filled.Info,
+            )
         }
     }
 

@@ -46,6 +46,23 @@ class ReleaseCheckerTest {
     }
 
     @Test
+    fun isNewer_returnsTrue_forTheRealDogfoodVersions() {
+        // Issue #515: the exact versions from the maintainer's bug report —
+        // a 0.3.22 install vs the published v0.3.23 release must read as
+        // "behind" so the update banner is offered.
+        assertTrue(checker.isNewer("0.3.22", "v0.3.23"))
+        assertTrue(checker.isNewer("0.3.22-debug", "v0.3.23"))
+    }
+
+    @Test
+    fun isNewer_returnsFalse_whenInstalledMatchesOrLeadsTheRelease() {
+        // Same version -> no banner (already current).
+        assertFalse(checker.isNewer("0.3.23", "v0.3.23"))
+        // Installed build ahead of the latest published release -> no banner.
+        assertFalse(checker.isNewer("0.3.24", "v0.3.23"))
+    }
+
+    @Test
     fun isNewer_returnsFalse_forMinorRegression() {
         assertFalse(checker.isNewer("v0.1.0", "v0.0.9"))
     }

@@ -496,15 +496,30 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG))
         compose.onNodeWithTag(FOLDER_LIST_EMPTY_ROOT_HINT_TAG).assertIsDisplayed()
-        compose.onNodeWithText("No project folders found").assertIsDisplayed()
+        // #603: the empty watched-root callout now reads as one dense project
+        // row — a muted dot, a `No folders yet` title, and a single trailing
+        // accent `+` matching the active rows (no divergent "+ Add" pill).
+        compose.onNodeWithText("No folders yet").assertIsDisplayed()
         compose.onNodeWithTag(folderTreeRootEmptyHintAddTestTag("~/archive"))
             .assertIsDisplayed()
             .assertHasClickAction()
-        compose.onNodeWithContentDescription("Add project folder").assertIsDisplayed()
-        compose.onNodeWithTag(folderTreeRootEmptyHintActionPlusTestTag("~/archive"), useUnmergedTree = true)
-            .assertTextEquals("+")
-        compose.onNodeWithTag(folderTreeRootEmptyHintActionLabelTestTag("~/archive"), useUnmergedTree = true)
-            .assertTextEquals("Add")
+        // The trailing affordance carries the action verb in its content
+        // description (the row title/subtitle carry the user-facing copy).
+        compose.onNodeWithTag(folderTreeRootEmptyHintActionPlusTestTag("~/archive"))
+            .assertIsDisplayed()
+            .assertHasClickAction()
+        compose.onAllNodes(hasContentDescription("Add project folder"))
+            .fetchSemanticsNodes()
+            .also {
+                assertTrue("empty watched-root callout must expose the Add affordance", it.isNotEmpty())
+            }
+        // No "Review …" verb leaks onto an empty (zero-candidate) root.
+        compose.onAllNodes(hasContentDescription("Review inactive project folders"))
+            .fetchSemanticsNodes()
+            .also {
+                assertTrue("empty root must not advertise the Review action", it.isEmpty())
+            }
+        // The retired two-text "+ Add" pill must be gone.
         compose.onAllNodesWithText("+ Add")
             .fetchSemanticsNodes()
             .also {
@@ -1334,15 +1349,13 @@ class FolderListScreenE2eTest {
             compose.onNodeWithTag(folderTreeRootEmptyHintAddTestTag(longRootPath))
                 .assertIsDisplayed()
                 .assertHasClickAction()
+            // #603: with inactive candidates the callout's trailing `+` carries
+            // the "Review inactive project folders" verb in its content
+            // description; the user-facing copy lives in the row title/subtitle.
             compose.onNodeWithContentDescription("Review inactive project folders").assertIsDisplayed()
-            compose.onNodeWithTag(
-                folderTreeRootEmptyHintActionPlusTestTag(longRootPath),
-                useUnmergedTree = true,
-            ).assertTextEquals("+")
-            compose.onNodeWithTag(
-                folderTreeRootEmptyHintActionLabelTestTag(longRootPath),
-                useUnmergedTree = true,
-            ).assertTextEquals("Review")
+            compose.onNodeWithTag(folderTreeRootEmptyHintActionPlusTestTag(longRootPath))
+                .assertIsDisplayed()
+                .assertHasClickAction()
             assertEmptyRootActionRowIsCompact(longRootPath)
         }
     }
@@ -1608,30 +1621,33 @@ class FolderListScreenE2eTest {
             folderTreeRootEmptyHintAddTestTag(rootPath),
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
-        val actionBounds = compose.onNodeWithTag(
-            folderTreeRootEmptyHintActionLabelTestTag(rootPath),
-            useUnmergedTree = true,
-        ).fetchSemanticsNode().boundsInRoot
+        // #603: the trailing affordance is now a single subtle accent `+`
+        // (the same SubtleAddButton the active rows use), not a "+ Review/Add"
+        // two-text pill. It must stay inside the row even under a long root label.
         val plusBounds = compose.onNodeWithTag(
             folderTreeRootEmptyHintActionPlusTestTag(rootPath),
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
-        val maxCompactHeightPx = 56f * density
-        val minInsetPx = 8f * density
+        // #603: the callout is now a two-line dense ListRow (count title + muted
+        // context subtitle) carrying a 48dp tap-target accent `+`, so it lands
+        // at ~64dp — the SAME compact weight as an active project row. The cap
+        // guards against a regression back to a bulky multi-line card (100dp+),
+        // not against the consistent dense row.
+        val maxCompactHeightPx = 72f * density
 
         assertTrue(
             "inactive watched-root hint should render as one compact dense row: height=${rowBounds.height}px",
             rowBounds.height <= maxCompactHeightPx,
         )
         assertTrue(
-            "inactive watched-root trailing action must stay inside the row: " +
-                "action.right=${actionBounds.right}px row.right=${rowBounds.right}px",
-            actionBounds.right <= rowBounds.right - minInsetPx,
+            "inactive watched-root trailing `+` must stay inside the row: " +
+                "plus.right=${plusBounds.right}px row.right=${rowBounds.right}px",
+            plusBounds.right <= rowBounds.right,
         )
         assertTrue(
-            "inactive watched-root plus affordance must stay inline before the label: " +
-                "plus.right=${plusBounds.right}px action.left=${actionBounds.left}px",
-            plusBounds.right <= actionBounds.left,
+            "inactive watched-root trailing `+` must sit on the trailing half of the row: " +
+                "plus.left=${plusBounds.left}px row.center=${rowBounds.center.x}px",
+            plusBounds.left >= rowBounds.center.x,
         )
     }
 

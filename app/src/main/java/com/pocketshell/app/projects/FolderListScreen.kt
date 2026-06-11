@@ -1602,19 +1602,32 @@ internal fun rootCountSubtitle(root: FolderTreeRoot): String {
     }
 }
 
+/**
+ * Inactive / empty watched-root callout (#603).
+ *
+ * Redesigned to read as ONE dense project-tree row — visually
+ * indistinguishable in chrome weight from an active project row
+ * ([FolderHeader]): a muted (idle) [StatusDot] leads, the title carries the
+ * inactive count (`N inactive folders` / `No folders yet`) with a muted-mono
+ * context subtitle, and the row's single trailing affordance is the SAME subtle
+ * accent `+` ([SubtleAddButton]) the active root/folder rows use. `+` means the
+ * same thing at every level — add here — so the inactive callout stops looking
+ * like a heavier, divergent "+ Review / + Add" pill inside the dense tree
+ * (maintainer feedback 2026-06-07). The whole row is clickable; the trailing `+`
+ * is the explicit visible target.
+ */
 @Composable
 private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () -> Unit) {
     val title = if (candidateCount > 0) {
-        "$candidateCount inactive project folders"
+        candidateCount.countLabel("inactive folder")
     } else {
-        "No project folders found"
+        "No folders yet"
     }
     val subtitle = if (candidateCount > 0) {
-        "Review folders detected under this root."
+        "Tap to review folders under this root."
     } else {
-        "Add a folder under this root."
+        "Tap to add a folder under this root."
     }
-    val actionLabel = if (candidateCount > 0) "Review" else "Add"
     val actionDescription = if (candidateCount > 0) {
         "Review inactive project folders"
     } else {
@@ -1633,39 +1646,21 @@ private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () ->
                 StatusDot(active = false)
             },
             trailing = {
-                EmptyRootHintAction(rootPath = rootPath, label = actionLabel)
+                // One subtle accent `+` — identical chrome to the active root and
+                // folder rows (#603). The plus glyph is tagged so the same
+                // instrumentation that located the retired "+ Review/Add" pill
+                // keeps resolving the affordance; the action verb now lives only
+                // in the content description (and the row title/subtitle copy).
+                SubtleAddButton(
+                    contentDescription = actionDescription,
+                    onClick = onCreate,
+                    testTag = folderTreeRootEmptyHintActionPlusTestTag(rootPath),
+                )
             },
             onClick = onCreate,
             modifier = Modifier
                 .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
-                .semantics { contentDescription = actionDescription }
                 .testTag(folderTreeRootEmptyHintAddTestTag(rootPath)),
-        )
-    }
-}
-
-@Composable
-private fun EmptyRootHintAction(rootPath: String, label: String) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "+",
-            color = PocketShellColors.Accent,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            modifier = Modifier.testTag(folderTreeRootEmptyHintActionPlusTestTag(rootPath)),
-        )
-        Text(
-            text = label,
-            color = PocketShellColors.Accent,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.testTag(folderTreeRootEmptyHintActionLabelTestTag(rootPath)),
         )
     }
 }
@@ -2782,8 +2777,6 @@ fun folderTreeRootEmptyHintAddTestTag(path: String): String =
     "folder-list:tree-root:$path:empty-hint:add"
 fun folderTreeRootEmptyHintActionPlusTestTag(path: String): String =
     "folder-list:tree-root:$path:empty-hint:action-plus"
-fun folderTreeRootEmptyHintActionLabelTestTag(path: String): String =
-    "folder-list:tree-root:$path:empty-hint:action-label"
 
 private fun windowStableKey(windowIndex: Int?, windowName: String?): String =
     windowIndex?.let { "w$it" } ?: windowName?.ifBlank { null } ?: "unknown"

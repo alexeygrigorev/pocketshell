@@ -154,6 +154,110 @@ class DesignRenders {
     }
 
     /**
+     * Issue #603: the host-detail workspace tree with the redesigned
+     * inactive / empty watched-root callout.
+     *
+     * `FolderListContent` lives in the app module, so this fixture mirrors the
+     * real screen's rows using the SAME shared ui-kit primitives the screen
+     * composes ([ScreenHeader], [SectionHeader] for the root header pattern,
+     * [ListRow] + [StatusDot], and the subtle accent `+`). It puts an active
+     * root group next to the inactive-root callout so the maintainer can compare
+     * their chrome weight: the inactive callout now reads as ONE dense project
+     * row (muted dot + count title + muted-mono context subtitle + a single
+     * trailing accent `+`), no longer a heavier divergent "+ Review/Add" pill.
+     */
+    @Test
+    fun hostDetailInactiveFolders() = render("host-detail-inactive-folders") {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // Active root group — header + an active project row, the "what an
+            // active row looks like" reference the inactive callout is matched to.
+            TreeRootHeader(label = "git", count = "10 projects · 14 sessions")
+            ListRow(
+                title = "pocketshell",
+                subtitle = "~/git/pocketshell",
+                leading = { StatusDot(status = ConnectionStatus.Connected) },
+                trailing = { SubtleAccentPlus() },
+                onClick = {},
+                modifier = Modifier
+                    .background(
+                        PocketShellColors.Surface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(start = 16.dp),
+            )
+
+            // Inactive-root callout — has scanned candidate folders ("Review").
+            TreeRootHeader(label = "archive", count = "3 projects")
+            ListRow(
+                title = "3 inactive folders",
+                subtitle = "Tap to review folders under this root.",
+                leading = { StatusDot(status = ConnectionStatus.Idle) },
+                trailing = { SubtleAccentPlus() },
+                onClick = {},
+                modifier = Modifier
+                    .background(
+                        PocketShellColors.Surface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(start = 16.dp),
+            )
+
+            // Empty-root callout — no candidate folders yet ("Add").
+            TreeRootHeader(label = "labs", count = "0 projects")
+            ListRow(
+                title = "No folders yet",
+                subtitle = "Tap to add a folder under this root.",
+                leading = { StatusDot(status = ConnectionStatus.Idle) },
+                trailing = { SubtleAccentPlus() },
+                onClick = {},
+                modifier = Modifier
+                    .background(
+                        PocketShellColors.Surface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(start = 16.dp),
+            )
+        }
+    }
+
+    /** Mirror of the app's tree-root header (title + muted-mono count subtitle). */
+    @Composable
+    private fun TreeRootHeader(label: String, count: String) {
+        Column(modifier = Modifier.padding(horizontal = 2.dp)) {
+            Text(
+                text = label,
+                color = PocketShellColors.Text,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = count,
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+            )
+        }
+    }
+
+    /** Mirror of the app's `SubtleAddButton` — a bare accent `+`, no chrome. */
+    @Composable
+    private fun SubtleAccentPlus() {
+        Box(
+            modifier = Modifier.width(48.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "+",
+                color = PocketShellColors.Accent,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+
+    /**
      * Issue #561: fast PNG target for the chat-style Conversation tab.
      * This fixture mirrors the mockup (docs/mockups/conversation.html):
      * full message blocks with role label header, multi-line body,

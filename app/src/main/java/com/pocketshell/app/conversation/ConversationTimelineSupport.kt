@@ -1,9 +1,22 @@
 package com.pocketshell.app.conversation
 
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationTextFormatting
 
-internal fun ConversationEvent.isHiddenConversationTimelineRow(): Boolean =
-    this is ConversationEvent.SystemNote && tag == "turn_duration"
+internal fun ConversationEvent.isHiddenConversationTimelineRow(): Boolean = when (this) {
+    is ConversationEvent.SystemNote ->
+        // turn_duration was always hidden; #704 req #1 also hides rows whose
+        // only content is internal-protocol noise (e.g. a bare <task-id>…),
+        // which would otherwise render as a raw, unstyled XML block.
+        tag == "turn_duration" ||
+            ConversationTextFormatting.isOnlyInternalProtocolNoise(content)
+    is ConversationEvent.Message ->
+        // A message whose entire text is an internal-protocol wrapper has no
+        // user-facing content left once stripped — drop it instead of showing
+        // an empty styled block.
+        ConversationTextFormatting.isOnlyInternalProtocolNoise(text)
+    else -> false
+}
 
 internal fun ConversationEvent.timelineTimestamp(): String? =
     ConversationTimeFormat.format(atMillis)
@@ -31,7 +44,10 @@ internal fun ConversationEvent.SystemNote.timelineActorLabel(): String =
     }
 
 internal fun ConversationEvent.SystemNote.timelinePreview(): String {
-    val firstLine = content.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+    // #704 req #1: strip internal-protocol noise (e.g. <task-id>…) so the
+    // preview never shows a raw XML wrapper inconsistent with styled rows.
+    val cleaned = ConversationTextFormatting.stripInternalProtocolNoise(content)
+    val firstLine = cleaned.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
     return when (tag) {
         "scheduled_task_fire" -> firstLine.ifBlank { "Task notification" }
         "task-notification" -> firstLine.ifBlank { "Task notification" }

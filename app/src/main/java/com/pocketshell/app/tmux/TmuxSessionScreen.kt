@@ -154,6 +154,7 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
+import com.pocketshell.core.agents.ToolPayloadFormatter
 import com.pocketshell.core.terminal.selection.ConversationLink
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import androidx.compose.foundation.layout.Spacer
@@ -4030,13 +4031,17 @@ private fun ConversationToolCallChatCard(
             ) {
                 ToolCallSection(
                     label = "input",
-                    body = toolCall.input,
+                    body = remember(toolCall.id, toolCall.input) {
+                        ToolPayloadFormatter.formatInput(toolCall.input)
+                    },
                     copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + toolCall.id + ":input",
                 )
                 if (result != null) {
                     ToolCallSection(
                         label = if (result.isError) "output (error)" else "output",
-                        body = result.output,
+                        body = remember(result.id, result.output) {
+                            ToolPayloadFormatter.formatOutput(result.output)
+                        },
                         copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + toolCall.id + ":output",
                     )
                 }
@@ -4158,7 +4163,9 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
         if (result.output.isNotEmpty()) {
             ToolCallSection(
                 label = "output",
-                body = result.output,
+                body = remember(result.id, result.output) {
+                    ToolPayloadFormatter.formatOutput(result.output)
+                },
                 copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + result.id + ":output",
             )
         }
@@ -4195,12 +4202,19 @@ private val MessageHeadBottomPadding = 8.dp
 private val MessageHeadLetterSpacing = 0.8.sp
 private val SystemNoteBlockBottomPadding = 22.dp
 
-/** .tool-call card tokens */
-private val ToolCallCardRadius = 10.dp
-private val ToolCallCardHPadding = 12.dp
-private val ToolCallCardVPadding = 10.dp
+/**
+ * .tool-call card tokens.
+ *
+ * #704 req #3 ("make it more compact"): the Agent/Read/Bash tool-call rows ate
+ * too much vertical space. Tighter per-row vertical padding (10 -> 6dp) and a
+ * much smaller inter-row margin (22 -> 8dp) pack more of the transcript on
+ * screen without losing the card framing.
+ */
+private val ToolCallCardRadius = 8.dp
+private val ToolCallCardHPadding = 10.dp
+private val ToolCallCardVPadding = 6.dp
 private val ToolCallCardItemGap = 8.dp
-private val ToolCallChatCardBottomMargin = 22.dp
+private val ToolCallChatCardBottomMargin = 8.dp
 
 /** System note header style (10sp uppercase matching .msg-head) */
 private val SystemNoteHeadStyle = TextStyle(

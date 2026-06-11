@@ -45,4 +45,15 @@ class ConversationTextSectionTest {
         assertFalse(result.text.contains("full message tail"))
         assertTrue(result.text.endsWith("[Message truncated in view. Copy for full text.]"))
     }
+
+    @Test
+    fun stripsInternalProtocolNoiseFromExpandedMessageBody() {
+        val result = conversationExpandedMessageDisplayBody(
+            "Review #690 server reset\n<task-id>a1887b43e9b725929</task-id>",
+        )
+
+        assertFalse(result.wasTruncated)
+        assertEquals("Review #690 server reset", result.text)
+        assertFalse(result.text.contains("task-id"))
+    }
 }

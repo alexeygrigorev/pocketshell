@@ -1116,6 +1116,85 @@ class DesignRenders {
     }
 
     /**
+     * #704: compact transcript tool-call rows. ui-kit cannot import the
+     * app-level `ConversationToolCallChatCard`, so this replicates its layout
+     * with the SAME design tokens (post-#704 compact: 6dp vertical padding,
+     * 8dp inter-row margin, 8dp radius) so the density + the parsed/collapsed
+     * image output can be eyeballed before the emulator. The expanded body
+     * shows what `ToolPayloadFormatter.formatOutput(...)` produces — an
+     * `[image …]` summary, NOT the multi-KB base64 blob.
+     */
+    @Test
+    fun conversationToolRowsCompact() = render("conversation-tool-rows-compact") {
+        Column(modifier = Modifier.padding(horizontal = 18.dp)) {
+            CompactToolRow("Bash", "cd /home/alexey/git/pocketshell ec…", expanded = false)
+            CompactToolRow("Read", "20260611-174904-01-Screenshot_2026…", expanded = false)
+            CompactToolRow("Agent", "implementer: Restore #690 wiring l…", expanded = false)
+            CompactToolRow(
+                tool = "Read",
+                summary = "shot.png",
+                expanded = true,
+                input = "{\n  \"file_path\": \"/home/alexey/.pocketshell/attachments/host/shot.png\"\n}",
+                output = "[image image/png · 39124 chars]",
+            )
+        }
+    }
+
+    @Composable
+    private fun CompactToolRow(
+        tool: String,
+        summary: String,
+        expanded: Boolean,
+        input: String? = null,
+        output: String? = null,
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+                    .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(if (expanded) "v" else "›", color = PocketShellColors.TextMuted, style = PocketShellType.labelMono, fontSize = 14.sp)
+                Text(tool, color = PocketShellColors.Accent, style = PocketShellType.bodyDense, fontWeight = FontWeight.SemiBold)
+                Text(
+                    summary,
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.labelMono,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text("✓", color = PocketShellColors.Green, style = PocketShellType.labelMono)
+            }
+            if (expanded) {
+                Column(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    input?.let { CompactSection("input", it) }
+                    output?.let { CompactSection("output", it) }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun CompactSection(label: String, body: String) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(label, color = PocketShellColors.TextMuted, fontSize = 10.sp, modifier = Modifier.padding(bottom = 2.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(PocketShellColors.TermBg, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            ) {
+                Text(body, color = PocketShellColors.TermText, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
+
+    /**
      * Renders [content] wrapped in the real [PocketShellTheme] on the app's dark
      * background and snapshots the composition to `build/renders/<name>.png`.
      */

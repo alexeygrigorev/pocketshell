@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.core.agents.ConversationTextFormatting
 import com.pocketshell.uikit.theme.PocketShellColors
 
 /**
@@ -106,8 +107,11 @@ internal fun conversationTextSectionDisplayBody(body: String): ConversationTextS
  * the main thread parse and measure an unbounded transcript block (#605).
  */
 internal fun conversationExpandedMessageDisplayBody(body: String): ConversationTextSectionDisplayBody {
+    // #704 req #1: never render raw internal-protocol XML (e.g. <task-id>…) in
+    // a message body — strip the noise wrappers before bounding for display.
+    val cleaned = ConversationTextFormatting.stripInternalProtocolNoise(body)
     return boundedConversationDisplayBody(
-        body = body,
+        body = cleaned,
         truncatedNotice = "[Message truncated in view. Copy for full text.]",
     )
 }

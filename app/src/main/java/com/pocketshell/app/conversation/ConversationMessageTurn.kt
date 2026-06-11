@@ -3,7 +3,6 @@ package com.pocketshell.app.conversation
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -231,62 +230,6 @@ private fun MessageBody(
 }
 
 /**
- * Inline tool call card rendered within an assistant message body.
- * Per mockup: surface background, 1dp border-soft, 10dp radius, flex row
- * with chevron + tool name + command preview.
- */
-@Composable
-internal fun InlineToolCallCard(
-    toolName: String,
-    command: String,
-    modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null,
-) {
-    val cardModifier = modifier
-        .fillMaxWidth()
-        .background(
-            color = PocketShellColors.Surface,
-            shape = RoundedCornerShape(ToolCallCardRadius),
-        )
-        .border(
-            width = 1.dp,
-            color = PocketShellColors.BorderSoft,
-            shape = RoundedCornerShape(ToolCallCardRadius),
-        )
-        .let { base ->
-            if (onClick != null) base.clickable(onClick = onClick) else base
-        }
-        .padding(horizontal = ToolCallCardHPadding, vertical = ToolCallCardVPadding)
-
-    Row(
-        modifier = cardModifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(ToolCallCardItemGap),
-    ) {
-        Text(
-            text = "›",
-            color = PocketShellColors.TextMuted,
-            style = PocketShellType.labelMono,
-            fontSize = 14.sp,
-        )
-        Text(
-            text = toolName,
-            color = PocketShellColors.Accent,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = command,
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.labelMono,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-/**
  * A streaming cursor indicator for use at the end of a streaming message.
  */
 @Composable
@@ -321,9 +264,3 @@ private val MessageHeadStyle = TextStyle(
 )
 private val MessageBadgeRadius = 6.dp
 private val MessageBadgeVerticalPadding = 2.dp
-
-// Tool call card tokens (from .tool-call CSS)
-private val ToolCallCardRadius = 10.dp
-private val ToolCallCardHPadding = 12.dp
-private val ToolCallCardVPadding = 10.dp
-private val ToolCallCardItemGap = 8.dp

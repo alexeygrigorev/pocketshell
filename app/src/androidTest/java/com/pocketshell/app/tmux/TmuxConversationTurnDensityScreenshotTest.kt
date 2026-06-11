@@ -188,6 +188,112 @@ class TmuxConversationTurnDensityScreenshotTest {
         ).assertCountEquals(1)
     }
 
+    /**
+     * Issue #704 evidence. Seeds the production [TmuxConversationPane] with the
+     * exact transcript shapes the maintainer reported:
+     *  - a SystemNote whose content is a bare `<task-id>…</task-id>` wrapper
+     *    (must NOT render as a raw, unstyled XML row),
+     *  - a `Read` tool call whose result is a base64 image content-block array
+     *    (must collapse to `[image …]`, never the multi-KB blob),
+     *  - dense Bash/Agent/Read rows for the compact-spacing check.
+     * Captures a collapsed view then taps the `Read` row open and captures the
+     * parsed input + `[image]` output.
+     */
+    @Test
+    fun issue704ConsistentStyledParsedCompactRows() {
+        val base64 = "iVBORw0KGgoAAAANSUhEUgAAA" + "B".repeat(38_000)
+        val events: List<ConversationEvent> = listOf(
+            ConversationEvent.Message(
+                id = "m-claude-task",
+                agent = AgentKind.ClaudeCode,
+                role = ConversationRole.Assistant,
+                // #704 req #1: a message whose entire body is a task-id wrapper
+                // must be dropped, not rendered raw.
+                text = "<task-id>a1887b43e9b725929</task-id>",
+            ),
+            ConversationEvent.SystemNote(
+                id = "n-claude-task",
+                agent = AgentKind.ClaudeCode,
+                tag = "task-notification",
+                content = "<task-id>a415fb6992433733a</task-id>",
+            ),
+            ConversationEvent.ToolCall(
+                id = "t-bash",
+                agent = AgentKind.ClaudeCode,
+                name = "Bash",
+                input = """{"command":"cd /home/alexey/git/pocketshell && echo ok"}""",
+            ),
+            ConversationEvent.ToolResult(
+                id = "r-bash",
+                agent = AgentKind.ClaudeCode,
+                toolCallId = "t-bash",
+                output = "ok",
+            ),
+            ConversationEvent.ToolCall(
+                id = "t-agent",
+                agent = AgentKind.ClaudeCode,
+                name = "Agent",
+                input = """{"description":"implementer: Restore #690 wiring layout","subagent_type":"implementer"}""",
+            ),
+            ConversationEvent.ToolCall(
+                id = "t-read",
+                agent = AgentKind.ClaudeCode,
+                name = "Read",
+                input = """{"file_path":"/home/alexey/.pocketshell/attachments/host-1-git-pocketshell-c/20260611-174904-01-Screenshot_20260611-174856.png"}""",
+            ),
+            ConversationEvent.ToolResult(
+                id = "r-read",
+                agent = AgentKind.ClaudeCode,
+                toolCallId = "t-read",
+                output = """[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$base64"}}]""",
+            ),
+        )
+
+        compose.setContent {
+            PocketShellTheme {
+                TmuxConversationPane(
+                    events = events,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .testTag(TMUX_CONVERSATION_PANE_TAG),
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        // #704 req #1: no raw <task-id> XML anywhere in the transcript.
+        compose.onAllNodesWithText("task-id", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.onAllNodesWithText("a1887b43e9b725929", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.onAllNodesWithText("a415fb6992433733a", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+
+        // The styled tool rows are present (consistent styling, compact).
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "t-read")
+            .assertIsDisplayed()
+        captureFullDevice(File(artifactDir(), "issue-704-collapsed-rows.png"))
+
+        // #704 req #2: expand the Read row -> parsed file_path + [image] result,
+        // never the base64 blob.
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "t-read")
+            .performClick()
+        compose.waitForIdle()
+
+        compose.onAllNodesWithText("[image", substring = true, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose.onAllNodesWithText("file_path", substring = true, useUnmergedTree = true)
+            .assertCountEquals(1)
+        // The base64 blob is never rendered.
+        compose.onAllNodesWithText(
+            "B".repeat(120),
+            substring = true,
+            useUnmergedTree = true,
+        ).assertCountEquals(0)
+        captureFullDevice(File(artifactDir(), "issue-704-expanded-read-image.png"))
+    }
+
     private fun densityComparisonEvents(): List<ConversationEvent.Message> = listOf(
         ConversationEvent.Message(
             id = "d1",

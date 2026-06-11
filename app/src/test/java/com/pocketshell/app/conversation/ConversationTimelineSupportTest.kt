@@ -28,6 +28,53 @@ class ConversationTimelineSupportTest {
         assertEquals("/tmp/result.txt", output.timelinePreview())
     }
 
+    @Test
+    fun hidesSystemNoteWhoseContentIsOnlyInternalProtocolNoise() {
+        // #704 req #1: a CLAUDE row whose content is a bare <task-id> hash had
+        // no user value and rendered as raw, unstyled XML — drop it entirely.
+        val note = systemNote(
+            tag = "task-notification",
+            content = "<task-id>a1887b43e9b725929</task-id>",
+        )
+
+        assertTrue(note.isHiddenConversationTimelineRow())
+    }
+
+    @Test
+    fun stripsInternalProtocolNoiseFromSystemNotePreview() {
+        val note = systemNote(
+            tag = "task-notification",
+            content = "Resuming /loop\n<task-id>a1887b43e9b725929</task-id>",
+        )
+
+        assertFalse(note.isHiddenConversationTimelineRow())
+        assertEquals("Resuming /loop", note.timelinePreview())
+    }
+
+    @Test
+    fun hidesMessageWhoseTextIsOnlyInternalProtocolNoise() {
+        val message = ConversationEvent.Message(
+            id = "m1",
+            agent = AgentKind.ClaudeCode,
+            role = com.pocketshell.core.agents.ConversationRole.Assistant,
+            text = "<task-id>a415fb6992433733a</task-id>",
+        )
+
+        assertTrue(message.isHiddenConversationTimelineRow())
+    }
+
+    @Test
+    fun keepsOrdinaryMessageVisible() {
+        val message = ConversationEvent.Message(
+            id = "m2",
+            agent = AgentKind.ClaudeCode,
+            role = com.pocketshell.core.agents.ConversationRole.Assistant,
+            text = "here is your answer",
+        )
+
+        assertFalse(message.isHiddenConversationTimelineRow())
+    }
+
     private fun systemNote(tag: String, content: String): ConversationEvent.SystemNote =
         ConversationEvent.SystemNote(
             id = "note-$tag",

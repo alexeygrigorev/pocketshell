@@ -21,24 +21,29 @@ import java.io.File
 import java.io.InputStream
 
 /**
- * Issue #465: a folder-tree probe that hits an "open failed" — the pooled SSH
- * transport is alive but refuses to open the exec channel — must EVICT the
- * poisoned lease so the next probe / Retry opens a FRESH transport and the
- * host-detail tree recovers, instead of dead-ending on a permanent
- * `ConnectFailed` ("open failed") screen with no way back but force-close.
+ * Issue #465 / #680: a folder-tree probe that hits an "open failed" — the
+ * pooled SSH transport is alive but refuses to open the exec channel — must
+ * EVICT the poisoned lease and open a FRESH transport so the host-detail tree
+ * recovers, instead of dead-ending on a permanent `ConnectFailed` ("open
+ * failed") screen with no way back but force-close.
+ *
+ * #680 strengthened #465: the heal now happens WITHIN the same refresh (evict
+ * + retry once on a fresh lease) rather than only on the next poll, so the user
+ * never even sees the transient `ConnectFailed` flash for a stale-channel
+ * symptom.
  */
 class FolderListGatewayOpenFailedEvictionTest {
 
     @Test
-    fun openFailedProbeEvictsPoisonedLeaseSoNextProbeReconnectsFresh() = runBlocking {
+    fun openFailedProbeEvictsPoisonedLeaseAndHealsWithinSameRefresh() = runBlocking {
         val poisoned = OpenFailingSession()
         val healthy = HealthySession()
         val connector = TwoSessionConnector(poisoned, healthy)
         // A non-zero idle TTL models the real pool: a released-but-still-
         // connected session is RETAINED and reused on the next acquire. Without
         // the #465 eviction, the poisoned transport would be handed back and
-        // the second probe would fail again ("open failed") instead of opening
-        // a fresh transport.
+        // the retry would fail again ("open failed") instead of opening a fresh
+        // transport.
         val manager = SshLeaseManager(connector = connector, idleTtlMillis = 60_000L)
         val gateway = SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
@@ -47,37 +52,27 @@ class FolderListGatewayOpenFailedEvictionTest {
             sessionListParser = com.pocketshell.app.sessions.HostTmuxSessionListParser(),
         )
 
-        // First probe: the live transport refuses the exec channel ("open failed").
-        val first = gateway.listSessionsWithFolder(
+        // The live transport refuses the exec channel ("open failed"). #680: the
+        // gateway evicts the poisoned lease and retries ONCE on a fresh
+        // transport within this same refresh, so the result is already the
+        // recovered Sessions — no transient ConnectFailed surfaces.
+        val result = gateway.listSessionsWithFolder(
             host = HOST,
             keyPath = KEY_PATH,
             passphrase = null,
             watchedRoots = WATCHED_ROOTS,
         )
         assertTrue(
-            "an open-failed probe must surface ConnectFailed, got $first",
-            first is FolderListResult.ConnectFailed,
-        )
-        assertEquals("only the poisoned transport opened so far", 1, connector.connectCount)
-
-        // Second probe (the poll loop's next tick / the user's Retry): the
-        // poisoned lease must have been evicted so a FRESH transport is opened
-        // and the tree recovers.
-        val second = gateway.listSessionsWithFolder(
-            host = HOST,
-            keyPath = KEY_PATH,
-            passphrase = null,
-            watchedRoots = WATCHED_ROOTS,
+            "an open-failed probe must heal within the same refresh and return " +
+                "Sessions (the poisoned lease evicted + a fresh transport opened), got $result",
+            result is FolderListResult.Sessions,
         )
         assertEquals(
-            "the poisoned lease must be evicted so the next probe opens a fresh transport",
+            "the poisoned lease must be evicted so the heal retry opens a fresh transport",
             2,
             connector.connectCount,
         )
-        assertTrue(
-            "the recovered probe must succeed, got $second",
-            second is FolderListResult.Sessions,
-        )
+        assertTrue("the poisoned transport must have been evicted (closed)", poisoned.closed)
     }
 
     private class TwoSessionConnector(

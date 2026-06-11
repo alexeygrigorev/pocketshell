@@ -440,6 +440,40 @@ class SshFolderListGateway internal constructor(
         block: suspend (SshSession) -> T,
     ): Result<T> {
         val leaseTarget = host.toSshLeaseTarget(keyPath, passphrase)
+        // Issue #680: a refresh probe over a pooled lease whose transport went
+        // STALE between acquire and the exec (sshj's `isConnected` lies until
+        // its keepalive trips, so `ensureConnected()` can throw "SSH session is
+        // not connected" on a lease that was just handed back as alive) is a
+        // FALSE NEGATIVE — the host is connectable (the user opens + uses a
+        // session right after) but the folder screen surfaced a scary
+        // persistent "Couldn't refresh sessions: SSH session is not connected"
+        // banner. The #465/#665 eviction already evicted the corpse so the NEXT
+        // poll recovered, but the CURRENT refresh still showed the alarming
+        // error. So instead of only evicting + surfacing, we EVICT-AND-RETRY
+        // ONCE on a fresh lease within the same refresh: a transient/stale-
+        // channel symptom heals silently (no false banner) and only a GENUINE
+        // disconnect — where the fresh connect or the retried exec also fails —
+        // surfaces an accurate error.
+        val firstAttempt = runLeaseAttempt(leaseTarget, block)
+        val firstError = firstAttempt.exceptionOrNull()
+        if (firstError == null || !isStaleChannelSymptom(firstError)) {
+            return firstAttempt
+        }
+        // Heal: the eviction inside runLeaseAttempt already discarded the
+        // poisoned transport, so this second acquire dials a FRESH connection.
+        return runLeaseAttempt(leaseTarget, block)
+    }
+
+    /**
+     * One lease acquire → block → release cycle. On a stale-channel/open-failed
+     * symptom the poisoned lease is EVICTED (not just released) so the next
+     * acquire — whether the in-refresh heal retry above or a later poll — opens
+     * a fresh transport instead of re-grabbing the corpse.
+     */
+    private suspend fun <T> runLeaseAttempt(
+        leaseTarget: SshLeaseTarget,
+        block: suspend (SshSession) -> T,
+    ): Result<T> {
         val lease = try {
             sshLeaseManager.acquire(leaseTarget)
                 .getOrElse { return Result.failure(it) }
@@ -454,15 +488,14 @@ class SshFolderListGateway internal constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            // Issue #465: an "open failed" — the pooled SSH transport is alive
-            // but refuses to open the probe's exec channel — must EVICT the
-            // pooled lease, not just release it back. A transport stuck
-            // refusing channels still reports `isConnected`, so the pool would
-            // keep handing it back and every folder-tree poll would re-surface
-            // the same ConnectError dead-end (the host-detail "open failed"
-            // screen the maintainer hit). Evicting it makes the NEXT poll /
-            // Retry open a fresh transport that recovers the tree.
-            poisonedTransport = isChannelOpenFailure(t) || isTransportDisconnected(t)
+            // Issue #465/#665/#680: an "open failed" / dead-transport / "SSH
+            // session is not connected" probe failure must EVICT the pooled
+            // lease, not just release it back. A transport stuck refusing
+            // channels (or one whose `isConnected` lies) still gets handed back
+            // by the pool, so without eviction every folder-tree poll would
+            // re-surface the same dead-end. Evicting it makes the heal retry /
+            // next poll open a fresh transport that recovers the tree.
+            poisonedTransport = isStaleChannelSymptom(t)
             Result.failure(t)
         } finally {
             withContext(NonCancellable) {
@@ -472,6 +505,55 @@ class SshFolderListGateway internal constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Issue #680: the family of transient probe failures that must HEAL +
+     * RETRY on a fresh lease rather than surface a persistent "not connected"
+     * error. Mirrors
+     * [com.pocketshell.app.tmux.TmuxSessionViewModel.isStaleChannelSymptom]:
+     *
+     *  - [isChannelOpenFailure]: live transport refuses the exec channel.
+     *  - [isTransportDisconnected]: sshj `TransportException` / `BY_APPLICATION`
+     *    teardown of a silently-dead pooled transport.
+     *  - [isSessionNotConnected]: `ensureConnected()` threw because the pooled
+     *    lease's `isConnected` flipped false between acquire and exec — the
+     *    exact false-negative #680 surfaced.
+     */
+    private fun isStaleChannelSymptom(cause: Throwable?): Boolean =
+        isChannelOpenFailure(cause) ||
+            isTransportDisconnected(cause) ||
+            isSessionNotConnected(cause)
+
+    /**
+     * Issue #680: true when [cause] is the "SSH session is not connected" probe
+     * failure — `RealSshSession.ensureConnected()` throwing because the pooled
+     * lease's `isConnected` (sshj `client.isConnected && isAuthenticated`)
+     * flipped false between the lease acquire and the exec. This is the
+     * transient stale-channel symptom the folder refresh surfaced as a scary
+     * persistent banner; it must heal + retry on a fresh lease, not surface a
+     * false "not connected" error while the host is actually connectable.
+     *
+     * Matched on message text (walking the cause chain) so the app module need
+     * not depend on the core SSH exception hierarchy. Also covers the lower-
+     * level "transport endpoint is not connected" socket text.
+     */
+    private fun isSessionNotConnected(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                (
+                    message.contains("SSH session is not connected", ignoreCase = true) ||
+                        message.contains("transport endpoint is not connected", ignoreCase = true)
+                    )
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
     }
 
     /**

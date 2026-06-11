@@ -342,13 +342,36 @@ class BackgroundGraceReconnectE2eTest {
 
     private fun assertNoReconnectOrReattachDiagnostics(label: String) {
         val events = diagnostics!!.events
+        // Forbid GENUINE reconnect signals only — a within-grace foreground must
+        // reuse the live SSH/tmux control client with no new handshake:
+        //   * reconnect_start / network_reconnect_start — a real reconnect kicked off.
+        //   * foreground_reattach — the VM-level reattach `connect()` request
+        //     (TmuxSessionViewModel.kt; category "connection"). NOT the benign
+        //     "app"-category fan-out marker below.
+        //   * foreground_runtime_probe_failed — the within-grace probe found the
+        //     transport dead and triggered a reconnect (TmuxSessionViewModel.kt;
+        //     the DiagnosticEvent equivalent of the `tmux_probe_result outcome=failed`
+        //     cause-trail record). If this fires within grace, the grace fix has a
+        //     residual and this test MUST fail.
+        //   * terminal_background_teardown — the runtime was torn down on background.
+        //
+        // We deliberately DO NOT forbid the `terminal_foreground_reattach`
+        // fan-out marker (App.kt). Since #548 / commit 1271a60e, App.kt calls
+        // dispatchTmuxForeground() UNCONDITIONALLY on every foreground (even
+        // within grace) so a stale transport is probed early. That call records
+        // `terminal_foreground_reattach` as a plain dispatch label BEFORE and
+        // REGARDLESS of what the hook does — for a healthy within-grace resume
+        // the hook just runs a live-channel probe and rides through with zero
+        // reconnect. The marker is a dispatch label, not a reconnect; the
+        // genuine reconnect signals above (none of which fire within grace) still
+        // gate this test.
         val forbidden = events.filter { event ->
             event.name in setOf(
                 "reconnect_start",
                 "network_reconnect_start",
                 "foreground_reattach",
+                "foreground_runtime_probe_failed",
                 "terminal_background_teardown",
-                "terminal_foreground_reattach",
             )
         }
         assertTrue(

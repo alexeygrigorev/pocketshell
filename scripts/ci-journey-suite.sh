@@ -43,16 +43,18 @@
 # this per-push subset below — each was proven GREEN on a pooled AVD before
 # re-adding (no flake, no CI email spam).
 #
-# STILL DEFERRED (issue #705): BackgroundGraceReconnectE2eTest stays OUT — it is
-# genuinely RED for a real production-behavior reason, NOT the picker wedge nor
-# the header artifact. A within-grace foreground (≈7.5s, grace=60s) still
-# dispatches a `terminal_foreground_reattach` diagnostic (hookCount=1,
-# source=background_grace_foreground), which the test forbids
-# (BackgroundGraceReconnectE2eTest.kt:354 assertNoReconnectOrReattachDiagnostics).
-# Both its tests (sixSecondAppSwitch…, quickAppSwitch…) fail on this. Re-add it
-# only after the within-grace reattach-suppression behavior is fixed — wiring it
-# in now would make this job RED on every push (the CI email spam this job must
-# avoid).
+# RE-ADDED (issue #707): BackgroundGraceReconnectE2eTest now re-joins this subset.
+# The triage (#707) established the within-grace `terminal_foreground_reattach`
+# diagnostic was a BENIGN fan-out marker, not a real reconnect: since #548 /
+# commit 1271a60e, App.kt fires dispatchTmuxForeground() unconditionally on every
+# foreground (even within grace) so a stale transport is probed early, and that
+# call records `terminal_foreground_reattach` purely as a dispatch label. The
+# E2E `assertNoReconnectOrReattachDiagnostics` is now narrowed to forbid only
+# the GENUINE reconnect signals (reconnect_start, network_reconnect_start, the
+# VM-level foreground_reattach, foreground_runtime_probe_failed,
+# terminal_background_teardown) — none of which fire within grace — so both its
+# tests are green. No production code changed; the triage confirmed the #685
+# grace path is correct.
 #
 # The heavy/long-running + toxiproxy network-fault + bootstrap-matrix suites
 # stay in nightly-extensive.yml. This is intentionally the fast per-push subset.
@@ -78,14 +80,15 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 # DeepLinkSessionSwitchE2eTest now that the picker enumeration wedge is fixed
 # (#687 + #702) and the over-broad header assertion is scoped to the breadcrumb
 # crumb (#705). Each was proven GREEN on a pooled AVD before re-adding.
-# BackgroundGraceReconnectE2eTest stays DEFERRED (genuinely red — see the
-# header note above): re-add it only after the within-grace
-# foreground-reattach-suppression behavior is fixed.
+# BackgroundGraceReconnectE2eTest re-joins this subset (#707): the within-grace
+# `terminal_foreground_reattach` it forbade was a benign fan-out marker, not a
+# reconnect; the assertion is narrowed to genuine reconnect signals only.
 JOURNEY_CLASSES=(
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
   "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
+  "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
 )
 
 join_by() {

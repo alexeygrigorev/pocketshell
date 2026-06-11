@@ -59,6 +59,64 @@ For each connected host, PocketShell:
 4. Runs the usage command on a configurable interval while the app is in the foreground.
 5. Parses the normalized NDJSON, renders mobile UI.
 
+## Stale-while-revalidate cache (issue #689)
+
+The usage screen is **always populated + instant**: it renders the last
+captured reading immediately, labelled with its capture time, then refreshes
+live in the foreground and swaps in fresh data. The user never stares at a
+spinner and never sees only-stale data without knowing it.
+
+### Server-side capture + history
+
+The host captures usage on a schedule (cron / systemd timer — server-side
+scheduling is fine; the foreground-only rule **D21** applies to the Android
+app, not the host CLI):
+
+```bash
+pocketshell usage --capture
+```
+
+`--capture` fetches usage live (via the daemon when one is running, else a
+one-shot subprocess) and writes two artifacts under
+`${XDG_STATE_HOME:-~/.local/state}/pocketshell/usage/`:
+
+- `usage-latest.json` — the cached latest reading
+  (`{"captured_at": "...Z", "records": [ … ]}`), mode `0600`.
+- `usage-history.jsonl` — an append-only history log, one capture per line,
+  **trimmed to the most recent 2000 lines** (~83 days at hourly capture; the
+  file stays well under ~1 MB). No external logrotate dependency. The history
+  enables usage tracking over time and powers the future reset-detection
+  follow-up.
+
+A failed live fetch is **not** cached, so a transient provider hiccup never
+pins a bad reading.
+
+The scheduler units (systemd user `.timer`/`.service` + a cron example) and
+install instructions live in
+[`tools/pocketshell/scheduler/`](../tools/pocketshell/scheduler/README.md).
+The recommended install is an hourly `systemctl --user` timer.
+
+### App read path
+
+The app reads the cache instantly with:
+
+```bash
+pocketshell usage --cached
+```
+
+which prints `usage-latest.json` (exit 3 with a friendly note when no capture
+has run yet, so the app falls back to a pure live fetch). The app:
+
+1. Renders the cached records at once with a "Last captured at HH:mm · refreshing…" label.
+2. Runs the live `pocketshell usage --json` fetch in the foreground.
+3. On success, swaps to the fresh value and updates the timestamp.
+4. On failure/timeout, keeps the cached value with an honest
+   "Couldn't refresh — showing cached from HH:mm" note (no scary blocking error).
+
+A per-host `usageCommandOverride` disables the cache path (an override is an
+arbitrary script that does not speak `--cached`); those hosts go straight to
+the live fetch.
+
 ## Pluggable usage source
 
 Per-host setting: which command to invoke for usage. Default:

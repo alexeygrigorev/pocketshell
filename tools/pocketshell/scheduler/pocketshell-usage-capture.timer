@@ -1,0 +1,15 @@
+[Unit]
+Description=Run PocketShell usage capture hourly
+Documentation=https://github.com/alexeygrigorev/pocketshell/blob/main/docs/usage-panel.md
+
+[Timer]
+# Hourly capture. RandomizedDelaySec spreads the provider API calls so a
+# fleet of hosts does not hit the endpoints all at once on the hour.
+OnCalendar=hourly
+RandomizedDelaySec=300
+# Catch up after the machine was asleep/off so a laptop that missed the
+# hourly tick still refreshes the cache on next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=PocketShell usage capture (writes the cached latest reading + history log)
+Documentation=https://github.com/alexeygrigorev/pocketshell/blob/main/docs/usage-panel.md
+
+[Service]
+Type=oneshot
+# Capture usage live, write usage-latest.json + append usage-history.jsonl
+# under $XDG_STATE_HOME/pocketshell/usage/. %h expands to the user's home,
+# so this works with `systemctl --user` (the recommended install).
+ExecStart=%h/.local/bin/pocketshell usage --capture
+# Keep capture failures (a transient provider hiccup) non-fatal for the
+# timer: a single missed capture just means the app shows a slightly older
+# cached reading until the next run.
+SuccessExitStatus=0 1

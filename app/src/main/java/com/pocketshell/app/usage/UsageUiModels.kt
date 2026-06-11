@@ -10,6 +10,19 @@ public data class UsageHostSnapshot(
     val records: List<UsageProviderRecord>,
     val lastSyncedAt: Instant?,
     val command: String = UsageRemoteSource.defaultUsageCommand,
+    /**
+     * Issue #689: when these records came from the server-side cache (the
+     * scheduled `pocketshell usage --capture`), the capture timestamp so the
+     * UI can render "last captured at <time>". Null once a live refresh has
+     * swapped in fresh data (provenance is then [lastSyncedAt]).
+     */
+    val capturedAt: Instant? = null,
+    /**
+     * Issue #689: set when a live refresh FAILED but a cached reading is
+     * still being shown, carrying the cache's capture time for the honest
+     * "couldn't refresh — showing cached from <time>" note.
+     */
+    val staleSince: Instant? = null,
 )
 
 public data class UsageMissingToolHost(
@@ -29,7 +42,30 @@ public data class UsageScreenState(
     val missingToolHosts: List<UsageMissingToolHost> = emptyList(),
     val failedHosts: List<UsageFailedHost> = emptyList(),
     val isRefreshing: Boolean = false,
+    /**
+     * Issue #689: true while the cached reading is shown and the live
+     * foreground refresh is still running, so the UI can show a
+     * "refreshing…" affordance over the populated cached value.
+     */
+    val showingCached: Boolean = false,
 ) {
+    /**
+     * Issue #689: the most recent capture timestamp across all hosts whose
+     * shown records still come from the server-side cache. Drives the
+     * screen-level "last captured at <time>" / "showing cached from <time>"
+     * provenance label. Null once every host has live data.
+     */
+    public val cachedAt: Instant?
+        get() = hosts.mapNotNull { it.capturedAt ?: it.staleSince }.maxOrNull()
+
+    /**
+     * Issue #689: true when at least one shown host's records are cached AND
+     * its live refresh failed — the screen shows the honest "couldn't
+     * refresh — showing cached from <time>" note instead of a hard error.
+     */
+    public val refreshFailedShowingCached: Boolean
+        get() = hosts.any { it.staleSince != null }
+
     public val providerCount: Int
         get() = hosts.sumOf { it.records.size }
 

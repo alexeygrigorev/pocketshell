@@ -536,6 +536,26 @@ def _try_daemon_usage_fetch(
         "No effect on the one-shot subprocess path, which always runs fresh."
     ),
 )
+@click.option(
+    "--capture",
+    "capture",
+    is_flag=True,
+    help=(
+        "Fetch usage live, write the cached latest reading + append to the "
+        "history log under $XDG_STATE_HOME/pocketshell/usage/, then exit. "
+        "Run this on a schedule (cron / systemd timer). Implies --json."
+    ),
+)
+@click.option(
+    "--cached",
+    "cached",
+    is_flag=True,
+    help=(
+        "Emit the last captured reading instantly (no live fetch) as a JSON "
+        "document {captured_at, records} for the app's stale-while-revalidate "
+        "render. Exits non-zero if no capture exists yet. Implies --json."
+    ),
+)
 @click.pass_context
 def usage_command(
     ctx: click.Context,
@@ -543,6 +563,8 @@ def usage_command(
     json_output: bool = False,
     no_daemon: bool = False,
     no_cache: bool = False,
+    capture: bool = False,
+    cached: bool = False,
 ) -> None:
     """Report quota / usage for coding-agent providers on this host.
 
@@ -552,7 +574,27 @@ def usage_command(
     it falls through to ``quse [provider] [--json]`` as a one-shot
     subprocess. JSON output is normalized into PocketShell's schema so
     the app is not pinned to provider-specific `quse` quirks.
+
+    ``--capture`` and ``--cached`` implement the stale-while-revalidate
+    cache (#689): a scheduled ``--capture`` writes the latest reading +
+    history log on the host, and the app reads ``--cached`` for an instant
+    populated render before its own live foreground refresh swaps in fresh
+    data.
     """
+    # `--cached` emits the last captured reading instantly; `--capture`
+    # fetches live and persists the cache + history. Both bypass the
+    # normal stdout-proxy path below. They imply JSON output.
+    if cached:
+        exit_code = _emit_cached_usage()
+        if exit_code != 0:
+            ctx.exit(exit_code)
+        return
+    if capture:
+        exit_code = _capture_usage(provider, no_daemon=no_daemon)
+        if exit_code != 0:
+            ctx.exit(exit_code)
+        return
+
     # JSON output is the format the daemon caches against (NDJSON
     # straight from `quse --json`). Human-readable output is rare and
     # not on the Android hot path, so it does not get the daemon
@@ -584,6 +626,87 @@ def usage_command(
     # outer `main()` (and the OS) sees the same exit code `quse` reported.
     if exit_code != 0:
         ctx.exit(exit_code)
+
+
+def _fetch_usage_ndjson(
+    provider: Optional[str],
+    *,
+    no_daemon: bool,
+) -> tuple[Optional[str], str, int]:
+    """Fetch live usage NDJSON for the cache capture.
+
+    Returns ``(stdout, stderr, returncode)`` where ``stdout`` is the
+    normalized NDJSON (or ``None`` when ``quse`` is missing). Mirrors the
+    command's own daemon-then-subprocess fall-through so a scheduled
+    ``--capture`` benefits from the daemon cache when one is live.
+    """
+    if not no_daemon:
+        envelope = _try_daemon_usage_fetch(provider, no_cache=False)
+        if envelope is not None:
+            stdout = normalize_usage_stdout(str(envelope.get("stdout") or ""))
+            stderr = str(envelope.get("stderr") or "")
+            return stdout, stderr, int(envelope.get("returncode", 0))
+
+    quse_path = _resolve_quse_binary()
+    if quse_path is None:
+        return (
+            None,
+            (
+                "pocketshell: `quse` is not installed on this host. "
+                "Install it via `uv tool install quse` or `pipx install quse` "
+                "and re-run.\n"
+            ),
+            127,
+        )
+    args: list[str] = [quse_path]
+    if provider:
+        args.append(provider)
+    args.append("--json")
+    completed = subprocess.run(args, check=False, capture_output=True, text=True)
+    return normalize_usage_stdout(completed.stdout), completed.stderr, completed.returncode
+
+
+def _capture_usage(provider: Optional[str], *, no_daemon: bool) -> int:
+    """Fetch usage live and persist the cache + history log, then report.
+
+    Designed to run on a schedule. On a successful fetch it writes
+    ``usage-latest.json`` and appends to ``usage-history.jsonl`` under
+    ``$XDG_STATE_HOME/pocketshell/usage/`` and echoes the cache object so a
+    cron/systemd log shows what landed. A failed fetch is NOT cached so a
+    transient provider hiccup never pins a bad reading.
+    """
+    from pocketshell import usage_capture as _capture
+
+    stdout, stderr, returncode = _fetch_usage_ndjson(provider, no_daemon=no_daemon)
+    if returncode != 0 or stdout is None:
+        if stderr:
+            sys.stderr.write(stderr)
+        return returncode if returncode != 0 else 1
+
+    cache_obj = _capture.write_capture(stdout)
+    sys.stdout.write(json.dumps(cache_obj, sort_keys=True) + "\n")
+    return 0
+
+
+def _emit_cached_usage() -> int:
+    """Emit the last captured reading as a JSON document, or exit non-zero.
+
+    Returns exit code 0 when a cache exists (its JSON document is written to
+    stdout), or 3 with a friendly stderr note when no capture has run yet so
+    the app can fall back to a pure live fetch.
+    """
+    from pocketshell import usage_capture as _capture
+
+    document = _capture.cached_document()
+    if document is None:
+        sys.stderr.write(
+            "pocketshell: no captured usage yet. "
+            "Run `pocketshell usage --capture` (or wait for the scheduled "
+            "capture) to populate the cache.\n"
+        )
+        return 3
+    sys.stdout.write(document)
+    return 0
 
 
 def _run_quse_json(args: Sequence[str]) -> int:

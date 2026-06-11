@@ -384,4 +384,66 @@ class UsageFormatTest {
         assertEquals("65% used", row.percentLabel)
         assertEquals(Instant.parse("2026-06-11T00:27:17Z"), row.soonestReset)
     }
+
+    // -- issue #689: stale-while-revalidate provenance ----------------------
+
+    private fun cachedHost(captured: Instant?, stale: Instant? = null) = UsageHostSnapshot(
+        hostId = 1,
+        hostName = "h",
+        records = emptyList(),
+        lastSyncedAt = captured,
+        capturedAt = captured,
+        staleSince = stale,
+    )
+
+    @Test
+    fun usageProvenance_showsLastCapturedAndRefreshingWhileSyncing() {
+        val state = UsageScreenState(
+            hosts = listOf(cachedHost(Instant.parse("2026-06-11T09:00:00Z"))),
+            isRefreshing = true,
+            showingCached = true,
+        )
+        assertEquals(
+            "Last captured 09:00 · refreshing…",
+            usageProvenanceLabel(state, ZoneId.of("UTC")),
+        )
+    }
+
+    @Test
+    fun usageProvenance_showsHonestCachedNoteOnRefreshFailure() {
+        val state = UsageScreenState(
+            hosts = listOf(
+                cachedHost(captured = null, stale = Instant.parse("2026-06-11T08:30:00Z")),
+            ),
+            isRefreshing = false,
+            showingCached = false,
+        )
+        assertEquals(
+            "Couldn't refresh — showing cached from 08:30",
+            usageProvenanceLabel(state, ZoneId.of("UTC")),
+        )
+        assertEquals(true, state.refreshFailedShowingCached)
+    }
+
+    @Test
+    fun usageProvenance_plainLiveStatusWhenFresh() {
+        val fresh = UsageScreenState(
+            hosts = listOf(
+                UsageHostSnapshot(
+                    hostId = 1,
+                    hostName = "h",
+                    records = emptyList(),
+                    lastSyncedAt = Instant.parse("2026-06-11T10:00:00Z"),
+                ),
+            ),
+            isRefreshing = false,
+        )
+        assertEquals("Last sync: host data", usageProvenanceLabel(fresh, ZoneId.of("UTC")))
+    }
+
+    @Test
+    fun usageProvenance_syncingWhenNoCacheYet() {
+        val state = UsageScreenState(isRefreshing = true)
+        assertEquals("Syncing...", usageProvenanceLabel(state, ZoneId.of("UTC")))
+    }
 }

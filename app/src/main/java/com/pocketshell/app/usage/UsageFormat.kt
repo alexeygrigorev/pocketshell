@@ -251,3 +251,37 @@ internal fun formatResetTime(now: Instant, resetAt: Instant, zoneId: ZoneId): St
  */
 internal fun soonestReset(record: UsageProviderRecord): Instant? =
     record.windows.mapNotNull { it.resetAt }.minOrNull()
+
+/**
+ * Issue #689: local "HH:mm" clock time for a capture timestamp, used in the
+ * "last captured at <time>" / "showing cached from <time>" provenance labels.
+ * Falls back to "—" when the capture time is unknown.
+ */
+internal fun formatCapturedClock(capturedAt: Instant?, zoneId: ZoneId): String {
+    if (capturedAt == null) return RESET_PLACEHOLDER
+    val formatter = DateTimeFormatter.ofPattern("HH:mm", Locale.US).withZone(zoneId)
+    return formatter.format(capturedAt)
+}
+
+/**
+ * Issue #689: the screen-level provenance line for the usage meta row.
+ *
+ * - live refresh in progress over a cached value → "Last captured HH:mm · refreshing…"
+ * - live refresh failed, cached value kept       → "Couldn't refresh — showing cached from HH:mm"
+ * - fresh live data                              → "Last sync: host data"
+ * - live refresh in progress, no cache yet       → "Syncing..."
+ */
+internal fun usageProvenanceLabel(
+    state: UsageScreenState,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): String {
+    val capturedClock = formatCapturedClock(state.cachedAt, zoneId)
+    return when {
+        state.refreshFailedShowingCached ->
+            "Couldn't refresh — showing cached from $capturedClock"
+        state.showingCached && state.isRefreshing ->
+            "Last captured $capturedClock · refreshing…"
+        state.isRefreshing -> "Syncing..."
+        else -> "Last sync: host data"
+    }
+}

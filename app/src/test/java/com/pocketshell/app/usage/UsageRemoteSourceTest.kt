@@ -169,6 +169,64 @@ class UsageRemoteSourceTest {
         }
     }
 
+    // -- issue #689: cached-reading path ------------------------------------
+
+    private val cachedCommand = PocketshellCommand.wrap(UsageRemoteSource.CACHED_USAGE_ARGS)
+
+    @Test
+    fun fetchCachedUsage_parsesDocumentAndCapturedAt() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                cachedCommand to ExecResult(
+                    """{"captured_at":"2026-06-11T09:00:00Z","records":[""" +
+                        """{"provider":"codex","status":"ok","short_term":{"percent_remaining":77.0},"long_term":null,"block_reason":null,"error":null,"details":{}}]}""",
+                    "",
+                    0,
+                ),
+            ),
+        )
+
+        val result = source.fetchCachedUsage(session)
+        assertTrue(result is CachedUsageResult.Hit)
+        val hit = result as CachedUsageResult.Hit
+        assertEquals(java.time.Instant.parse("2026-06-11T09:00:00Z"), hit.capturedAt)
+        assertEquals(1, hit.records.size)
+        assertEquals("codex", hit.records.single().provider)
+        assertEquals(listOf(cachedCommand), session.recorded)
+    }
+
+    @Test
+    fun fetchCachedUsage_emptyWhenNoCaptureYet() = runTest {
+        // `pocketshell usage --cached` exits 3 with a stderr note when no
+        // capture has run — the app must collapse this to Empty so it falls
+        // back to a pure live fetch.
+        val session = FakeSshSession(
+            mapOf(cachedCommand to ExecResult("", "no captured usage yet\n", 3)),
+        )
+
+        assertEquals(CachedUsageResult.Empty, source.fetchCachedUsage(session))
+    }
+
+    @Test
+    fun fetchCachedUsage_emptyForPerHostOverride() = runTest {
+        // A per-host usageCommandOverride is an arbitrary script that does
+        // not speak `--cached`; the cache path is disabled for it.
+        val session = FakeSshSession(emptyMap())
+        assertEquals(
+            CachedUsageResult.Empty,
+            source.fetchCachedUsage(session, commandOverride = "my-quota-script"),
+        )
+        assertTrue("override must not invoke the cached command", session.recorded.isEmpty())
+    }
+
+    @Test
+    fun fetchCachedUsage_emptyOnGarbageStdout() = runTest {
+        val session = FakeSshSession(
+            mapOf(cachedCommand to ExecResult("not json at all", "", 0)),
+        )
+        assertEquals(CachedUsageResult.Empty, source.fetchCachedUsage(session))
+    }
+
     private class FakeSshSession(
         private val canned: Map<String, ExecResult>,
         private val barePocketshellFails: Boolean = false,

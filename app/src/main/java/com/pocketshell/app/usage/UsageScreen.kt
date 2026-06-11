@@ -74,7 +74,7 @@ fun UsageScreen(
 
         state.hosts.forEach { host ->
             host.records.forEach { record ->
-                UsageProviderCard(record = record, now = now)
+                UsageProviderCard(record = record, now = now, host = host)
             }
         }
 
@@ -377,6 +377,17 @@ fun UsageWarningBanner(
 
 @Composable
 private fun UsageMeta(state: UsageScreenState) {
+    // Issue #689: the provenance line is the honest stale-while-revalidate
+    // status — "last captured at <time> · refreshing…" over a cached value,
+    // "couldn't refresh — showing cached from <time>" on failure, or the
+    // plain live status otherwise. Tinted amber on a refresh failure so a
+    // glance reads it as "stale, not fresh".
+    val provenance = usageProvenanceLabel(state)
+    val provenanceColor = if (state.refreshFailedShowingCached) {
+        PocketShellColors.Amber
+    } else {
+        PocketShellColors.TextMuted
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -384,9 +395,10 @@ private fun UsageMeta(state: UsageScreenState) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
-            text = if (state.isRefreshing) "Syncing..." else "Last sync: host data",
-            color = PocketShellColors.TextMuted,
+            text = provenance,
+            color = provenanceColor,
             style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.testTag(USAGE_PROVENANCE_TAG),
         )
         Text(
             text = "${state.providerCount} providers · ${state.hostCount} hosts",
@@ -397,7 +409,12 @@ private fun UsageMeta(state: UsageScreenState) {
 }
 
 @Composable
-private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
+private fun UsageProviderCard(
+    record: UsageProviderRecord,
+    now: Instant,
+    host: UsageHostSnapshot? = null,
+) {
+    val zone = ZoneId.systemDefault()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -411,6 +428,20 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
             leading = { ProviderDot(kind = dotKind(record)) },
             trailing = { Pill(label = statusLabel(record), kind = pillKind(record)) },
         )
+
+        // Issue #689: per-card provenance for cached / stale readings, so a
+        // card sourced from the server-side capture is honestly labelled
+        // even amid mixed-freshness hosts.
+        host?.let { snapshot ->
+            usageCardProvenance(snapshot, zone)?.let { (text, isStale) ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = text,
+                    color = if (isStale) PocketShellColors.Amber else PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
 
@@ -520,6 +551,26 @@ private fun UsageResetFoot(
 private fun resetUnavailableText(window: UsageWindow): String? {
     if (window.resetAt != null) return null
     return "Reset time unavailable."
+}
+
+/**
+ * Issue #689: per-card provenance line + a stale flag.
+ *
+ * - stale (live refresh failed, cached kept) → "Showing cached from HH:mm",
+ *   stale=true (amber).
+ * - cached but still refreshing              → "Last captured HH:mm · refreshing…",
+ *   stale=false (muted).
+ * - fresh live data                          → null (no extra line).
+ */
+private fun usageCardProvenance(
+    host: UsageHostSnapshot,
+    zone: ZoneId,
+): Pair<String, Boolean>? = when {
+    host.staleSince != null ->
+        "Showing cached from ${formatCapturedClock(host.staleSince, zone)}" to true
+    host.capturedAt != null ->
+        "Last captured ${formatCapturedClock(host.capturedAt, zone)} · refreshing…" to false
+    else -> null
 }
 
 @Composable
@@ -709,6 +760,12 @@ public fun usageBannerTagFor(provider: String): String =
 
 public fun usageBannerDismissTagFor(provider: String): String =
     "usage:warning-banner-dismiss:" + provider.lowercase()
+
+/**
+ * Issue #689: tag for the screen-level provenance line ("last captured at
+ * <time> · refreshing…" / "couldn't refresh — showing cached from <time>").
+ */
+public const val USAGE_PROVENANCE_TAG: String = "usage:provenance"
 
 public const val USAGE_OVERFLOW_TAG: String = "usage:overflow"
 public const val USAGE_REFRESH_ACTION_TAG: String = "usage:overflow:refresh"

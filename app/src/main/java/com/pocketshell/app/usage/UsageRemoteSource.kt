@@ -6,6 +6,9 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
 import kotlinx.coroutines.CancellationException
+import org.json.JSONArray
+import org.json.JSONObject
+import java.time.Instant
 import javax.inject.Inject
 
 public sealed interface UsageToolStatus {
@@ -18,6 +21,28 @@ public sealed interface UsageFetchResult {
     public data class Success(val records: List<UsageProviderRecord>) : UsageFetchResult
     public data object ToolMissing : UsageFetchResult
     public data class Failed(val reason: String) : UsageFetchResult
+}
+
+/**
+ * Result of reading the host's cached latest usage reading (issue #689).
+ *
+ * The cache is written by a scheduled server-side `pocketshell usage
+ * --capture`. The app reads it with `pocketshell usage --cached` for an
+ * instant, always-populated render BEFORE its own live foreground refresh.
+ */
+public sealed interface CachedUsageResult {
+    /**
+     * A captured reading exists. [capturedAt] powers the "last captured at
+     * <time>" provenance label; [records] are the same provider records the
+     * live path returns.
+     */
+    public data class Hit(
+        val records: List<UsageProviderRecord>,
+        val capturedAt: Instant?,
+    ) : CachedUsageResult
+
+    /** No capture has run yet (or `--cached` is unsupported); fall back to live. */
+    public data object Empty : CachedUsageResult
 }
 
 /**
@@ -60,6 +85,63 @@ public class UsageRemoteSource @Inject constructor(
         UsageToolStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
 
+    /**
+     * Read the host's cached latest usage reading (issue #689).
+     *
+     * Runs `pocketshell usage --cached`, which prints the most recent
+     * scheduled capture as a single JSON document `{captured_at, records}`
+     * instantly (no provider API round-trip). The app renders this at once
+     * with a "last captured at <time>" label, then refreshes live in the
+     * foreground.
+     *
+     * Returns [CachedUsageResult.Empty] when no capture exists yet (the CLI
+     * exits 3), when `--cached` is unsupported (exit 127 / 2), or on any
+     * parse/transport hiccup — every "no usable cache" case collapses to
+     * Empty so the caller simply falls back to a pure live fetch. A
+     * per-host [commandOverride] disables the cache path (an override is an
+     * arbitrary script that does not speak `--cached`).
+     */
+    public suspend fun fetchCachedUsage(
+        session: SshSession,
+        commandOverride: String? = null,
+    ): CachedUsageResult {
+        if (commandOverride?.trim()?.isNotEmpty() == true) return CachedUsageResult.Empty
+        return try {
+            val result = session.exec(PocketshellCommand.wrap(CACHED_USAGE_ARGS))
+            if (result.exitCode != 0) return CachedUsageResult.Empty
+            parseCachedDocument(result.stdout)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            CachedUsageResult.Empty
+        }
+    }
+
+    private fun parseCachedDocument(stdout: String): CachedUsageResult {
+        val trimmed = stdout.trim()
+        if (trimmed.isEmpty()) return CachedUsageResult.Empty
+        return try {
+            val obj = JSONObject(trimmed)
+            val capturedAt = obj.optString("captured_at").trim().ifBlank { null }?.let { raw ->
+                runCatching { Instant.parse(raw) }.getOrNull()
+            }
+            val recordsArray: JSONArray = obj.optJSONArray("records") ?: JSONArray()
+            // Re-emit the records as NDJSON so the SAME parser the live path
+            // uses produces identical UsageProviderRecord shapes.
+            val ndjson = buildString {
+                for (i in 0 until recordsArray.length()) {
+                    val record = recordsArray.optJSONObject(i) ?: continue
+                    append(record.toString())
+                    append('\n')
+                }
+            }
+            val records = if (ndjson.isBlank()) emptyList() else parser.parse(ndjson)
+            CachedUsageResult.Hit(records = records, capturedAt = capturedAt)
+        } catch (_: Exception) {
+            CachedUsageResult.Empty
+        }
+    }
+
     public suspend fun fetchUsage(
         session: SshSession,
         commandOverride: String? = null,
@@ -95,6 +177,12 @@ public class UsageRemoteSource @Inject constructor(
     public companion object {
         /** The `pocketshell` arguments for the default usage probe. */
         public const val DEFAULT_USAGE_ARGS: String = "usage --json"
+
+        /**
+         * The `pocketshell` arguments for the cached-reading probe (#689).
+         * Prints the last scheduled capture instantly as a JSON document.
+         */
+        public const val CACHED_USAGE_ARGS: String = "usage --cached"
 
         /**
          * Human-readable form of the default usage command, used for snapshot

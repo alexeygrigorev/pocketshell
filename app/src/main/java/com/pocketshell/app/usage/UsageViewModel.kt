@@ -42,6 +42,16 @@ import javax.inject.Inject
  */
 public interface HostUsageFetcher {
     public suspend fun fetch(host: HostEntity): HostUsageFetch
+
+    /**
+     * Read this host's cached latest reading (#689) for an instant
+     * stale-while-revalidate render, WITHOUT a live provider round-trip.
+     * Returns [HostCachedUsage.None] when no capture exists yet, the host
+     * cannot be reached, or its key is unavailable — every "no cache" case
+     * so the caller simply renders nothing cached and waits for the live
+     * [fetch]. The default no-ops so test doubles need not override it.
+     */
+    public suspend fun fetchCached(host: HostEntity): HostCachedUsage = HostCachedUsage.None
 }
 
 public sealed interface HostUsageFetch {
@@ -53,6 +63,20 @@ public sealed interface HostUsageFetch {
     public data object ToolMissing : HostUsageFetch
     public data class Failed(val reason: String) : HostUsageFetch
     public data object Skipped : HostUsageFetch
+}
+
+/**
+ * Cached-reading result for one host (#689). [Hit] carries the records the
+ * last scheduled capture saved plus its `captured_at` provenance; [None]
+ * means there is nothing cached to show yet.
+ */
+public sealed interface HostCachedUsage {
+    public data class Hit(
+        val records: List<UsageProviderRecord>,
+        val capturedAt: Instant?,
+    ) : HostCachedUsage
+
+    public data object None : HostCachedUsage
 }
 
 /**
@@ -142,6 +166,34 @@ public class SshHostUsageFetcher : HostUsageFetcher {
             runCatching { session.close() }
         }
     }
+
+    override suspend fun fetchCached(host: HostEntity): HostCachedUsage {
+        val key = sshKeyDao.getById(host.keyId) ?: return HostCachedUsage.None
+        val keyFile = File(key.privateKeyPath)
+        if (!keyFile.exists()) return HostCachedUsage.None
+        if (key.hasPassphrase) return HostCachedUsage.None
+
+        val session: SshSession = try {
+            connector.connect(host, keyFile).getOrNull() ?: return HostCachedUsage.None
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            return HostCachedUsage.None
+        }
+
+        return try {
+            when (val cached = remoteSource.fetchCachedUsage(session, commandOverride = host.usageCommandOverride)) {
+                is CachedUsageResult.Hit -> HostCachedUsage.Hit(
+                    records = cached.records,
+                    capturedAt = cached.capturedAt,
+                )
+
+                CachedUsageResult.Empty -> HostCachedUsage.None
+            }
+        } finally {
+            runCatching { session.close() }
+        }
+    }
 }
 
 /**
@@ -224,8 +276,27 @@ open class UsageViewModel internal constructor(
         activeLoad?.cancel()
         inFlight = viewModelScope.launch {
             _state.value = _state.value.copy(isRefreshing = true)
+
+            // Issue #689 (stale-while-revalidate): read the server-side
+            // cached reading FIRST and render it instantly with its
+            // "last captured at <time>" provenance, then fall through to
+            // the live fetch below which swaps in fresh data. The cached
+            // read is best-effort; if it yields nothing we just go
+            // straight to the live spinner state as before.
+            val cached = viewModelScope.async(refreshDispatcher) { loadCachedState() }
+            val cachedState = try {
+                withTimeoutOrNull(refreshTimeoutMillis) { cached.await() }
+            } catch (e: CancellationException) {
+                cached.cancel(); if (!isActive) throw e; null
+            } catch (_: Throwable) {
+                null
+            }
+            if (serial == refreshSerial && cachedState != null && cachedState.hosts.isNotEmpty()) {
+                _state.value = cachedState
+            }
+
             val load = viewModelScope.async(refreshDispatcher) {
-                loadUsageState()
+                loadUsageState(cachedFallback = cachedState)
             }
             activeLoad = load
             val result = try {
@@ -249,7 +320,11 @@ open class UsageViewModel internal constructor(
                 load.cancel()
                 if (activeLoad === load) activeLoad = null
                 if (serial == refreshSerial) {
-                    _state.value = _state.value.copy(isRefreshing = false)
+                    // Issue #689: a live-refresh timeout must NOT blank a
+                    // populated cached reading. Keep the cached records
+                    // visible and flip them to the honest "couldn't refresh
+                    // — showing cached from <time>" stale state.
+                    _state.value = staleStateFrom(cachedState, _state.value)
                 }
                 return@launch
             }
@@ -263,7 +338,65 @@ open class UsageViewModel internal constructor(
         }
     }
 
-    private suspend fun loadUsageState(): UsageRefreshResult {
+    /**
+     * Issue #689: load every host's cached latest reading for the instant
+     * stale-while-revalidate render. Hosts with no cache (or unreachable)
+     * are simply omitted; this never blocks on a live provider call.
+     */
+    private suspend fun loadCachedState(): UsageScreenState {
+        val hosts = hostDao.getAll().first()
+        val snapshots = mutableListOf<UsageHostSnapshot>()
+        hosts.forEach { host ->
+            when (val cached = fetcher.fetchCached(host)) {
+                is HostCachedUsage.Hit -> {
+                    if (cached.records.isNotEmpty()) {
+                        snapshots += UsageHostSnapshot(
+                            hostId = host.id,
+                            hostName = host.name,
+                            records = cached.records,
+                            lastSyncedAt = cached.capturedAt,
+                            command = host.usageCommandOverride ?: UsageRemoteSource.defaultUsageCommand,
+                            capturedAt = cached.capturedAt,
+                        )
+                    }
+                }
+
+                HostCachedUsage.None -> Unit
+            }
+        }
+        return UsageScreenState(
+            hosts = snapshots,
+            isRefreshing = true,
+            showingCached = snapshots.isNotEmpty(),
+        )
+    }
+
+    /**
+     * Issue #689: build the state shown when a live refresh fails/timeouts
+     * but a cached reading is available — keep the cached hosts visible and
+     * mark them stale so the UI shows the honest "couldn't refresh — showing
+     * cached from <time>" note. Falls back to the prior on-screen state
+     * (spinner cleared) when there is nothing cached to keep.
+     */
+    private fun staleStateFrom(
+        cachedState: UsageScreenState?,
+        current: UsageScreenState,
+    ): UsageScreenState {
+        val cachedHosts = cachedState?.hosts?.takeIf { it.isNotEmpty() }
+            ?: current.hosts.filter { it.capturedAt != null || it.staleSince != null }
+        if (cachedHosts.isEmpty()) {
+            return current.copy(isRefreshing = false, showingCached = false)
+        }
+        return UsageScreenState(
+            hosts = cachedHosts.map {
+                it.copy(staleSince = it.staleSince ?: it.capturedAt, capturedAt = null)
+            },
+            isRefreshing = false,
+            showingCached = false,
+        )
+    }
+
+    private suspend fun loadUsageState(cachedFallback: UsageScreenState?): UsageRefreshResult {
         // Issue #525: do NOT filter hosts by `pocketshellVersionCompatible`.
         // That flag is unreliable — a host whose remote CLI is NEWER than
         // the app (which #514 considers fully usable) can carry a STALE
@@ -281,6 +414,11 @@ open class UsageViewModel internal constructor(
         val missing = mutableListOf<UsageMissingToolHost>()
         val failed = mutableListOf<UsageFailedHost>()
         val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()
+
+        // Issue #689: when a host's live refresh fails but we still hold its
+        // cached reading, keep the cached value on screen flagged stale
+        // instead of replacing it with a scary failure panel.
+        val cachedByHost = cachedFallback?.hosts?.associateBy { it.hostId } ?: emptyMap()
 
         hosts.forEach { host ->
             when (val result = fetcher.fetch(host)) {
@@ -312,12 +450,32 @@ open class UsageViewModel internal constructor(
                     )
                 }
 
-                HostUsageFetch.Skipped -> Unit
-                is HostUsageFetch.Failed -> failed += UsageFailedHost(
-                    hostId = host.id,
-                    hostName = host.name,
-                    reason = result.reason,
-                )
+                HostUsageFetch.Skipped -> {
+                    // Issue #689: a skipped live refresh (key unavailable,
+                    // connect failed) keeps the cached reading visible as
+                    // stale rather than dropping the host entirely.
+                    cachedByHost[host.id]?.let { cached ->
+                        snapshots += cached.copy(
+                            staleSince = cached.capturedAt,
+                            capturedAt = null,
+                        )
+                    }
+                }
+                is HostUsageFetch.Failed -> {
+                    val cached = cachedByHost[host.id]
+                    if (cached != null) {
+                        snapshots += cached.copy(
+                            staleSince = cached.capturedAt,
+                            capturedAt = null,
+                        )
+                    } else {
+                        failed += UsageFailedHost(
+                            hostId = host.id,
+                            hostName = host.name,
+                            reason = result.reason,
+                        )
+                    }
+                }
             }
         }
 

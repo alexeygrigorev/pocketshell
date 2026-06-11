@@ -233,6 +233,106 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun refresh_rendersCachedReadingInstantly_thenSwapsToLive() = runTest {
+        // Issue #689: cached-first render. The cached records appear (with
+        // their captured_at provenance + showingCached=true) BEFORE the live
+        // fetch resolves, then the live records swap in and clear provenance.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "agents", hostname = "swr.example", username = "u", keyId = keyId),
+        )
+        val parser = PocketshellUsageJsonParser()
+        val cachedRecords = parser.parse(
+            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":60.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val liveRecords = parser.parse(
+            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":42.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val capturedAt = Instant.parse("2026-06-11T09:00:00Z")
+        val release = CountDownLatch(1)
+        val fetcher = object : HostUsageFetcher {
+            override suspend fun fetch(host: HostEntity): HostUsageFetch {
+                release.await()
+                return HostUsageFetch.Records(liveRecords, Instant.now())
+            }
+
+            override suspend fun fetchCached(host: HostEntity): HostCachedUsage =
+                HostCachedUsage.Hit(cachedRecords, capturedAt)
+        }
+
+        val executor = Executors.newSingleThreadExecutor()
+        val viewModel = UsageViewModel(
+            hostDao = db.hostDao(),
+            fetcher = fetcher,
+            usageScheduler = null,
+            refreshDispatcher = executor.asCoroutineDispatcher(),
+            refreshTimeoutMillis = UsageViewModel.DEFAULT_REFRESH_TIMEOUT_MILLIS,
+        )
+
+        // Cached value visible while the live fetch is still blocked.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (viewModel.state.value.hosts.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10)
+        }
+        val cachedState = viewModel.state.value
+        assertTrue("cached records should render before live resolves", cachedState.hosts.isNotEmpty())
+        assertTrue("showingCached should be set during cached-first phase", cachedState.showingCached)
+        assertTrue("should still be refreshing while live is pending", cachedState.isRefreshing)
+        assertEquals(capturedAt, cachedState.hosts.single().capturedAt)
+        // percent_remaining 60.0 → used = 100 - 60 = 40.0
+        assertEquals(40.0, cachedState.hosts.single().records.single().windows.single().used, 0.001)
+
+        // Release the live fetch; fresh records swap in, provenance clears.
+        release.countDown()
+        val freshDeadline = System.currentTimeMillis() + 5_000
+        while (viewModel.state.value.isRefreshing && System.currentTimeMillis() < freshDeadline) {
+            Thread.sleep(10)
+        }
+        val freshState = viewModel.state.value
+        assertFalse("refresh should settle after live resolves", freshState.isRefreshing)
+        assertFalse(freshState.showingCached)
+        // percent_remaining 42.0 → used = 100 - 42 = 58.0
+        assertEquals(58.0, freshState.hosts.single().records.single().windows.single().used, 0.001)
+        assertEquals("live data clears cached provenance", null, freshState.hosts.single().capturedAt)
+        executor.shutdownNow()
+    }
+
+    @Test
+    fun refresh_keepsCachedValue_whenLiveRefreshFails() = runTest {
+        // Issue #689: a live-refresh failure must NOT blank a populated
+        // cached reading. The cached records stay, flagged stale, and the
+        // screen shows the honest "showing cached" provenance — no failure
+        // panel for that host.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "agents", hostname = "fail.example", username = "u", keyId = keyId),
+        )
+        val cachedRecords = PocketshellUsageJsonParser().parse(
+            """{"provider":"claude","status":"ok","short_term":{"percent_remaining":55.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val capturedAt = Instant.parse("2026-06-11T08:30:00Z")
+        val fetcher = FakeFetcher(
+            scripts = mapOf("fail.example" to HostUsageFetch.Failed("HTTP Error 500")),
+            cachedScripts = mapOf("fail.example" to HostCachedUsage.Hit(cachedRecords, capturedAt)),
+        )
+
+        val viewModel = testViewModel(fetcher, testScheduler)
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertFalse(state.isRefreshing)
+        assertTrue("cached value kept on live failure", state.hosts.isNotEmpty())
+        assertEquals(0, state.failedHosts.size)
+        assertTrue("stale flag set after live failure", state.refreshFailedShowingCached)
+        assertEquals(capturedAt, state.hosts.single().staleSince)
+        assertEquals(null, state.hosts.single().capturedAt)
+    }
+
+    @Test
     fun exhaustedCodexRecord_isNotDroppedAndReachesExceededState() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
@@ -526,8 +626,11 @@ class UsageViewModelTest {
 
     private class FakeFetcher(
         private val scripts: Map<String, HostUsageFetch>,
+        private val cachedScripts: Map<String, HostCachedUsage> = emptyMap(),
     ) : HostUsageFetcher {
         var callCount: Int = 0
+            private set
+        var cachedCallCount: Int = 0
             private set
         val fetchedHostnames: MutableList<String> = mutableListOf()
 
@@ -535,6 +638,11 @@ class UsageViewModelTest {
             callCount += 1
             fetchedHostnames += host.hostname
             return scripts[host.hostname] ?: HostUsageFetch.Skipped
+        }
+
+        override suspend fun fetchCached(host: HostEntity): HostCachedUsage {
+            cachedCallCount += 1
+            return cachedScripts[host.hostname] ?: HostCachedUsage.None
         }
     }
 

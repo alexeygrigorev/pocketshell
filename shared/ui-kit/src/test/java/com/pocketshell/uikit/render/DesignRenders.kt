@@ -12,7 +12,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -970,6 +974,144 @@ class DesignRenders {
                 style = PocketShellType.bodyDense,
                 modifier = Modifier.padding(top = 2.dp),
             )
+        }
+    }
+
+    /**
+     * Issue #701: faithful static mirror of the polished prompt-composer sheet
+     * chrome — the grabber, the `Prompt Composer` header + circular close chip,
+     * the draft field, and (the focus of #701) the bottom controls row: the
+     * grouped 📎/{} tools pill on the left, a weight gap, then the FILLED accent
+     * Send pill + cyan mic disc on the right.
+     *
+     * Caveat (#555): the real `SheetContent` lives in the `app` module, which the
+     * ui-kit render harness can't import, so this mirrors its layout with the
+     * same ui-kit theme tokens (`Accent`, `OnAccent`, `SurfaceElev`, `Surface`,
+     * `Border`, `TextMuted`). It is the fast first design check for the row
+     * rebalance + Send prominence; the real app composable is validated on the
+     * emulator with the keyboard up.
+     */
+    @Test
+    fun composerControlsRow() = render("composer-controls-row") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+        ) {
+            // Grabber.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .width(40.dp)
+                    .height(4.dp)
+                    .background(PocketShellColors.Border, RoundedCornerShape(2.dp)),
+            )
+            Spacer(Modifier.height(14.dp))
+            // Header: title + circular close chip.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "Prompt Composer",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketShellColors.Text,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(PocketShellColors.SurfaceElev, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "×", color = PocketShellColors.TextSecondary, fontSize = 20.sp)
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            // Draft field with sample text.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(96.dp)
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                    .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            ) {
+                Text(
+                    text = "check the deploy log and tell me what failed in the last run",
+                    color = PocketShellColors.Text,
+                    fontSize = 14.sp,
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            // Controls row — the #701 focus.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // Grouped left tools pill.
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    // Glyphs stand in for the Material AttachFile / DataObject
+                    // icons (the icons-extended set isn't on the ui-kit render
+                    // classpath); the real app row uses the proper icons.
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
+                    }
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "{ }",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                // Filled accent Send pill.
+                Row(
+                    modifier = Modifier
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Text(
+                        text = "Send",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                // Cyan mic disc.
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(PocketShellColors.Accent, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "●",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 18.sp,
+                    )
+                }
+            }
         }
     }
 

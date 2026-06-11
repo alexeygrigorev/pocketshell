@@ -648,11 +648,21 @@ internal fun SheetContent(
                     text = "Prompt Composer",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.2).sp,
                     color = PocketShellColors.Text,
                 )
+                // Issue #701: the close target gets a subtle circular
+                // SurfaceElev chip (mockup `.sheet-close`, a 32dp 16dp-radius
+                // disc) so it reads as a deliberate dismiss affordance instead
+                // of a bare `×` glyph hanging in the corner.
                 Box(
                     modifier = Modifier
                         .size(32.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(
+                            PocketShellColors.SurfaceElev,
+                            androidx.compose.foundation.shape.CircleShape,
+                        )
                         .clickable(role = Role.Button, onClick = onClose)
                         .testTag(COMPOSER_CLOSE_TAG)
                         .semantics { contentDescription = "Close composer" },
@@ -852,19 +862,36 @@ internal fun SheetContent(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Left cluster: paperclip attach + `{}` snippets. Attachment
-            // picking itself stays single-flight while a batch is uploading,
-            // but typing, editing, dictation, and text-only Send remain live.
-            AttachIconButton(
-                onClick = { onAttachFiles?.invoke() },
-                enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
-                modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
-            )
-            SnippetsIconButton(
-                onClick = { onSnippets?.invoke() },
-                enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
-                modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
-            )
+            // Issue #701: the left tools — 📎 attach + `{}` snippets — sit in a
+            // single rounded `SurfaceElev` group rather than as two bare ghost
+            // icons floating at the far edge. The earlier layout left the row
+            // looking unbalanced: two lonely icons hard-left, a weak Send
+            // hard-right, and a wide dead gap between them (the maintainer's
+            // "big empty gap" complaint). Grouping the secondary tools into one
+            // pill gives the row a deliberate left anchor that visually balances
+            // the filled Send + mic cluster on the right; the `weight(1f)` space
+            // between them now reads as intentional breathing room. Attachment
+            // picking stays single-flight while a batch is uploading, but
+            // typing, editing, dictation, and text-only Send remain live.
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                    .padding(horizontal = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                AttachIconButton(
+                    onClick = { onAttachFiles?.invoke() },
+                    enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
+                    modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
+                )
+                SnippetsIconButton(
+                    onClick = { onSnippets?.invoke() },
+                    enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
+                    modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
+                )
+            }
             // Issue #453: the separate keyboard icon is removed from the Idle
             // row — it is not in the mockup and cluttered the clean idle. The
             // editable draft field itself raises the soft IME the moment it is
@@ -1156,10 +1183,20 @@ private fun DiscardRecordingButton(
 }
 
 /**
- * Issue #453: the single primary Send affordance for the Idle / Text-
- * inserted states. A pill with the "Send" label + a send-arrow glyph,
- * replacing the old Insert / Send button pair (declutter). Always submits
- * with Enter (`onSend(true)`), since the composer's job is to send a prompt.
+ * Issue #453 / #701: the single primary Send affordance for the Idle / Text-
+ * inserted states. Always submits with Enter (`onSend(true)`), since the
+ * composer's job is to send a prompt.
+ *
+ * Issue #701 (visual polish): the earlier #453 iteration stripped Send down to
+ * a borderless cyan text+arrow, which the maintainer found weak — it read as a
+ * plain link, not the row's primary commit action, and left the controls row
+ * looking unfinished. The composer mockup (`docs/mockups/composer.html`,
+ * `.btn.primary`) renders the submit action as a FILLED accent pill. We restore
+ * that here: an enabled Send is a solid `Accent` pill with `OnAccent` ink + the
+ * send arrow, matching the recording-state [StopSendButton] (so the two Send
+ * affordances finally look like the same button) and giving the row a clear
+ * primary anchor. Disabled Send drops to a muted `SurfaceElev` fill so the row
+ * never has a "dead" accent shape begging to be tapped on an empty draft.
  */
 @Composable
 private fun SendButton(
@@ -1167,20 +1204,17 @@ private fun SendButton(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // Issue #453: a borderless ghost text button — just "Send" + the send
-    // arrow, no outline pill and no filled fill. The mockup renders Send as a
-    // plain text+arrow control with the small cyan mic disc to its right as the
-    // ONLY accent shape on the row, so any border/fill here reads as the
-    // "large outlined Send pill" the reviewer flagged. Removing the outline
-    // keeps the row compact and lets the mic carry the lone accent.
-    val contentColor = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted
+    val containerColor = if (enabled) PocketShellColors.Accent else PocketShellColors.SurfaceElev
+    val contentColor = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted
     Row(
         modifier = modifier
             .height(44.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .background(color = containerColor, shape = RoundedCornerShape(22.dp))
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 8.dp),
+            .padding(horizontal = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         Text(
             text = "Send",
@@ -1192,7 +1226,7 @@ private fun SendButton(
             imageVector = Icons.AutoMirrored.Filled.Send,
             contentDescription = null,
             tint = contentColor,
-            modifier = Modifier.size(17.dp),
+            modifier = Modifier.size(16.dp),
         )
     }
 }
@@ -1657,8 +1691,12 @@ private const val ATTACHMENT_THUMBNAIL_MAX_PIXELS = 192 * 192
 internal val ATTACHMENT_TILE_SIZE = 64.dp
 internal val ATTACHMENT_TILE_REMOVE_TOUCH_SIZE = 48.dp
 private val ATTACHMENT_TILE_REMOVE_SIZE = 22.dp
-private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 44.dp
-private val COMPOSER_ACTION_ICON_SIZE = 22.dp
+// Issue #701: the secondary tool icons sit inside a grouped SurfaceElev pill,
+// so each individual hit target shrinks slightly (40dp) to keep the group neat
+// and the glyph trims to 20dp — still a comfortable touch target, but the
+// cluster reads as one tidy control rather than two oversized ghost buttons.
+private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 40.dp
+private val COMPOSER_ACTION_ICON_SIZE = 20.dp
 
 /**
  * Issue #453: compact paperclip attach button. Uses the official Material

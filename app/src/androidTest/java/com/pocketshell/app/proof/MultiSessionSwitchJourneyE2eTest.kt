@@ -8,6 +8,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -25,6 +27,7 @@ import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
+import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_SESSION_LABEL_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
@@ -472,26 +475,53 @@ class MultiSessionSwitchJourneyE2eTest {
      * because the crumb flips on the same frame the surface reveals.
      */
     private fun assertHeaderShowsSession(step: Int, fromSession: String, toSession: String) {
-        // The TARGET name must be visible in the header.
+        // The header session crumb is a single text node tagged
+        // TMUX_CONSOLIDATED_SESSION_LABEL_TAG ("tmux:chrome:session-label")
+        // rendered as `agentName ?: sessionName` from the nav-route TARGET
+        // (TmuxSessionScreen.kt). We read THAT node's text directly rather than
+        // scanning the whole tree, because the bottom chrome legitimately
+        // renders the LEAVING session name in the #628 previous-session toggle
+        // chip (`session:toggle-previous`) and one-time flip-back hint
+        // (`session:toggle-previous-hint`) — those controls are intended UX and
+        // must not be mistaken for a stale header crumb (#705).
+        //
+        // Retry briefly because the crumb flips on the same frame the surface
+        // reveals.
+        var crumbText = ""
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText(toSession, substring = true, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+            crumbText = headerSessionCrumbText() ?: ""
+            crumbText.contains(toSession)
         }
-        // The LEAVING name must NOT be visible anywhere (the picker is closed,
-        // so the only place it could appear is a stale header crumb).
-        val staleHeaderNodes =
-            compose.onAllNodesWithText(fromSession, substring = true, useUnmergedTree = true)
-                .fetchSemanticsNodes()
+        // The crumb must show the TARGET and must NOT wear the LEAVING name.
         assertTrue(
-            "step$step switch to $toSession: the HEADER must show the TARGET session " +
-                "name '$toSession', never the LEAVING session's name '$fromSession'. " +
-                "Found ${staleHeaderNodes.size} on-screen node(s) still bearing " +
-                "'$fromSession' after the switch landed — the header is wearing the " +
-                "previous session's identity (the #661/#693 header-name regression).",
-            staleHeaderNodes.isEmpty(),
+            "step$step switch to $toSession: the HEADER session crumb " +
+                "('${TMUX_CONSOLIDATED_SESSION_LABEL_TAG}') must show the TARGET " +
+                "session name '$toSession', never the LEAVING session's name " +
+                "'$fromSession'. Crumb text after the switch landed: '$crumbText' — " +
+                "if it wears '$fromSession' the header is still showing the previous " +
+                "session's identity (the #661/#693 header-name regression).",
+            crumbText.contains(toSession) && !crumbText.contains(fromSession),
         )
-        Log.i(LOG_TAG, "header-name ok step=$step shows=$toSession not=$fromSession")
+        Log.i(
+            LOG_TAG,
+            "header-name ok step=$step crumb='$crumbText' shows=$toSession not=$fromSession",
+        )
+    }
+
+    /**
+     * Read the text carried by the header session-crumb node
+     * (`TMUX_CONSOLIDATED_SESSION_LABEL_TAG`). Returns `null` when the node is
+     * not currently present (e.g. mid-transition), so callers can retry.
+     */
+    private fun headerSessionCrumbText(): String? {
+        val nodes =
+            compose.onAllNodesWithTag(
+                TMUX_CONSOLIDATED_SESSION_LABEL_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes()
+        val node = nodes.firstOrNull() ?: return null
+        val texts = node.config.getOrNull(SemanticsProperties.Text) ?: return null
+        return texts.joinToString(separator = "") { it.text }
     }
 
     /**

@@ -150,14 +150,20 @@ jobs:
   # never-black / wrong-session / EOF-on-switch regressions are caught at PR
   # time, not the next morning by nightly or at release by the gate.
   #
-  # Issue #470: the per-push proof is currently the picker-FREE
-  # DeepLinkSessionSwitchE2eTest (it deep-links straight onto the TmuxSession
-  # screen and exercises the real `tmux -CC` attach/switch), because the shared
-  # session-PICKER enumeration is wedged on the AVD (a production-side defect
-  # tracked for the terminal/lease cluster, #661/#692). The picker-driven
-  # journey classes (MultiSessionSwitchJourney, BackgroundGraceReconnect, etc.)
-  # re-join scripts/ci-journey-suite.sh the moment that enumeration is fixed —
-  # wiring them in now would make this job RED on every push (CI email spam).
+  # Issue #705: the per-push proof now runs the picker-FREE
+  # DeepLinkSessionSwitchE2eTest AND three picker-driven journey classes
+  # (MultiSessionSwitchJourney, ColdRestoreGoneSessionNoResurrect,
+  # ReconnectRepaint). The session-PICKER enumeration that was wedged on the AVD
+  # is fixed (the lease-bound cold connect/handshake of #687 + the picker fix in
+  # #702), and the over-broad header assertion that collided with the #628
+  # previous-session toggle controls is scoped to the breadcrumb crumb in #705.
+  # Each re-added picker journey was proven GREEN on a pooled AVD before
+  # re-adding, so this job stays green (no CI email spam).
+  #
+  # BackgroundGraceReconnectE2eTest stays DEFERRED (#705): it is genuinely RED
+  # for a real production-behavior reason (a within-grace foreground still
+  # dispatches a terminal_foreground_reattach diagnostic the test forbids), NOT
+  # the picker wedge — re-add it only after that suppression behavior is fixed.
   #
   # This is intentionally the FAST subset (scripts/ci-journey-suite.sh), not the
   # full connected suite — the heavy/long-running + toxiproxy network-fault +
@@ -205,7 +211,7 @@ jobs:
       - name: Build SSH base image
         run: docker compose -f tests/docker/docker-compose.yml build sshd
 
-      # The selected journeys (BackgroundGraceReconnect, MultiSessionSwitch,
+      # The selected journeys (DeepLinkSessionSwitch, MultiSessionSwitch,
       # ColdRestoreGoneSessionNoResurrect, ReconnectRepaint) all drive the plain
       # deterministic `agents` fixture on host port 2222 (emulator 10.0.2.2:2222)
       # and NONE of them need the opt-in toxiproxy network-fault proxies. Bring

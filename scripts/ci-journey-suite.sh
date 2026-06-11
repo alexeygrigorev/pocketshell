@@ -31,18 +31,28 @@
 #         session's marker does not bleed in. The A->B "switch" is a fresh
 #         deep-link to B. This is the load-bearing terminal-attach/switch proof.
 #
-# WHY NOT the picker-driven journey classes yet (issue #470): the shared
-# session-PICKER enumeration (FolderListGateway.listSessionsWithFolder over the
-# warm SSH lease) is currently WEDGED on the AVD — every test that taps a host
-# row and waits on `waitForSessionInPicker` stalls before its real terminal
-# assertion (no PsFolderProbe, no enumeration socket, the picker never leaves
-# Loading). That is a PRODUCTION-side enumeration defect tracked for the
-# terminal/lease cluster (#661/#692), NOT a harness bug. Until that lands, the
-# picker-driven journeys (MultiSessionSwitchJourneyE2eTest,
-# BackgroundGraceReconnectE2eTest, ColdRestoreGoneSessionNoResurrectE2eTest,
-# ReconnectRepaintE2eTest) would be RED on EVERY push — exactly the CI email
-# spam this job must avoid. They re-join this list the moment the picker
-# enumeration is fixed (re-add their FQCNs below).
+# PICKER-DRIVEN journeys (issue #705): the shared session-PICKER enumeration
+# (FolderListGateway.listSessionsWithFolder over the warm SSH lease) was WEDGED
+# on the AVD — every test that taps a host row and waited on
+# `waitForSessionInPicker` stalled (picker never left Loading). That wedge is
+# now FIXED (the lease-bound cold connect/handshake of #687 + the picker fix in
+# #702), and the over-broad header assertion that collided with the #628
+# previous-session toggle controls is corrected in #705. So three picker-driven
+# journeys (MultiSessionSwitchJourneyE2eTest,
+# ColdRestoreGoneSessionNoResurrectE2eTest, ReconnectRepaintE2eTest) re-join
+# this per-push subset below — each was proven GREEN on a pooled AVD before
+# re-adding (no flake, no CI email spam).
+#
+# STILL DEFERRED (issue #705): BackgroundGraceReconnectE2eTest stays OUT — it is
+# genuinely RED for a real production-behavior reason, NOT the picker wedge nor
+# the header artifact. A within-grace foreground (≈7.5s, grace=60s) still
+# dispatches a `terminal_foreground_reattach` diagnostic (hookCount=1,
+# source=background_grace_foreground), which the test forbids
+# (BackgroundGraceReconnectE2eTest.kt:354 assertNoReconnectOrReattachDiagnostics).
+# Both its tests (sixSecondAppSwitch…, quickAppSwitch…) fail on this. Re-add it
+# only after the within-grace reattach-suppression behavior is fixed — wiring it
+# in now would make this job RED on every push (the CI email spam this job must
+# avoid).
 #
 # The heavy/long-running + toxiproxy network-fault + bootstrap-matrix suites
 # stay in nightly-extensive.yml. This is intentionally the fast per-push subset.
@@ -64,16 +74,18 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 # named subset; every class here MUST use only the deterministic agents:2222
 # fixture (no toxiproxy) so the per-push job stays deterministic.
 #
-# Issue #470: only the picker-FREE DeepLinkSessionSwitchE2eTest runs per-push
-# today; the picker-driven journeys are temporarily out (see the WHY NOT note
-# in the header) until the FolderListGateway enumeration wedge is fixed. Re-add
-# their FQCNs here the moment that lands — they were:
-#   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
-#   "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
-#   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
-#   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
+# Issue #705: three picker-driven journeys re-join the picker-FREE
+# DeepLinkSessionSwitchE2eTest now that the picker enumeration wedge is fixed
+# (#687 + #702) and the over-broad header assertion is scoped to the breadcrumb
+# crumb (#705). Each was proven GREEN on a pooled AVD before re-adding.
+# BackgroundGraceReconnectE2eTest stays DEFERRED (genuinely red — see the
+# header note above): re-add it only after the within-grace
+# foreground-reattach-suppression behavior is fixed.
 JOURNEY_CLASSES=(
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
+  "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
+  "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
+  "$FQCN_PREFIX.ReconnectRepaintE2eTest"
 )
 
 join_by() {

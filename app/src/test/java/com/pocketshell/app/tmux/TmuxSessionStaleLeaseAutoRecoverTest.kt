@@ -105,7 +105,7 @@ class TmuxSessionStaleLeaseAutoRecoverTest {
         val registry = ActiveTmuxClients()
         val vm = TestNewVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
         )
 
         // Auto-reconnect is ENABLED (the real default) — Slice 4 heals
@@ -177,7 +177,7 @@ class TmuxSessionStaleLeaseAutoRecoverTest {
         val registry = ActiveTmuxClients()
         val vm = TestNewVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L))
 
@@ -257,7 +257,7 @@ class TmuxSessionStaleLeaseAutoRecoverTest {
         val registry = ActiveTmuxClients()
         val vm = TestNewVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
 

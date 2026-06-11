@@ -20,6 +20,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -58,6 +59,10 @@ class FolderListViewModelPrewarmLeaseTest {
             connector = connector,
             scope = this,
             idleTtlMillis = 1_000L,
+            // Issue #708: run the bounded cold connect (#687) on the same virtual
+            // clock as `runTest`, not a real `Dispatchers.IO` thread.
+            connectTimeoutContext = StandardTestDispatcher(testScheduler),
+            nowMillis = { testScheduler.currentTime },
         )
         val vm = newViewModel(
             gateway = EmptyFolderListGateway(),
@@ -107,6 +112,10 @@ class FolderListViewModelPrewarmLeaseTest {
             connector = connector,
             scope = this,
             idleTtlMillis = 0L,
+            // Issue #708: run the bounded cold connect (#687) on the same virtual
+            // clock as `runTest`, not a real `Dispatchers.IO` thread.
+            connectTimeoutContext = StandardTestDispatcher(testScheduler),
+            nowMillis = { testScheduler.currentTime },
         )
         val vm = newViewModel(
             gateway = EmptyFolderListGateway(),

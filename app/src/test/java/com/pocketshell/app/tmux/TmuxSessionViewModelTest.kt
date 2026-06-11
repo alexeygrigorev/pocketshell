@@ -55,7 +55,9 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.withTimeoutOrNull
 import net.schmizz.sshj.common.DisconnectReason
 import net.schmizz.sshj.transport.TransportException
@@ -94,9 +96,26 @@ import java.util.concurrent.atomic.AtomicInteger
 @Config(manifest = Config.NONE, sdk = [33])
 class TmuxSessionViewModelTest {
 
-    @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    // Issue #708: ONE virtual-clock scheduler shared by `runTest(scheduler)`,
+    // `Dispatchers.Main`, and every test's SshLeaseManager. The lease's bounded
+    // cold connect (#687, b5733d33) defaults to a real `Dispatchers.IO` + wall
+    // clock; under a virtual `runTest` clock that strands the dial so
+    // `advanceUntilIdle()` never drives it. Binding the lease + Main to this one
+    // scheduler makes the lease/connect path deterministic.
+    private val scheduler = TestCoroutineScheduler()
 
+    // Keep the existing UnconfinedTestDispatcher Main semantics (eager-on-advance)
+    // that this suite's assertions already rely on — but bind it to the SHARED
+    // scheduler so Main, runTest, and the lease clock stay in lockstep.
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher(scheduler))
+
+    // factoryScope stays on REAL `Dispatchers.IO`: the TmuxClientFactory drives a
+    // genuine background IO read/feed loop that the terminal-feed integration
+    // tests pump via the Robolectric Looper, NOT via this scheduler. Moving it
+    // onto the virtual clock races that Looper feed and flakes
+    // `codexLikeTmuxOutputWithSlowTerminalSideChannel...` (verified empirically:
+    // 30/30 green on IO vs ~8% failure on the virtual scheduler).
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
 
@@ -109,6 +128,10 @@ class TmuxSessionViewModelTest {
                 error("unexpected SSH lease connect for ${target.leaseKey}")
             },
             idleTtlMillis = 0L,
+            // Issue #708: keep the lease on the shared virtual clock even for the
+            // never-connecting default so any bounded dial resolves under runTest.
+            connectTimeoutContext = StandardTestDispatcher(scheduler),
+            nowMillis = { scheduler.currentTime },
         ),
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
         folderListGateway: FolderListGateway? = null,
@@ -159,7 +182,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun killCurrentSessionBroadcastsSignalOnConfirmedKill() = runTest {
+    fun killCurrentSessionBroadcastsSignalOnConfirmedKill() = runTest(scheduler) {
         // Issue #655: the in-session Stop now routes through the SAME verified
         // gateway SSH-exec path the host-detail Stop uses (#518), NOT the
         // control channel it is attached to. A gateway-confirmed kill (the
@@ -206,7 +229,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun killCurrentSessionDoesNotBroadcastWhenGatewayKillFails() = runTest {
+    fun killCurrentSessionDoesNotBroadcastWhenGatewayKillFails() = runTest(scheduler) {
         // Issue #655: a gateway-verified failure (the session is STILL running
         // after the kill, e.g. `tmux has-session` still exits 0) must NOT
         // broadcast, so the tree keeps the still-live row.
@@ -328,7 +351,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun commandTimeoutDuringReconcileSurfacesFailedStatus() = runTest {
+    fun commandTimeoutDuringReconcileSurfacesFailedStatus() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             closeAndThrowOnCommandPrefix = "list-panes"
@@ -365,7 +388,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun attachReadinessTimeoutFailsWithRetryableMessageAndClosesClient() = runTest {
+    fun attachReadinessTimeoutFailsWithRetryableMessageAndClosesClient() = runTest(scheduler) {
         val vm = newVm()
         vm.setAttachPanesReadyTimeoutForTest(500L)
         val client = FakeTmuxClient().apply {
@@ -409,7 +432,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun attachReadinessRetriesEmptyPaneListUntilPanesArrive() = runTest {
+    fun attachReadinessRetriesEmptyPaneListUntilPanesArrive() = runTest(scheduler) {
         val vm = newVm()
         vm.setAttachPanesReadyTimeoutForTest(1_000L)
         val client = FakeTmuxClient().apply {
@@ -448,7 +471,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun applyParsedPanesPopulatesStateFlowWithOnePerPane() = runTest {
+    fun applyParsedPanesPopulatesStateFlowWithOnePerPane() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -472,7 +495,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun applyParsedPanesSortsByWindowThenPaneIndex() = runTest {
+    fun applyParsedPanesSortsByWindowThenPaneIndex() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
 
@@ -492,7 +515,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun reusesTerminalStateAcrossReconcilesForSamePaneId() = runTest {
+    fun reusesTerminalStateAcrossReconcilesForSamePaneId() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
 
@@ -516,7 +539,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun newPaneInReconcileGetsDistinctTerminalState() = runTest {
+    fun newPaneInReconcileGetsDistinctTerminalState() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
 
@@ -542,7 +565,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun closedPaneIsDroppedFromState() = runTest {
+    fun closedPaneIsDroppedFromState() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
 
@@ -563,7 +586,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun windowAddEventTriggersListPanesAndPopulatesState() = runTest {
+    fun windowAddEventTriggersListPanesAndPopulatesState() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -591,7 +614,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun newPaneReconcileCapturesExistingVisibleContent() = runTest {
+    fun newPaneReconcileCapturesExistingVisibleContent() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -622,7 +645,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun newPaneReconcileSeedsCaptureWithRestoredCursor() = runTest {
+    fun newPaneReconcileSeedsCaptureWithRestoredCursor() = runTest(scheduler) {
         // Issue #259/#640: the seed pairs the capture with the pane's true
         // cursor (so the agent's next in-place spinner rewrite lands on the
         // right row) via [TmuxClient.captureWithCursor]. The capture command
@@ -674,7 +697,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun bestEffortCaptureFailureDuringAttachKeepsConnectionConnectedAndClientOpen() = runTest {
+    fun bestEffortCaptureFailureDuringAttachKeepsConnectionConnectedAndClientOpen() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -712,7 +735,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun missingCursorReplyDuringSeedDegradesToSeedWithoutRestore() = runTest {
+    fun missingCursorReplyDuringSeedDegradesToSeedWithoutRestore() = runTest(scheduler) {
         // Issue #259/#640: the seed pairs the capture with a cursor query via
         // [TmuxClient.captureWithCursor]. When tmux returns no usable cursor
         // (older tmux / dropped reply) the seed must still apply (no explicit
@@ -765,7 +788,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun attachReadinessRecordsTmuxLatencyMetrics() = runTest {
+    fun attachReadinessRecordsTmuxLatencyMetrics() = runTest(scheduler) {
         TmuxSessionLatencyTelemetry.resetForTest()
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -820,7 +843,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun coldOpenRevealsConnectedOnlyAfterTheVisiblePaneIsSeeded() = runTest {
+    fun coldOpenRevealsConnectedOnlyAfterTheVisiblePaneIsSeeded() = runTest(scheduler) {
         // Issue #640 (seed-before-reveal): the terminal surface must NOT flip
         // to the revealed Connected state until the initial capture-pane seed
         // for the visible pane has been APPLIED. Otherwise the user watches the
@@ -885,7 +908,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun coldOpenSeedsEachVisiblePaneExactlyOnceWithNoRedundantReseed() = runTest {
+    fun coldOpenSeedsEachVisiblePaneExactlyOnceWithNoRedundantReseed() = runTest(scheduler) {
         // Issue #640: on a cold open every visible pane is freshly created and
         // seeded by the preload pass; the post-attach reseed must NOT re-capture
         // those same panes (the redundant second full reseed the diagnosis
@@ -936,7 +959,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun warmSwitchReadinessTelemetryFollowsAttachOrdering() = runTest {
+    fun warmSwitchReadinessTelemetryFollowsAttachOrdering() = runTest(scheduler) {
         TmuxSessionLatencyTelemetry.resetForTest()
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -1041,7 +1064,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun existingPaneReconcileDoesNotRecaptureContent() = runTest {
+    fun existingPaneReconcileDoesNotRecaptureContent() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -1083,7 +1106,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun reconcileScopesPanesAndWindowSummariesToActiveSession() = runTest {
+    fun reconcileScopesPanesAndWindowSummariesToActiveSession() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -1139,7 +1162,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun layoutChangeEventTriggersListPanesReconcile() = runTest {
+    fun layoutChangeEventTriggersListPanesReconcile() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         // Two responses: bootstrap and layout-change reconcile.
@@ -1176,7 +1199,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun windowCloseEventTriggersReconcileThatDropsThePane() = runTest {
+    fun windowCloseEventTriggersReconcileThatDropsThePane() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -1207,7 +1230,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun listPanesErrorLeavesExistingPaneListUntouched() = runTest {
+    fun listPanesErrorLeavesExistingPaneListUntouched() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -1245,7 +1268,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun unrelatedEventDoesNotTriggerListPanes() = runTest {
+    fun unrelatedEventDoesNotTriggerListPanes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -1263,7 +1286,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneIssuesSendKeysWithLiteralBytes() = runTest {
+    fun writeInputToPaneIssuesSendKeysWithLiteralBytes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -1288,7 +1311,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneExitsTmuxCopyModeBeforeSendingBytes() = runTest {
+    fun writeInputToPaneExitsTmuxCopyModeBeforeSendingBytes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -1323,7 +1346,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneSendKeysFailureSurfacesFailedStatus() = runTest {
+    fun writeInputToPaneSendKeysFailureSurfacesFailedStatus() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             closeAndThrowOnCommandPrefix = "send-keys"
@@ -1360,7 +1383,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun eofDisconnectUnregistersDeadClientAndPreservesReconnectTarget() = runTest {
+    fun eofDisconnectUnregistersDeadClientAndPreservesReconnectTarget() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
@@ -1400,13 +1423,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun readerEofDisconnectStartsAutoReconnectAfterSilentGrace() = runTest {
+    fun readerEofDisconnectStartsAutoReconnectAfterSilentGrace() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(0L))
@@ -1476,7 +1499,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun briefPassiveEofSilentlyReattachesWithoutDisconnectBandOrConnectAttempt() = runTest {
+    fun briefPassiveEofSilentlyReattachesWithoutDisconnectBandOrConnectAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
@@ -1517,13 +1540,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun passiveEofShowsReconnectOnlyAfterSilentGraceExpires() = runTest {
+    fun passiveEofShowsReconnectOnlyAfterSilentGraceExpires() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = FailingLeaseConnector(IOException("network still unavailable"))
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 500L, silentReattachTimeoutMs = 500L)
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
@@ -1605,7 +1628,7 @@ class TmuxSessionViewModelTest {
      * frame stays; the dashboard registry keeps pointing at the live client.
      */
     @Test
-    fun withinDefaultGracePassiveBlipReattachesWithZeroReconnect() = runTest {
+    fun withinDefaultGracePassiveBlipReattachesWithZeroReconnect() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
@@ -1696,13 +1719,13 @@ class TmuxSessionViewModelTest {
      * non-Connected (honest) state.
      */
     @Test
-    fun sustainedPassiveDisconnectFlipsIndicatorOffGreenWithinBoundedGrace() = runTest {
+    fun sustainedPassiveDisconnectFlipsIndicatorOffGreenWithinBoundedGrace() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = FailingLeaseConnector(IOException("network still unavailable"))
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         // Bounded test grace so the assertion is deterministic; production uses
         // the 60s lease-anchored window asserted separately above.
@@ -1736,13 +1759,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun passiveEofSilentlyReacquiresTransportWhenOldSessionIsBroken() = runTest {
+    fun passiveEofSilentlyReacquiresTransportWhenOldSessionIsBroken() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 1_000L, silentReattachTimeoutMs = 1_000L)
         val deadClient = FakeTmuxClient()
@@ -1779,13 +1802,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun failedSilentTransportReattachEvictsLeaseSoManualReconnectUsesFreshSession() = runTest {
+    fun failedSilentTransportReattachEvictsLeaseSoManualReconnectUsesFreshSession() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
         val failedReconnectSession = FakeSshSession()
         val manualReconnectSession = FakeSshSession()
         val connector = QueueLeaseConnector(failedReconnectSession, manualReconnectSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 60_000L,
@@ -1852,13 +1875,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun manualReconnectCancelsInFlightSilentTransportReattachAndUsesFreshSession() = runTest {
+    fun manualReconnectCancelsInFlightSilentTransportReattachAndUsesFreshSession() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
         val hiddenReconnectSession = FakeSshSession()
         val manualReconnectSession = FakeSshSession()
         val connector = QueueLeaseConnector(hiddenReconnectSession, manualReconnectSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 60_000L,
@@ -1929,12 +1952,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun networkChangeLifecycleHookEntersReconnectingWithoutConnectionError() = runTest {
+    fun networkChangeLifecycleHookEntersReconnectingWithoutConnectionError() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient()
@@ -1978,7 +2001,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sameNetworkHandleWithDifferentTransportsDoesNotEnterReconnecting() = runTest {
+    fun sameNetworkHandleWithDifferentTransportsDoesNotEnterReconnecting() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         TMUX_CONNECT_ATTEMPTS.set(0)
         try {
@@ -1986,7 +2009,7 @@ class TmuxSessionViewModelTest {
             val connector = QueueLeaseConnector(FakeSshSession())
             val vm = newVm(
                 registry = registry,
-                sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
             )
             vm.setAutoReconnectDelaysForTest(listOf(0L))
             val client = FakeTmuxClient()
@@ -2038,14 +2061,14 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun differentNetworkHandleStillEntersReconnecting() = runTest {
+    fun differentNetworkHandleStillEntersReconnecting() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         try {
             val registry = ActiveTmuxClients()
             val connector = QueueLeaseConnector(FakeSshSession())
             val vm = newVm(
                 registry = registry,
-                sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
             )
             vm.setAutoReconnectDelaysForTest(listOf(60_000L))
             vm.replaceClientForTest(
@@ -2092,13 +2115,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun restoredSameNetworkHintDuringActiveTerminalOutputDoesNotShowReconnect() = runTest {
+    fun restoredSameNetworkHintDuringActiveTerminalOutputDoesNotShowReconnect() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L, 0L))
         val client = FakeTmuxClient()
@@ -2175,13 +2198,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun outputForOnlyTerminalOutputKeepsNetworkHintFromShowingReconnect() = runTest {
+    fun outputForOnlyTerminalOutputKeepsNetworkHintFromShowingReconnect() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
         val client = FakeTmuxClient()
@@ -2232,13 +2255,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun firstValidatedNetworkHintDoesNotReconnectIdleStableTerminal() = runTest {
+    fun firstValidatedNetworkHintDoesNotReconnectIdleStableTerminal() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
         vm.replaceClientForTest(
@@ -2272,12 +2295,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun realNetworkIdentityChangeDuringActiveTerminalOutputStillReconnects() = runTest {
+    fun realNetworkIdentityChangeDuringActiveTerminalOutputStillReconnects() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient()
@@ -2315,14 +2338,14 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun networkReconnectAndPassiveDisconnectAreCoalescedIntoOneAttempt() = runTest {
+    fun networkReconnectAndPassiveDisconnectAreCoalescedIntoOneAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -2369,13 +2392,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun networkChangeLifecycleHookProactivelyReattachesTmuxSession() = runTest {
+    fun networkChangeLifecycleHookProactivelyReattachesTmuxSession() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -2407,12 +2430,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun networkReconnectEvictsConnectedIdleLeaseBeforeReattaching() = runTest {
+    fun networkReconnectEvictsConnectedIdleLeaseBeforeReattaching() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val staleSession = FakeSshSession()
         val freshSession = FakeSshSession()
         val connector = QueueLeaseConnector(staleSession, freshSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 60_000L,
@@ -2479,13 +2502,13 @@ class TmuxSessionViewModelTest {
      * symptom of a TCP reset that the SSH library hasn't noticed yet.
      */
     @Test
-    fun networkReconnectRetriesAfterStaleListPanesEofAndRecovers() = runTest {
+    fun networkReconnectRetriesAfterStaleListPanesEofAndRecovers() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val staleSession = FakeSshSession()
         val freshSession = FakeSshSession()
         val connector = QueueLeaseConnector(staleSession, freshSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 60_000L,
@@ -2559,12 +2582,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun lifecycleReattachEvictsConnectedIdleLeaseBeforeReattaching() = runTest {
+    fun lifecycleReattachEvictsConnectedIdleLeaseBeforeReattaching() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val staleSession = FakeSshSession()
         val freshSession = FakeSshSession()
         val connector = QueueLeaseConnector(staleSession, freshSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 60_000L,
@@ -2615,14 +2638,14 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun postGraceLifecycleReattachCoalescesDeferredNetworkReplay() = runTest {
+    fun postGraceLifecycleReattachCoalescesDeferredNetworkReplay() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val lifecycleClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -2682,7 +2705,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun postGraceLifecycleReattachCoalescesForegroundNetworkReplayWithoutForceFreshReconnect() = runTest {
+    fun postGraceLifecycleReattachCoalescesForegroundNetworkReplayWithoutForceFreshReconnect() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val staleIdleSession = FakeSshSession()
@@ -2693,7 +2716,7 @@ class TmuxSessionViewModelTest {
             lifecycleSession,
             networkReconnectSession,
         )
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 60_000L,
@@ -2767,7 +2790,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun networkReconnectRetriesTransientFlapThenRecoversWithoutOverlappingAttempts() = runTest {
+    fun networkReconnectRetriesTransientFlapThenRecoversWithoutOverlappingAttempts() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = FailingThenConnectingLeaseConnector(
@@ -2780,7 +2803,7 @@ class TmuxSessionViewModelTest {
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -2854,7 +2877,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun eofDisconnectDoesNotBurnAutoReconnectAttempts() = runTest {
+    fun eofDisconnectDoesNotBurnAutoReconnectAttempts() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
@@ -2890,7 +2913,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun explicitReconnectAfterEofReportsNonRetryableAuthFailureOnce() = runTest {
+    fun explicitReconnectAfterEofReportsNonRetryableAuthFailureOnce() = runTest(scheduler) {
         // Issue #440: a non-retryable failure (auth rejection) must NOT burn
         // the whole backoff schedule when a passive EOF has already surfaced
         // the manual Reconnect affordance.
@@ -2903,7 +2926,7 @@ class TmuxSessionViewModelTest {
         )
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         // Four delays available — if the abort fails, all four would be used.
@@ -2951,7 +2974,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun explicitReconnectAfterEofDoesNotLoopOnTransientFailure() = runTest {
+    fun explicitReconnectAfterEofDoesNotLoopOnTransientFailure() = runTest(scheduler) {
         // Issue #440: a transient transport failure (e.g. connection refused
         // while the host reboots) should not become a reconnect storm after a
         // passive EOF has surfaced the manual Reconnect affordance.
@@ -2968,7 +2991,7 @@ class TmuxSessionViewModelTest {
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
@@ -3009,14 +3032,14 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun tmuxAutoReconnectDelayIsCancelledWhenAppBackgrounds() = runTest {
+    fun tmuxAutoReconnectDelayIsCancelledWhenAppBackgrounds() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         try {
             val registry = ActiveTmuxClients()
             val connector = QueueLeaseConnector(FakeSshSession())
             val vm = newVm(
                 registry = registry,
-                sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
             )
             vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
             vm.setAutoReconnectDelaysForTest(listOf(60_000L))
@@ -3086,13 +3109,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun foregroundReturnResumesBackgroundPausedAutoReconnect() = runTest {
+    fun foregroundReturnResumesBackgroundPausedAutoReconnect() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
@@ -3159,13 +3182,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun shortAppSwitchPassiveDisconnectResumesAutoReconnectOnScreenStart() = runTest {
+    fun shortAppSwitchPassiveDisconnectResumesAutoReconnectOnScreenStart() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 60_000L, silentReattachTimeoutMs = 1_000L)
         vm.setAutoReconnectDelaysForTest(listOf(0L))
@@ -3250,12 +3273,12 @@ class TmuxSessionViewModelTest {
      * [pausedAutoReconnect] instead of resuming it.
      */
     @Test
-    fun onScreenStartedClearsPausedReconnectForDifferentSession() = runTest {
+    fun onScreenStartedClearsPausedReconnectForDifferentSession() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 60_000L, silentReattachTimeoutMs = 1_000L)
         vm.setAutoReconnectDelaysForTest(listOf(0L))
@@ -3319,13 +3342,13 @@ class TmuxSessionViewModelTest {
      * (same session) still works after the session-mismatch guard is added.
      */
     @Test
-    fun onScreenStartedResumesPausedReconnectForSameSession() = runTest {
+    fun onScreenStartedResumesPausedReconnectForSameSession() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 60_000L, silentReattachTimeoutMs = 1_000L)
         vm.setAutoReconnectDelaysForTest(listOf(0L))
@@ -3373,7 +3396,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneSeparatesLeadingDashLiteralFromTmuxOptions() = runTest {
+    fun writeInputToPaneSeparatesLeadingDashLiteralFromTmuxOptions() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -3386,7 +3409,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneEscapesSingleQuotesViaCloseEscapeOpen() = runTest {
+    fun writeInputToPaneEscapesSingleQuotesViaCloseEscapeOpen() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -3404,7 +3427,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalStateInputRoutesThroughTmuxSendKeys() = runTest {
+    fun terminalStateInputRoutesThroughTmuxSendKeys() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -3423,7 +3446,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexScaleTmuxOutputFloodKeepsTerminalAndConnectionStateConsistent() = runTest {
+    fun codexScaleTmuxOutputFloodKeepsTerminalAndConnectionStateConsistent() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -3507,7 +3530,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexLikeTmuxOutputWithSlowTerminalSideChannelRendersFinalMarkerWithoutReconnect() = runTest {
+    fun codexLikeTmuxOutputWithSlowTerminalSideChannelRendersFinalMarkerWithoutReconnect() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
@@ -3565,9 +3588,24 @@ class TmuxSessionViewModelTest {
                     "Codex-like tmux %output burst must not stall behind a slow terminal side-channel",
                     completed,
                 )
-                advanceUntilIdle()
-                shadowOf(Looper.getMainLooper()).idle()
-                val transcript = renderedTranscriptFrom(state)
+                // Issue #708: the final marker is applied by the REAL
+                // SshTerminalBridge feed on a wall-clock background thread, which a
+                // single virtual `advanceUntilIdle()` + one Looper idle does not
+                // reliably drain under a contended JVM (this is the only
+                // load-sensitive flake in the lease-fix gate). Pump the Looper +
+                // the scheduler in a bounded wall-clock loop until the marker
+                // renders. This strengthens, never weakens, the assertion: if the
+                // marker genuinely never lands the loop still times out and the
+                // assertTrue below fails.
+                var transcript = ""
+                val markerDeadline = System.currentTimeMillis() + 5_000
+                do {
+                    advanceUntilIdle()
+                    shadowOf(Looper.getMainLooper()).idle()
+                    transcript = renderedTranscriptFrom(state)
+                    if (transcript.contains("ISSUE576-CODEX-LIKE-DONE")) break
+                    Thread.sleep(20)
+                } while (System.currentTimeMillis() < markerDeadline)
                 assertTrue(
                     "integrated fake tmux -> TerminalSurfaceState -> SshTerminalBridge path must render " +
                         "the final marker; tail=${transcript.takeLast(500)}",
@@ -3626,13 +3664,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexLikePaneOutputOverflowStaysLocalAndNeverReconnectsStableTransport() = runTest {
+    fun codexLikePaneOutputOverflowStaysLocalAndNeverReconnectsStableTransport() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
         val client = FakeTmuxClient()
@@ -3781,7 +3819,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalOutputBacklogOverflowIsLocalPaneErrorNotReconnect() = runTest {
+    fun terminalOutputBacklogOverflowIsLocalPaneErrorNotReconnect() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -3830,14 +3868,14 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun seedGateLiveBufferOverflowIsLocalPaneErrorNotReconnect() = runTest {
+    fun seedGateLiveBufferOverflowIsLocalPaneErrorNotReconnect() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val diagnostics = installRecordingDiagnosticSink()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setTerminalSurfaceStateFactoryForTest {
             TerminalSurfaceState(StandardTestDispatcher(testScheduler))
@@ -3964,7 +4002,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalSurfaceFailureDoesNotMarkTmuxTransportDisconnectedOrReconnect() = runTest {
+    fun terminalSurfaceFailureDoesNotMarkTmuxTransportDisconnectedOrReconnect() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -3997,7 +4035,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun repeatedTerminalSurfaceFailuresStopAtErrorStateInsteadOfReconnectStorm() = runTest {
+    fun repeatedTerminalSurfaceFailuresStopAtErrorStateInsteadOfReconnectStorm() = runTest(scheduler) {
         // Issue #423: opening the keyboard after a long dictated Codex
         // prompt could send the terminal into a recovery storm — the
         // surface redraws, fails, gets recreated, fails again, and never
@@ -4075,7 +4113,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun tmuxHighRateInputStressBatchesWithBoundedBacklogAndNoContentLoss() = runTest {
+    fun tmuxHighRateInputStressBatchesWithBoundedBacklogAndNoContentLoss() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             sendCommandDelayMs = 3L
@@ -4129,7 +4167,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalDaQueryResponsesSuppressedInBridgeMode() = runTest {
+    fun terminalDaQueryResponsesSuppressedInBridgeMode() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4154,7 +4192,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalOsc11QueryResponsesSuppressedInBridgeMode() = runTest {
+    fun terminalOsc11QueryResponsesSuppressedInBridgeMode() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4179,7 +4217,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalGeneratedInputResponseRoutesAsRawHex() = runTest {
+    fun terminalGeneratedInputResponseRoutesAsRawHex() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4195,7 +4233,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun singleEscapeInputStillUsesNamedKeyPath() = runTest {
+    fun singleEscapeInputStillUsesNamedKeyPath() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4208,7 +4246,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneIgnoresEmptyBytes() = runTest {
+    fun writeInputToPaneIgnoresEmptyBytes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4223,7 +4261,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneResultPropagatesFailedPaneWrite() = runTest {
+    fun writeInputToPaneResultPropagatesFailedPaneWrite() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             closeAndThrowOnCommandPrefix = "send-keys"
@@ -4247,7 +4285,7 @@ class TmuxSessionViewModelTest {
     // so we don't regress per-line named-key routing for normal typing.
 
     @Test
-    fun writeInputToPaneWrapsMultiLineInputInBracketedPaste() = runTest {
+    fun writeInputToPaneWrapsMultiLineInputInBracketedPaste() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4298,7 +4336,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneNormalisesCrLfToLfInsideBracketedPaste() = runTest {
+    fun writeInputToPaneNormalisesCrLfToLfInsideBracketedPaste() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4326,7 +4364,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneKeepsSingleLineInputOnTheLiteralPath() = runTest {
+    fun writeInputToPaneKeepsSingleLineInputOnTheLiteralPath() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4349,7 +4387,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun writeInputToPaneTrailingNewlineGoesThroughBracketedPaste() = runTest {
+    fun writeInputToPaneTrailingNewlineGoesThroughBracketedPaste() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4375,7 +4413,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun largeBracketedPasteIsSplitIntoBoundedSendKeysCommands() = runTest {
+    fun largeBracketedPasteIsSplitIntoBoundedSendKeysCommands() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4435,7 +4473,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onKeyBarKeyTranslatesLabelsToTmuxNamedKeys() = runTest {
+    fun onKeyBarKeyTranslatesLabelsToTmuxNamedKeys() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4461,7 +4499,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onKeyBarKeyEnterSendsTmuxEnterNamedKeyWithoutReflow() = runTest {
+    fun onKeyBarKeyEnterSendsTmuxEnterNamedKeyWithoutReflow() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4492,7 +4530,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onKeyBarKeySendsCuratedCtrlCombosAsRawControlBytes() = runTest {
+    fun onKeyBarKeySendsCuratedCtrlCombosAsRawControlBytes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4522,7 +4560,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun ctrlModifierChordsTheNextKeyAsAControlByte() = runTest {
+    fun ctrlModifierChordsTheNextKeyAsAControlByte() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4551,7 +4589,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun lockedCtrlModifierChordsRepeatedlyUntilDisarmed() = runTest {
+    fun lockedCtrlModifierChordsRepeatedlyUntilDisarmed() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4584,7 +4622,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun ctrlModifierChordsArrowsAndNamedKeysViaTmuxChordSyntax() = runTest {
+    fun ctrlModifierChordsArrowsAndNamedKeysViaTmuxChordSyntax() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4613,7 +4651,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun keyBarControlEscapeAndHotkeysClearSmartTextBeforeTmuxRawSends() = runTest {
+    fun keyBarControlEscapeAndHotkeysClearSmartTextBeforeTmuxRawSends() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4656,7 +4694,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun keyBarEnterFlushesSmartTextBeforeTmuxEnter() = runTest {
+    fun keyBarEnterFlushesSmartTextBeforeTmuxEnter() = runTest(scheduler) {
         val vm = newVm()
         val literalFlushGate = CompletableDeferred<Unit>()
         val client = FakeTmuxClient().apply {
@@ -4705,7 +4743,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun directTmuxControlHotkeyClearsSmartTextBeforeSendingRawBytes() = runTest {
+    fun directTmuxControlHotkeyClearsSmartTextBeforeSendingRawBytes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4734,7 +4772,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendControlInputToPaneCanSendDoublePressPayload() = runTest {
+    fun sendControlInputToPaneCanSendDoublePressPayload() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4838,7 +4876,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onKeyBarKeyIgnoresUnknownLabel() = runTest {
+    fun onKeyBarKeyIgnoresUnknownLabel() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -4850,7 +4888,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun lifecycleCommandsTargetActiveSessionAndWindow() = runTest {
+    fun lifecycleCommandsTargetActiveSessionAndWindow() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -4883,7 +4921,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun lifecycleCommandsDeriveCreateNameButIgnoreBlankRenameNames() = runTest {
+    fun lifecycleCommandsDeriveCreateNameButIgnoreBlankRenameNames() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -4919,7 +4957,7 @@ class TmuxSessionViewModelTest {
     // ----- Issue #285: automatic tmux control-client sizing.
 
     @Test
-    fun resizeRemotePtyReportsPhoneSizeToTmuxControlClient() = runTest {
+    fun resizeRemotePtyReportsPhoneSizeToTmuxControlClient() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -4946,7 +4984,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeRemotePtyIsIdempotentForSameDimensions() = runTest {
+    fun resizeRemotePtyIsIdempotentForSameDimensions() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -4970,7 +5008,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeRemotePtyRefreshesAgainWhenPhoneDimensionsChange() = runTest {
+    fun resizeRemotePtyRefreshesAgainWhenPhoneDimensionsChange() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -5003,7 +5041,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeRemotePtyIgnoresZeroAndNegativeDimensions() = runTest {
+    fun resizeRemotePtyIgnoresZeroAndNegativeDimensions() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -5027,7 +5065,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeRemotePtyIsNoOpBeforeConnect() = runTest {
+    fun resizeRemotePtyIsNoOpBeforeConnect() = runTest(scheduler) {
         val vm = newVm()
 
         vm.resizeRemotePty(columns = 48, rows = 96)
@@ -5037,7 +5075,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeRemotePtyEscapesSessionNameSingleQuotesForPolicyCommand() = runTest {
+    fun resizeRemotePtyEscapesSessionNameSingleQuotesForPolicyCommand() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -5064,7 +5102,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeRemotePtyFailureDoesNotBlockLaterSizeChangeRetry() = runTest {
+    fun resizeRemotePtyFailureDoesNotBlockLaterSizeChangeRetry() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.refreshClientSizeException = IllegalStateException("boom")
@@ -5093,7 +5131,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun outputForReceivesEventsRoutedThroughEventsFlow() = runTest {
+    fun outputForReceivesEventsRoutedThroughEventsFlow() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -5134,7 +5172,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun listPanesRowWithFewerFieldsIsSkipped() = runTest {
+    fun listPanesRowWithFewerFieldsIsSkipped() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -5159,7 +5197,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun listPanesRowWithWrongIdPrefixIsSkipped() = runTest {
+    fun listPanesRowWithWrongIdPrefixIsSkipped() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -5250,7 +5288,7 @@ class TmuxSessionViewModelTest {
     )
 
     @Test
-    fun detectedAgentConversationStartsWithoutHintPopupState() = runTest {
+    fun detectedAgentConversationStartsWithoutHintPopupState() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.applyParsedPanesForTest(
@@ -5266,7 +5304,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentConversationStillReceivesEventsAfterPopupRemoval() = runTest {
+    fun agentConversationStillReceivesEventsAfterPopupRemoval() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5296,7 +5334,7 @@ class TmuxSessionViewModelTest {
     // ─── Issue #256: current-pane conversation semantics ──────────────
 
     @Test
-    fun selectingConversationTabOnlyMutatesTheCurrentPaneState() = runTest {
+    fun selectingConversationTabOnlyMutatesTheCurrentPaneState() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5317,7 +5355,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun selectingTmuxConversationAndTerminalTabsRecordsExplicitDiagnostics() = runTest {
+    fun selectingTmuxConversationAndTerminalTabsRecordsExplicitDiagnostics() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         try {
             val vm = newVm()
@@ -5351,7 +5389,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun selectingConversationTabForUnknownOrPlainPaneIsNoOp() = runTest {
+    fun selectingConversationTabForUnknownOrPlainPaneIsNoOp() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5399,7 +5437,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentSessionRememberedAndRestoredImmediatelyAfterReconnect() = runTest {
+    fun agentSessionRememberedAndRestoredImmediatelyAfterReconnect() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5429,7 +5467,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sharedAgentSessionMemoryRestoresAfterViewModelRecreation() = runTest {
+    fun sharedAgentSessionMemoryRestoresAfterViewModelRecreation() = runTest(scheduler) {
         val memory = AgentSessionMemory()
         val firstVm = newVm(agentSessionMemory = memory)
         firstVm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
@@ -5456,7 +5494,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun reconnectReselectsConversationWhenUserWasOnConversation() = runTest {
+    fun reconnectReselectsConversationWhenUserWasOnConversation() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5476,7 +5514,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun reconnectKeepsTerminalWhenUserWasOnTerminal() = runTest {
+    fun reconnectKeepsTerminalWhenUserWasOnTerminal() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5499,7 +5537,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun reconnectDoesNotResurrectAgentThatExited() = runTest {
+    fun reconnectDoesNotResurrectAgentThatExited() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5536,7 +5574,7 @@ class TmuxSessionViewModelTest {
      * "we forget it's an agent and bounce to plain-shell-then-back" regression.
      */
     @Test
-    fun transientNullDetectionDoesNotForgetRememberedAgentOnReconnect() = runTest {
+    fun transientNullDetectionDoesNotForgetRememberedAgentOnReconnect() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5579,7 +5617,7 @@ class TmuxSessionViewModelTest {
      * Conversation tab does not linger.
      */
     @Test
-    fun persistentNullDetectionEventuallyDowngradesAnExitedAgent() = runTest {
+    fun persistentNullDetectionEventuallyDowngradesAnExitedAgent() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5614,7 +5652,7 @@ class TmuxSessionViewModelTest {
      * for delaying the normal plain-shell verdict.
      */
     @Test
-    fun nullDetectionDowngradesImmediatelyWhenWindowWasNeverAnAgent() = runTest {
+    fun nullDetectionDowngradesImmediatelyWhenWindowWasNeverAnAgent() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
@@ -5627,7 +5665,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun liveDetectionRefiningSameAgentKeepsRestoredConversationTab() = runTest {
+    fun liveDetectionRefiningSameAgentKeepsRestoredConversationTab() = runTest(scheduler) {
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -5662,7 +5700,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneAppendsOptimisticMessageAndWritesCarriageReturn() = runTest {
+    fun sendToAgentPaneAppendsOptimisticMessageAndWritesCarriageReturn() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -5687,7 +5725,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneExitsTmuxCopyModeBeforeTypingPrompt() = runTest {
+    fun sendToAgentPaneExitsTmuxCopyModeBeforeTypingPrompt() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -5723,7 +5761,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexAgentSubmitDelaysFinalEnterAfterTextInsertion() = runTest {
+    fun codexAgentSubmitDelaysFinalEnterAfterTextInsertion() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -5758,13 +5796,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexSendInFlightSurvivesTerminalOverflowWithoutReconnectOrDuplicateSend() = runTest {
+    fun codexSendInFlightSurvivesTerminalOverflowWithoutReconnectOrDuplicateSend() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -5845,7 +5883,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentSubmitDelaysFinalEnterByConfiguredDelayForClaudeCode() = runTest {
+    fun agentSubmitDelaysFinalEnterByConfiguredDelayForClaudeCode() = runTest(scheduler) {
         // Issue #526: the composer/agent send path types the message text,
         // waits the user-configurable delay, then presses the submit Enter as
         // a SEPARATE send-keys so the Enter can't race ahead of the agent
@@ -5889,7 +5927,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentSubmitWithZeroConfiguredDelaySendsEnterBackToBack() = runTest {
+    fun agentSubmitWithZeroConfiguredDelaySendsEnterBackToBack() = runTest(scheduler) {
         // Issue #526: a 0ms delay restores the pre-#526 back-to-back behaviour
         // for users whose agent never races — no spurious suspension between
         // the text and the submit Enter.
@@ -5913,7 +5951,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun rawPaneInputDoesNotUseCodexAgentSubmitDelay() = runTest {
+    fun rawPaneInputDoesNotUseCodexAgentSubmitDelay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -5933,7 +5971,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneLongSingleLineUsesBoundedBracketedChunksThenEnter() = runTest {
+    fun sendToAgentPaneLongSingleLineUsesBoundedBracketedChunksThenEnter() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -5964,7 +6002,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneLongDictationWithAttachmentBlockSubmitsFinalEnter() = runTest {
+    fun sendToAgentPaneLongDictationWithAttachmentBlockSubmitsFinalEnter() = runTest(scheduler) {
         // Issue #569: a long dictated prompt plus staged attachment paths
         // must not stop at "text inserted into the agent TUI". The composed
         // prompt is pasted through bounded chunks and then submitted with the
@@ -6010,7 +6048,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultFailureDuringLargePasteKeepsDraftOnlyAndReconnectAvailable() = runTest {
+    fun sendToAgentPaneResultFailureDuringLargePasteKeepsDraftOnlyAndReconnectAvailable() = runTest(scheduler) {
         val vm = newVm()
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient().apply {
@@ -6046,7 +6084,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultPasteChunkTmuxErrorRemovesOptimisticMessage() = runTest {
+    fun sendToAgentPaneResultPasteChunkTmuxErrorRemovesOptimisticMessage() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             responses.addLast(CommandResponse(number = 1L, output = emptyList(), isError = false))
@@ -6079,7 +6117,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultFinalEnterTmuxErrorRemovesOptimisticMessage() = runTest {
+    fun sendToAgentPaneResultFinalEnterTmuxErrorRemovesOptimisticMessage() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             repeat(5) {
@@ -6116,7 +6154,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneBlankTextIsNoOp() = runTest {
+    fun sendToAgentPaneBlankTextIsNoOp() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -6130,7 +6168,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultDoesNotAppendOptimisticMessageWhenReconnectCannotStart() = runTest {
+    fun sendToAgentPaneResultDoesNotAppendOptimisticMessageWhenReconnectCannotStart() = runTest(scheduler) {
         // Issue #548 follow-up: if send-time reconnect cannot even start
         // (no remembered target), the unified composer keeps the draft.
         // Do not also append a failed optimistic row, or the next
@@ -6146,13 +6184,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest {
+    fun sendToAgentPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
@@ -6213,13 +6251,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendAgentPayloadToPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest {
+    fun sendAgentPayloadToPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
@@ -6272,11 +6310,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultDoesNotRetryNonRetryableFailedConnection() = runTest {
+    fun sendToAgentPaneResultDoesNotRetryNonRetryableFailedConnection() = runTest(scheduler) {
         val authFailure = UserAuthException("bad key")
         val connector = FailingLeaseConnector(authFailure)
         val vm = newVm(
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         val deadClient = FakeTmuxClient()
@@ -6310,7 +6348,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun retryFailedAgentSendDropsFailedTurnAndReSendsWithoutDoubleSend() = runTest {
+    fun retryFailedAgentSendDropsFailedTurnAndReSendsWithoutDoubleSend() = runTest(scheduler) {
         // Issue #494: retrying a failed tmux send drops the failed
         // placeholder and re-sends. With a live client the re-send inserts
         // a fresh pending turn and submits the keys — exactly one user turn
@@ -6347,7 +6385,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun retryFailedAgentSendKeepsFailedTurnWhenRetryDeliveryFails() = runTest {
+    fun retryFailedAgentSendKeepsFailedTurnWhenRetryDeliveryFails() = runTest(scheduler) {
         val vm = newVm()
         val failed = ConversationEvent.Message(
             id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}seed",
@@ -6382,7 +6420,7 @@ class TmuxSessionViewModelTest {
     // ─── Issue #154: conversation search query persistence ─────────────
 
     @Test
-    fun setAgentSearchQueryUpdatesPaneState() = runTest {
+    fun setAgentSearchQueryUpdatesPaneState() = runTest(scheduler) {
         // Acceptance criterion #5: the search query is hoisted into the
         // pane's `AgentConversationUiState` so a Terminal ↔ Conversation
         // tab round-trip cannot clear it. The screen wires the search
@@ -6417,7 +6455,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun setAgentSearchQueryIsNoOpForUnknownPane() = runTest {
+    fun setAgentSearchQueryIsNoOpForUnknownPane() = runTest(scheduler) {
         // Calling the setter against a pane the VM has never seen must
         // not crash and must not populate a phantom row in the map.
         val vm = newVm()
@@ -6432,7 +6470,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun stoppedAgentLogTailMarksConversationStaleWhileTmuxStaysConnected() = runTest {
+    fun stoppedAgentLogTailMarksConversationStaleWhileTmuxStaysConnected() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         val detection = newClaudeDetection()
@@ -6461,7 +6499,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun stoppedAgentLogTailPreservesConcurrentConversationState() = runTest {
+    fun stoppedAgentLogTailPreservesConcurrentConversationState() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         val detection = newClaudeDetection()
@@ -6500,7 +6538,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun staleOldAgentLogTailCompletionDoesNotMarkRestartedPaneStale() = runTest {
+    fun staleOldAgentLogTailCompletionDoesNotMarkRestartedPaneStale() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         val detection = newClaudeDetection()
@@ -6537,7 +6575,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun failedAgentLogTailMarksConversationLogUnavailableWhileTmuxStaysConnected() = runTest {
+    fun failedAgentLogTailMarksConversationLogUnavailableWhileTmuxStaysConnected() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         val detection = newClaudeDetection()
@@ -6561,7 +6599,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun disconnectedSshWhenAgentTailStartsMarksConversationUnavailableWithoutCrashing() = runTest {
+    fun disconnectedSshWhenAgentTailStartsMarksConversationUnavailableWithoutCrashing() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
@@ -6591,7 +6629,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun cancelledAgentConversationStartupReadIsNotSwallowed() = runTest {
+    fun cancelledAgentConversationStartupReadIsNotSwallowed() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         val detection = newClaudeDetection()
@@ -6615,7 +6653,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun retryAgentLogTailForPaneRestartsOneTailAndKeepsTmuxConnected() = runTest {
+    fun retryAgentLogTailForPaneRestartsOneTailAndKeepsTmuxConnected() = runTest(scheduler) {
         val vm = newVm()
         val detection = newClaudeDetection()
         val oldTailJob = Job()
@@ -6673,7 +6711,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexAgentLogRetryWithTerminalFloodKeepsConversationAndTerminalConsistent() = runTest {
+    fun codexAgentLogRetryWithTerminalFloodKeepsConversationAndTerminalConsistent() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val detection = newCodexDetection()
@@ -6787,7 +6825,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun retryAgentLogTailForPaneDetectionFailureReturnsLogUnavailable() = runTest {
+    fun retryAgentLogTailForPaneDetectionFailureReturnsLogUnavailable() = runTest(scheduler) {
         val vm = newVm()
         val detection = newClaudeDetection()
         val retryGate = CompletableDeferred<Unit>()
@@ -6845,7 +6883,7 @@ class TmuxSessionViewModelTest {
     // plain-shell windows even when a sibling window has a live agent.
 
     @Test
-    fun agentForWindowReturnsNullForUnknownWindowId() = runTest {
+    fun agentForWindowReturnsNullForUnknownWindowId() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
 
@@ -6855,7 +6893,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentForWindowReturnsKindOfDetectedAgentInThatWindow() = runTest {
+    fun agentForWindowReturnsKindOfDetectedAgentInThatWindow() = runTest(scheduler) {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.applyParsedPanesForTest(
@@ -6893,7 +6931,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentForWindowPicksLowestPaneIndexWhenMultipleAgentsInOneWindow() = runTest {
+    fun agentForWindowPicksLowestPaneIndexWhenMultipleAgentsInOneWindow() = runTest(scheduler) {
         // Edge case: two panes in the same window with detections.
         // Stable behaviour: the pane that appears first in the panes
         // list wins (which is paneIndex ascending per the reconcile
@@ -6933,7 +6971,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun listPanesParserAcceptsPrintableFieldSeparator() = runTest {
+    fun listPanesParserAcceptsPrintableFieldSeparator() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -6978,7 +7016,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun listPanesFormatRequestsPaneTty() = runTest {
+    fun listPanesFormatRequestsPaneTty() = runTest(scheduler) {
         // Issue #186: the list-panes format must include
         // `#{pane_tty}` so per-pane detection can scope its process
         // scan to a TTY. Without this, the per-window fix has no
@@ -7023,7 +7061,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun listPanesParserCapturesTmuxWindowIndex() = runTest {
+    fun listPanesParserCapturesTmuxWindowIndex() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -7054,7 +7092,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun paneModeChangedRefreshesCopyModeStateFromListPanes() = runTest {
+    fun paneModeChangedRefreshesCopyModeStateFromListPanes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         client.responses.addLast(
@@ -7084,7 +7122,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentForWindowClearsAfterPaneLosesDetection() = runTest {
+    fun agentForWindowClearsAfterPaneLosesDetection() = runTest(scheduler) {
         // The screen drives Conversation-tab visibility off
         // [agentForWindow]. When a pane that previously had a
         // detection no longer reports one (the user exited Claude),
@@ -7113,7 +7151,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun conversationStateClearsWhenPaneLosesDetection() = runTest {
+    fun conversationStateClearsWhenPaneLosesDetection() = runTest(scheduler) {
         // If the user has opened the Conversation tab on the agent pane
         // and then exits the agent in that pane, the per-pane
         // conversation state must disappear so the screen falls back to
@@ -7142,7 +7180,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun parsedPanePaneTtyDefaultsToEmptyWhenOmitted() = runTest {
+    fun parsedPanePaneTtyDefaultsToEmptyWhenOmitted() = runTest(scheduler) {
         // Defensive: an older tmux that doesn't emit the new field, or
         // a unit test passing the legacy shape, must still produce a
         // valid TmuxPaneState (with an empty paneTty so per-pane
@@ -7160,7 +7198,7 @@ class TmuxSessionViewModelTest {
     // ----- Issue #188: killWindow error surfacing + deterministic refresh.
 
     @Test
-    fun killWindowStartsAtNullWindowKillErrorAndStaysNullOnHappyPath() = runTest {
+    fun killWindowStartsAtNullWindowKillErrorAndStaysNullOnHappyPath() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -7218,7 +7256,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun killWindowSurfacesTransportFailureAndSkipsRefresh() = runTest {
+    fun killWindowSurfacesTransportFailureAndSkipsRefresh() = runTest(scheduler) {
         // sendCommand throws → user must see a banner-targetable error
         // string AND no reconcile must fire (a reconcile after a failed
         // kill would re-render the still-alive window and look like the
@@ -7265,7 +7303,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun killWindowSurfacesTmuxErrorResponseAndSkipsRefresh() = runTest {
+    fun killWindowSurfacesTmuxErrorResponseAndSkipsRefresh() = runTest(scheduler) {
         // tmux responds with %error — same skip-refresh rule.
         val vm = newVm()
         val client = FakeTmuxClient().apply {
@@ -7316,7 +7354,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun killWindowRefreshesAfterDeterministicWindowCloseEvent() = runTest {
+    fun killWindowRefreshesAfterDeterministicWindowCloseEvent() = runTest(scheduler) {
         // Happy path: sendCommand succeeds → view model waits for
         // %window-close → fires an explicit reconcile. Asserting the
         // ordering: until the event arrives no reconcile fires; once the
@@ -7392,7 +7430,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun killWindowRefreshesAfterFallbackTimeoutWhenEventNeverArrives() = runTest {
+    fun killWindowRefreshesAfterFallbackTimeoutWhenEventNeverArrives() = runTest(scheduler) {
         // A degenerate tmux that swallows the %window-close notification
         // must not wedge the UI indefinitely — the view model falls back
         // to an unconditional reconcile after KILL_WINDOW_EVENT_WAIT_MS.
@@ -7435,7 +7473,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun clearWindowKillErrorRemovesPriorMessage() = runTest {
+    fun clearWindowKillErrorRemovesPriorMessage() = runTest(scheduler) {
         // The screen's banner dismiss action wires to this method; it must
         // null out the StateFlow so subsequent recompositions hide the band.
         val vm = newVm()
@@ -7459,7 +7497,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun killWindowIgnoresBlankWindowIdAndNeverDispatches() = runTest {
+    fun killWindowIgnoresBlankWindowIdAndNeverDispatches() = runTest(scheduler) {
         // Defensive: the screen passes `currentWindowId.orEmpty()` so a
         // pre-attach kill tap must be a no-op rather than a wire
         // request for `kill-window -t `.
@@ -7481,7 +7519,7 @@ class TmuxSessionViewModelTest {
     // ─── Issue #625: new-window auto-switch ───
 
     @Test
-    fun newWindowEmitsWindowSwitchRequestAfterWindowAddEvent() = runTest {
+    fun newWindowEmitsWindowSwitchRequestAfterWindowAddEvent() = runTest(scheduler) {
         // Happy path: new-window succeeds → wait for %window-add →
         // reconcile → emit the new window ID via windowSwitchRequest.
         val vm = newVm()
@@ -7559,7 +7597,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun newWindowDoesNotEmitSwitchRequestOnTransportFailure() = runTest {
+    fun newWindowDoesNotEmitSwitchRequestOnTransportFailure() = runTest(scheduler) {
         // Transport failure: sendCommand throws → early return, no
         // switch request.
         val vm = newVm()
@@ -7602,7 +7640,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun newWindowDoesNotEmitSwitchRequestOnTmuxError() = runTest {
+    fun newWindowDoesNotEmitSwitchRequestOnTmuxError() = runTest(scheduler) {
         // tmux responds with an error → early return, no switch request.
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -7650,7 +7688,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun newWindowDoesNotEmitSwitchRequestOnTimeoutWithoutEvent() = runTest {
+    fun newWindowDoesNotEmitSwitchRequestOnTimeoutWithoutEvent() = runTest(scheduler) {
         // The %window-add event never arrives → timeout fires →
         // reconcile still happens but no switch request is emitted
         // (window ID is null).
@@ -7705,7 +7743,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun newWindowDoesNothingWithoutActiveTarget() = runTest {
+    fun newWindowDoesNothingWithoutActiveTarget() = runTest(scheduler) {
         // No active target → early return, no commands dispatched.
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -7955,7 +7993,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchCachesOldRuntimeAndReusesSshSession() = runTest {
+    fun fastSwitchCachesOldRuntimeAndReusesSshSession() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -8021,7 +8059,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun activatingCachedRuntimePublishesPanesSynchronouslyWithoutTmuxCommands() = runTest {
+    fun activatingCachedRuntimePublishesPanesSynchronouslyWithoutTmuxCommands() = runTest(scheduler) {
         TmuxSessionLatencyTelemetry.resetForTest()
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
@@ -8172,14 +8210,14 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun cachedRuntimeWithStaleConnectedSessionFallsBackToFreshAttach() = runTest {
+    fun cachedRuntimeWithStaleConnectedSessionFallsBackToFreshAttach() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             registry = registry,
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val staleSession = FakeSshSession()
         val staleClient = FakeTmuxClient().apply {
@@ -8250,7 +8288,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun cachedRuntimeRefreshBestEffortSeedFailureKeepsConnectedClientOpen() = runTest {
+    fun cachedRuntimeRefreshBestEffortSeedFailureKeepsConnectedClientOpen() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -8334,7 +8372,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun staleCachedRuntimeRefreshCannotOverwriteNewerSelection() = runTest {
+    fun staleCachedRuntimeRefreshCannotOverwriteNewerSelection() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -8460,7 +8498,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun activatingCachedRuntimeReinstallsDisconnectedObserver() = runTest {
+    fun activatingCachedRuntimeReinstallsDisconnectedObserver() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -8528,7 +8566,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun activatingCachedRuntimeRestartsAgentConversationTail() = runTest {
+    fun activatingCachedRuntimeRestartsAgentConversationTail() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
         val session = FakeSshSession()
@@ -8597,7 +8635,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun restoredRuntimeTailRefreshPreservesConcurrentConversationState() = runTest {
+    fun restoredRuntimeTailRefreshPreservesConcurrentConversationState() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
         val execGate = CompletableDeferred<Unit>()
@@ -8699,7 +8737,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun runtimeCacheEvictsLeastRecentlyUsedRuntimePerHost() = runTest {
+    fun runtimeCacheEvictsLeastRecentlyUsedRuntimePerHost() = runTest(scheduler) {
         val cache = TmuxSessionRuntimeCache(maxEntries = 2)
         val first = cachedRuntimeForTest("one")
         val second = cachedRuntimeForTest("two")
@@ -8722,7 +8760,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun runtimeCachePerHostCapDoesNotEvictOtherHosts() = runTest {
+    fun runtimeCachePerHostCapDoesNotEvictOtherHosts() = runTest(scheduler) {
         val cache = TmuxSessionRuntimeCache(maxEntries = 1)
         val hostOneFirst = cachedRuntimeForTest("one", hostId = 1L)
         val hostTwoFirst = cachedRuntimeForTest("one", hostId = 2L)
@@ -8739,7 +8777,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun runtimeCacheEvictsExpiredRuntimesDeterministically() = runTest {
+    fun runtimeCacheEvictsExpiredRuntimesDeterministically() = runTest(scheduler) {
         var nowMs = 0L
         val cache = TmuxSessionRuntimeCache(
             maxEntries = 2,
@@ -8761,7 +8799,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchEvictionClosesOldWarmRuntimeAsynchronously() = runTest {
+    fun fastSwitchEvictionClosesOldWarmRuntimeAsynchronously() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 1)
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -8826,12 +8864,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sessionSwitcherPrewarmCachesOnlyBoundedLikelyTargets() = runTest {
+    fun sessionSwitcherPrewarmCachesOnlyBoundedLikelyTargets() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val connector = QueueLeaseConnector(FakeSshSession(), FakeSshSession(), FakeSshSession())
         val vm = newVm(
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val activeSession = FakeSshSession()
         val prewarmClients = listOf(
@@ -8872,7 +8910,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sessionPrewarmSeedsCaptureWithCursorRestore() = runTest {
+    fun sessionPrewarmSeedsCaptureWithCursorRestore() = runTest(scheduler) {
         // Issue #640: the prewarm seed shares the capture+cursor exchange via
         // [TmuxClient.captureWithCursor] (single-flight in production), pairing
         // the capture with the cursor restore, and still caches the runtime +
@@ -8881,7 +8919,7 @@ class TmuxSessionViewModelTest {
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4")
         vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
@@ -8915,12 +8953,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sessionPrewarmBestEffortCaptureFailureCachesRuntimeAndKeepsClientOpen() = runTest {
+    fun sessionPrewarmBestEffortCaptureFailureCachesRuntimeAndKeepsClientOpen() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4").apply {
             failBestEffortOnCommandPrefix = "capture-pane"
@@ -8952,7 +8990,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun switchingToPrewarmedTargetUsesCachedRuntimeFirstFramePath() = runTest {
+    fun switchingToPrewarmedTargetUsesCachedRuntimeFirstFramePath() = runTest(scheduler) {
         TmuxSessionLatencyTelemetry.resetForTest()
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
@@ -8960,7 +8998,7 @@ class TmuxSessionViewModelTest {
         val vm = newVm(
             registry = registry,
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val activeClient = FakeTmuxClient()
         val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4")
@@ -9005,12 +9043,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun cancelledSessionPrewarmClosesPartialRuntimeWithoutCachingIt() = runTest {
+    fun cancelledSessionPrewarmClosesPartialRuntimeWithoutCachingIt() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val connector = QueueLeaseConnector(FakeSshSession())
         val vm = newVm(
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val gate = CompletableDeferred<Unit>()
         val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%5").apply {
@@ -9041,13 +9079,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun switchingToColdTargetStillFallsBackToFastAttach() = runTest {
+    fun switchingToColdTargetStillFallsBackToFastAttach() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val session = FakeSshSession()
         val connector = QueueLeaseConnector(session)
         val vm = newVm(
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val coldClient = FakeTmuxClient().withSinglePane("cold", "%6")
         vm.setTmuxClientFactoryForTest { _, _, _ -> coldClient }
@@ -9085,7 +9123,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun failedSameHostSwitchKeepsParkedRuntimeActivatable() = runTest {
+    fun failedSameHostSwitchKeepsParkedRuntimeActivatable() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val session = FakeSshSession()
@@ -9093,7 +9131,7 @@ class TmuxSessionViewModelTest {
         val vm = newVm(
             registry = registry,
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val clientA = FakeTmuxClient().withSinglePane("work", "%0")
         val clientB = FakeTmuxClient().apply {
@@ -9166,7 +9204,7 @@ class TmuxSessionViewModelTest {
     // attaches, then flips to [Connected] with the new session's panes.
 
     @Test
-    fun sameHostSwitchToUncachedSessionEntersSwitchingNotConnecting() = runTest {
+    fun sameHostSwitchToUncachedSessionEntersSwitchingNotConnecting() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val session = FakeSshSession()
         val connector = QueueLeaseConnector(session)
@@ -9174,7 +9212,7 @@ class TmuxSessionViewModelTest {
         val vm = newVm(
             registry = registry,
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         // Gate the cold client's list-panes so the new -CC attach stays
         // in flight while we observe the visible state during the switch.
@@ -9289,11 +9327,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun firstConnectToHostStillShowsConnectingNotSwitching() = runTest {
+    fun firstConnectToHostStillShowsConnectingNotSwitching() = runTest(scheduler) {
         val session = FakeSshSession()
         val connector = QueueLeaseConnector(session)
         val vm = newVm(
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         // Gate the first attach so we can observe the visible state before
         // it completes.
@@ -9334,7 +9372,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sameHostSwitchDeadSshSessionEscalatesToConnectingAndBlanks() = runTest {
+    fun sameHostSwitchDeadSshSessionEscalatesToConnectingAndBlanks() = runTest(scheduler) {
         // #178 dead-session fallback preserved: if the reused SSH session
         // died mid-switch we do a genuine reconnect, so the UI must
         // escalate from Switching to the full-screen Connecting overlay
@@ -9349,7 +9387,7 @@ class TmuxSessionViewModelTest {
         val fallbackSession = FakeSshSession()
         val connector = QueueLeaseConnector(deadLeaseSession, fallbackSession)
         val vm = newVm(
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val reconnectGate = CompletableDeferred<Unit>()
         val fallbackClient = FakeTmuxClient().withSinglePane("cold", "%6").apply {
@@ -9414,9 +9452,9 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun closeCachedRuntimeDetachesClientBeforeReleasingLease() = runTest {
+    fun closeCachedRuntimeDetachesClientBeforeReleasingLease() = runTest(scheduler) {
         val session = FakeSshSession()
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = SshLeaseConnector { Result.success(session) },
             idleTtlMillis = 0L,
         )
@@ -9439,11 +9477,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun forceFreshAcquireClosesSameLeaseCachedRuntimeBeforeOpeningTransport() = runTest {
+    fun forceFreshAcquireClosesSameLeaseCachedRuntimeBeforeOpeningTransport() = runTest(scheduler) {
         val staleSession = FakeSshSession()
         val freshSession = FakeSshSession()
         val connector = QueueLeaseConnector(staleSession, freshSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 0L,
@@ -9485,10 +9523,10 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun normalAcquirePreservesSameLeaseCachedRuntimeReuse() = runTest {
+    fun normalAcquirePreservesSameLeaseCachedRuntimeReuse() = runTest(scheduler) {
         val warmSession = FakeSshSession()
         val connector = QueueLeaseConnector(warmSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 0L,
@@ -9530,11 +9568,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchDeadSessionFallbackReleasesAcquiredLeaseBeforeRetry() = runTest {
+    fun fastSwitchDeadSessionFallbackReleasesAcquiredLeaseBeforeRetry() = runTest(scheduler) {
         val deadLeaseSession = FakeSshSession(isConnectedValue = false)
         val fallbackSession = FakeSshSession()
         val connector = QueueLeaseConnector(deadLeaseSession, fallbackSession)
-        val manager = SshLeaseManager(
+        val manager = testLeaseManager(
             connector = connector,
             scope = this,
             idleTtlMillis = 0L,
@@ -9573,7 +9611,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchBlanksPreviousFrameAndHidesSurfaceUntilNewSessionReconciles() = runTest {
+    fun fastSwitchBlanksPreviousFrameAndHidesSurfaceUntilNewSessionReconciles() = runTest(scheduler) {
         // Issue #661 (reverses #437 slice A / #634 keep-frame for the
         // cross-session case): a same-host fast switch to a DIFFERENT session
         // must NEVER paint the leaving session's frame — not even one frame.
@@ -9647,7 +9685,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchDoesNotDetachPreviousClientOnCriticalPath() = runTest {
+    fun fastSwitchDoesNotDetachPreviousClientOnCriticalPath() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -9706,7 +9744,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchIncrementsTmuxConnectCounterButNotSshHandshakeCounter() = runTest {
+    fun fastSwitchIncrementsTmuxConnectCounterButNotSshHandshakeCounter() = runTest(scheduler) {
         val vm = newVm()
         val session = FakeSshSession()
         val oldClient = FakeTmuxClient()
@@ -9751,7 +9789,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchTelemetryUsesVisibleSwitchBaseline() = runTest {
+    fun fastSwitchTelemetryUsesVisibleSwitchBaseline() = runTest(scheduler) {
         TmuxSessionLatencyTelemetry.resetForTest()
         val vm = newVm()
         val session = FakeSshSession()
@@ -9807,7 +9845,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun closedPaneClearsConversationRoutingState() = runTest {
+    fun closedPaneClearsConversationRoutingState() = runTest(scheduler) {
         // A pane that tmux removes between reconciles cannot keep any
         // conversation state behind.
         val vm = newVm()
@@ -9835,7 +9873,7 @@ class TmuxSessionViewModelTest {
     // state instead of staying stuck on Connecting.
 
     @Test
-    fun cancelConnectFlipsConnectingStatusToFailedAndCancelsJob() = runTest {
+    fun cancelConnectFlipsConnectingStatusToFailedAndCancelsJob() = runTest(scheduler) {
         val vm = newVm()
         // A real Job we can inspect post-cancel, parented to the test
         // scope. The production [connect] launches into [viewModelScope];
@@ -9863,7 +9901,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun cancelConnectIsNoOpWhenNotConnecting() = runTest {
+    fun cancelConnectIsNoOpWhenNotConnecting() = runTest(scheduler) {
         val vm = newVm()
         // Status starts Idle — cancel must be a no-op.
         val firedFromIdle = vm.cancelConnect()
@@ -9889,7 +9927,7 @@ class TmuxSessionViewModelTest {
      * has something to tear down.
      */
     @Test
-    fun onAppBackgroundedCallsDetachCleanlyOnLiveClient() = runTest {
+    fun onAppBackgroundedCallsDetachCleanlyOnLiveClient() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -9916,7 +9954,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onClearedWhileBackgroundedParksLiveRuntimeInsteadOfClosingLeaseBeforeGrace() = runTest {
+    fun onClearedWhileBackgroundedParksLiveRuntimeInsteadOfClosingLeaseBeforeGrace() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
         val client = FakeTmuxClient()
@@ -9957,7 +9995,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onClearedAfterScreenStopParksRuntimeDuringProcessLifecycleStopDebounce() = runTest {
+    fun onClearedAfterScreenStopParksRuntimeDuringProcessLifecycleStopDebounce() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
         val client = FakeTmuxClient()
@@ -9989,10 +10027,10 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onClearedWhileBackgroundedClosesEvictedParkedRuntimeOutsideViewModelScope() = runTest {
+    fun onClearedWhileBackgroundedClosesEvictedParkedRuntimeOutsideViewModelScope() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 1)
         val evictedSession = FakeSshSession()
-        val evictedLeaseManager = SshLeaseManager(
+        val evictedLeaseManager = testLeaseManager(
             connector = SshLeaseConnector { Result.success(evictedSession) },
             idleTtlMillis = 0L,
         )
@@ -10035,7 +10073,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun foregroundOnClearedStillClosesLiveRuntimeForUserNavigation() = runTest {
+    fun foregroundOnClearedStillClosesLiveRuntimeForUserNavigation() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
         val client = FakeTmuxClient()
@@ -10063,7 +10101,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun restoredParkedRuntimeRebindsViewModelScopedPaneJobsWithoutSshReconnect() = runTest {
+    fun restoredParkedRuntimeRebindsViewModelScopedPaneJobsWithoutSshReconnect() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val parkedClient = FakeTmuxClient()
         val session = FakeSshSession()
@@ -10099,7 +10137,7 @@ class TmuxSessionViewModelTest {
         )
         val vm = newVm(
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
 
         vm.connect(
@@ -10127,7 +10165,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun foregroundReturnWithinGraceRestoresParkedRuntimeWithoutVisibleReconnectState() = runTest {
+    fun foregroundReturnWithinGraceRestoresParkedRuntimeWithoutVisibleReconnectState() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val firstVm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -10170,7 +10208,7 @@ class TmuxSessionViewModelTest {
         val restoredVm = newVm(
             registry = registry,
             runtimeCache = runtimeCache,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val observedStatuses = mutableListOf<TmuxSessionViewModel.ConnectionStatus>()
         val statusJob = backgroundScope.launch {
@@ -10208,7 +10246,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onAppBackgroundedClosesInactiveCachedRuntimesForHost() = runTest {
+    fun onAppBackgroundedClosesInactiveCachedRuntimesForHost() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
         val session = FakeSshSession()
@@ -10263,7 +10301,7 @@ class TmuxSessionViewModelTest {
      * with no pending reattach left.
      */
     @Test
-    fun onAppForegroundedWaitsForInFlightBackgroundDetachBeforeConsumingReattach() = runTest {
+    fun onAppForegroundedWaitsForInFlightBackgroundDetachBeforeConsumingReattach() = runTest(scheduler) {
         val vm = newVm()
         val detachGate = CompletableDeferred<Unit>()
         val client = FakeTmuxClient().apply {
@@ -10315,14 +10353,14 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onAppForegroundedProbesStaleLiveRuntimeAndForcesFreshReconnect() = runTest {
+    fun onAppForegroundedProbesStaleLiveRuntimeAndForcesFreshReconnect() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         try {
             val registry = ActiveTmuxClients()
             val staleSession = FakeSshSession()
             val freshSession = FakeSshSession()
             val connector = QueueLeaseConnector(freshSession)
-            val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+            val manager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
             val vm = newVm(
                 registry = registry,
                 sshLeaseManager = manager,
@@ -10400,7 +10438,7 @@ class TmuxSessionViewModelTest {
      * and reconnected.
      */
     @Test
-    fun foregroundProbeTimeoutOnLiveSocketRidesThroughWithoutReconnect() = runTest {
+    fun foregroundProbeTimeoutOnLiveSocketRidesThroughWithoutReconnect() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         try {
             val registry = ActiveTmuxClients()
@@ -10408,7 +10446,7 @@ class TmuxSessionViewModelTest {
             // Connector must never be touched: a ride-through opens no fresh
             // SSH transport.
             val connector = QueueLeaseConnector(FakeSshSession())
-            val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+            val manager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
             val vm = newVm(registry = registry, sshLeaseManager = manager)
 
             // The probe `display-message` hangs forever; `withTimeoutOrNull`
@@ -10488,14 +10526,14 @@ class TmuxSessionViewModelTest {
      * transport, recover to Connected, and tag the failure `not_connected`.
      */
     @Test
-    fun foregroundProbeReconnectsWhenTransportIsGenuinelyDead() = runTest {
+    fun foregroundProbeReconnectsWhenTransportIsGenuinelyDead() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         try {
             val registry = ActiveTmuxClients()
             val deadSession = FakeSshSession(isConnectedValue = false)
             val freshSession = FakeSshSession()
             val connector = QueueLeaseConnector(freshSession)
-            val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+            val manager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
             val vm = newVm(registry = registry, sshLeaseManager = manager)
 
             val deadClient = FakeTmuxClient()
@@ -10555,7 +10593,7 @@ class TmuxSessionViewModelTest {
      * and the B target remains available for the in-flight connect path.
      */
     @Test
-    fun onAppForegroundedSkipsDetachedSessionWhenNewerConnectIntentExists() = runTest {
+    fun onAppForegroundedSkipsDetachedSessionWhenNewerConnectIntentExists() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         var foregroundReattachCount = 0
@@ -10615,7 +10653,7 @@ class TmuxSessionViewModelTest {
      * opened a tmux session.
      */
     @Test
-    fun onAppBackgroundedIsNoOpWhenNoActiveClient() = runTest {
+    fun onAppBackgroundedIsNoOpWhenNoActiveClient() = runTest(scheduler) {
         val vm = newVm()
         // Status is Idle, no client attached.
         vm.onAppBackgrounded()
@@ -10632,7 +10670,7 @@ class TmuxSessionViewModelTest {
      * from.
      */
     @Test
-    fun detachAndExitTearsClientDownAndClearsPendingReattach() = runTest {
+    fun detachAndExitTearsClientDownAndClearsPendingReattach() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -10676,7 +10714,7 @@ class TmuxSessionViewModelTest {
      * host id so the application-scope fanout can find them.
      */
     @Test
-    fun replaceClientInstallsLifecycleHooksIntoRegistry() = runTest {
+    fun replaceClientInstallsLifecycleHooksIntoRegistry() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
         val client = FakeTmuxClient()
@@ -10704,7 +10742,7 @@ class TmuxSessionViewModelTest {
      * test below).
      */
     @Test
-    fun connectionTeardownPreservesLifecycleHooks() = runTest {
+    fun connectionTeardownPreservesLifecycleHooks() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
         vm.replaceClientForTest(
@@ -10742,7 +10780,7 @@ class TmuxSessionViewModelTest {
      * lifecycle hook. Sanity-checks the hook lifetime invariant.
      */
     @Test
-    fun onClearedRemovesLifecycleHooksFromRegistry() = runTest {
+    fun onClearedRemovesLifecycleHooksFromRegistry() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
         vm.replaceClientForTest(
@@ -10775,7 +10813,7 @@ class TmuxSessionViewModelTest {
      * detach/attach cycles.
      */
     @Test
-    fun reinstallingLifecycleHooksForDifferentHostRemovesPreviousHook() = runTest {
+    fun reinstallingLifecycleHooksForDifferentHostRemovesPreviousHook() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
         vm.replaceClientForTest(
@@ -10824,7 +10862,7 @@ class TmuxSessionViewModelTest {
      * evict the newer client entry or lifecycle hook.
      */
     @Test
-    fun staleViewModelClearDoesNotUnregisterNewerSameHostClientOrHooks() = runTest {
+    fun staleViewModelClearDoesNotUnregisterNewerSameHostClientOrHooks() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val oldVm = newVm(registry)
         val newVm = newVm(registry)
@@ -10900,7 +10938,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun confirmedNewPortSurfacesOverlay() = runTest {
+    fun confirmedNewPortSurfacesOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(5173))
@@ -10917,7 +10955,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun assistantConversationLocalhostUrlSurfacesPortForwardOverlay() = runTest {
+    fun assistantConversationLocalhostUrlSurfacesPortForwardOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(5173))
@@ -10942,7 +10980,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun assistantConversationLoopbackPortPhraseSurfacesPortForwardOverlay() = runTest {
+    fun assistantConversationLoopbackPortPhraseSurfacesPortForwardOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(3000))
@@ -10967,7 +11005,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun agentToolResultLoopbackPortSurfacesPortForwardOverlay() = runTest {
+    fun agentToolResultLoopbackPortSurfacesPortForwardOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(8000))
@@ -10991,7 +11029,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun userConversationLocalhostUrlDoesNotSurfacePortForwardOverlay() = runTest {
+    fun userConversationLocalhostUrlDoesNotSurfacePortForwardOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(5173))
@@ -11016,7 +11054,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun echoedPortNotListeningDoesNotSurfaceOverlay() = runTest {
+    fun echoedPortNotListeningDoesNotSurfaceOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         // ss reports nothing listening — the regex hit is an echoed/old URL.
@@ -11033,7 +11071,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun acceptingDetectedPortReturnsItAndClearsOverlay() = runTest {
+    fun acceptingDetectedPortReturnsItAndClearsOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(8000))
@@ -11050,7 +11088,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun dismissedPortDoesNotReSurfaceInSameSession() = runTest {
+    fun dismissedPortDoesNotReSurfaceInSameSession() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(8000))
@@ -11074,7 +11112,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun forwardedPortDoesNotReSurfaceInSameSession() = runTest {
+    fun forwardedPortDoesNotReSurfaceInSameSession() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val session = FakeSshSession(ssListeningPorts = setOf(8000))
@@ -11302,7 +11340,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun unifiedPanesMirrorsActivePanesWhenNoCachedRuntimes() = runTest {
+    fun unifiedPanesMirrorsActivePanesWhenNoCachedRuntimes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -11335,7 +11373,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun unifiedPanesIncludesCachedSessionPanes() = runTest {
+    fun unifiedPanesIncludesCachedSessionPanes() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
         val session = FakeSshSession()
@@ -11393,7 +11431,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun isActiveSessionPaneReturnsTrueForActivePanes() = runTest {
+    fun isActiveSessionPaneReturnsTrueForActivePanes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -11425,7 +11463,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sessionNameForUnifiedPaneReturnsActiveSessionName() = runTest {
+    fun sessionNameForUnifiedPaneReturnsActiveSessionName() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -11475,7 +11513,7 @@ class TmuxSessionViewModelTest {
     // ---- Issue #662: black-pane re-seed on a live connection ----
 
     @Test
-    fun reseedVisiblePaneIfBlankReCapturesAndHealsABlackPane() = runTest {
+    fun reseedVisiblePaneIfBlankReCapturesAndHealsABlackPane() = runTest(scheduler) {
         // The maintainer's symptom: a window renders a BLACK pane (the seed
         // never painted content) on a LIVE connection, and switching to it does
         // not recover it. Drive that exact state: the pane's attach-time seed
@@ -11543,7 +11581,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun reseedVisiblePaneIfBlankIsNoOpWhenPaneAlreadyShowsContent() = runTest {
+    fun reseedVisiblePaneIfBlankIsNoOpWhenPaneAlreadyShowsContent() = runTest(scheduler) {
         // A pane that already painted content must NOT be re-captured on a
         // window switch — the blank-only guard keeps the switch cheap and never
         // clobbers a good frame.
@@ -11819,13 +11857,13 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun connectSnapshotsPreviousSessionNameWhenSessionChanges() = runTest {
+    fun connectSnapshotsPreviousSessionNameWhenSessionChanges() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val session = FakeSshSession()
         val connector = QueueLeaseConnector(session)
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         // Set up the first session ("work") via replaceClientForTest.
         val firstClient = FakeTmuxClient().withSinglePane("work", "%0")
@@ -11866,11 +11904,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun closeCurrentConnectionResetsPreviousSessionName() = runTest {
+    fun closeCurrentConnectionResetsPreviousSessionName() = runTest(scheduler) {
         val session = FakeSshSession()
         val connector = QueueLeaseConnector(session)
         val vm = newVm(
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val firstClient = FakeTmuxClient().withSinglePane("work", "%0")
         vm.replaceClientForTest(

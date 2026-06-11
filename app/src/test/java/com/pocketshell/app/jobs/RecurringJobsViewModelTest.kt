@@ -10,6 +10,8 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -20,13 +22,20 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecurringJobsViewModelTest {
 
+    // Issue #708: the SshLeaseManager's bounded cold connect (#687) runs under a
+    // real `Dispatchers.IO` + wall clock by default. Share ONE virtual-clock
+    // scheduler between `runTest`, `Dispatchers.Main`, and the lease so
+    // `advanceUntilIdle()` actually drives the bounded dial instead of leaving it
+    // stranded on a real thread.
+    private val scheduler = TestCoroutineScheduler()
+
     @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    val mainDispatcherRule = MainDispatcherRule(StandardTestDispatcher(scheduler))
 
     private val remoteSource = PocketshellJobsRemoteSource(RecurringJobsParser())
 
     @Test
-    fun loadConnectsAndFetchesJobsForSession() = runTest {
+    fun loadConnectsAndFetchesJobsForSession() = runTest(scheduler) {
         val session = FakeSshSession(
             pathAware("pocketshell jobs list --session 'agent main'") to listOutput(id = 7, sessionName = "agent main"),
         )
@@ -57,7 +66,7 @@ class RecurringJobsViewModelTest {
     }
 
     @Test
-    fun jobsActionsReuseTheSameWarmLeaseAcrossActions() = runTest {
+    fun jobsActionsReuseTheSameWarmLeaseAcrossActions() = runTest(scheduler) {
         // Issue #699: load + add + remove must all ride ONE warm transport
         // (one acquire/connect), not a fresh handshake per action.
         val session = FakeSshSession(
@@ -95,7 +104,7 @@ class RecurringJobsViewModelTest {
     }
 
     @Test
-    fun refreshMapsMissingPocketshellToErrorState() = runTest {
+    fun refreshMapsMissingPocketshellToErrorState() = runTest(scheduler) {
         val session = FakeSshSession(
             pathAware("pocketshell jobs list --session 'codex'") to ExecResult("", "pocketshell: not found", 127),
         )
@@ -118,7 +127,7 @@ class RecurringJobsViewModelTest {
     }
 
     @Test
-    fun refreshMapsUnavailableJobsDaemonToTargetedSetupMessage() = runTest {
+    fun refreshMapsUnavailableJobsDaemonToTargetedSetupMessage() = runTest(scheduler) {
         val session = FakeSshSession(
             pathAware("pocketshell jobs list --session 'codex'") to ExecResult(
                 "",
@@ -147,7 +156,7 @@ class RecurringJobsViewModelTest {
     }
 
     @Test
-    fun addRefreshesTheBoundSessionAfterSuccess() = runTest {
+    fun addRefreshesTheBoundSessionAfterSuccess() = runTest(scheduler) {
         val session = FakeSshSession(
             pathAware("pocketshell jobs list --session 'codex'") to listOf(
                 listOutput(id = 1, sessionName = "codex"),
@@ -195,7 +204,13 @@ class RecurringJobsViewModelTest {
         RecurringJobsViewModel(
             remoteSource = remoteSource,
             connector = RecurringJobsViewModel.DefaultRecurringJobsSshConnector(
-                SshLeaseManager(connector = connector),
+                SshLeaseManager(
+                    connector = connector,
+                    // Issue #708: keep the bounded cold connect (#687) on the
+                    // shared virtual clock so it resolves under `runTest`.
+                    connectTimeoutContext = StandardTestDispatcher(scheduler),
+                    nowMillis = { scheduler.currentTime },
+                ),
             ),
         )
 

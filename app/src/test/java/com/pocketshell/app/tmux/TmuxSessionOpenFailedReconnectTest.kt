@@ -81,7 +81,7 @@ class TmuxSessionOpenFailedReconnectTest {
         val registry = ActiveTmuxClients()
         val vm = TestNewVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
 
         // Disable auto-reconnect so the test drives the manual Retry deterministically.
@@ -157,7 +157,7 @@ class TmuxSessionOpenFailedReconnectTest {
         val registry = ActiveTmuxClients()
         val vm = TestNewVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
         )
 
         vm.setAutoReconnectDelaysForTest(emptyList())
@@ -222,7 +222,7 @@ class TmuxSessionOpenFailedReconnectTest {
         val registry = ActiveTmuxClients()
         val vm = TestNewVm(
             registry = registry,
-            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
         )
 
         vm.setAutoReconnectDelaysForTest(emptyList())

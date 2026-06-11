@@ -83,6 +83,7 @@ const val FILE_EXPLORER_TRANSFER_DISMISS_TAG = "fileExplorerTransferDismiss"
  */
 @Composable
 fun FileExplorerScreen(
+    hostId: Long,
     hostName: String,
     hostname: String,
     port: Int,
@@ -95,9 +96,10 @@ fun FileExplorerScreen(
     modifier: Modifier = Modifier,
     viewModel: FileExplorerViewModel = hiltViewModel(),
 ) {
-    LaunchedEffect(hostname, port, username, keyPath, startDir) {
+    LaunchedEffect(hostId, hostname, port, username, keyPath, startDir) {
         viewModel.start(
             FileExplorerViewModel.Request(
+                hostId = hostId,
                 hostname = hostname,
                 port = port,
                 username = username,

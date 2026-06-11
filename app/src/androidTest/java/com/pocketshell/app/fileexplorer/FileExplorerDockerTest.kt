@@ -12,9 +12,14 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -49,11 +54,28 @@ class FileExplorerDockerTest {
     private lateinit var keyFile: File
     private var seededRoot: String? = null
 
+    /**
+     * Counts cold SSH handshakes the explorer dials (issue #697). The explorer
+     * acquires from this shared app-wide [SshLeaseManager]; a warm lease already
+     * held for the same key means the browse reuses it and this stays at the
+     * pre-warmed count (no second ~3-4s handshake).
+     */
+    private val handshakeCount = AtomicInteger(0)
+    private val leaseConnector: SshLeaseConnector = SshLeaseConnector { target ->
+        handshakeCount.incrementAndGet()
+        DefaultSshLeaseConnector().connect(target)
+    }
+    private lateinit var leaseManager: SshLeaseManager
+
+    private fun newExplorerViewModel(): FileExplorerViewModel =
+        FileExplorerViewModel(leaseManager)
+
     @Before
     fun setUp(): Unit = runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
+        leaseManager = SshLeaseManager(connector = leaseConnector)
         val cacheDir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
         keyFile = File(cacheDir, "issue528-explorer-key").apply {
             parentFile?.mkdirs()
@@ -72,6 +94,7 @@ class FileExplorerDockerTest {
             }
         }
         runCatching { keyFile.delete() }
+        runCatching { leaseManager.close() }
     }
 
     @Test
@@ -96,6 +119,7 @@ class FileExplorerDockerTest {
         var openedFilePath: String? = null
         composeRule.setContent {
             FileExplorerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -105,7 +129,7 @@ class FileExplorerDockerTest {
                 startDir = root,
                 onBack = {},
                 onOpenFile = { openedFilePath = it },
-                viewModel = FileExplorerViewModel(),
+                viewModel = newExplorerViewModel(),
             )
         }
 
@@ -155,9 +179,10 @@ class FileExplorerDockerTest {
             } ?: error("could not connect to seed fixture dir")
         }
 
-        val viewModel = FileExplorerViewModel()
+        val viewModel = newExplorerViewModel()
         viewModel.start(
             FileExplorerViewModel.Request(
+                hostId = TEST_HOST_ID,
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
                 username = DEFAULT_USER,
@@ -242,6 +267,7 @@ class FileExplorerDockerTest {
 
         composeRule.setContent {
             FileExplorerScreen(
+                hostId = TEST_HOST_ID,
                 hostName = "agents",
                 hostname = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -251,7 +277,7 @@ class FileExplorerDockerTest {
                 startDir = "$root/locked",
                 onBack = {},
                 onOpenFile = {},
-                viewModel = FileExplorerViewModel(),
+                viewModel = newExplorerViewModel(),
             )
         }
 
@@ -262,6 +288,85 @@ class FileExplorerDockerTest {
         WalkthroughScreenshotArtifacts.capture("issue528-explorer-permission-denied")
     }
 
+    @Test
+    fun browseReusesTheWarmLeaseInsteadOfHandshakingAgain(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val root = "/tmp/issue697-$suffix"
+        seededRoot = root
+
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec(
+                    "mkdir -p '$root/sub' && printf 'x' > '$root/a.txt' && echo ok",
+                )
+                assertEquals("seed exit", 0, exit.exitCode)
+            } ?: error("could not connect to seed fixture tree")
+        }
+
+        // Pre-warm: a sibling screen (session/folder/tmux) already holds a live
+        // lease for this host, keyed IDENTICALLY to what the explorer will use.
+        val warmTarget = SshLeaseTarget(
+            leaseKey = com.pocketshell.core.ssh.SshLeaseKey(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                credentialId = "$TEST_HOST_ID:${keyFile.absolutePath}",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(keyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
+        val warmLease = withTimeout(30_000) { leaseManager.acquire(warmTarget).getOrThrow() }
+        val afterWarm = handshakeCount.get()
+        assertEquals("pre-warm dials exactly one handshake", 1, afterWarm)
+
+        val viewModel = newExplorerViewModel()
+        viewModel.start(
+            FileExplorerViewModel.Request(
+                hostId = TEST_HOST_ID,
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                startDir = root,
+            ),
+        )
+        // Browse: list start dir, descend, go back up — several lease ops.
+        withTimeout(30_000) {
+            while (viewModel.state.value !is FileExplorerUiState.Ready) {
+                kotlinx.coroutines.delay(100)
+            }
+        }
+        val ready = viewModel.state.value as FileExplorerUiState.Ready
+        val subDir = ready.entries.first { it.name == "sub" }
+        viewModel.openDirectory(subDir)
+        withTimeout(20_000) {
+            while ((viewModel.state.value as? FileExplorerUiState.Ready)?.currentPath
+                    ?.endsWith("/sub") != true
+            ) {
+                kotlinx.coroutines.delay(100)
+            }
+        }
+        viewModel.goUp()
+        withTimeout(20_000) {
+            while ((viewModel.state.value as? FileExplorerUiState.Ready)?.entries
+                    ?.any { it.name == "a.txt" } != true
+            ) {
+                kotlinx.coroutines.delay(100)
+            }
+        }
+
+        // The explorer rode the warm transport for every op — no new handshake.
+        assertEquals(
+            "explorer browse must reuse the warm lease, not handshake again",
+            afterWarm,
+            handshakeCount.get(),
+        )
+        warmLease.release()
+    }
+
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,
         port = DEFAULT_PORT,
@@ -270,6 +375,15 @@ class FileExplorerDockerTest {
         knownHosts = KnownHostsPolicy.AcceptAll,
         timeoutMs = 10_000,
     ).getOrNull()
+
+    private companion object {
+        /**
+         * Stable host id for the lease key (issue #697). The explorer keys its
+         * lease as `"$hostId:$keyPath"`; this must match the pre-warmed sibling
+         * lease so the pool hands back the same warm transport.
+         */
+        const val TEST_HOST_ID: Long = 528L
+    }
 }
 
 /**

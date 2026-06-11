@@ -1131,6 +1131,7 @@ private fun AppNavigator(
         // FileViewer destination with the already-absolute path (cwd = null,
         // it's resolved). Back returns to the explorer at the same directory.
         is AppDestination.FileExplorer -> FileExplorerScreen(
+            hostId = dest.hostId,
             hostName = dest.hostName,
             hostname = dest.hostname,
             port = dest.port,

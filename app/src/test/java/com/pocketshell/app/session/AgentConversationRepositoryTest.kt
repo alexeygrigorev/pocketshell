@@ -13,15 +13,18 @@ import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.io.InputStream
+import kotlin.system.measureNanoTime
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentConversationRepositoryTest {
@@ -249,6 +252,266 @@ class AgentConversationRepositoryTest {
         assertEquals(2, userMessages.size)
         assertTrue(userMessages.any { it.text == "run the tests" && it.sendState == MessageSendState.Pending })
         assertTrue(userMessages.any { it.text == "now ship it" })
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #576: the conversation-tail performance hole.
+    //
+    // A Codex `/new` replays thousands of JSONL lines; the old per-line
+    // ingest ran one O(n^2) reconcile + one StateFlow emit PER line, an
+    // ~O(N^3)/N-emit storm. The fix is (1) a LINEAR reconcile (text-keyed
+    // optimistic index instead of a nested scan) and (2) a batched/
+    // debounced tail that coalesces a burst into one reconcile + one emit
+    // per window. Correctness — the final event set, order, and dedup —
+    // must be identical to the per-event behaviour.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun reconcileWithManyOptimisticDuplicatesCollapsesOldestMatchFirstLikeTheLinearScan() {
+        // The text-keyed optimistic index must reproduce the prior
+        // `firstOrNull` semantics exactly: back-to-back duplicate prompts
+        // each mint their own optimistic id, and a single real arrival
+        // collapses the OLDEST still-live optimistic turn with that text.
+        val opt1 = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "ping",
+            sendState = MessageSendState.Pending,
+        )
+        val opt2 = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}2",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "ping",
+            sendState = MessageSendState.Pending,
+        )
+        val real = ConversationEvent.Message(
+            id = "claude-real-ping",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "ping",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(opt1, opt2, real))
+
+        // Exactly one optimistic "ping" remains plus the real one: the
+        // first-inserted optimistic (id ...1) was collapsed.
+        val pings = reconciled.filterIsInstance<ConversationEvent.Message>()
+            .filter { it.text == "ping" }
+        assertEquals(2, pings.size)
+        assertFalse(
+            "the oldest optimistic ping must be collapsed",
+            pings.any { it.id == "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1" },
+        )
+        assertTrue(pings.any { it.id == "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}2" })
+        assertTrue(pings.any { it.id == "claude-real-ping" })
+    }
+
+    @Test
+    fun reconcileIsIdenticalWhetherEventsArrivePerEventOrAsOneBatch() {
+        // The load-bearing correctness invariant for the batched tail:
+        // reconciling a burst incrementally (one event at a time, the old
+        // per-line shape) and reconciling the whole burst as a single
+        // batch must produce the SAME final list — same set, same order,
+        // same dedup. Without that, batching would change what the user
+        // sees. The feed mixes user prompts, optimistic placeholders, their
+        // real arrivals, assistant prose, and tool churn.
+        val burst = buildMixedConversationBurst(turns = 40)
+
+        // Per-event: rebuild the accumulator after every single event, the
+        // exact shape of the old unbatched ingest.
+        var perEvent = emptyList<ConversationEvent>()
+        for (event in burst) {
+            perEvent = reconcileAgentEvents(perEvent + event)
+        }
+
+        // Batched: one reconcile over the whole burst.
+        val batched = reconcileAgentEvents(burst)
+
+        assertEquals(
+            "batched ingest must reconcile to the same list as per-event ingest",
+            perEvent.map { it.id },
+            batched.map { it.id },
+        )
+        // And dedup actually happened: no optimistic turn survives once its
+        // real twin is present.
+        assertFalse(
+            batched.any {
+                it is ConversationEvent.Message &&
+                    it.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX) &&
+                    batched.any { other ->
+                        other is ConversationEvent.Message &&
+                            !other.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX) &&
+                            other.role == ConversationRole.User &&
+                            other.text == it.text
+                    }
+            },
+        )
+    }
+
+    @Test
+    fun reconcileScalesLinearlyForLargeUserMessageHeavyBursts() {
+        // Regression guard for the O(n^2)-per-reconcile hole: a burst of
+        // thousands of distinct user messages must reconcile in roughly
+        // LINEAR time. The old nested `byId.entries.firstOrNull` scan ran
+        // O(window^2) here — doubling the input quadrupled the time. We
+        // assert the larger input is well under the quadratic projection of
+        // the smaller one (with generous slack for JIT/GC noise), which the
+        // old implementation would blow past.
+        fun userHeavyBurst(count: Int): List<ConversationEvent> = buildList {
+            repeat(count) { index ->
+                add(
+                    ConversationEvent.Message(
+                        id = "u$index",
+                        agent = AgentKind.Codex,
+                        role = ConversationRole.User,
+                        text = "prompt number $index",
+                    ),
+                )
+            }
+        }
+
+        val small = userHeavyBurst(1_000)
+        val large = userHeavyBurst(4_000)
+
+        // Warm up so JIT compilation isn't charged to the timed runs.
+        repeat(3) {
+            reconcileAgentEvents(small, maxEvents = 10_000)
+            reconcileAgentEvents(large, maxEvents = 10_000)
+        }
+
+        val smallNanos = measureNanoTime { reconcileAgentEvents(small, maxEvents = 10_000) }
+            .coerceAtLeast(1)
+        val largeNanos = measureNanoTime { reconcileAgentEvents(large, maxEvents = 10_000) }
+
+        println(
+            "[#576 reconcile linearity] small(1000)=${smallNanos / 1000}us " +
+                "large(4000)=${largeNanos / 1000}us ratio=${"%.2f".format(largeNanos.toDouble() / smallNanos)} " +
+                "(linear~4x, quadratic~16x)",
+        )
+
+        // 4x the input. Linear => ~4x the time. Quadratic => ~16x. Assert
+        // we are far below quadratic: allow up to 9x (well under 16x) to
+        // tolerate measurement noise while still failing the old O(n^2)
+        // implementation, which would be ~16x.
+        assertTrue(
+            "reconcile time grew super-linearly: small=${smallNanos}ns large=${largeNanos}ns " +
+                "ratio=${largeNanos.toDouble() / smallNanos}",
+            largeNanos <= smallNanos * 9,
+        )
+    }
+
+    @Test
+    fun batchedTailCoalescesACodexNewReplayIntoFewBatchesNotPerLine() = runTest {
+        // The headline #576 scenario: a Codex `/new` rewrites the rollout
+        // JSONL with thousands of lines. The batched tail must deliver them
+        // as a HANDFUL of batches (one per debounce window), not one
+        // callback per line — that is what collapses the N-reconcile /
+        // N-emit storm.
+        val lineCount = 3_000
+        val replay = (0 until lineCount).joinToString("\n") { index ->
+            """{"type":"user","uuid":"u$index","message":{"role":"user","content":"replayed line $index"}}"""
+        }
+        val session = FakeSshSession(tailLines = replay.lines())
+        val repository = AgentConversationRepository(
+            tailScope = backgroundScope,
+            tailBatchWindowMillis = 50L,
+        )
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val batches = mutableListOf<List<ConversationEvent>>()
+        val job = repository.tailEventsBatchedFromLine(
+            session = session,
+            detection = detection,
+            fromLineExclusive = 0L,
+        ) { batch ->
+            batches += batch
+        }
+        assertNotNull(job)
+        // Let the drain coroutine fire its window(s). All lines arrive in
+        // one synchronous burst from the fake tail, so they coalesce into a
+        // single batch.
+        advanceTimeBy(200L)
+        runCurrent()
+        job?.cancel()
+
+        // The whole replay reached the caller...
+        val totalEvents = batches.sumOf { it.size }
+        assertEquals(lineCount, totalEvents)
+        // ...but in a tiny number of batches, NOT one per line. The old
+        // per-event shape would have been [lineCount] callbacks.
+        assertTrue(
+            "expected a handful of batches, got ${batches.size}",
+            batches.size <= 5,
+        )
+        assertEquals(1, session.tailCalls)
+
+        // And the batched events reconcile to exactly the same feed as
+        // feeding every line's event individually — correctness preserved.
+        val allEvents = batches.flatten()
+        var perEvent = emptyList<ConversationEvent>()
+        for (event in allEvents) {
+            perEvent = reconcileAgentEvents(perEvent + event)
+        }
+        val batchedReconciled = reconcileAgentEvents(allEvents)
+        assertEquals(perEvent.map { it.id }, batchedReconciled.map { it.id })
+    }
+
+    private fun buildMixedConversationBurst(turns: Int): List<ConversationEvent> = buildList {
+        repeat(turns) { turn ->
+            val prompt = "do task $turn"
+            // Optimistic placeholder, as sendToAgent would insert it.
+            add(
+                ConversationEvent.Message(
+                    id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}$turn",
+                    agent = AgentKind.Codex,
+                    role = ConversationRole.User,
+                    text = prompt,
+                    sendState = MessageSendState.Pending,
+                ),
+            )
+            // Its authoritative twin arriving via the tail.
+            add(
+                ConversationEvent.Message(
+                    id = "real-user-$turn",
+                    agent = AgentKind.Codex,
+                    role = ConversationRole.User,
+                    text = prompt,
+                ),
+            )
+            // A tool call + result.
+            add(
+                ConversationEvent.ToolCall(
+                    id = "tool-$turn",
+                    agent = AgentKind.Codex,
+                    name = "Bash",
+                    input = "run $turn",
+                ),
+            )
+            add(
+                ConversationEvent.ToolResult(
+                    id = "result-$turn",
+                    agent = AgentKind.Codex,
+                    toolCallId = "tool-$turn",
+                    output = "output $turn",
+                ),
+            )
+            // Assistant prose.
+            add(
+                ConversationEvent.Message(
+                    id = "assistant-$turn",
+                    agent = AgentKind.Codex,
+                    role = ConversationRole.Assistant,
+                    text = "answer $turn",
+                ),
+            )
+        }
     }
 
     @Test

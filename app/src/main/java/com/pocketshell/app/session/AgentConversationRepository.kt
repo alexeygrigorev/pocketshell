@@ -92,6 +92,22 @@ internal fun reconcileAgentEvents(
 ): List<ConversationEvent> {
     if (events.isEmpty()) return events
     val byId = LinkedHashMap<String, ConversationEvent>()
+    // Issue #576: optimistic-turn reconciliation is kept O(1) per event
+    // by indexing the live optimistic user turns by their text instead of
+    // re-scanning the whole accumulator (`byId.entries.firstOrNull`) on
+    // every real user message. A Codex `/new` replay feeds thousands of
+    // tail lines through this reconcile; the old nested scan made each
+    // pass O(window x map), so a burst was effectively O(N^2) inside one
+    // reconcile (and O(N^3) across the unbatched per-line ingest). The
+    // index makes the whole pass linear in the window size.
+    //
+    // The index maps optimistic user-message TEXT -> a FIFO queue of the
+    // ids that produced it, in insertion order. That reproduces the prior
+    // `firstOrNull` semantics exactly: when a real user message arrives we
+    // collapse the OLDEST still-live optimistic turn with the same text
+    // (back-to-back duplicate prompts each mint their own nanoTime-tagged
+    // id, so a single real arrival only collapses one of them).
+    val optimisticIdsByText = HashMap<String, ArrayDeque<String>>()
     // Mirror the pre-existing safety net: never inspect more than
     // 2 * maxEvents historic rows on a single reconcile call (callers
     // append new events at the tail; older events have already been
@@ -105,18 +121,36 @@ internal fun reconcileAgentEvents(
             event.role == ConversationRole.User &&
             !event.isOptimistic()
         ) {
-            // Drop any prior optimistic entry with matching text.
-            val matchingOptimistic = byId.entries.firstOrNull { (_, candidate) ->
-                candidate is ConversationEvent.Message &&
-                    candidate.role == ConversationRole.User &&
-                    candidate.isOptimistic() &&
-                    candidate.text == event.text
-            }
-            if (matchingOptimistic != null) {
-                byId.remove(matchingOptimistic.key)
+            // Drop the oldest prior optimistic entry with matching text.
+            // The text index can carry stale ids (an optimistic turn that
+            // was already overwritten by an id-dedup replace), so skip any
+            // id that is no longer a live matching optimistic turn before
+            // committing to a removal — preserving the exact "first live
+            // match wins" behaviour of the previous linear scan.
+            val queue = optimisticIdsByText[event.text]
+            if (queue != null) {
+                while (queue.isNotEmpty()) {
+                    val candidateId = queue.removeFirst()
+                    val candidate = byId[candidateId]
+                    if (candidate is ConversationEvent.Message &&
+                        candidate.role == ConversationRole.User &&
+                        candidate.isOptimistic() &&
+                        candidate.text == event.text
+                    ) {
+                        byId.remove(candidateId)
+                        break
+                    }
+                }
+                if (queue.isEmpty()) optimisticIdsByText.remove(event.text)
             }
         }
         byId[event.id] = event
+        if (event is ConversationEvent.Message &&
+            event.role == ConversationRole.User &&
+            event.isOptimistic()
+        ) {
+            optimisticIdsByText.getOrPut(event.text) { ArrayDeque() }.addLast(event.id)
+        }
     }
     return byId.values.toList().takeLastPreservingMessages(maxEvents)
 }
@@ -219,6 +253,15 @@ internal class AgentConversationRepository(
     private val detector: AgentDetector = AgentDetector(),
     private val tailScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val openCodePollIntervalMillis: Long = 2_000L,
+    /**
+     * Issue #576: coalescing window for the batched JSONL tail
+     * ([tailEventsBatchedFromLine]). Parsed events that arrive within this
+     * window are flushed as ONE batch to the caller, so a Codex `/new`
+     * replay of thousands of lines collapses into a handful of
+     * reconcile/emit cycles instead of one per line. Kept small so the
+     * normal one-line-at-a-time live stream still feels immediate.
+     */
+    private val tailBatchWindowMillis: Long = 60L,
 ) {
     suspend fun detect(
         session: SshSession,
@@ -670,6 +713,138 @@ internal class AgentConversationRepository(
             null
         } catch (_: IOException) {
             null
+        }
+    }
+
+    /**
+     * Issue #576: batched / debounced variant of [tailEventsFromLine].
+     *
+     * A Codex `/new` (or any large JSONL replay) rewrites the rollout file
+     * with thousands of lines; the per-line [tailEventsFromLine] fires its
+     * callback once per parsed event, so the conversation feed runs N
+     * reconcile passes and N StateFlow emissions for a single burst — an
+     * O(N^3)/N-emit storm that starves the device. This variant coalesces
+     * the events that arrive within [tailBatchWindowMillis] into ONE
+     * [onEvents] callback, so the burst collapses to a handful of
+     * reconcile + emit cycles. The final event set, order, and dedup are
+     * identical to feeding every event one at a time — the reconcile pass
+     * in [reconcileAgentEvents] is order-preserving and idempotent over
+     * batch boundaries, so `[a],[b],[c]` and `[a,b,c]` reconcile to the
+     * same list.
+     *
+     * The returned [Job] owns both the underlying tail and the drain
+     * coroutine; cancelling it stops both and flushes nothing further.
+     */
+    fun tailEventsBatchedFromLine(
+        session: SshSession,
+        detection: AgentDetection,
+        fromLineExclusive: Long,
+        onEvents: (List<ConversationEvent>) -> Unit,
+    ): Job? {
+        if (detection.isOpenCodeSqlite()) {
+            // OpenCode already produces a coherent per-poll snapshot; emit
+            // each poll's new rows as a single batch instead of per row so
+            // a large snapshot still costs one reconcile/emit per cycle.
+            return tailEventsFromLineOpenCodeBatched(session, detection, onEvents)
+        }
+        val parser = parserFor(detection.agent) ?: return null
+
+        // Buffer parsed events arriving from the tail reader and flush them
+        // on a short debounce window. The buffer is guarded by its own
+        // monitor because the tail callback runs on the SSH reader thread
+        // while the drain runs on [tailScope].
+        val pending = ArrayList<ConversationEvent>()
+        val lock = Any()
+
+        val drainJob = tailScope.launch {
+            while (isActive) {
+                delay(tailBatchWindowMillis)
+                val batch = synchronized(lock) {
+                    if (pending.isEmpty()) {
+                        null
+                    } else {
+                        ArrayList(pending).also { pending.clear() }
+                    }
+                }
+                if (batch != null) onEvents(batch)
+            }
+        }
+
+        val tailJob = try {
+            session.tail(detection.sourcePath, fromLineExclusive) { line ->
+                val parsed = parser.parseLine(line)
+                if (parsed.isNotEmpty()) {
+                    synchronized(lock) { pending.addAll(parsed) }
+                }
+            }
+        } catch (_: SshException) {
+            drainJob.cancel()
+            return null
+        } catch (_: IOException) {
+            drainJob.cancel()
+            return null
+        }
+
+        // Tie the two together: cancelling the umbrella job cancels both,
+        // and either one completing on its own tears the other down. A
+        // final synchronous flush on cancellation would race the reader, so
+        // any residue that lands after the last drain tick is intentionally
+        // dropped — the conversation feed is reseeded from the initial read
+        // on the next attach, and the tail bound trims replay surplus
+        // anyway.
+        val umbrella = Job()
+        drainJob.invokeOnCompletion { umbrella.cancel() }
+        tailJob.invokeOnCompletion { umbrella.cancel() }
+        umbrella.invokeOnCompletion {
+            drainJob.cancel()
+            tailJob.cancel()
+        }
+        return umbrella
+    }
+
+    private fun tailEventsFromLineOpenCodeBatched(
+        session: SshSession,
+        detection: AgentDetection,
+        onEvents: (List<ConversationEvent>) -> Unit,
+    ): Job? {
+        val sessionId = openCodeSessionId(detection) ?: return null
+        return tailScope.launch {
+            val reader = OpenCodeReader()
+            val emittedEvents = linkedMapOf<String, ConversationEvent>()
+            while (isActive) {
+                val output = try {
+                    exportOpenCodeSqliteRows(
+                        session = session,
+                        detection = detection,
+                        sessionId = sessionId,
+                        maxMessages = DEFAULT_MAX_AGENT_EVENTS * 2,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: SshException) {
+                    return@launch
+                } catch (_: IOException) {
+                    return@launch
+                }
+                val snapshotEvents = reader.parseSqliteJsonRows(output)
+                val snapshotIds = snapshotEvents.mapTo(mutableSetOf()) { it.id }
+                val batch = ArrayList<ConversationEvent>()
+                snapshotEvents.forEach { event ->
+                    if (emittedEvents[event.id] != event) {
+                        emittedEvents.remove(event.id)
+                        emittedEvents[event.id] = event
+                        batch += event
+                    }
+                }
+                if (batch.isNotEmpty()) onEvents(batch)
+                val iterator = emittedEvents.entries.iterator()
+                while (iterator.hasNext()) {
+                    if (iterator.next().key !in snapshotIds) {
+                        iterator.remove()
+                    }
+                }
+                delay(openCodePollIntervalMillis)
+            }
         }
     }
 

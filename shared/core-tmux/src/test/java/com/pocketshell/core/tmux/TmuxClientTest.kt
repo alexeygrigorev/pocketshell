@@ -449,6 +449,95 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `sendChainedCommands writes one chained line and drains both blocks in order`() = runBlocking {
+        // Issue #692: the folder-list discovery probe fetches list-sessions +
+        // list-panes in ONE control-mode round-trip. tmux -CC answers a
+        // `cmd1 ; cmd2` request with TWO separate begin/end blocks, so the
+        // client must write ONE chained line and correlate both blocks under a
+        // single single-flight acquisition, returning one response per command
+        // in submission order.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val result = scope.async {
+                client.sendChainedCommands(listOf("list-sessions", "list-panes -a"))
+            }
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            // Exactly ONE chained line on the wire (one round-trip).
+            assertEquals("list-sessions ; list-panes -a\n", shell.stdinAsString())
+
+            // tmux answers with two sequential blocks in submission order.
+            shell.feed(
+                "%begin 1700000000 20 0\n" +
+                    "sess-a\n" +
+                    "sess-b\n" +
+                    "%end 1700000000 20 0\n" +
+                    "%begin 1700000000 21 0\n" +
+                    "pane-a\n" +
+                    "%end 1700000000 21 0\n",
+            )
+
+            val responses = withTimeout(3_000) { result.await() }
+            assertEquals(2, responses.size)
+            assertFalse(responses[0].isError)
+            assertEquals(listOf("sess-a", "sess-b"), responses[0].output)
+            assertFalse(responses[1].isError)
+            assertEquals(listOf("pane-a"), responses[1].output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendChainedCommands degrades trailing block to error when it never returns`() = runBlocking {
+        // Issue #692: a slow/absent trailing block (the best-effort list-panes
+        // half) must NOT fail the whole enumeration — it degrades to an error
+        // response so the caller falls back to session_path cwd, while the
+        // first block (list-sessions) is still delivered.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 300L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val result = scope.async {
+                client.sendChainedCommands(listOf("list-sessions", "list-panes -a"))
+            }
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+
+            // Only the first block returns; the second never arrives.
+            shell.feed(
+                "%begin 1700000000 20 0\n" +
+                    "sess-a\n" +
+                    "%end 1700000000 20 0\n",
+            )
+
+            val responses = withTimeout(3_000) { result.await() }
+            assertEquals(2, responses.size)
+            assertFalse(responses[0].isError)
+            assertEquals(listOf("sess-a"), responses[0].output)
+            assertTrue("trailing block must degrade to an error response", responses[1].isError)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `setWindowSizeLatest sends window option command and shell-quotes target`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

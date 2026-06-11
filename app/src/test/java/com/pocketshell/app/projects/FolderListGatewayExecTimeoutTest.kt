@@ -87,9 +87,16 @@ class FolderListGatewayExecTimeoutTest {
             "healthy sub-second enumeration must succeed, got $result",
             result is FolderListResult.Sessions,
         )
+        // Issue #692: the enumeration is now ONE chained exec (list-sessions +
+        // marker + list-panes) so the first exec is the chained command, with
+        // the list-sessions probe as its leading section.
         assertEquals(
-            "the list-sessions probe is the first exec on the healthy path",
-            ReposRemoteSource.pathAwareCommand(SshFolderListGateway.LIST_SESSIONS_COMMAND),
+            "the chained enumeration probe is the first exec on the healthy path",
+            ReposRemoteSource.pathAwareCommand(
+                "${SshFolderListGateway.LIST_SESSIONS_COMMAND} ; " +
+                    "printf '%s\\n' ${SshFolderListGateway.ENUMERATION_MARKER} ; " +
+                    SshFolderListGateway.LIST_PANES_COMMAND,
+            ),
             session.execCommands.first(),
         )
     }

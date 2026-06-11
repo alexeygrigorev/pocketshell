@@ -327,8 +327,21 @@ class SshFolderListGateway internal constructor(
         passphrase: CharArray?,
         watchedRoots: List<ProjectRootEntity>,
     ): FolderListResult {
-        if (watchedRoots.isEmpty()) {
-            listSessionsWithFolderFromLiveClient(host, keyPath)?.let { return it }
+        // Issue #692: reuse the live `-CC` control client for the
+        // session/pane ENUMERATION whenever one is connected — even when
+        // watched roots are configured. The enumeration is the picker-gating
+        // probe (issue #470), and serving it from the already-open control
+        // channel in ONE batched round-trip (`list-sessions` + `list-panes`
+        // chained, see [TmuxClient.sendChainedCommands]) avoids dialing a
+        // fresh multi-exec SSH lease and paying 2 serial exec round-trips on
+        // every poll. When no watched roots exist this is the WHOLE result;
+        // when roots exist we only open a lease for the (app-cached, optional)
+        // watched-root expansion and merge it onto the live-client rows,
+        // instead of re-running list-sessions/list-panes/agent-detect over the
+        // lease.
+        val liveRows = listSessionRowsFromLiveClient(host, keyPath)
+        if (liveRows != null && watchedRoots.isEmpty()) {
+            return FolderListResult.Sessions(rows = liveRows)
         }
 
         return try {
@@ -337,8 +350,36 @@ class SshFolderListGateway internal constructor(
                 keyPath = keyPath,
                 passphrase = passphrase,
             ) { session ->
-                val listSessions = session.execBounded(pathAware(LIST_SESSIONS_COMMAND))
-                listSessionsFromNativeOrPocketshell(session, host, watchedRoots, listSessions)
+                if (liveRows != null) {
+                    // Live client already enumerated the sessions/panes in one
+                    // control-mode round-trip, so the lease is used for the
+                    // watched-root expansion (project folders, history, ports)
+                    // — NOT a second list-sessions/list-panes pair. Issue #252's
+                    // per-session agent detection still runs over the lease and
+                    // is merged onto the live-client rows so the chips do not
+                    // regress just because a control client is attached (the
+                    // control channel can't run the host-wide ps/candidate scan
+                    // the detector needs).
+                    val annotated = annotateAgentKinds(session, liveRows)
+                    sessionsWithWatchedRootExpansion(
+                        session = session,
+                        host = host,
+                        watchedRoots = watchedRoots,
+                        rows = annotated,
+                    )
+                } else {
+                    // No live client: batch `list-sessions` + `list-panes` into
+                    // a single chained shell exec so the lease pays ONE
+                    // enumeration round-trip instead of two serial ones.
+                    val enumeration = execEnumeration(session)
+                    listSessionsFromNativeOrPocketshell(
+                        session = session,
+                        host = host,
+                        watchedRoots = watchedRoots,
+                        listSessions = enumeration.listSessions,
+                        listPanes = enumeration.listPanes,
+                    )
+                }
             }.fold(
                 onSuccess = { it },
                 onFailure = { error -> FolderListResult.ConnectFailed(error) },
@@ -349,6 +390,53 @@ class SshFolderListGateway internal constructor(
             FolderListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
         }
     }
+
+    /**
+     * Issue #692: run `list-sessions` + `list-panes` as ONE chained shell
+     * exec over the lease, split the two sections apart, and surface each as
+     * a separate [ExecResult]. tmux writes both blocks to stdout; we delimit
+     * them with a unique marker line printed between the two commands so the
+     * single round-trip can be parsed back into the two probes the native
+     * path expects. The `list-panes` half is best-effort — a marker-less or
+     * truncated read degrades to a blank panes section (the caller already
+     * tolerates an empty panes result), never to a wrong session list.
+     */
+    private suspend fun execEnumeration(session: SshSession): LeaseEnumeration {
+        val chained =
+            "$LIST_SESSIONS_COMMAND ; printf '%s\\n' $ENUMERATION_MARKER ; $LIST_PANES_COMMAND"
+        val result = session.execBounded(pathAware(chained))
+        // A non-zero exit (tmux missing / no server) is reported through the
+        // list-sessions half so the existing fallbacks (pocketshell, tmux
+        // absent) still trigger. The marker split is applied to stdout only.
+        val markerIndex = result.stdout.indexOf("\n$ENUMERATION_MARKER\n")
+            .let { if (it >= 0) it else result.stdout.indexOf("$ENUMERATION_MARKER\n") }
+        return if (markerIndex < 0) {
+            // No marker: treat the whole stdout as the session list and skip
+            // panes (degrade to session_path cwd). Preserves exit code/stderr
+            // so the tmux-absent / pocketshell fallbacks still fire.
+            LeaseEnumeration(
+                listSessions = result,
+                listPanes = ExecResult(stdout = "", stderr = "", exitCode = 0),
+            )
+        } else {
+            val before = result.stdout.substring(0, markerIndex)
+            val afterStart = result.stdout.indexOf('\n', markerIndex + 1)
+            val after = if (afterStart >= 0) result.stdout.substring(afterStart + 1) else ""
+            LeaseEnumeration(
+                listSessions = ExecResult(
+                    stdout = before,
+                    stderr = result.stderr,
+                    exitCode = result.exitCode,
+                ),
+                listPanes = ExecResult(stdout = after, stderr = "", exitCode = 0),
+            )
+        }
+    }
+
+    private data class LeaseEnumeration(
+        val listSessions: ExecResult,
+        val listPanes: ExecResult,
+    )
 
     /**
      * Run a session-enumeration probe with a bounded read timeout.
@@ -642,6 +730,12 @@ class SshFolderListGateway internal constructor(
         host: HostEntity,
         watchedRoots: List<ProjectRootEntity>,
         listSessions: ExecResult,
+        // Issue #692: the `list-panes` half is fetched in the SAME chained
+        // enumeration round-trip as `list-sessions` (see [execEnumeration]) and
+        // handed in here, so this method never issues a second serial probe.
+        // Null preserves the old behaviour for callers (tests) that only have a
+        // list-sessions result — those re-fetch panes on demand.
+        listPanes: ExecResult? = null,
     ): FolderListResult {
         return when {
             listSessions.exitCode == 127 ||
@@ -665,8 +759,12 @@ class SshFolderListGateway internal constructor(
             else -> {
                 val baseRows = parseListSessionsRows(listSessions.stdout)
                 val windowRows = runCatching {
-                    val listPanes = session.execBounded(pathAware(LIST_PANES_COMMAND))
-                    if (listPanes.exitCode == 0) parseSessionWindowRows(listPanes.stdout) else emptyList()
+                    // Issue #692: prefer the list-panes section already fetched
+                    // in the chained enumeration round-trip; only fall back to a
+                    // separate probe when a caller passed null (legacy/tests).
+                    val panes = listPanes
+                        ?: session.execBounded(pathAware(LIST_PANES_COMMAND))
+                    if (panes.exitCode == 0) parseSessionWindowRows(panes.stdout) else emptyList()
                 }.getOrDefault(emptyList())
                 val paneRows = activePaneRowsBySession(windowRows)
                 val windowsBySession = windowRows.groupBy { it.sessionName }
@@ -681,27 +779,8 @@ class SshFolderListGateway internal constructor(
                 // Issue #252: per-session agent detection delegated to
                 // the Conversation view's detector
                 // (AgentConversationRepository.detectForPane) so the
-                // list chip and the Conversation tab agree. Each
-                // session is probed with its active pane's cwd, TTY,
-                // and foreground command. Sessions without a live
-                // agent stay on SessionAgentKind.Shell (the default).
-                val agentKinds = runCatching {
-                    detectAgentKinds(
-                        session = session,
-                        rows = merged,
-                    )
-                }.getOrDefault(FolderAgentDetection())
-
-                val annotated = merged.map { row ->
-                    val windows = row.windows.map { window ->
-                        val key = WindowProbeKey(row.sessionName, window.index)
-                        window.copy(agentKind = agentKinds.windowKinds[key] ?: SessionAgentKind.Shell)
-                    }
-                    row.copy(
-                        agentKind = agentKinds.sessionKinds[row.sessionName] ?: SessionAgentKind.Shell,
-                        windows = windows,
-                    )
-                }
+                // list chip and the Conversation tab agree.
+                val annotated = annotateAgentKinds(session, merged)
                 sessionsWithWatchedRootExpansion(
                     session = session,
                     host = host,
@@ -1025,6 +1104,33 @@ class SshFolderListGateway internal constructor(
     }
 
     /**
+     * Issue #252 / #692: run the constant-cost per-window agent detection
+     * over [session] and fold the result onto [rows]. Shared by the native
+     * lease path and the live-client + watched-root path so the agent chips
+     * are identical regardless of whether a `-CC` control client enumerated
+     * the rows. A detection failure degrades every row to
+     * [SessionAgentKind.Shell] rather than failing the list.
+     */
+    private suspend fun annotateAgentKinds(
+        session: SshSession,
+        rows: List<FolderSessionRow>,
+    ): List<FolderSessionRow> {
+        val agentKinds = runCatching {
+            detectAgentKinds(session = session, rows = rows)
+        }.getOrDefault(FolderAgentDetection())
+        return rows.map { row ->
+            val windows = row.windows.map { window ->
+                val key = WindowProbeKey(row.sessionName, window.index)
+                window.copy(agentKind = agentKinds.windowKinds[key] ?: SessionAgentKind.Shell)
+            }
+            row.copy(
+                agentKind = agentKinds.sessionKinds[row.sessionName] ?: SessionAgentKind.Shell,
+                windows = windows,
+            )
+        }
+    }
+
+    /**
      * Classify every session window's active pane by delegating to the
      * SAME detector the Conversation view uses. This keeps issue #252's
      * constant host-wide probe count while letting the project tree show
@@ -1100,35 +1206,49 @@ class SshFolderListGateway internal constructor(
 
     private fun shellQuote(value: String): String = shellQuoteValue(value)
 
-    private suspend fun listSessionsWithFolderFromLiveClient(
+    /**
+     * Issue #692: enumerate session + pane rows from the live `-CC` control
+     * client in ONE batched control-mode round-trip.
+     *
+     * Returns null when no matching live client is connected (the caller then
+     * opens an SSH lease) and when the enumeration errors (so the lease path
+     * can produce an accurate error). An EMPTY list is a valid result — it
+     * means a connected client with `no server running` (all sessions gone),
+     * which is distinct from "no client". The two probes (`list-sessions`,
+     * `list-panes`) are chained via [TmuxClient.sendChainedCommands] so the
+     * already-open channel pays a single wire round-trip instead of two
+     * serial commands.
+     */
+    private suspend fun listSessionRowsFromLiveClient(
         host: HostEntity,
         keyPath: String,
-    ): FolderListResult? {
+    ): List<FolderSessionRow>? {
         val entry = activeTmuxClients.clients.value[host.id]
             ?.takeIf { it.matches(host, keyPath) }
             ?.takeUnless { it.client.disconnected.value }
             ?: return null
         return try {
-            val listSessions = entry.client.sendCommand(CONTROL_LIST_SESSIONS_COMMAND)
+            val responses = entry.client.sendChainedCommands(
+                listOf(CONTROL_LIST_SESSIONS_COMMAND, CONTROL_LIST_PANES_COMMAND),
+            )
+            val listSessions = responses.getOrNull(0) ?: return null
+            val listPanes = responses.getOrNull(1)
             when {
                 listSessions.isError &&
                     listSessions.output.joinToString("\n").contains("no server running", ignoreCase = true) ->
-                    FolderListResult.Sessions(rows = emptyList())
+                    emptyList()
                 listSessions.isError -> null
                 else -> {
                     val baseRows = parseListSessionsRows(listSessions.output.joinToString(separator = "\n"))
-                    val windowRows = runCatching {
-                        val listPanes = entry.client.sendCommand(CONTROL_LIST_PANES_COMMAND)
-                        if (!listPanes.isError) {
-                            parseSessionWindowRows(listPanes.output.joinToString("\n"))
-                        } else {
-                            emptyList()
-                        }
-                    }.getOrDefault(emptyList())
+                    val windowRows = if (listPanes != null && !listPanes.isError) {
+                        parseSessionWindowRows(listPanes.output.joinToString("\n"))
+                    } else {
+                        emptyList()
+                    }
                     val paneRows = activePaneRowsBySession(windowRows)
                     val windowsBySession = windowRows.groupBy { it.sessionName }
 
-                    val rows = baseRows.map { row ->
+                    baseRows.map { row ->
                         val pane = paneRows[row.sessionName]
                         row.copy(
                             cwd = pane?.cwd ?: row.cwd,
@@ -1136,7 +1256,6 @@ class SshFolderListGateway internal constructor(
                             windows = windowsBySession[row.sessionName].orEmpty(),
                         )
                     }
-                    FolderListResult.Sessions(rows = rows)
                 }
             }
         } catch (e: CancellationException) {
@@ -1284,6 +1403,17 @@ class SshFolderListGateway internal constructor(
         // be parsed verbatim including the colons; degraded but not
         // wrong).
         const val FIELD_SEP: String = "::"
+
+        /**
+         * Issue #692: delimiter line printed between the chained
+         * `list-sessions` and `list-panes` output so the SINGLE enumeration
+         * exec round-trip ([execEnumeration]) can be split back into the two
+         * sections. Chosen to be unambiguous: it contains a `::` (the field
+         * separator, which never starts a session row) plus a sentinel token
+         * no tmux session name / path produces, so a stray match inside real
+         * output is implausible.
+         */
+        const val ENUMERATION_MARKER: String = "__pocketshell_enum_$FIELD_SEP@@"
 
         const val LIST_SESSIONS_COMMAND: String =
             "tmux list-sessions -F " +

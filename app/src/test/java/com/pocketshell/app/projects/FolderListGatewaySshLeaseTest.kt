@@ -45,24 +45,31 @@ class FolderListGatewaySshLeaseTest {
         assertTrue(second is FolderListResult.Sessions)
         assertEquals(1, connector.connectCount)
         assertFalse(session.closed)
+        // Issue #692: `list-sessions` + `list-panes` are now fetched in ONE
+        // chained shell exec (a single SSH round-trip) instead of two serial
+        // probes. The port scan is unchanged (3 commands inside PortScanner).
+        // Two polls => 2 enumeration round-trips + 2x3 port-scan = 8 execs
+        // (was 10 before the batch).
         assertEquals(
             listOf(
-                SshFolderListGateway.LIST_SESSIONS_COMMAND,
-                SshFolderListGateway.LIST_PANES_COMMAND,
+                ENUMERATION_COMMAND,
                 "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
                 "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
                 "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
-                SshFolderListGateway.LIST_SESSIONS_COMMAND,
-                SshFolderListGateway.LIST_PANES_COMMAND,
+                ENUMERATION_COMMAND,
                 "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
                 "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
                 "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
-            ).map { command ->
-                if (command.startsWith("tmux ")) ReposRemoteSource.pathAwareCommand(command) else command
-            },
+            ),
             session.execCommands,
         )
     }
+
+    private val ENUMERATION_COMMAND: String = ReposRemoteSource.pathAwareCommand(
+        "${SshFolderListGateway.LIST_SESSIONS_COMMAND} ; " +
+            "printf '%s\\n' ${SshFolderListGateway.ENUMERATION_MARKER} ; " +
+            SshFolderListGateway.LIST_PANES_COMMAND,
+    )
 
     @Test
     fun cancelledFolderPollReleasesLease() = runTest {

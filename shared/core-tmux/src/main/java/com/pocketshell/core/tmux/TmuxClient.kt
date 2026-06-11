@@ -158,6 +158,28 @@ public interface TmuxClient : AutoCloseable {
     }
 
     /**
+     * Issue #692: send several tmux control-mode commands as ONE chained
+     * `cmd1 ; cmd2 ; …` request and drain ALL of their `%begin` / (`%end` |
+     * `%error`) response blocks under a SINGLE single-flight acquisition,
+     * returning one [CommandResponse] per command in submission order.
+     *
+     * In `tmux -CC` control mode a chained `cmd1 ; cmd2` request is answered
+     * with N SEPARATE `%begin`/`%end` blocks — chaining does NOT collapse
+     * them — so a naive single [sendCommand] would see only the first block
+     * and leave the rest as uncorrelated late blocks. This generalises the
+     * [captureWithCursor] two-block drain so the folder-list discovery probe
+     * can fetch `list-sessions` + `list-panes` in ONE wire round-trip instead
+     * of two serial ones (the picker-gating enumeration behind issue #470).
+     *
+     * The returned list has the same size and order as [commands]. The
+     * default implementation falls back to issuing each command serially via
+     * [sendCommand] for [TmuxClient] doubles that do not model control-mode
+     * block correlation.
+     */
+    public suspend fun sendChainedCommands(commands: List<String>): List<CommandResponse> =
+        commands.map { sendCommand(it) }
+
+    /**
      * Subscribe to `%output` events for a single pane.
      *
      * Multiple callers may subscribe to the same pane — the underlying
@@ -695,6 +717,125 @@ internal class RealTmuxClient(
     ) {
         synchronized(responseCorrelationLock) {
             for (pending in listOf(capturePending, cursorPending)) {
+                val startedBlock = pending.commandNumber >= 0L
+                if (pendingQueue.remove(pending) && startedBlock) {
+                    staleResponseBlocksToIgnore += 1
+                }
+            }
+        }
+    }
+
+    /**
+     * Issue #692: chain N commands onto the wire under one [sendMutex]
+     * acquisition and drain all N `%begin`/`%end` blocks in FIFO order.
+     *
+     * Generalises [captureWithCursor]'s two-block drain: register one
+     * [PendingCommand] per command BEFORE the single chained write so no
+     * block can be lost if it arrives before the write returns, then await
+     * each block in submission order. Every block is best-effort: a slow /
+     * failed block degrades to an error [CommandResponse] so the caller can
+     * fall back per-section rather than failing the whole enumeration. This
+     * collapses the folder-list discovery `list-sessions` + `list-panes`
+     * pair into a single wire round-trip (the picker-gating enumeration
+     * behind #470).
+     */
+    override suspend fun sendChainedCommands(commands: List<String>): List<CommandResponse> {
+        if (commands.isEmpty()) return emptyList()
+        if (commands.size == 1) return listOf(sendCommand(commands.single()))
+        if (closed) throw TmuxClientException("client is closed")
+        if (!connected) throw TmuxClientException("client is not connected")
+        val chained = commands.joinToString(separator = " ; ")
+        return sendMutex.withLock {
+            if (closed) throw TmuxClientException("client is closed")
+            if (!connected) throw TmuxClientException("client is not connected")
+            val sh = shell ?: throw TmuxClientException("client has no active shell")
+
+            // Register every expected response block BEFORE writing so none
+            // can be lost if it arrives before the write returns. tmux answers
+            // the chained commands in submission order, so the pending entries
+            // correlate to the blocks one-for-one.
+            val pendings = commands.map { PendingCommand(deferred = CompletableDeferred()) }
+            synchronized(responseCorrelationLock) {
+                pendings.forEach { pendingQueue.offer(it) }
+            }
+
+            val writeResult = CompletableDeferred<Unit>()
+            val writeJob = clientScope.launch {
+                try {
+                    writeLine(sh.stdin, chained)
+                    writeResult.complete(Unit)
+                } catch (t: Throwable) {
+                    writeResult.completeExceptionally(t)
+                }
+            }
+            var writeCompleted = false
+
+            try {
+                val first = commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
+                    writeResult.await()
+                    writeCompleted = true
+                    checkpoint.writeCompleted()
+                    pendings.first().deferred.await()
+                } ?: run {
+                    cleanupChainedPending(pendings)
+                    writeJob.cancel()
+                    throw TmuxClientException(
+                        "tmux chained command (first block) timed out after ${commandTimeoutMs}ms",
+                    )
+                }
+
+                val responses = ArrayList<CommandResponse>(commands.size)
+                responses += first
+                // Remaining blocks are best-effort: a slow/absent block
+                // degrades to a synthetic error response (and is dropped from
+                // the queue so a late reply is treated as stale rather than
+                // mis-correlating with the next command on the wire).
+                for (pending in pendings.drop(1)) {
+                    val response = commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
+                        checkpoint.writeCompleted()
+                        pending.deferred.await()
+                    }
+                    if (response != null) {
+                        responses += response
+                    } else {
+                        synchronized(responseCorrelationLock) {
+                            val stillWaitingForBegin = pending.commandNumber < 0L
+                            if (pendingQueue.remove(pending) && stillWaitingForBegin) {
+                                staleResponseBlocksToIgnore += 1
+                            }
+                        }
+                        responses += CommandResponse(
+                            number = -1L,
+                            output = emptyList(),
+                            isError = true,
+                        )
+                    }
+                }
+                responses
+            } catch (t: Throwable) {
+                cleanupChainedPending(pendings)
+                writeJob.cancel()
+                if (!writeCompleted) {
+                    close()
+                    throw TmuxClientException(
+                        "failed to write tmux chained command: ${t.message}",
+                        t,
+                    )
+                }
+                throw t
+            }
+        }
+    }
+
+    /**
+     * Issue #692: remove every still-pending entry for a chained exchange,
+     * accounting for any block tmux has already begun (so its late `%end`
+     * drains as a stale block rather than mis-correlating with a later
+     * command). Mirrors [cleanupCaptureWithCursorPending] for N blocks.
+     */
+    private fun cleanupChainedPending(pendings: List<PendingCommand>) {
+        synchronized(responseCorrelationLock) {
+            for (pending in pendings) {
                 val startedBlock = pending.commandNumber >= 0L
                 if (pendingQueue.remove(pending) && startedBlock) {
                     staleResponseBlocksToIgnore += 1

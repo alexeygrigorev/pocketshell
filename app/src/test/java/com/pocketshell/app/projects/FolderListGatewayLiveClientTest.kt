@@ -6,13 +6,25 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
 import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.tmux.FakeTmuxClient
+import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
+import java.io.InputStream
 
 class FolderListGatewayLiveClientTest {
     private val activeTmuxClients = ActiveTmuxClients()
@@ -74,6 +86,106 @@ class FolderListGatewayLiveClientTest {
             ),
             client.sentCommands,
         )
+        // Issue #692: the two enumeration probes are sent as ONE chained batch
+        // (a single control-mode round-trip), not two serial sendCommand calls.
+        assertEquals(
+            listOf(
+                listOf(
+                    SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND,
+                    SshFolderListGateway.CONTROL_LIST_PANES_COMMAND,
+                ),
+            ),
+            client.chainedCommandBatches,
+        )
+    }
+
+    @Test
+    fun watchedRootsReuseLiveClientForEnumerationAndLeaseOnlyForExpansion() = runTest {
+        // Issue #692: with watched roots configured, the gateway STILL reuses
+        // the live -CC client for the session/pane enumeration (one chained
+        // round-trip) and opens the SSH lease ONLY for the watched-root
+        // expansion — it must NOT re-run list-sessions / list-panes over the
+        // lease. So the lease session never sees a `tmux list-sessions` exec.
+        val client = FakeTmuxClient()
+        client.responses += CommandResponse(
+            number = 1L,
+            output = listOf("git-cable-world::100::300::1::/home/testuser/git/cable-world"),
+            isError = false,
+        )
+        client.responses += CommandResponse(
+            number = 2L,
+            output = listOf(
+                "git-cable-world::0::shell::1::1::/home/testuser/git/cable-world::/dev/pts/1::sh",
+            ),
+            isError = false,
+        )
+        activeTmuxClients.register(
+            hostId = HOST.id,
+            hostName = HOST.name,
+            hostname = HOST.hostname,
+            port = HOST.port,
+            username = HOST.username,
+            keyPath = KEY_PATH,
+            client = client,
+        )
+        val leaseSession = RecordingSshSession()
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = SshLeaseManager(
+                connector = object : SshLeaseConnector {
+                    override suspend fun connect(target: SshLeaseTarget) = Result.success<SshSession>(leaseSession)
+                },
+                scope = this,
+                idleTtlMillis = 30_000L,
+            ),
+        )
+
+        val result = gateway.listSessionsWithFolder(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            watchedRoots = listOf(
+                ProjectRootEntity(id = 1L, hostId = HOST.id, label = "git", path = "/home/testuser/git"),
+            ),
+        )
+
+        val rows = (result as FolderListResult.Sessions).rows
+        // Rows come from the LIVE client enumeration (one chained batch).
+        assertEquals(listOf("git-cable-world"), rows.map { it.sessionName })
+        assertEquals(listOf("/home/testuser/git/cable-world"), rows.map { it.cwd })
+        assertEquals(
+            listOf(
+                listOf(
+                    SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND,
+                    SshFolderListGateway.CONTROL_LIST_PANES_COMMAND,
+                ),
+            ),
+            client.chainedCommandBatches,
+        )
+        // The lease did the watched-root expansion (repos/history/port scan)
+        // but NEVER re-enumerated tmux sessions/panes.
+        assertTrue(
+            "lease must not re-run tmux list-sessions when the live client enumerated; got ${leaseSession.execCommands}",
+            leaseSession.execCommands.none { it.contains("tmux list-sessions") || it.contains("tmux list-panes") },
+        )
+    }
+
+    private class RecordingSshSession : SshSession {
+        val execCommands: MutableList<String> = mutableListOf()
+        override val isConnected: Boolean = true
+        override suspend fun exec(command: String): ExecResult {
+            execCommands += command
+            return ExecResult(stdout = "", stderr = "", exitCode = 0)
+        }
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("not used")
+        override fun startShell(): SshShell = error("not used")
+        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
+        override suspend fun uploadStream(input: InputStream, length: Long, name: String, remotePath: String): String =
+            error("not used")
+        override fun close() = Unit
     }
 
     private companion object {

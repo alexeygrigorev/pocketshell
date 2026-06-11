@@ -172,6 +172,19 @@ internal class FakeTmuxClient(
         connectThrows?.let { throw it }
     }
 
+    /**
+     * Issue #692: records the chained-enumeration calls so tests can assert
+     * the live-client discovery probe batches `list-sessions` + `list-panes`
+     * into ONE round-trip. Each inner command still flows through
+     * [handleCommand] so canned [responses] are consumed in submission order.
+     */
+    val chainedCommandBatches: MutableList<List<String>> = mutableListOf()
+
+    override suspend fun sendChainedCommands(commands: List<String>): List<CommandResponse> {
+        chainedCommandBatches += commands
+        return commands.map { handleCommand(it, bestEffort = false) }
+    }
+
     override suspend fun sendCommand(cmd: String): CommandResponse =
         handleCommand(cmd, bestEffort = false)
 

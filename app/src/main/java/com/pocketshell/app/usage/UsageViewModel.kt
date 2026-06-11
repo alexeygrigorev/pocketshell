@@ -2,9 +2,9 @@ package com.pocketshell.app.usage
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -90,23 +90,25 @@ public sealed interface HostCachedUsage {
 
 /**
  * Production [HostUsageFetcher] backed by sshj. Resolves the host's SSH
- * key from disk and opens a short-lived session for the detect+fetch
- * exchange.
+ * key from disk and borrows a session from the app-wide warm SSH lease for
+ * the detect+fetch exchange.
  *
  * Skips passphrase-protected keys: the Usage screen does not own a
  * passphrase prompt today, and silently unlocking a key is not the right
  * call. Fix C may pass a passphrase through from an open session in
  * memory, but Fix A simply leaves the host out of the panel.
+ *
+ * Issue #699: each fetch borrows a reference-counted lease on the app-wide
+ * `@Singleton` [SshLeaseManager] (via [LeaseSessionExec]) keyed IDENTICALLY
+ * to the live session screens / folder discovery, so a usage read reuses the
+ * host's WARM transport instead of dialing a fresh ~3-4s SSH handshake. The
+ * lease is released — never closed — when the read returns.
  */
-internal fun interface SshHostUsageConnector {
-    suspend fun connect(host: HostEntity, keyFile: File): Result<SshSession>
-}
-
 public class SshHostUsageFetcher : HostUsageFetcher {
     private val sshKeyDao: SshKeyDao
     private val remoteSource: UsageRemoteSource
     private val resetEventsSource: UsageResetEventsRemoteSource
-    private val connector: SshHostUsageConnector
+    private val sshLeaseManager: SshLeaseManager
 
     // `UsageRemoteSource` carries a default-arg constructor that, combined
     // with its `@Inject` annotation, generates two constructors at the
@@ -114,48 +116,37 @@ public class SshHostUsageFetcher : HostUsageFetcher {
     // here keeps the source unmodified (out of scope for this issue) while
     // still letting Hilt own the `SshHostUsageFetcher` graph.
     @Inject
-    public constructor(sshKeyDao: SshKeyDao) : this(
+    public constructor(
+        sshKeyDao: SshKeyDao,
+        // Issue #699: inject the app-singleton lease manager so the usage
+        // detail read shares the SAME warm transport per host as the live
+        // session screens / folder discovery.
+        sshLeaseManager: SshLeaseManager,
+    ) : this(
         sshKeyDao = sshKeyDao,
         remoteSource = UsageRemoteSource(),
+        sshLeaseManager = sshLeaseManager,
         resetEventsSource = UsageResetEventsRemoteSource(),
-        connector = SshHostUsageConnector { host, keyFile ->
-            SshConnection.connect(
-                host = host.hostname,
-                port = host.port,
-                user = host.username,
-                key = SshKey.Path(keyFile),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-            )
-        },
     )
 
     internal constructor(
         sshKeyDao: SshKeyDao,
         remoteSource: UsageRemoteSource,
-        connector: SshHostUsageConnector,
+        sshLeaseManager: SshLeaseManager,
         resetEventsSource: UsageResetEventsRemoteSource = UsageResetEventsRemoteSource(),
     ) {
         this.sshKeyDao = sshKeyDao
         this.remoteSource = remoteSource
         this.resetEventsSource = resetEventsSource
-        this.connector = connector
+        this.sshLeaseManager = sshLeaseManager
     }
 
     override suspend fun fetch(host: HostEntity): HostUsageFetch {
         val key = sshKeyDao.getById(host.keyId) ?: return HostUsageFetch.Skipped
-        val keyFile = File(key.privateKeyPath)
-        if (!keyFile.exists()) return HostUsageFetch.Skipped
+        if (!File(key.privateKeyPath).exists()) return HostUsageFetch.Skipped
         if (key.hasPassphrase) return HostUsageFetch.Skipped
 
-        val session: SshSession = try {
-            connector.connect(host, keyFile).getOrNull() ?: return HostUsageFetch.Skipped
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            return HostUsageFetch.Skipped
-        }
-
-        return try {
+        return withSession(host, key.privateKeyPath, onFail = { HostUsageFetch.Skipped }) { session ->
             // Issue #490: the Usage DETAIL screen and the host-list SUMMARY
             // strip must agree. The summary's [UsageScheduler.fetchHostOverSsh]
             // calls [UsageRemoteSource.fetchUsage] DIRECTLY and infers
@@ -175,26 +166,15 @@ public class SshHostUsageFetcher : HostUsageFetcher {
                 UsageFetchResult.ToolMissing -> HostUsageFetch.ToolMissing
                 is UsageFetchResult.Failed -> HostUsageFetch.Failed(fetch.reason)
             }
-        } finally {
-            runCatching { session.close() }
         }
     }
 
     override suspend fun fetchCached(host: HostEntity): HostCachedUsage {
         val key = sshKeyDao.getById(host.keyId) ?: return HostCachedUsage.None
-        val keyFile = File(key.privateKeyPath)
-        if (!keyFile.exists()) return HostCachedUsage.None
+        if (!File(key.privateKeyPath).exists()) return HostCachedUsage.None
         if (key.hasPassphrase) return HostCachedUsage.None
 
-        val session: SshSession = try {
-            connector.connect(host, keyFile).getOrNull() ?: return HostCachedUsage.None
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            return HostCachedUsage.None
-        }
-
-        return try {
+        return withSession(host, key.privateKeyPath, onFail = { HostCachedUsage.None }) { session ->
             when (val cached = remoteSource.fetchCachedUsage(session, commandOverride = host.usageCommandOverride)) {
                 is CachedUsageResult.Hit -> HostCachedUsage.Hit(
                     records = cached.records,
@@ -203,31 +183,49 @@ public class SshHostUsageFetcher : HostUsageFetcher {
 
                 CachedUsageResult.Empty -> HostCachedUsage.None
             }
-        } finally {
-            runCatching { session.close() }
         }
     }
 
     override suspend fun fetchResetEvents(host: HostEntity): List<UsageResetEvent> {
         val key = sshKeyDao.getById(host.keyId) ?: return emptyList()
-        val keyFile = File(key.privateKeyPath)
-        if (!keyFile.exists()) return emptyList()
+        if (!File(key.privateKeyPath).exists()) return emptyList()
         if (key.hasPassphrase) return emptyList()
 
-        val session: SshSession = try {
-            connector.connect(host, keyFile).getOrNull() ?: return emptyList()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            return emptyList()
-        }
-
-        return try {
+        return withSession(host, key.privateKeyPath, onFail = { emptyList() }) { session ->
             resetEventsSource.fetchResetEvents(session)
-        } finally {
-            runCatching { session.close() }
         }
     }
+
+    /**
+     * Issue #699: borrow the host's WARM transport from the app-wide
+     * [SshLeaseManager] (reference-counted, released — never closed — when
+     * [block] returns) instead of dialing a fresh SSH handshake per usage read.
+     * The lease key is byte-identical to the live session screens' / folder
+     * discovery's, so the read reuses the pooled connection a warm session
+     * already holds. Any failure (connect OR exec) maps to [onFail] — the
+     * "skip this host" sentinel — matching the prior raw path's best-effort
+     * behavior. A stale-channel symptom heals + retries once inside
+     * [LeaseSessionExec]. Passphrase-protected keys are filtered out before
+     * this point, so the lease passphrase is always null.
+     */
+    private suspend fun <T> withSession(
+        host: HostEntity,
+        keyPath: String,
+        onFail: () -> T,
+        block: suspend (SshSession) -> T,
+    ): T =
+        LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = LeaseSessionTarget(
+                hostId = host.id,
+                hostname = host.hostname,
+                port = host.port,
+                username = host.username,
+                keyPath = keyPath,
+                passphrase = null,
+            ),
+            block = block,
+        ).getOrElse { onFail() }
 }
 
 /**

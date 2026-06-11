@@ -4,6 +4,9 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
@@ -550,13 +553,17 @@ class UsageViewModelTest {
                 ),
             ),
         )
+        val connector = CountingLeaseConnector(session)
         val fetcher = SshHostUsageFetcher(
             sshKeyDao = db.sshKeyDao(),
             remoteSource = UsageRemoteSource(),
-            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+            sshLeaseManager = leaseManagerFor(connector, this),
         )
 
         val result = fetcher.fetch(host)
+        // Issue #699: a SECOND read against the same host must reuse the warm
+        // transport — no second handshake — and must never close it.
+        fetcher.fetch(host)
 
         assertTrue(result is HostUsageFetch.Records)
         // #490: the detail fetcher no longer pre-gates on a separate detect
@@ -564,10 +571,11 @@ class UsageViewModelTest {
         // scheduler runs (here the per-host override, verbatim), so the two
         // surfaces can never disagree about "installed vs not".
         assertEquals(
-            listOf("mycorp-usage --json"),
+            listOf("mycorp-usage --json", "mycorp-usage --json"),
             session.recorded,
         )
-        assertTrue("session should be closed after fetch", session.closed)
+        assertEquals("two usage reads must share ONE warm transport", 1, connector.connectCount)
+        assertFalse("usage read must not close the shared warm transport", session.closed)
     }
 
     @Test
@@ -605,7 +613,7 @@ class UsageViewModelTest {
         val fetcher = SshHostUsageFetcher(
             sshKeyDao = db.sshKeyDao(),
             remoteSource = UsageRemoteSource(),
-            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+            sshLeaseManager = leaseManagerFor(CountingLeaseConnector(session), this),
         )
 
         val result = fetcher.fetch(host)
@@ -637,7 +645,7 @@ class UsageViewModelTest {
         val fetcher = SshHostUsageFetcher(
             sshKeyDao = db.sshKeyDao(),
             remoteSource = UsageRemoteSource(),
-            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+            sshLeaseManager = leaseManagerFor(CountingLeaseConnector(session), this),
         )
 
         val result = fetcher.fetch(host)
@@ -673,14 +681,17 @@ class UsageViewModelTest {
         val fetcher = SshHostUsageFetcher(
             sshKeyDao = db.sshKeyDao(),
             remoteSource = UsageRemoteSource(),
-            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+            sshLeaseManager = leaseManagerFor(CountingLeaseConnector(session), this),
         )
 
         val result = fetcher.fetch(host)
 
         assertTrue(result is HostUsageFetch.Failed)
         assertEquals("HTTP Error 401: Unauthorized", (result as HostUsageFetch.Failed).reason)
-        assertTrue("session should be closed after failure", session.closed)
+        // Issue #699: a usage-command FAILURE (non-zero exit) is a normal
+        // result, not a dead transport — the warm lease is released, never
+        // closed.
+        assertFalse("usage read must not close the shared warm transport", session.closed)
     }
 
     private class FakeFetcher(
@@ -788,6 +799,28 @@ class UsageViewModelTest {
             closed = true
         }
     }
+
+    /**
+     * Issue #699: a lease connector that counts real handshakes and always
+     * hands back [session]. Lets the fetcher tests assert that N usage reads
+     * pay exactly ONE connect (the warm transport is reused) and never close
+     * the shared session.
+     */
+    private class CountingLeaseConnector(
+        private val session: SshSession,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            connectCount += 1
+            return Result.success(session)
+        }
+    }
+
+    private fun leaseManagerFor(
+        connector: CountingLeaseConnector,
+        scope: kotlinx.coroutines.CoroutineScope,
+    ): SshLeaseManager =
+        SshLeaseManager(connector = connector, scope = scope, idleTtlMillis = 30_000L)
 
     @Suppress("unused")
     private fun ensureProviderRecordIsImported(): UsageProviderRecord? = null

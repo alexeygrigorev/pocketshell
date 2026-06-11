@@ -2,9 +2,9 @@ package com.pocketshell.app.projects
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -17,7 +17,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import javax.inject.Inject
 
 /**
@@ -63,6 +62,13 @@ import javax.inject.Inject
 @HiltViewModel
 class WatchedFoldersViewModel @Inject constructor(
     internal val projectRootDao: ProjectRootDao,
+    // Issue #699: borrow the host's WARM transport from the app-wide
+    // @Singleton SshLeaseManager (the SAME instance the live session screens /
+    // folder discovery use) for the "Discover from remote" probe instead of
+    // dialing a fresh ~3-4s SSH handshake. The lease key is byte-identical to
+    // those surfaces (`credentialId = "$hostId:$keyPath"`), so the discover
+    // probe reuses the pooled connection a warm session already holds.
+    private val sshLeaseManager: SshLeaseManager,
 ) : ViewModel() {
 
     private val _state: MutableStateFlow<WatchedFoldersUiState> =
@@ -208,7 +214,7 @@ class WatchedFoldersViewModel @Inject constructor(
      * call is a no-op and the screen shows the static hint instead.
      */
     fun discoverFromRemote() {
-        if (this.hostId == null) return
+        val hostId = this.hostId ?: return
         val creds = sshCredentials ?: run {
             _state.value = _state.value.copy(
                 feedback = "Open this host to enable discovery.",
@@ -218,7 +224,7 @@ class WatchedFoldersViewModel @Inject constructor(
         if (_state.value.discovering) return
         _state.value = _state.value.copy(discovering = true, discoverError = null)
         viewModelScope.launch {
-            val result = runCatching { runDiscover(creds) }
+            val result = runCatching { runDiscover(hostId, creds) }
             val candidates = result.getOrDefault(emptyList())
             _state.value = _state.value.copy(
                 discovering = false,
@@ -290,26 +296,35 @@ class WatchedFoldersViewModel @Inject constructor(
      * — we trim the trailing slash and derive the label from the last
      * path component.
      */
-    private suspend fun runDiscover(creds: SshCredentials): List<DiscoveredFolder> =
+    private suspend fun runDiscover(hostId: Long, creds: SshCredentials): List<DiscoveredFolder> =
         withContext(Dispatchers.IO) {
-            val session = SshConnection.connect(
-                host = creds.hostname,
-                port = creds.port,
-                user = creds.username,
-                key = SshKey.Path(File(creds.keyPath)),
-                passphrase = creds.passphrase,
-                knownHosts = KnownHostsPolicy.AcceptAll,
-            ).getOrThrow()
-            try {
+            // Issue #699: borrow the host's WARM transport from the app-wide
+            // [SshLeaseManager] (reference-counted, released — never closed —
+            // when the block returns) instead of dialing a fresh
+            // [com.pocketshell.core.ssh.SshConnection] per discover tap. The
+            // lease key is byte-identical to the session screens' / folder
+            // discovery's, so the probe reuses the pooled connection a warm
+            // session already holds. `getOrThrow()` preserves the prior
+            // throwing contract so `discoverFromRemote`'s `runCatching`
+            // surfaces a connect / exec failure in `discoverError`.
+            LeaseSessionExec.withSession(
+                leaseManager = sshLeaseManager,
+                target = LeaseSessionTarget(
+                    hostId = hostId,
+                    hostname = creds.hostname,
+                    port = creds.port,
+                    username = creds.username,
+                    keyPath = creds.keyPath,
+                    passphrase = creds.passphrase,
+                ),
+            ) { session ->
                 val result = session.exec(DISCOVER_COMMAND)
                 // We don't fail on non-zero exit: a missing ~/git tree
                 // makes `ls` exit 1 but stderr is redirected so we only
                 // see the empty stdout. That's a valid "no discoveries"
                 // outcome and should not raise.
                 parseDiscoverOutput(result.stdout)
-            } finally {
-                runCatching { session.close() }
-            }
+            }.getOrThrow()
         }
 
     /**

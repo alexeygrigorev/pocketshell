@@ -4,11 +4,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.app.startup.StartupTiming
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
-import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
@@ -96,6 +95,20 @@ public class UsageScheduler @Inject constructor(
     private val hostDao: HostDao,
     private val sshKeyDao: SshKeyDao,
     private val remoteSource: UsageRemoteSource,
+    // Issue #699: borrow the host's WARM transport from the app-wide
+    // @Singleton SshLeaseManager (the SAME instance the live session screens /
+    // folder discovery use) for each usage poll instead of dialing a fresh
+    // ~3-4s SSH handshake every cadence tick. The lease key is byte-identical
+    // to those surfaces (`credentialId = "$hostId:$keyPath"`), so a poll reuses
+    // the pooled connection a warm session already holds.
+    //
+    // Hilt injects the app-singleton binding on the production graph (the
+    // default value is ignored when Hilt provides the parameter); the default
+    // only serves the unit tests that construct the scheduler positionally and
+    // never reach the live SSH path (they stub `fetchHost`).
+    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
+        connector = com.pocketshell.core.ssh.DefaultSshLeaseConnector(),
+    ),
     private val usageNotifier: UsageNotifier = UsageNotifier.Noop,
 ) {
     /**
@@ -365,27 +378,32 @@ public class UsageScheduler @Inject constructor(
         // UsageViewModel does — the scheduler can't prompt the user.
         if (key.hasPassphrase) return null
 
-        val session: SshSession = try {
-            StartupTiming.markOnce(
-                "usage-ssh-connect-start",
-                "hostId" to host.id,
-                "host" to host.hostname,
-                "port" to host.port,
-            )
-            SshConnection.connect(
-                host = host.hostname,
+        StartupTiming.markOnce(
+            "usage-ssh-connect-start",
+            "hostId" to host.id,
+            "host" to host.hostname,
+            "port" to host.port,
+        )
+        // Issue #699: borrow the host's WARM transport from the app-wide
+        // [SshLeaseManager] (reference-counted, released — never closed —
+        // when the block returns) instead of dialing a fresh
+        // [com.pocketshell.core.ssh.SshConnection] per poll. The lease key is
+        // byte-identical to the live session screens' / folder discovery's, so
+        // the poll reuses the pooled connection a warm session already holds.
+        // Any failure (connect OR exec) yields null — best-effort, exactly as
+        // the prior raw path treated a failed connect — so one bad host never
+        // breaks the cadence round.
+        return LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = LeaseSessionTarget(
+                hostId = host.id,
+                hostname = host.hostname,
                 port = host.port,
-                user = host.username,
-                key = SshKey.Path(keyFile),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-            ).getOrNull() ?: return null
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            return null
-        }
-
-        return try {
+                username = host.username,
+                keyPath = key.privateKeyPath,
+                passphrase = null,
+            ),
+        ) { session ->
             when (val result = remoteSource.fetchUsage(session, commandOverride = host.usageCommandOverride)) {
                 is UsageFetchResult.Success -> UsageSnapshot.Records(
                     hostId = host.id,
@@ -408,9 +426,7 @@ public class UsageScheduler @Inject constructor(
                     fetchedAt = Instant.now(),
                 )
             }
-        } finally {
-            runCatching { session.close() }
-        }
+        }.getOrNull()
     }
 
     public companion object {

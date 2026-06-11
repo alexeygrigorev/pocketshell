@@ -6,9 +6,9 @@ import com.pocketshell.app.repos.RepoEntry
 import com.pocketshell.app.repos.RepoPathResult
 import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposRemoteSource
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import javax.inject.Inject
 
 /**
@@ -94,6 +93,13 @@ sealed interface RepoBrowserUiState {
 @HiltViewModel
 class RepoBrowserViewModel @Inject constructor(
     private val reposRemoteSource: ReposRemoteSource,
+    // Issue #699: borrow the host's WARM transport from the app-wide
+    // @Singleton SshLeaseManager (the SAME instance the live session screens /
+    // folder discovery use) instead of dialing a fresh ~3-4s SSH handshake per
+    // repo list / clone / open. The lease key is byte-identical to those
+    // surfaces (`credentialId = "$hostId:$keyPath"`), so a repo action reuses
+    // the pooled connection a warm session already holds.
+    private val sshLeaseManager: SshLeaseManager,
 ) : ViewModel() {
 
     private val _state: MutableStateFlow<RepoBrowserUiState> =
@@ -186,58 +192,96 @@ class RepoBrowserViewModel @Inject constructor(
         _state.value = ready.copy(pendingFullName = null, actionError = message)
     }
 
-    private suspend fun runLoad(creds: SshCredentials): RepoBrowserUiState {
-        val session = connect(creds) ?: return RepoBrowserUiState.Failed(
-            "Couldn't reach ${creds.hostname}.",
-        )
-        return try {
+    private suspend fun runLoad(creds: SshCredentials): RepoBrowserUiState =
+        withSession(
+            creds,
+            // A connect failure surfaces the same "Couldn't reach" banner the
+            // raw path showed; an in-block exec error keeps its "ClassName: msg"
+            // shape.
+            onConnectFail = { RepoBrowserUiState.Failed("Couldn't reach ${creds.hostname}.") },
+            onExecFail = { t ->
+                RepoBrowserUiState.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+            },
+        ) { session ->
+            // The remote + local enumeration runs over ONE borrowed lease
+            // session, so both `repos list` calls reuse the warm transport.
             val remote = reposRemoteSource.listRemote(session)
-            if (remote is ReposListResult.ToolMissing) return RepoBrowserUiState.ToolUnavailable
-            if (remote is ReposListResult.Failed) return RepoBrowserUiState.Failed(remote.reason)
-            val local = reposRemoteSource.listLocal(session)
-            if (local is ReposListResult.ToolMissing) return RepoBrowserUiState.ToolUnavailable
-            // A local-scan failure degrades gracefully — we still show the
-            // remote list, just without cloned-state for any repo whose
-            // clone the scan would have found.
-            val remoteRepos = (remote as ReposListResult.Success).repos
-            val localRepos = (local as? ReposListResult.Success)?.repos.orEmpty()
-            RepoBrowserUiState.Ready(repos = mergeRepos(remoteRepos, localRepos))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            RepoBrowserUiState.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
-        } finally {
-            runCatching { session.close() }
+            when {
+                remote is ReposListResult.ToolMissing -> RepoBrowserUiState.ToolUnavailable
+                remote is ReposListResult.Failed -> RepoBrowserUiState.Failed(remote.reason)
+                else -> {
+                    val local = reposRemoteSource.listLocal(session)
+                    if (local is ReposListResult.ToolMissing) {
+                        RepoBrowserUiState.ToolUnavailable
+                    } else {
+                        // A local-scan failure degrades gracefully — we still
+                        // show the remote list, just without cloned-state for
+                        // any repo whose clone the scan would have found.
+                        val remoteRepos = (remote as ReposListResult.Success).repos
+                        val localRepos = (local as? ReposListResult.Success)?.repos.orEmpty()
+                        RepoBrowserUiState.Ready(repos = mergeRepos(remoteRepos, localRepos))
+                    }
+                }
+            }
         }
-    }
 
-    private suspend fun runAction(creds: SshCredentials, row: RepoRow): RepoPathResult {
-        val session = connect(creds)
-            ?: return RepoPathResult.Failed("Couldn't reach ${creds.hostname}.")
-        return try {
+    private suspend fun runAction(creds: SshCredentials, row: RepoRow): RepoPathResult =
+        withSession(
+            creds,
+            onConnectFail = { RepoPathResult.Failed("Couldn't reach ${creds.hostname}.") },
+            onExecFail = { t ->
+                RepoPathResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+            },
+        ) { session ->
             if (row.cloned) {
                 reposRemoteSource.open(session, row.fullName)
             } else {
                 reposRemoteSource.clone(session, row.fullName, root = creds.cloneRoot)
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            RepoPathResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
-        } finally {
-            runCatching { session.close() }
+        }
+
+    /**
+     * Issue #699: borrow the host's WARM transport from the app-wide
+     * [SshLeaseManager] (reference-counted, released — never closed — when
+     * [block] returns) instead of dialing a fresh [com.pocketshell.core.ssh.SshConnection]
+     * per repo action. The lease key is byte-identical to the session screens'
+     * / folder discovery's, so a repo list / clone / open reuses the same
+     * pooled connection the user's session holds.
+     *
+     * [block] runs WITHOUT a swallowing try/catch so a stale-channel symptom
+     * propagates into [LeaseSessionExec], which evicts the poisoned transport
+     * and retries ONCE on a fresh lease. The final failure is then split:
+     * [onConnectFail] for a lease-acquire (connect) failure, [onExecFail] for
+     * an in-block exec error — preserving the raw path's distinct messages.
+     */
+    private suspend fun <T> withSession(
+        creds: SshCredentials,
+        onConnectFail: () -> T,
+        onExecFail: (Throwable) -> T,
+        block: suspend (SshSession) -> T,
+    ): T {
+        val target = LeaseSessionTarget(
+            hostId = creds.hostId,
+            hostname = creds.hostname,
+            port = creds.port,
+            username = creds.username,
+            keyPath = creds.keyPath,
+            passphrase = creds.passphrase,
+        )
+        var blockEntered = false
+        val result = LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = target,
+        ) { session ->
+            blockEntered = true
+            block(session)
+        }
+        return result.getOrElse { t ->
+            // A failure after the block ran is an exec error; a failure before
+            // it ran is a lease-acquire (connect) failure.
+            if (blockEntered) onExecFail(t) else onConnectFail()
         }
     }
-
-    private suspend fun connect(creds: SshCredentials): SshSession? =
-        SshConnection.connect(
-            host = creds.hostname,
-            port = creds.port,
-            user = creds.username,
-            key = SshKey.Path(File(creds.keyPath)),
-            passphrase = creds.passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrNull()
 
     override fun onCleared() {
         super.onCleared()
@@ -246,6 +290,11 @@ class RepoBrowserViewModel @Inject constructor(
     }
 
     data class SshCredentials(
+        // Issue #699: the host id is required to build the lease key
+        // (`credentialId = "$hostId:$keyPath"`) byte-identically to the live
+        // session screens / folder discovery so a repo action reuses the same
+        // warm transport.
+        val hostId: Long,
         val hostname: String,
         val port: Int,
         val username: String,
@@ -256,6 +305,7 @@ class RepoBrowserViewModel @Inject constructor(
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is SshCredentials) return false
+            if (hostId != other.hostId) return false
             if (hostname != other.hostname) return false
             if (port != other.port) return false
             if (username != other.username) return false
@@ -269,7 +319,8 @@ class RepoBrowserViewModel @Inject constructor(
         }
 
         override fun hashCode(): Int {
-            var result = hostname.hashCode()
+            var result = hostId.hashCode()
+            result = 31 * result + hostname.hashCode()
             result = 31 * result + port
             result = 31 * result + username.hashCode()
             result = 31 * result + keyPath.hashCode()

@@ -96,9 +96,10 @@ fun RepoBrowserScreen(
     sessionViewModel: FolderListViewModel = hiltViewModel(),
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
 ) {
-    LaunchedEffect(hostname, port, username, keyPath) {
+    LaunchedEffect(hostId, hostname, port, username, keyPath) {
         viewModel.bind(
             RepoBrowserViewModel.SshCredentials(
+                hostId = hostId,
                 hostname = hostname,
                 port = port,
                 username = username,

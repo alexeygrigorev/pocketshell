@@ -1,5 +1,7 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.core.ssh.DefaultSshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -32,6 +34,10 @@ class WatchedFoldersViewModelTest {
     private fun newVm(dao: ProjectRootDao = FakeProjectRootDao()): WatchedFoldersViewModel =
         WatchedFoldersViewModel(
             projectRootDao = dao,
+            // Issue #699: the unit tests cover the data-layer paths (bind,
+            // validation, dedupe, reorder, parser) and never reach the SSH
+            // discover probe, so a default lease manager is never dialed.
+            sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
         )
 
     @Test

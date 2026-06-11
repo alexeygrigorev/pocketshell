@@ -9,6 +9,8 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.settings.HostDetailViewMode
+import com.pocketshell.core.ssh.DefaultSshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -104,6 +106,7 @@ class WatchedFoldersE2eTest {
 
         val vm = WatchedFoldersViewModel(
             projectRootDao = dao,
+            sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
         )
 
         compose.setContent {
@@ -204,6 +207,7 @@ class WatchedFoldersE2eTest {
 
         val vm = WatchedFoldersViewModel(
             projectRootDao = dao,
+            sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
         )
 
         compose.setContent {
@@ -241,6 +245,7 @@ class WatchedFoldersE2eTest {
     fun hostDetailViewModeRowsDispatchPreferenceChanges(): Unit = runBlocking {
         val vm = WatchedFoldersViewModel(
             projectRootDao = db.projectRootDao(),
+            sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
         )
         var selected = HostDetailViewMode.Tree
 

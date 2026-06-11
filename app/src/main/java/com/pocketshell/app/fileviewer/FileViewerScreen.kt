@@ -98,6 +98,10 @@ const val FILE_VIEWER_COPY_ALL_TAG = "fileViewerCopyAll"
 // Issue #623 — "Save" action to download the remote file locally.
 const val FILE_VIEWER_SAVE_TAG = "fileViewerSave"
 
+// Issue #696 — text reading toggles: word wrap + Markdown render-vs-raw.
+const val FILE_VIEWER_WRAP_TAG = "fileViewerWrap"
+const val FILE_VIEWER_RENDER_MD_TAG = "fileViewerRenderMarkdown"
+
 // Issue #623 — download-only panel for unsupported file types (binary, archives, etc.).
 const val FILE_VIEWER_DOWNLOAD_ONLY_TAG = "fileViewerDownloadOnly"
 const val FILE_VIEWER_DOWNLOAD_BUTTON_TAG = "fileViewerDownloadButton"
@@ -141,11 +145,15 @@ fun FileViewerScreen(
         )
     }
     val state by viewModel.state.collectAsState()
+    val readingPrefs by viewModel.readingPrefs.collectAsState()
     FileViewerScaffold(
         hostName = hostName,
         state = state,
+        readingPrefs = readingPrefs,
         onBack = onBack,
         onRetry = viewModel::retry,
+        onToggleWordWrap = viewModel::toggleWordWrap,
+        onToggleRenderMarkdown = viewModel::toggleRenderMarkdown,
         modifier = modifier,
     )
 }
@@ -162,8 +170,15 @@ internal fun FileViewerScaffold(
     state: FileViewerUiState,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    readingPrefs: FileViewerReadingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
+    onToggleWordWrap: () -> Unit = {},
+    onToggleRenderMarkdown: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    // The wrap / Markdown-render toggles only apply to the text reading
+    // surface, so the app bar offers them only for a TextContent state.
+    val textState = state as? FileViewerUiState.TextContent
+    val isMarkdown = textState != null && MarkdownParser.isMarkdownPath(textState.displayPath)
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -177,10 +192,24 @@ internal fun FileViewerScaffold(
                 shareable = state.shareable(),
                 onBack = onBack,
             )
+            if (textState != null) {
+                TextReadingToggleBar(
+                    wordWrap = readingPrefs.wordWrap,
+                    showMarkdownToggle = isMarkdown,
+                    renderMarkdown = readingPrefs.renderMarkdown,
+                    onToggleWordWrap = onToggleWordWrap,
+                    onToggleRenderMarkdown = onToggleRenderMarkdown,
+                )
+            }
             when (state) {
                 is FileViewerUiState.Loading -> LoadingPanel()
                 is FileViewerUiState.Image -> ImagePanel(state.cacheFile)
-                is FileViewerUiState.TextContent -> TextPanel(state.content)
+                is FileViewerUiState.TextContent -> TextPanel(
+                    content = state.content,
+                    wordWrap = readingPrefs.wordWrap,
+                    isMarkdown = isMarkdown,
+                    renderMarkdown = readingPrefs.renderMarkdown,
+                )
                 is FileViewerUiState.Pdf -> PdfPanel(state.cacheFile)
                 is FileViewerUiState.Audio -> AudioPanel(state.cacheFile)
                 is FileViewerUiState.CannotPreview -> if (state.cacheFile != null) {
@@ -395,6 +424,76 @@ private fun FileViewerAppBar(
             }
         },
     )
+}
+
+/**
+ * Issue #696 — the text reading toggle strip shown directly under the header
+ * for a text file: a word-wrap toggle (always) and, for Markdown files, a
+ * render-vs-raw toggle. Kept as its own row (not crammed into the header
+ * trailing slot next to Save/Share/Copy) so every control stays fully visible
+ * and tappable rather than occluded when the header gets crowded.
+ */
+@Composable
+private fun TextReadingToggleBar(
+    wordWrap: Boolean,
+    showMarkdownToggle: Boolean,
+    renderMarkdown: Boolean,
+    onToggleWordWrap: () -> Unit,
+    onToggleRenderMarkdown: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Background)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = PocketShellSpacing.sm, vertical = PocketShellSpacing.xs),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+    ) {
+        ToggleChip(
+            label = if (wordWrap) "Wrap: on" else "Wrap: off",
+            active = wordWrap,
+            testTag = FILE_VIEWER_WRAP_TAG,
+            onClick = onToggleWordWrap,
+        )
+        if (showMarkdownToggle) {
+            ToggleChip(
+                label = if (renderMarkdown) "View: rendered" else "View: raw",
+                active = renderMarkdown,
+                testTag = FILE_VIEWER_RENDER_MD_TAG,
+                onClick = onToggleRenderMarkdown,
+            )
+        }
+    }
+}
+
+/** A compact pill toggle for the reading toggle bar (#696). */
+@Composable
+private fun ToggleChip(
+    label: String,
+    active: Boolean,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .height(PocketShellDensity.tapTargetMin)
+            .background(
+                color = if (active) PocketShellColors.SurfaceElev else PocketShellColors.Surface,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = PocketShellSpacing.sm)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (active) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Medium,
+        )
+    }
 }
 
 /** A compact text action button for the header trailing slot (#559). */
@@ -621,18 +720,38 @@ private fun ImagePanel(cacheFile: File) {
 }
 
 /**
- * Scrollable read-only monospace text view (vertical + horizontal scroll).
+ * Scrollable read-only text view.
  *
  * Issue #559: the reading surface is wrapped in a [SelectionContainer] so the
  * user can long-press to select an arbitrary range (and use the system
  * copy/share handles), and a one-tap "Copy all" action above it puts the whole
  * body on the clipboard as plain text.
+ *
+ * Issue #696: two reading modes drive what is rendered below the "Copy all"
+ * action.
+ *  - **Word wrap** ([wordWrap]) — when on, long lines wrap to the viewport;
+ *    when off, the monospace body keeps its own horizontal scroll so wide code
+ *    lines stay aligned. The whole surface always scrolls vertically.
+ *  - **Markdown** — when the file is Markdown ([isMarkdown]) and
+ *    [renderMarkdown] is on, the body renders as formatted Markdown
+ *    ([MarkdownView]); otherwise the raw source is shown in the monospace view.
+ *    Wrap still applies to the raw source view; the rendered Markdown view
+ *    always wraps (only its fenced code blocks scroll horizontally).
  */
 @Composable
-private fun TextPanel(content: String) {
+private fun TextPanel(
+    content: String,
+    wordWrap: Boolean,
+    isMarkdown: Boolean,
+    renderMarkdown: Boolean,
+) {
     val context = LocalContext.current
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
+    val showRenderedMarkdown = isMarkdown && renderMarkdown
+    val blocks = remember(content, showRenderedMarkdown) {
+        if (showRenderedMarkdown) MarkdownParser.parse(content) else emptyList()
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -665,15 +784,19 @@ private fun TextPanel(content: String) {
                 .verticalScroll(vScroll)
                 .testTag(FILE_VIEWER_TEXT_TAG),
         ) {
-            Text(
-                text = content,
-                color = PocketShellColors.TermText,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .horizontalScroll(hScroll)
-                    .padding(12.dp),
-            )
+            if (showRenderedMarkdown) {
+                MarkdownView(blocks = blocks)
+            } else {
+                Text(
+                    text = content,
+                    color = PocketShellColors.TermText,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .then(if (wordWrap) Modifier.fillMaxWidth() else Modifier.horizontalScroll(hScroll))
+                        .padding(12.dp),
+                )
+            }
         }
     }
 }

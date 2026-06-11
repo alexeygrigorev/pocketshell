@@ -23,6 +23,16 @@ import java.io.File
 import javax.inject.Inject
 
 /**
+ * Text-viewer reading preferences (issue #696). [wordWrap] wraps long lines to
+ * the viewport instead of horizontal scrolling; [renderMarkdown] shows a
+ * `.md`/`.markdown` file formatted instead of raw source.
+ */
+data class FileViewerReadingPrefs(
+    val wordWrap: Boolean,
+    val renderMarkdown: Boolean,
+)
+
+/**
  * UI state for the in-app file viewer (issue #497).
  */
 sealed interface FileViewerUiState {
@@ -102,6 +112,7 @@ sealed interface FileViewerUiState {
 @HiltViewModel
 class FileViewerViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
+    private val prefs: FileViewerPrefsStore = FileViewerPrefsStore(appContext),
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<FileViewerUiState>(
@@ -109,8 +120,35 @@ class FileViewerViewModel @Inject constructor(
     )
     val state: StateFlow<FileViewerUiState> = _state.asStateFlow()
 
+    /**
+     * Text-viewer reading preferences (issue #696): word wrap and whether
+     * Markdown renders formatted. Seeded from the persisted [FileViewerPrefsStore]
+     * so the choice survives navigation and restarts; toggling writes back.
+     */
+    private val _readingPrefs = MutableStateFlow(
+        FileViewerReadingPrefs(
+            wordWrap = prefs.isWordWrap(),
+            renderMarkdown = prefs.isRenderMarkdown(),
+        ),
+    )
+    val readingPrefs: StateFlow<FileViewerReadingPrefs> = _readingPrefs.asStateFlow()
+
     private var loadJob: Job? = null
     private var lastRequest: Request? = null
+
+    /** Toggle word wrap and persist the choice. */
+    fun toggleWordWrap() {
+        val next = !_readingPrefs.value.wordWrap
+        prefs.setWordWrap(next)
+        _readingPrefs.value = _readingPrefs.value.copy(wordWrap = next)
+    }
+
+    /** Toggle Markdown-rendered-vs-raw and persist the choice. */
+    fun toggleRenderMarkdown() {
+        val next = !_readingPrefs.value.renderMarkdown
+        prefs.setRenderMarkdown(next)
+        _readingPrefs.value = _readingPrefs.value.copy(renderMarkdown = next)
+    }
 
     /**
      * Bind to a host + path and fetch. Re-binding with the identical request

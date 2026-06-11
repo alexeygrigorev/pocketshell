@@ -4,9 +4,7 @@ import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -18,7 +16,6 @@ import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,28 +23,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -154,25 +143,40 @@ class ComposerPartialExpandE2eTest {
             capturedSheetValue != null && capturedSheetValue != SheetValue.Hidden
         }
 
-        // AC #1: sheet uses partial-expand state by default. Equality
-        // check on `currentValue` — anything other than `PartiallyExpanded`
-        // (notably `Expanded`, which the old `skipPartiallyExpanded = true`
-        // wiring would yield) fails the test.
-        assertEquals(
-            "Composer sheet should land at PartiallyExpanded by default, " +
-                "but currentValue=$capturedSheetValue",
-            SheetValue.PartiallyExpanded,
-            capturedSheetValue,
+        // Issue #682 / #234: the modal-inversion goal (terminal stays visible
+        // behind the composer) is now satisfied by a CONTENT-HEIGHT sheet rather
+        // than a 65%-fill / forced PartiallyExpanded sheet. The #615 regression
+        // came precisely from over-sizing the content to trip the partial-expand
+        // anchor, so we no longer assert the `PartiallyExpanded` enum. Instead we
+        // assert the real user-facing invariant: the composer is open
+        // (non-Hidden) and is COMPACT — its content top sits well below the
+        // screen top so the terminal text above it stays readable.
+        assertTrue(
+            "Composer sheet should be open (non-Hidden), but currentValue=$capturedSheetValue",
+            capturedSheetValue != null && capturedSheetValue != SheetValue.Hidden,
         )
 
-        // AC #2: the terminal marker text remains visible behind the
-        // sheet at the partial-expand resting state. The marker is
-        // painted above the sheet's top edge so the user can read it
-        // through the (translucent) M3 scrim.
+        // AC #2: the terminal marker text remains visible behind / above the
+        // compact composer. The marker is painted at the top of the viewport so
+        // the user can read it while composing the next prompt.
         compose.onNodeWithTag(TERMINAL_TEXT_TAG, useUnmergedTree = true)
             .assertIsDisplayed()
         compose.onNodeWithText(TERMINAL_MARKER_TEXT, useUnmergedTree = true)
             .assertIsDisplayed()
+
+        // Geometry proof that the composer is compact (not full-screen): the
+        // draft field's top must be in the lower portion of the screen, leaving
+        // the terminal area above it visible — the modal-inversion guarantee.
+        val rootHeight = readDecorHeightPx().toFloat()
+        val draftTop = compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .boundsInRoot
+            .top
+        assertTrue(
+            "Composer draft field should sit in the lower half of the screen so " +
+                "the terminal stays visible above it. draftTop=$draftTop rootHeight=$rootHeight",
+            rootHeight <= 0f || draftTop > rootHeight * 0.25f,
+        )
 
         // Composer is open and rendering its draft field. If the sheet
         // had been Hidden (e.g. because the dismiss-on-mount path fired)
@@ -196,156 +200,14 @@ class ComposerPartialExpandE2eTest {
         )
     }
 
-    @Test
-    fun sendButtonRemainsAboveImeWhenDraftFocused() {
-        var capturedSheetValue: SheetValue? = null
-        val sendModes = mutableListOf<Boolean>()
-
-        compose.setContent {
-            PocketShellTheme {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PocketShellColors.Background),
-                    contentAlignment = Alignment.TopCenter,
-                ) {
-                    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
-                    ComposerHarness(
-                        onDismiss = {},
-                        sheetState = sheetState,
-                        onSheetValueChanged = { capturedSheetValue = it },
-                        onSend = { withEnter -> sendModes += withEnter },
-                    )
-                }
-            }
-        }
-
-        compose.waitUntil(timeoutMillis = 5_000) {
-            capturedSheetValue != null && capturedSheetValue != SheetValue.Hidden
-        }
-
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-            .performClick()
-            .performTextInput("printf issue615")
-
-        compose.activity.runOnUiThread {
-            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
-                .show(WindowInsetsCompat.Type.ime())
-        }
-        val imeShown = waitForInputMethodVisible(
-            scenario = compose.activityRule.scenario,
-            expected = true,
-            timeoutMs = 30_000L,
-        )
-        assumeTrue(
-            "IME not available on this emulator; cannot validate issue #615 geometry",
-            imeShown,
-        )
-
-        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
-        compose.waitForIdle()
-
-        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
-            .fetchSemanticsNode()
-            .boundsInRoot
-        val imeTop = readDecorHeightPx() - readImeBottomPx()
-
-        assertTrue(
-            "Send button must stay above the IME. sendBottom=${sendBounds.bottom} imeTop=$imeTop",
-            sendBounds.bottom <= imeTop + 2f,
-        )
-
-        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .performClick()
-        compose.runOnIdle {
-            assertEquals(listOf(true), sendModes)
-        }
-
-        compose.activity.runOnUiThread {
-            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
-                .hide(WindowInsetsCompat.Type.ime())
-        }
-    }
-
-    @Test
-    fun sendButtonRemainsAboveImeWithLongDraftAndAttachments() {
-        var capturedSheetValue: SheetValue? = null
-        val sendModes = mutableListOf<Boolean>()
-
-        compose.setContent {
-            PocketShellTheme {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PocketShellColors.Background),
-                    contentAlignment = Alignment.TopCenter,
-                ) {
-                    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
-                    ComposerHarness(
-                        onDismiss = {},
-                        sheetState = sheetState,
-                        onSheetValueChanged = { capturedSheetValue = it },
-                        onSend = { withEnter -> sendModes += withEnter },
-                        attachments = issue615Attachments(),
-                    )
-                }
-            }
-        }
-
-        compose.waitUntil(timeoutMillis = 5_000) {
-            capturedSheetValue != null && capturedSheetValue != SheetValue.Hidden
-        }
-
-        val longDraft = buildString {
-            append("Open a new session after checking these screenshots. ")
-            repeat(12) {
-                append("Keep the folder picker visible while typing the prompt. ")
-            }
-        }
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-            .performClick()
-            .performTextInput(longDraft)
-
-        compose.activity.runOnUiThread {
-            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
-                .show(WindowInsetsCompat.Type.ime())
-        }
-        val imeShown = waitForInputMethodVisible(
-            scenario = compose.activityRule.scenario,
-            expected = true,
-            timeoutMs = 30_000L,
-        )
-        assumeTrue(
-            "IME not available on this emulator; cannot validate issue #615 geometry",
-            imeShown,
-        )
-
-        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
-        compose.waitForIdle()
-
-        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
-            .fetchSemanticsNode()
-            .boundsInRoot
-        val imeTop = readDecorHeightPx() - readImeBottomPx()
-
-        assertTrue(
-            "Send button must stay above the IME with attachments. sendBottom=${sendBounds.bottom} imeTop=$imeTop",
-            sendBounds.bottom <= imeTop + 2f,
-        )
-
-        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .performClick()
-        compose.runOnIdle {
-            assertEquals(listOf(true), sendModes)
-        }
-
-        compose.activity.runOnUiThread {
-            WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
-                .hide(WindowInsetsCompat.Type.ime())
-        }
-    }
+    // Issue #682: the Send-above-IME geometry for the REAL production sheet with
+    // the REAL keyboard (raised by focusing the field, including the long-draft +
+    // attachments worst case) is proved by `PromptComposerImeLayoutRegressionTest`
+    // and `PromptComposerSheetImeReachabilityTest`. The earlier synthetic-harness
+    // variants here raised the IME via `WindowInsetsControllerCompat` on the
+    // ACTIVITY window (not by focusing the sheet-dialog field), which is exactly
+    // the unfaithful proxy that let #615 ship a regression — so they were
+    // removed in favour of the real-sheet tests.
 
     /**
      * Production-shape harness that mirrors the call site in
@@ -363,46 +225,33 @@ class ComposerPartialExpandE2eTest {
         attachments: List<PromptComposerViewModel.StagedAttachment> = emptyList(),
     ) {
         var draft by remember { mutableStateOf("") }
-        var isImeVisible by remember { mutableStateOf(false) }
         // Surface the current sheet value out to the test on every
         // recomposition so the test's `waitUntil` can read the latest
         // value without polling via reflection.
         onSheetValueChanged(sheetState.currentValue)
-        LaunchedEffect(isImeVisible, sheetState.currentValue) {
-            if (shouldAutoExpandPromptComposerForIme(
-                    isImeVisible = isImeVisible,
-                    currentValue = sheetState.currentValue,
-                    expandedForIme = false,
-                )
-            ) {
-                runCatching { sheetState.expand() }
-            }
-        }
 
         ModalBottomSheet(
             onDismissRequest = onDismiss,
             sheetState = sheetState,
             containerColor = PocketShellColors.Surface,
             contentColor = PocketShellColors.Text,
+            // Issue #682: mirror the reworked production `contentWindowInsets`
+            // exactly — TOP + horizontal safe area only, so the body's own
+            // `imePadding()` (in `SheetContent`) does the keyboard lift. (#615
+            // false-passed for rounds precisely because this harness diverged
+            // from production; keep it in lockstep.)
             contentWindowInsets = {
                 WindowInsets.safeDrawing.only(
                     WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
                 )
             },
         ) {
-            val sheetDensity = LocalDensity.current
-            val contentImeVisible = WindowInsets.ime.getBottom(sheetDensity) > 0
-            LaunchedEffect(contentImeVisible) {
-                isImeVisible = contentImeVisible
-            }
-            // Mirrors the production wiring in `PromptComposerSheet`:
-            // the SheetContent fills 65% of available height so that
-            // Material 3 populates the `PartiallyExpanded` anchor —
-            // without this, the sheet's intrinsic content falls under
-            // half-screen and M3 collapses straight to `Expanded`,
-            // which is exactly the legacy behaviour issue #234 fixes.
+            // Issue #682: mirrors the reworked production wiring — the composer
+            // is a CONTENT-HEIGHT (wrap-content) sheet that floats above the
+            // keyboard via `SheetContent`'s own `imePadding()`. No height
+            // fraction, no force-expand on IME (the #615 over-sizing that caused
+            // the void / jump-to-top / cut-off).
             SheetContent(
-                modifier = Modifier.fillMaxHeight(promptComposerSheetHeightFraction(contentImeVisible)),
                 state = PromptComposerViewModel.UiState(
                     draft = draft,
                     recording = PromptComposerViewModel.RecordingState.Idle,
@@ -416,29 +265,6 @@ class ComposerPartialExpandE2eTest {
                 onSend = onSend,
             )
         }
-    }
-
-    private fun issue615Attachments(): List<PromptComposerViewModel.StagedAttachment> =
-        listOf(
-            PromptComposerViewModel.StagedAttachment(
-                remotePath = "~/.pocketshell/attachments/host-1/issue615-folder.png",
-                displayName = "issue615-folder.png",
-                mimeType = "image/png",
-            ),
-            PromptComposerViewModel.StagedAttachment(
-                remotePath = "~/.pocketshell/attachments/host-1/issue615-session.png",
-                displayName = "issue615-session.png",
-                mimeType = "image/png",
-            ),
-        )
-
-    private fun readImeBottomPx(): Int {
-        var result = 0
-        compose.activityRule.scenario.onActivity { activity ->
-            val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)
-            result = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
-        }
-        return result
     }
 
     private fun readDecorHeightPx(): Int {

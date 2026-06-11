@@ -20,22 +20,24 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
@@ -57,7 +59,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
-import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -66,11 +67,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -92,6 +91,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
@@ -106,12 +106,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -128,7 +125,6 @@ import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
@@ -196,41 +192,6 @@ public fun PromptComposerSheet(
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
     val context = LocalContext.current
-
-    // Issue #615: the soft keyboard occluded the Send action on real devices
-    // even though our isolated `ModalBottomSheet` harness passed. Root cause:
-    // the sheet hosts its content in its own dialog window and that window's
-    // `WindowInsets.ime` is unreliable on the maintainer's phone — when it
-    // reads 0, the height-fraction + auto-expand machinery never fires and the
-    // inner `.imePadding()` adds nothing, so the action row sits under the
-    // keyboard. We instead read the IME bottom from the HOST activity window's
-    // root insets (the same signal the proof helper + every layout-aware screen
-    // uses), which is reliable, and drive both the IME-visible state and the
-    // action-row lift off that host-window value. `hostImeBottomPx` is updated
-    // by an inset listener registered on the host decor view while the sheet is
-    // in composition (no background work; removed on dispose, D21-clean).
-    val hostView = LocalView.current
-    var hostImeBottomPx by remember { mutableIntStateOf(0) }
-    DisposableEffect(hostView) {
-        val decor = hostView.rootView
-        val listener = androidx.core.view.OnApplyWindowInsetsListener { _, insets ->
-            hostImeBottomPx = insets.getInsets(
-                WindowInsetsCompat.Type.ime(),
-            ).bottom
-            insets
-        }
-        ViewCompat.setOnApplyWindowInsetsListener(decor, listener)
-        // Seed from the current insets so a sheet that opens with the keyboard
-        // already up (rotation, re-open) lifts the action row immediately.
-        ViewCompat.getRootWindowInsets(decor)?.let { current ->
-            hostImeBottomPx = current.getInsets(WindowInsetsCompat.Type.ime()).bottom
-        }
-        ViewCompat.requestApplyInsets(decor)
-        onDispose {
-            ViewCompat.setOnApplyWindowInsetsListener(decor, null)
-        }
-    }
-    val isImeVisible = hostImeBottomPx > 0
 
     var showApiKeyDialog by remember { mutableStateOf(false) }
     // Issue #17: tracks whether the Snippets bottom sheet is currently
@@ -349,27 +310,6 @@ public fun PromptComposerSheet(
         viewModel.cancelRecording()
         onDismiss()
     }
-    var expandedForIme by remember { mutableStateOf(false) }
-    LaunchedEffect(isImeVisible, sheetState.currentValue) {
-        when {
-            shouldAutoExpandPromptComposerForIme(
-                isImeVisible = isImeVisible,
-                currentValue = sheetState.currentValue,
-                expandedForIme = expandedForIme,
-            ) -> {
-                if (runCatching { sheetState.expand() }.isSuccess) {
-                    expandedForIme = true
-                }
-            }
-            shouldRestorePromptComposerPartialAfterIme(
-                isImeVisible = isImeVisible,
-                expandedForIme = expandedForIme,
-            ) -> {
-                runCatching { sheetState.partialExpand() }
-                expandedForIme = false
-            }
-        }
-    }
 
     ModalBottomSheet(
         onDismissRequest = dismissComposer,
@@ -377,55 +317,39 @@ public fun PromptComposerSheet(
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
         modifier = modifier,
-        // Issue #615: the primary Send action must remain visible while the
-        // draft field owns focus and the IME is open. The sheet's own dialog
-        // window does not reliably report `WindowInsets.ime` on every device,
-        // so we deliberately do NOT depend on it here: keep the sheet's
-        // top/horizontal safe-area behavior and lift the sticky action row in
-        // `SheetContent` using the HOST-window IME inset (`hostImeBottomPx`)
-        // captured above.
+        // Issue #682: the composer is a CONTENT-HEIGHT (wrap-content) sheet that
+        // sits directly above the soft keyboard, like a normal chat composer.
+        //
+        // #615 reworked this into a fully-expanded sheet + a host-window IME
+        // inset read + an explicit `padding(bottom = hostImeBottomPx)` on the
+        // sheet body. That combination over-sized the sheet (`fillMaxHeight(1f)`
+        // when the IME was up) AND, because the IME padding was applied to the
+        // BODY rather than positioning the sheet, it grew the content height by
+        // the keyboard height — pushing the controls up to the top of the screen
+        // (the jump-to-top + cut-off) and opening a keyboard-height empty void
+        // BELOW them. It also force-expanded the sheet on focus.
+        //
+        // The fix (two parts, both in `SheetContent`):
+        //  - Keep the sheet's `contentWindowInsets` to the TOP + horizontal
+        //    safe area only, so the sheet content area is bottom-anchored to the
+        //    screen and the IME inset is still AVAILABLE to the content (M3 does
+        //    not reliably reposition a bottom sheet for the IME on its own).
+        //  - In `SheetContent`, lift the wrap-content body above the keyboard
+        //    with `imePadding()` AND cap the scrollable upper region to the space
+        //    that fits above the keyboard. Because the body is content-height and
+        //    capped (not full-screen), `imePadding()` floats it directly above
+        //    the IME with NO void / NO jump-to-top, and the cap keeps the sticky
+        //    Send row on-screen even with a long draft + attachment tiles (the
+        //    long-content cut-off). This is the opposite of #615, which applied
+        //    the IME padding to a FULL-HEIGHT body and so grew the content by the
+        //    keyboard height instead of lifting a compact one.
         contentWindowInsets = {
             WindowInsets.safeDrawing.only(
                 WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
             )
         },
     ) {
-        // Issue #615: convert the reliable host-window IME inset (px) into the
-        // Dp bottom padding the sticky action row needs to clear the keyboard.
-        val sheetDensity = LocalDensity.current
-        val contentImeVisible = isImeVisible
-        val imeBottomPadding = with(sheetDensity) { hostImeBottomPx.toDp() }
-        // Issue #234: force the sheet content to be tall enough that
-        // Material 3 actually populates the `PartiallyExpanded` anchor.
-        //
-        // M3 1.3.2's `ModalBottomSheet` only assigns a partial-expand
-        // anchor when the sheet's intrinsic content height is greater
-        // than half the screen height; otherwise the partial state is
-        // suppressed and the sheet lands at `Expanded` regardless of
-        // `skipPartiallyExpanded`. The composer's natural content
-        // (~300dp on a Pixel 7) sits well under that threshold, so
-        // without an explicit minimum we keep the legacy "always
-        // full-content / Expanded" behaviour and the AC #1 partial-
-        // expand resting state never fires.
-        //
-        // `fillMaxHeight(0.65f)` makes the sheet content 65% of the
-        // available height. That's tall enough on every phone in our
-        // supported range (Pixel 4 at 800dp → 65% = 520dp; Pixel 7 at
-        // 891dp → 65% = ~580dp) to trip the > halfHeight check, which
-        // means M3 will create the PartiallyExpanded anchor at
-        // `fullHeight / 2`. The sheet then rests at PartiallyExpanded
-        // by default, occupying the bottom ~50% of the screen and
-        // leaving the top ~50% scrim + visible terminal — the
-        // composer-modal-inversion fix the #191 UX audit asked for.
-        //
-        // Issues #567/#615: when the soft keyboard opens from the draft
-        // field, temporarily give the composer full-height sheet content and
-        // expand the sheet. The host-window IME padding below lifts the action
-        // row above the keyboard, and the extra measured height keeps the
-        // draft/status area from being crushed into a tiny strip.
         SheetContent(
-            modifier = Modifier.fillMaxHeight(promptComposerSheetHeightFraction(contentImeVisible)),
-            imeBottomPadding = imeBottomPadding,
             state = state,
             onClose = dismissComposer,
             onDraftChange = viewModel::onDraftChange,
@@ -530,22 +454,6 @@ public fun PromptComposerSheet(
     }
 }
 
-internal fun promptComposerSheetHeightFraction(isImeVisible: Boolean): Float =
-    if (isImeVisible) PromptComposerImeVisibleHeightFraction else PromptComposerRestingHeightFraction
-
-@OptIn(ExperimentalMaterial3Api::class)
-internal fun shouldAutoExpandPromptComposerForIme(
-    isImeVisible: Boolean,
-    currentValue: SheetValue,
-    expandedForIme: Boolean,
-): Boolean =
-    isImeVisible && !expandedForIme && currentValue == SheetValue.PartiallyExpanded
-
-internal fun shouldRestorePromptComposerPartialAfterIme(
-    isImeVisible: Boolean,
-    expandedForIme: Boolean,
-): Boolean = !isImeVisible && expandedForIme
-
 /**
  * Pure-renderer content for the sheet body. Pulled out of
  * [PromptComposerSheet] so the `@Preview`s can render the layout without
@@ -562,12 +470,6 @@ internal fun SheetContent(
     onMicTap: () -> Unit,
     onSend: (withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
-    // Issue #615: bottom padding to lift the sticky action row above the soft
-    // keyboard. Driven by the HOST activity window's IME inset (reliable across
-    // devices) rather than the sheet dialog window's `WindowInsets.ime`, which
-    // can read 0 on some devices and let Send slip under the keyboard. Defaults
-    // to 0.dp so previews/tests that host `SheetContent` directly are unaffected.
-    imeBottomPadding: Dp = 0.dp,
     onSnippets: (() -> Unit)? = null,
     onAttachFiles: (() -> Unit)? = null,
     // Issue #544/#566: remove a single staged attachment tile by remote path.
@@ -650,24 +552,29 @@ internal fun SheetContent(
     }
     val draftFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
-    // Issue #491: IME show/hide is driven off the click frame via a coroutine
-    // so a synchronous show()/hide() can never block the tap handler (or the
-    // test framework's main-thread idling). The visible-text commit that makes
-    // Send reliable does NOT depend on the IME call — it is the
-    // [onDraftChange] flush below — so even if the keyboard animation is
-    // mid-flight the send still carries the right text.
-    val imeScope = rememberCoroutineScope()
 
-    // Issue #491: the single Send path used by every Send affordance. Commit
-    // the live editor text (composing region included) into the ViewModel
-    // draft FIRST, then ask the ViewModel to dispatch. The commit is what
-    // makes a Send tap deliver even when the keyboard was never raised / Enter
-    // was never pressed; hiding the keyboard is a cosmetic follow-up dispatched
-    // off-frame.
+    // Issue #491 / #682: the single Send path used by every Send affordance.
+    //
+    // Order matters for the #682 "Send opens the keyboard" regression:
+    //
+    //  1. Flush the live editor text (composing region included) into the
+    //     ViewModel draft so the send always carries the visible text (#491).
+    //  2. Clear focus + hide the IME SYNCHRONOUSLY, BEFORE dispatching. The
+    //     dispatch (`onSend`) runs through the ViewModel -> `sendRequests` ->
+    //     host `onDismiss`, which tears this sheet (and its dialog window) out
+    //     of composition. If we hid the keyboard in a launched coroutine
+    //     (the old #491 behaviour), that coroutine could run AFTER the sheet's
+    //     `keyboardController` had already been disposed, so `hide()` no-op'd
+    //     and the keyboard stayed/bounced up. Clearing focus first means no
+    //     focused editor remains to re-request the IME on the way out; hiding
+    //     synchronously means it actually fires while the controller is alive.
+    //  3. Dispatch the send last.
+    val focusManager = LocalFocusManager.current
     val commitAndSend: () -> Unit = {
         onDraftChange(draftFieldValue.text)
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
         onSend(true)
-        imeScope.launch { keyboardController?.hide() }
     }
     val lockThresholdPx = with(LocalDensity.current) { MIC_LOCK_SWIPE_THRESHOLD_DP.dp.toPx() }
     val micStartSlopPx = with(LocalDensity.current) { MIC_GESTURE_START_SLOP_DP.dp.toPx() }
@@ -678,32 +585,56 @@ internal fun SheetContent(
     )
     var micBoundsInControlsRow by remember { mutableStateOf<Rect?>(null) }
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface)
-            // Issue #615: lift the whole composer (and therefore the sticky
-            // action row at the bottom) above the soft keyboard using the
-            // host-window IME inset. When the keyboard is up, the IME inset
-            // already extends to the bottom of the screen (it covers the nav
-            // bar), so we apply the IME padding INSTEAD of the nav-bar padding
-            // to avoid double-counting; when the keyboard is down we fall back
-            // to the nav-bar padding so the controls clear the system nav bar.
-            .then(
-                if (imeBottomPadding > 0.dp) {
-                    Modifier.padding(bottom = imeBottomPadding)
-                } else {
-                    Modifier.navigationBarsPadding()
-                },
-            )
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 26.dp),
-    ) {
+    // Issue #682: bound the composer body to the space ABOVE the keyboard and
+    // lift it there.
+    //
+    // `BoxWithConstraints.maxHeight` here is the sheet content area height
+    // (screen minus the status bar the `contentWindowInsets` reserved). We then
+    // subtract the live IME inset so `availableAboveKeyboard` is exactly the
+    // room left above the soft keyboard. The body:
+    //   - is `imePadding()`-lifted so it floats directly above the keyboard
+    //     (compact, no void — it works precisely because the body is bounded and
+    //     not full-height, unlike #615);
+    //   - is `heightIn(max = availableAboveKeyboard)` so a long draft + a stack
+    //     of attachment tiles can never grow the body past the keyboard top; the
+    //     scrollable upper region then absorbs the overflow and the sticky Send
+    //     row always stays on-screen above the IME (the long-content cut-off
+    //     symptom of #682).
+    val density = LocalDensity.current
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val imeBottomDp = with(density) { WindowInsets.ime.getBottom(this).toDp() }
+        val availableAboveKeyboard = (maxHeight - imeBottomDp).coerceAtLeast(0.dp)
         Column(
             modifier = Modifier
-                .weight(1f, fill = false)
-                .verticalScroll(rememberScrollState()),
+                .fillMaxWidth()
+                .heightIn(max = availableAboveKeyboard)
+                .background(PocketShellColors.Surface)
+                // Lift the whole (bounded, content-height) body above the soft
+                // keyboard, and clear the system navigation bar when the keyboard
+                // is down. `imePadding()` here lifts a COMPACT body — it does not
+                // grow a full-height one (the #615 void), because the body is
+                // capped to `availableAboveKeyboard` above.
+                .imePadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 18.dp)
+                .padding(bottom = 26.dp),
         ) {
+            Column(
+                modifier = Modifier
+                    // Issue #682: the scroll region absorbs overflow so a long
+                    // draft or a stack of status banners scrolls WITHIN the
+                    // compact sheet instead of forcing the whole content taller
+                    // (which would push the sticky action row off-screen / under
+                    // the keyboard). `weight(1f, fill = false)` keeps the column
+                    // at its content height when short (compact wrap-content) but
+                    // lets it SHRINK to the available height when long, because
+                    // the parent Column is bounded by `availableAboveKeyboard`
+                    // above — so the sticky action row below always stays
+                    // on-screen.
+                    .weight(1f, fill = false)
+                    .heightIn(max = PromptComposerScrollRegionMaxHeight)
+                    .verticalScroll(rememberScrollState()),
+            ) {
             // Header: title + close X. The Material 3 sheet draws its own
             // grabber above this, so we don't redraw it.
             Row(
@@ -1028,6 +959,7 @@ internal fun SheetContent(
                 }
             }
         }
+    }
     }
 }
 
@@ -2420,8 +2352,13 @@ private const val MIC_LOCK_SWIPE_THRESHOLD_DP = 24
 // "on the mic" for arming the swipe-up gesture. The disc is 44dp; this slop
 // makes a slightly-off hold-and-pull-up still start recording.
 private const val MIC_GESTURE_START_SLOP_DP = 24
-private const val PromptComposerRestingHeightFraction = 0.65f
-private const val PromptComposerImeVisibleHeightFraction = 1f
+
+// Issue #682: cap the scrollable upper region (draft + status banners) so the
+// content-height sheet never grows taller than this even with a long draft +
+// several banners. Keeps the composer compact above the keyboard; the inner
+// `verticalScroll` lets a long draft scroll within the cap instead of pushing
+// the sticky action row off-screen.
+private val PromptComposerScrollRegionMaxHeight = 360.dp
 
 /**
  * Issue #180: test tags for the failed-transcription queue surface.

@@ -76,8 +76,17 @@ class PromptComposerDismissReleasesMicTest {
      */
     @Before
     fun grantRecordAudio() {
+        // Issue #682 / #672: grant to the ACTUAL target package, not a hardcoded
+        // `com.pocketshell.app`. Under the parallel-agent suffix-coexist scheme
+        // the APK installs as `com.pocketshell.app.i<issue>`, so a hardcoded
+        // grant lands on the wrong package and the mic tap falls into the
+        // runtime-permission path instead of the recording FSM (the test then
+        // times out waiting for Recording). Resolve the package at runtime so the
+        // grant works for both the base and any suffixed install.
+        val targetPackage = InstrumentationRegistry.getInstrumentation()
+            .targetContext.packageName
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
-            "pm grant com.pocketshell.app android.permission.RECORD_AUDIO",
+            "pm grant $targetPackage android.permission.RECORD_AUDIO",
         ).close()
     }
 

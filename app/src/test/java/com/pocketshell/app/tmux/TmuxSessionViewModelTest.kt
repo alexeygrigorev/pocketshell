@@ -1058,6 +1058,16 @@ class TmuxSessionViewModelTest {
                 isError = false,
             ),
         )
+        // Issue #693/#662: the attach-time seed must succeed in ONE shot
+        // (non-empty capture) so the pane is marked seeded-this-attach. An empty
+        // attach seed now legitimately RETRIES (the never-black guard), which is
+        // a different code path than the "no RE-capture of EXISTING content on a
+        // reconcile" invariant this test locks in. Queue real content so the
+        // single attach seed lands and the LayoutChange reconcile below stays a
+        // no-op (the #640 panesSeededThisAttach skip).
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("work shell ready"), isError = false),
+        )
         vm.attachClientForTest(client)
 
         client.emittedEvents.emit(
@@ -1560,6 +1570,169 @@ class TmuxSessionViewModelTest {
         )
         assertTrue(registry.clients.value.isEmpty())
         assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+    }
+
+    /**
+     * Issue #685 (Bug A): the grace-clock collapse. The maintainer's #1 daily
+     * pain ("lots of reconnects on stable home Wi-Fi") was caused by THREE
+     * disagreeing grace clocks, the worst being a stray 8s VM
+     * `PASSIVE_DISCONNECT_GRACE_MS` that tore the held Connected frame down long
+     * before the single 60s lease/keepalive would. This pins the VM grace to the
+     * ONE lease-anchored 60s window so the divergent 8s clock can never be
+     * reintroduced — a sub-60s background/blip must hold without a reconnect.
+     */
+    @Test
+    fun passiveDisconnectGraceIsAnchoredToTheSingle60sLeaseWindow() {
+        assertEquals(
+            "VM passive-disconnect grace must defer to the single 60s lease TTL " +
+                "(no divergent 8s VM clock); collapsing the clocks is the #685 " +
+                "Bug A reconnect-on-stable-Wi-Fi fix",
+            SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS,
+            PASSIVE_DISCONNECT_GRACE_MS,
+        )
+        assertEquals(
+            "the single lease-anchored grace window is 60s",
+            60_000L,
+            PASSIVE_DISCONNECT_GRACE_MS,
+        )
+    }
+
+    /**
+     * Issue #685 (Bug A): a passive transport blip WITHIN the lease-anchored 60s
+     * grace must reattach silently with ZERO logical reconnect, using the REAL
+     * production grace default (no test override) so the regression is caught at
+     * the shipped value — not a convenient short test grace. The held Connected
+     * frame stays; the dashboard registry keeps pointing at the live client.
+     */
+    @Test
+    fun withinDefaultGracePassiveBlipReattachesWithZeroReconnect() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        // Deliberately NO setPassiveDisconnectRecoveryForTest override: exercise
+        // the shipped 60s grace so a regressed short clock would fail here.
+        val session = FakeSshSession()
+        val deadClient = FakeTmuxClient()
+        val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            replacementClient
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = session,
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        // Resolve the silent reattach WITHIN the 60s grace.
+        advanceTimeBy(5_000L)
+        runCurrent()
+        advanceUntilIdle()
+
+        assertSame(
+            "a within-grace blip must hand off to the freshly reattached client, " +
+                "not strand on the dead one",
+            replacementClient,
+            registry.clients.value[7L]?.client,
+        )
+        assertTrue(
+            "within the 60s grace the indicator stays green — no reconnect band",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(
+            "a within-grace silent reattach must NOT count as a logical reconnect",
+            1,
+            TMUX_CONNECT_ATTEMPTS.get(),
+        )
+    }
+
+    /**
+     * Issue #685 (Bug B): the "control channel closed before response /
+     * mid-command" error in the maintainer's screenshot is the beyond-grace
+     * foreground-reattach symptom. It must be classified as a stale-channel
+     * symptom so it routes through the transparent re-dial (calm Reconnecting +
+     * automatic pane reseed) instead of the scary `Failed` band with "Tap
+     * Reconnect to retry." + a stuck spinner.
+     */
+    @Test
+    fun controlChannelClosedIsTreatedAsAStaleChannelSymptom() {
+        val vm = newVm()
+        assertTrue(
+            "'control channel closed before response' must heal via transparent " +
+                "re-dial, not the scary manual-tap band",
+            vm.isStaleChannelSymptom(
+                TmuxClientException("control channel closed before response"),
+            ),
+        )
+        assertTrue(
+            "'control channel closed mid-command' must also heal transparently",
+            vm.isStaleChannelSymptom(
+                RuntimeException(
+                    "list-panes failed",
+                    TmuxClientException("control channel closed mid-command"),
+                ),
+            ),
+        )
+        assertFalse(
+            "an ordinary error must NOT be misclassified as a stale-channel heal",
+            vm.isStaleChannelSymptom(IllegalStateException("some unrelated failure")),
+        )
+    }
+
+    /**
+     * Issue #685 (honest indicator, false-negative direction — the "no
+     * indication I'm disconnected" complaint): a sustained passive disconnect
+     * that the silent grace CANNOT recover must flip the indicator OFF green
+     * within the bounded grace — never keep showing a stale "connected" green
+     * dot over a confirmed-dead channel. After the bounded grace the status is a
+     * non-Connected (honest) state.
+     */
+    @Test
+    fun sustainedPassiveDisconnectFlipsIndicatorOffGreenWithinBoundedGrace() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = FailingLeaseConnector(IOException("network still unavailable"))
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        // Bounded test grace so the assertion is deterministic; production uses
+        // the 60s lease-anchored window asserted separately above.
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 500L, silentReattachTimeoutMs = 500L)
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = FakeSshSession(isConnectedValue = false),
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        advanceTimeBy(501L)
+        runCurrent()
+        advanceUntilIdle()
+
+        assertFalse(
+            "a confirmed-dead channel must NOT keep showing a stale green " +
+                "'connected' indicator past the bounded grace (the #685 " +
+                "'no indication I'm disconnected' false-negative)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
     }
 
     @Test
@@ -9056,8 +9229,7 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         // While the new -CC client is attaching the screen must be in
-        // Switching — NOT the blanking full-screen Connecting overlay —
-        // and the previous frame must still be painted.
+        // Switching — NOT the blanking full-screen Connecting overlay.
         val midStatus = vm.connectionStatus.value
         assertTrue(
             "same-host switch must enter Switching, got $midStatus",
@@ -9067,9 +9239,21 @@ class TmuxSessionViewModelTest {
             "same-host switch must never show the blanking Connecting overlay",
             midStatus is TmuxSessionViewModel.ConnectionStatus.Connecting,
         )
+        // Issue #661: a CROSS-session switch must NOT paint the previous
+        // session's frame — not even one frame. #634's keep-frame is reversed
+        // for the cross-session case: the surface is HIDDEN
+        // ([switchHidesTerminal] = true) and the rendered panes are blanked,
+        // so the screen shows the "Attaching" loading state instead of the
+        // leaving session's content.
+        assertTrue(
+            "cross-session switch must hide the terminal surface (loading state) " +
+                "so the previous session's frame is never painted",
+            vm.switchHidesTerminal.value,
+        )
         assertEquals(
-            "previous frame must stay painted during a same-host switch (no blank)",
-            listOf("%0"),
+            "previous session's frame must NOT stay painted during a cross-session " +
+                "switch (#661): panes are blanked until the new session reconciles",
+            emptyList<String>(),
             vm.panes.value.map { it.paneId },
         )
         // Input is gated: only Connected counts as live (mirrors the
@@ -9087,6 +9271,13 @@ class TmuxSessionViewModelTest {
         assertTrue(
             "switch must complete to Connected once the new client attaches",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        // Issue #661: the terminal surface is revealed only AFTER the new
+        // session's panes are seeded — and it is the NEW session's content.
+        assertFalse(
+            "the terminal surface must be revealed (switchHidesTerminal=false) " +
+                "once the new session's panes are seeded",
+            vm.switchHidesTerminal.value,
         )
         assertEquals(
             "viewport must swap to the new session's panes after attach",
@@ -9382,12 +9573,17 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchKeepsPreviousFrameUntilNewSessionPanesReconcile() = runTest {
-        // Issue #437 (slice A): a same-host fast switch must NOT blank the
-        // viewport. The previous frame stays painted (no "Connecting"
-        // blank) until the new session's panes reconcile and atomically
-        // replace it. This reverses the old "clear pane state on fast
-        // switch" behaviour — hard-cut, per D22.
+    fun fastSwitchBlanksPreviousFrameAndHidesSurfaceUntilNewSessionReconciles() = runTest {
+        // Issue #661 (reverses #437 slice A / #634 keep-frame for the
+        // cross-session case): a same-host fast switch to a DIFFERENT session
+        // must NEVER paint the leaving session's frame — not even one frame.
+        // The previous frame is BLANKED and the terminal surface is HIDDEN
+        // ([switchHidesTerminal] = true, the screen shows the "Attaching"
+        // loading state) until the new session's panes reconcile and reveal.
+        // This is the maintainer's refined preference (hard-cut, per D22):
+        // we no longer keep the previous frame painted on a cross-session
+        // switch — that was the "I can still see the previous session for a
+        // split second" flash.
         val vm = newVm()
         val session = FakeSshSession()
         val oldClient = FakeTmuxClient()
@@ -9422,8 +9618,8 @@ class TmuxSessionViewModelTest {
         assertEquals(1, vm.panes.value.size)
 
         // The new client reports no panes here, so nothing reconciles to
-        // replace the previous frame — letting us assert the frame is kept
-        // rather than blanked during the switch.
+        // replace the blanked frame — letting us assert the leaving frame is
+        // BLANKED (not kept) the instant the cross-session switch begins.
         val newClient = FakeTmuxClient()
         vm.fastSwitchSessionForTest(
             hostId = 1L,
@@ -9438,10 +9634,14 @@ class TmuxSessionViewModelTest {
         )
         advanceUntilIdle()
 
-        // Previous frame stays painted across the switch (no blank).
+        // Issue #661: the previous session's frame is BLANKED across a
+        // cross-session switch — never re-published — so the screen shows the
+        // loading state instead of the leaving session's content. (The new
+        // session reported no panes, so nothing reconciles in to replace it.)
         assertEquals(
-            "previous frame must be kept until the new session reconciles, was ${vm.panes.value}",
-            listOf("%0"),
+            "previous session's frame must be BLANKED on a cross-session switch (#661), " +
+                "not kept painted — was ${vm.panes.value}",
+            emptyList<String>(),
             vm.panes.value.map { it.paneId },
         )
     }

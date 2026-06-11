@@ -345,6 +345,30 @@ public class TmuxSessionViewModel @Inject constructor(
     public val connectionStatus: StateFlow<ConnectionStatus> =
         _connectionStatus.asStateFlow()
 
+    /**
+     * Issue #661: while a CROSS-session switch to a NOT-yet-cached target is in
+     * flight, the screen must NEVER paint the leaving session's terminal frame —
+     * not even for one Compose frame. #634 kept the previous frame painted to
+     * avoid a "Connecting" blank, but the maintainer's refined preference is the
+     * opposite for a cross-session switch: hide the terminal surface entirely
+     * (show a compact "Attaching" loading indicator) and reveal ONLY once the
+     * NEW session's panes are seeded from `capture-pane`.
+     *
+     * This flag is set SYNCHRONOUSLY (before any coroutine runs) at the start of
+     * a cross-session fast-switch and cleared the instant the new session's
+     * panes are revealed (status flips to [ConnectionStatus.Connected]). It is
+     * NOT set on the runtime-cache-hit path: that path activates the TARGET
+     * session's own cached frame instantly, which is correct content (the target,
+     * never the leaving session), so there is nothing to hide.
+     *
+     * Keep-frame remains in force for a within-session reattach / warm reopen of
+     * the SAME session — only the cross-session case blanks.
+     */
+    private val _switchHidesTerminal: MutableStateFlow<Boolean> =
+        MutableStateFlow(false)
+    public val switchHidesTerminal: StateFlow<Boolean> =
+        _switchHidesTerminal.asStateFlow()
+
     private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
     private var activeAttachMilestone: AttachMilestone? = null
 
@@ -932,6 +956,28 @@ public class TmuxSessionViewModel @Inject constructor(
         } else {
             ConnectionStatus.Connecting(host, port, user)
         }
+        // Issue #661: a cross-session fast switch must NOT paint the leaving
+        // session's frame for even one Compose frame. Hide the terminal surface
+        // SYNCHRONOUSLY (the screen shows a compact "Attaching" loading state
+        // instead) and reveal only once the new session's panes are seeded. This
+        // reverses #634's keep-frame for the cross-session case (see
+        // [_switchHidesTerminal]). The runtime-cache-hit path returned earlier
+        // above and is unaffected — it activates the target's own cached frame,
+        // which is correct content, not the leaving session.
+        //
+        // CRITICAL ordering: raise the gate AND blank the rendered panes in the
+        // SAME synchronous turn (before any coroutine runs). If the gate were
+        // raised while [_panes] still held the leaving frame, the screen could
+        // observe a single (hidden=true, previous-pane) state — the very flash
+        // we are removing. The cached runtime still captures the leaving panes
+        // via [deactivateCurrentRuntimeToCache]'s `paneRows` fallback (the
+        // per-pane row map is untouched here), so blanking [_panes] now loses no
+        // warm-cache content.
+        if (willFastSwitch) {
+            _switchHidesTerminal.value = true
+            _panes.value = emptyList()
+            rebuildUnifiedPanes()
+        }
         // Issue #257 (scope F): drop the previous session's panes from the
         // rendered list SYNCHRONOUSLY, before the teardown coroutine even
         // gets a turn. The actual per-pane producer/scrollback teardown
@@ -1002,26 +1048,23 @@ public class TmuxSessionViewModel @Inject constructor(
                     // user switches back, activation is a pointer swap
                     // rather than a fresh tmux attach.
                     //
-                    // Issue #437 (slice A): snapshot the rendered frame
-                    // BEFORE parking the leaving runtime so the viewport
-                    // never blanks during a same-host switch.
-                    // [deactivateCurrentRuntimeToCache] clears [_panes] as
-                    // part of detaching the leaving session's producers;
-                    // we immediately re-publish the snapshot so the user
-                    // keeps seeing content (the previous frame) until
-                    // [runFastSessionSwitch]'s pane reconcile atomically
-                    // swaps in the new session's panes. This mirrors the
-                    // cache-hit path, which also keeps a frame painted and
-                    // reconciles in the background, and removes the
-                    // perceived full-screen "Connecting" blank. Input stays
-                    // gated for the whole window because the status is
-                    // [Switching], not [Connected].
-                    val previousFrame = _panes.value
+                    // Issue #661: do NOT re-publish the leaving session's
+                    // frame here. #634 used to snapshot [_panes] before
+                    // parking the leaving runtime and immediately re-publish
+                    // it so the viewport never blanked — but that is exactly
+                    // the "I can still see the previous session for a split
+                    // second" flash the maintainer reported. We now blank the
+                    // rendered panes (the producer teardown inside
+                    // [deactivateCurrentRuntimeToCache] already clears them)
+                    // and rely on [_switchHidesTerminal] (set synchronously
+                    // above) to show a compact "Attaching" loading state until
+                    // [runFastSessionSwitch]'s reconcile seeds and reveals the
+                    // NEW session's panes. Input stays gated for the whole
+                    // window because the status is [Switching], not
+                    // [Connected].
                     closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
-                    if (previousFrame.isNotEmpty()) {
-                        _panes.value = previousFrame
-                        rebuildUnifiedPanes()
-                    }
+                    _panes.value = emptyList()
+                    rebuildUnifiedPanes()
                     runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
                 } else {
                     // Slow path: full teardown of both the tmux client
@@ -2654,6 +2697,11 @@ public class TmuxSessionViewModel @Inject constructor(
         installLifecycleHooks(target.hostId)
         bindProjectRootsForHost(target.hostId)
         refreshReconnectAvailability()
+        // Issue #661: the cache-hit path activates the TARGET session's own
+        // cached frame (already published above), so there is never a leaving
+        // frame to hide here; clear the gate defensively in case a prior
+        // in-flight fast switch had set it.
+        _switchHidesTerminal.value = false
         _connectionStatus.value = ConnectionStatus.Connected(
             target.host,
             target.port,
@@ -2962,11 +3010,30 @@ public class TmuxSessionViewModel @Inject constructor(
             // the complete screen rather than a black/partial grid that fills in.
             connectingTarget = null
             refreshReconnectAvailability()
+            val blankReseedGuard = RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+            // Issue #693/#661: NEVER reveal a black active pane on this cold/slow
+            // path either (it is also the dead-lease fast-switch escalation
+            // target). Gate the reveal on a non-empty active-pane seed; only
+            // clear [_switchHidesTerminal] (the loading overlay) once the active
+            // pane is non-blank, otherwise keep the calm "Attaching…" overlay and
+            // hand off to [armConnectedBlankWatchdog].
+            val activePaneSeeded = awaitActivePaneSeededOrLoading(blankReseedGuard)
+            // Issue #661: clear any cross-session "hide terminal" gate at the
+            // reveal so a fast switch that fell through to this slow/cold path
+            // (e.g. a dead-lease escalation) still reveals the new session's
+            // seeded panes rather than staying on the loading placeholder — but
+            // only when the active pane actually has content (#693).
+            _switchHidesTerminal.value = !activePaneSeeded
             _connectionStatus.value = ConnectionStatus.Connected(
                 target.host,
                 target.port,
                 target.user,
             )
+            if (!activePaneSeeded) armConnectedBlankWatchdog(blankReseedGuard)
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             // Issue #662: black-pane safety net for the open/switch path even
             // when the phone grid happens to MATCH tmux's current size (so
@@ -2978,11 +3045,6 @@ public class TmuxSessionViewModel @Inject constructor(
             // pane is re-captured from tmux's grid; a no-op for panes that
             // already painted (the common case) and for the resize path (already
             // healed). Guarded so a superseded runtime never re-seeds.
-            val blankReseedGuard = RuntimeRefreshGuard(
-                generation = connectGeneration,
-                target = target,
-                client = client,
-            )
             bridgeScope.launch {
                 delay(BLANK_PANE_RESEED_DELAY_MS)
                 if (!isCurrentRuntime(blankReseedGuard)) return@launch
@@ -3341,11 +3403,33 @@ public class TmuxSessionViewModel @Inject constructor(
 
             connectingTarget = null
             refreshReconnectAvailability()
+            // Issue #693/#661: NEVER reveal a black active pane. #661's O(1)
+            // reveal gates on the active pane's single capture — a degraded
+            // switch could otherwise reveal a BLACK active pane with a green dot
+            // and no reconnecting band. Gate the reveal on a non-empty active-
+            // pane seed (bounded retries); only clear [_switchHidesTerminal]
+            // (the loading overlay) once the active pane is non-blank.
+            val fastSwitchRevealGuard = RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+            val activePaneSeeded = awaitActivePaneSeededOrLoading(fastSwitchRevealGuard)
+            // Issue #661: the NEW session's panes are seeded (reconciled in
+            // [awaitPanesReadyForAttach]); reveal the terminal surface in the
+            // SAME state mutation that flips to Connected so the first painted
+            // frame is the new session's content — never a transient blank or
+            // (worse) the leaving session's frame. When the active pane could
+            // NOT be seeded non-blank within the gate's bound, keep the loading
+            // overlay raised and hand off to [armConnectedBlankWatchdog] so the
+            // user sees a calm "Attaching…" rather than a black Connected pane.
+            _switchHidesTerminal.value = !activePaneSeeded
             _connectionStatus.value = ConnectionStatus.Connected(
                 target.host,
                 target.port,
                 target.user,
             )
+            if (!activePaneSeeded) armConnectedBlankWatchdog(fastSwitchRevealGuard)
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             logAttachMilestone(
                 attempt = attempt,
@@ -3679,6 +3763,9 @@ public class TmuxSessionViewModel @Inject constructor(
 
         connectingTarget = if (preserveReconnectTarget || staleChannelSymptom) target else null
         refreshReconnectAvailability()
+        // Issue #661: a failed switch must drop the cross-session "hide terminal"
+        // gate so the Failed band is shown (not the loading placeholder).
+        _switchHidesTerminal.value = false
         _connectionStatus.value = ConnectionStatus.Failed(message)
     }
 
@@ -3714,7 +3801,44 @@ public class TmuxSessionViewModel @Inject constructor(
         isChannelOpenFailure(cause) ||
             isTmuxCommandTimeout(cause) ||
             isTmuxEofWriteFailure(cause) ||
-            isTransportDisconnected(cause)
+            isTransportDisconnected(cause) ||
+            isControlChannelClosed(cause)
+
+    /**
+     * Issue #685 (Bug B): true when [cause] is the "control channel closed"
+     * variant the maintainer saw on a beyond-grace foreground reattach — the
+     * pooled SSH transport died while backgrounded, so the reattach's
+     * `list-panes` round-trip races the now-dead `-CC` control channel and the
+     * reader reports `control channel closed before response` /
+     * `control channel closed mid-command` (see
+     * [com.pocketshell.core.tmux.TmuxClient]). The four older
+     * [isStaleChannelSymptom] matchers ("open failed" / EOF-write /
+     * command-timeout / transport-disconnect) did NOT cover this shape, so it
+     * slipped straight to the scary `Failed` band with "Tap Reconnect to
+     * retry." + a stuck "waiting for tmux panes…" spinner instead of healing.
+     *
+     * Treating it as a stale-channel symptom evicts the poisoned lease and
+     * routes the beyond-grace return through the transparent re-dial
+     * ([shouldTransparentlyRecoverStaleLease]): the user sees a calm
+     * Reconnecting band and the panes reseed automatically — no manual tap, no
+     * control-channel error text. A genuinely-dead host (every fresh transport
+     * also fails) still falls back to the honest manual Reconnect band after the
+     * [STALE_LEASE_AUTO_RECOVER_MAX] budget is spent.
+     */
+    private fun isControlChannelClosed(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                message.contains("control channel closed", ignoreCase = true)
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
 
     /**
      * Issue #665 / #636: true when [cause] is the transport-DEAD variant of the
@@ -4440,13 +4564,27 @@ public class TmuxSessionViewModel @Inject constructor(
                     trigger = TmuxConnectTrigger.AutoReconnect,
                 )
                 rebindVisiblePaneProducersToClient(replacement)
-                reseedAllVisiblePanes(
-                    RuntimeRefreshGuard(
-                        generation = connectGeneration,
-                        target = target,
-                        client = replacement,
-                    ),
+                // Issue #693/#662: this is a fresh attach for the reused panes —
+                // their old per-attach seed flags no longer apply, so clear them
+                // and let [reseedAllVisiblePanes] re-capture every visible pane
+                // with the new control client. [seedPaneFromCapture] now keeps
+                // the last rendered frame on an empty capture (never repaints
+                // black) and retries, so a degraded reconnect can't strand a
+                // black pane.
+                panesSeededThisAttach.clear()
+                val reattachGuard = RuntimeRefreshGuard(
+                    generation = connectGeneration,
+                    target = target,
+                    client = replacement,
                 )
+                reseedAllVisiblePanes(reattachGuard)
+                // Issue #693/#662: wire the blank-net into the reconnect path
+                // (it was only on the connect-reveal + resize paths before). Any
+                // pane still blank after the reseed (its reconnect capture was
+                // empty) is retried here, and a still-black active pane keeps the
+                // calm loading overlay via the watchdog rather than painting
+                // black on a live (green) reattached connection.
+                reseedBlankVisiblePanes(reattachGuard)
                 maybeRefreshControlClientSize()
                 true
             } == true
@@ -4479,6 +4617,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.host,
                 target.port,
                 target.user,
+            )
+            // Issue #693: never leave a reattached pane black on a live (green)
+            // connection. If the active pane is still blank after the reconnect
+            // reseed, keep re-seeding under the watchdog rather than showing a
+            // black Connected pane.
+            armConnectedBlankWatchdog(
+                RuntimeRefreshGuard(
+                    generation = connectGeneration,
+                    target = target,
+                    client = replacement,
+                ),
             )
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
@@ -4592,13 +4741,19 @@ public class TmuxSessionViewModel @Inject constructor(
                     trigger = TmuxConnectTrigger.AutoReconnect,
                 )
                 rebindVisiblePaneProducersToClient(newClient)
-                reseedAllVisiblePanes(
-                    RuntimeRefreshGuard(
-                        generation = connectGeneration,
-                        target = target,
-                        client = newClient,
-                    ),
+                // Issue #693/#662: fresh transport reattach — re-seed every
+                // visible pane on the new client (clear the prior per-attach
+                // flags first), then run the blank-net backstop so a degraded
+                // fresh-transport reconnect never strands a black pane on a
+                // live (green) connection.
+                panesSeededThisAttach.clear()
+                val transportReattachGuard = RuntimeRefreshGuard(
+                    generation = connectGeneration,
+                    target = target,
+                    client = newClient,
                 )
+                reseedAllVisiblePanes(transportReattachGuard)
+                reseedBlankVisiblePanes(transportReattachGuard)
                 maybeRefreshControlClientSize()
                 true
             } == true
@@ -4659,6 +4814,15 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.host,
                 target.port,
                 target.user,
+            )
+            // Issue #693: never leave a reattached pane black on a live (green)
+            // connection after a fresh-transport reconnect.
+            armConnectedBlankWatchdog(
+                RuntimeRefreshGuard(
+                    generation = connectGeneration,
+                    target = target,
+                    client = newClient,
+                ),
             )
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
@@ -5235,9 +5399,12 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         connectingTarget = target
         refreshReconnectAvailability()
-        // Issue #437 (slice A): mirror production — a same-host fast switch
-        // enters [Switching] (inline indicator, previous frame preserved),
-        // NOT the blanking full-screen [Connecting] overlay.
+        // Issue #437 (slice A) / #661: mirror production — a same-host fast
+        // switch enters [Switching] (inline indicator), NOT the blanking
+        // full-screen [Connecting] overlay; and per #661 it HIDES the terminal
+        // surface ([_switchHidesTerminal]) so the leaving frame is never painted
+        // until the new session's panes are seeded.
+        _switchHidesTerminal.value = true
         _connectionStatus.value = ConnectionStatus.Switching(host, port, user)
         recordWarmSwitchMilestone(
             attempt = attempt,
@@ -5247,21 +5414,29 @@ public class TmuxSessionViewModel @Inject constructor(
             trigger = TmuxConnectTrigger.FastSwitch,
             detail = "paneCount=${_panes.value.size}",
         )
-        // Mirror production's ordering: deactivate the previous tmux/UI
-        // runtime into the warm cache before binding the new one. Snapshot
-        // the rendered frame first so it stays painted across the
-        // deactivation (#437 slice A: no blank during a same-host switch).
-        val previousFrame = _panes.value
+        // Mirror production's ordering: deactivate the previous tmux/UI runtime
+        // into the warm cache before binding the new one. Issue #661: do NOT
+        // re-publish the leaving frame — blank the rendered panes and rely on
+        // [_switchHidesTerminal] to show the loading state until the new
+        // session's panes reconcile and reveal.
         closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
-        if (previousFrame.isNotEmpty()) {
-            _panes.value = previousFrame
-            rebuildUnifiedPanes()
-        }
+        _panes.value = emptyList()
+        rebuildUnifiedPanes()
         sessionRef = session
         // Inline a simplified runFastSessionSwitch: we cannot call the
         // real method directly because it pulls tmuxClientFactory in,
         // and the test fakes the [TmuxClient] outright.
         activeTarget = target
+        // Issue #661: [deactivateCurrentRuntimeToCache] cleared [activeTarget]
+        // (so the unified rebuild it triggered above could not see the host and
+        // dropped the cached panes). Now that the new target is bound, rebuild
+        // the unified list so it reflects the active session PLUS the just-cached
+        // leaving session — mirroring production, where the post-attach
+        // reconcile ([applyParsedPanes] -> [rebuildUnifiedPanes]) repopulates the
+        // pager with a live [activeTarget]. The real path does this via
+        // reconcile; the test helper fakes the client and never reconciles, so
+        // it must rebuild here to keep the cross-session pager populated.
+        rebuildUnifiedPanes()
         refreshReconnectAvailability()
         attachClient(client)
         client.connect()
@@ -5292,6 +5467,8 @@ public class TmuxSessionViewModel @Inject constructor(
         bindProjectRootsForHost(hostId)
         connectingTarget = null
         refreshReconnectAvailability()
+        // Issue #661: reveal the new session's surface at the Connected flip.
+        _switchHidesTerminal.value = false
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
         recordWarmSwitchMilestone(
             attempt = attempt,
@@ -6195,25 +6372,74 @@ public class TmuxSessionViewModel @Inject constructor(
         // a snapshot lands; any pane we bail on (capture failed, runtime
         // superseded, exception) must still have its gate opened so buffered
         // live output flushes in order rather than being swallowed.
-        val seededPaneIds = HashSet<String>()
         val client = clientRef ?: run {
             for (pane in newPanes) pane.terminalState.openSeedGateWithoutSeed()
             return
         }
+        if (newPanes.isEmpty()) return
+
+        // Issue #661 (switch latency, research-spike opt #3 + #1): only the
+        // ACTIVE/visible pane needs to be seeded BEFORE the surface reveals.
+        // tmux control mode is strictly one-command-at-a-time, so seeding every
+        // pane serially before reveal makes the perceived switch latency scale
+        // with pane/window count (a 3-window agent session paid ~N capture
+        // round-trips before the user saw ANYTHING — the exact "switching feels
+        // slow" the maintainer reported, and the window the stale-frame flash
+        // used to live in).
+        //
+        // The active pane is the head of the reconciled list (panes are sorted
+        // by window index, so the lowest-window pane is page 0 — what the screen
+        // renders first). Seed it synchronously here so the #640 seed-before-
+        // reveal contract still holds for the pane the user actually sees:
+        // [awaitPanesReadyForAttach] only returns (and the caller reveals) after
+        // this function returns, so the active pane's capture has landed before
+        // the first painted frame.
+        //
+        // The remaining (off-screen / other-window) panes are background-seeded
+        // in [bridgeScope] AFTER reveal — the user can't see them yet, and the
+        // #662 [reseedVisiblePaneIfBlank] safety net (wired to every pager
+        // settle) re-captures any that are still blank the instant the user tabs
+        // to them. This collapses the perceived O(N) capture cost to O(1).
+        val activePane = newPanes.first()
+        val backgroundPanes = newPanes.drop(1)
         try {
-            for (pane in newPanes) {
-                if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
-                if (seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = true)) {
-                    seededPaneIds.add(pane.paneId)
-                }
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+                activePane.terminalState.openSeedGateWithoutSeed()
+            } else if (!seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = true)) {
+                // Issue #468: a failed/empty active-pane capture must still open
+                // the seed gate so buffered live %output flushes in order.
+                activePane.terminalState.openSeedGateWithoutSeed()
             }
-        } finally {
-            // Issue #468: open the gate for every pane that did not get a seed
-            // applied (capture failed/empty, runtime superseded mid-loop, or an
-            // exception), so buffered live output is flushed in order instead
-            // of being swallowed.
-            for (pane in newPanes) {
-                if (pane.paneId !in seededPaneIds) {
+        } catch (t: Throwable) {
+            // Open the gate before propagating so the producer is never left
+            // permanently buffering behind a closed seed gate.
+            activePane.terminalState.openSeedGateWithoutSeed()
+            throw t
+        }
+
+        if (backgroundPanes.isEmpty()) return
+        // Background-seed the off-screen panes without blocking the reveal. Each
+        // still manages its own seed gate (so buffered live output flushes in
+        // order even if its capture fails), and the per-pane refresh guard keeps
+        // a superseded runtime from re-seeding stale panes.
+        bridgeScope.launch {
+            for (pane in backgroundPanes) {
+                if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+                    // Runtime superseded mid-flight: open the gates of the panes
+                    // we did not reach so none stays stuck behind a closed gate.
+                    pane.terminalState.openSeedGateWithoutSeed()
+                    continue
+                }
+                val seeded = try {
+                    seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = false)
+                } catch (t: Throwable) {
+                    if (t is CancellationException) {
+                        pane.terminalState.openSeedGateWithoutSeed()
+                        throw t
+                    }
+                    false
+                }
+                if (!seeded) {
                     pane.terminalState.openSeedGateWithoutSeed()
                 }
             }
@@ -6310,6 +6536,106 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #693/#661: the never-reveal-black gate. Before a connect/switch
+     * reveal flips the surface to `Connected`, make sure the ACTIVE (visible,
+     * page-0) pane actually has a non-blank seed. If the active pane's seed
+     * came back empty on a degraded link, RETRY it (bounded) so the user never
+     * sees a black active pane the instant the green dot lights up.
+     *
+     * #661 made this worse: its O(1) reveal gates on the active pane's single
+     * capture, so a degraded switch could reveal a BLACK active pane with no
+     * reconnecting band. This gate closes that hole: it returns true only when
+     * the active pane is non-blank (safe to reveal as Connected), and false
+     * when every retry still left it blank (the caller keeps the loading state
+     * and hands off to [armConnectedBlankWatchdog], which keeps re-seeding under
+     * a calm overlay rather than painting a black Connected pane).
+     *
+     * Returns true when there is no active pane to gate on (nothing to reveal
+     * black) or when the active pane is/became non-blank.
+     */
+    private suspend fun awaitActivePaneSeededOrLoading(
+        refreshGuard: RuntimeRefreshGuard?,
+    ): Boolean {
+        val client = clientRef ?: return true
+        var attempt = 0
+        while (true) {
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return true
+            if (client.disconnected.value) return true
+            val activePane = activeVisiblePane() ?: return true
+            if (!activePane.terminalState.visibleScreenIsBlank()) return true
+            // Active pane is blank: try to (re-)seed it before revealing.
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-reveal-gate-active-pane-blank pane=${activePane.paneId} " +
+                    "attempt=$attempt session=${activeTarget?.sessionName}",
+            )
+            seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = false)
+            if (!activePane.terminalState.visibleScreenIsBlank()) return true
+            attempt += 1
+            if (attempt >= ACTIVE_PANE_REVEAL_SEED_ATTEMPTS) {
+                Log.w(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-reveal-gate-active-pane-still-blank pane=${activePane.paneId} " +
+                        "after=$attempt session=${activeTarget?.sessionName} " +
+                        "-> reveal deferred to blank watchdog",
+                )
+                return false
+            }
+            delay(ACTIVE_PANE_REVEAL_SEED_DELAY_MS)
+        }
+    }
+
+    /**
+     * The pane the user is actually looking at right now: the head of the
+     * window-sorted [_panes] (page 0 of the pager). Falls back to the first
+     * [paneRows] entry when [_panes] has not been published yet. Null when there
+     * are no panes.
+     */
+    private fun activeVisiblePane(): TmuxPaneState? =
+        _panes.value.firstOrNull() ?: paneRows.values.firstOrNull()
+
+    /**
+     * Issue #693: never leave a `Connected` pane black. When a reveal had to
+     * fall through with a still-blank active pane (the link stayed degraded past
+     * [awaitActivePaneSeededOrLoading]'s bound), arm a bounded watchdog that
+     * keeps re-seeding any blank visible pane and only clears the loading
+     * overlay once a real frame lands. This is the last line of defense behind
+     * the reveal gate, the per-switch reseed, and the resize/defer nets: as long
+     * as the channel is `Connected`, the user ends up on real content or a calm
+     * "Attaching…" overlay — never a silent black pane.
+     */
+    private fun armConnectedBlankWatchdog(refreshGuard: RuntimeRefreshGuard) {
+        bridgeScope.launch {
+            var tick = 0
+            while (tick < CONNECTED_BLANK_WATCHDOG_MAX_TICKS) {
+                delay(CONNECTED_BLANK_WATCHDOG_TICK_MS)
+                if (!isCurrentRuntime(refreshGuard)) return@launch
+                val client = clientRef ?: return@launch
+                if (client.disconnected.value) return@launch
+                if (_connectionStatus.value !is ConnectionStatus.Connected) return@launch
+                val activePane = activeVisiblePane()
+                if (activePane == null || !activePane.terminalState.visibleScreenIsBlank()) {
+                    // A frame landed (seed or live %output) — drop the loading
+                    // overlay and let the Connected surface show the content.
+                    if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    return@launch
+                }
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-connected-blank-watchdog tick=$tick pane=${activePane.paneId} " +
+                        "session=${activeTarget?.sessionName} -> re-seeding blank visible panes",
+                )
+                reseedBlankVisiblePanes(refreshGuard)
+                if (!activePane.terminalState.visibleScreenIsBlank()) {
+                    if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    return@launch
+                }
+                tick += 1
+            }
+        }
+    }
+
+    /**
      * Issue #662: re-seed a single visible pane from `capture-pane` if its
      * emulator is rendering a blank (black) screen. Called when the user
      * switches to a window: tmux `-CC` never re-emits an idle window's existing
@@ -6343,7 +6669,51 @@ public class TmuxSessionViewModel @Inject constructor(
      * ([preloadVisibleContentForNewPanes]) and the all-visible-pane reseed
      * ([reseedAllVisiblePanes]).
      */
+    /**
+     * Issue #693/#662: seed a pane from `capture-pane`, RETRYING when the
+     * capture comes back empty/error/null on a flaky link.
+     *
+     * The black-screen-while-connected bug: [seedPaneFromCaptureOnce] used to
+     * be the only seed call, and it treats an empty/error/null capture as a
+     * SILENT no-op (`return false` — no repaint, no keep-last, NO retry). On a
+     * degraded-but-connected channel the attach-time capture can transiently
+     * return empty; the idle full-screen agent/pager then emits no `%output`,
+     * so the pane's emulator stays unpainted and the surface renders the
+     * near-black background while status is `Connected` — the maintainer's
+     * green-dot-but-black-pane screenshots (and the partial/orphaned-cell
+     * variant, which is the SAME unseeded grid showing only a few live deltas).
+     *
+     * Retrying a transiently-empty capture (bounded, short backoff) lands the
+     * frame the next time the link recovers. A persistently-empty capture means
+     * tmux genuinely has nothing for that pane (a truly blank shell) — those
+     * retries are cheap and stop after the bound. The caller keeps the last
+     * rendered frame on a still-empty result (we never clear the emulator on a
+     * failed capture), so a momentary drop never repaints black.
+     */
     private suspend fun seedPaneFromCapture(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard?,
+        recordMilestone: Boolean,
+    ): Boolean {
+        var attempt = 0
+        while (true) {
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+            if (client.disconnected.value) return false
+            if (seedPaneFromCaptureOnce(client, pane, refreshGuard, recordMilestone)) {
+                return true
+            }
+            attempt += 1
+            if (attempt >= SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS) return false
+            // Short backoff so a flaky-link empty capture is re-tried after the
+            // channel has a moment to recover, without stalling a genuinely
+            // empty pane's reveal for long. The guard re-check at the top of the
+            // loop aborts immediately if the runtime was superseded mid-wait.
+            delay(SEED_CAPTURE_EMPTY_RETRY_DELAY_MS)
+        }
+    }
+
+    private suspend fun seedPaneFromCaptureOnce(
         client: TmuxClient,
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
@@ -9821,6 +10191,54 @@ internal const val SEED_SCROLLBACK_LINES: Int = 200
 internal const val BLANK_PANE_RESEED_DELAY_MS: Long = 350L
 
 /**
+ * Issue #693/#662: how many times [seedPaneFromCapture] re-issues a
+ * `capture-pane` when it comes back empty/error/null on a flaky link before
+ * giving up for this pass. A transiently-empty capture on a degraded-but-
+ * connected channel is the root of the green-dot-but-black-pane symptom; a few
+ * cheap retries land the frame the next time the link recovers. The bound keeps
+ * a genuinely-empty pane (a truly blank shell) from looping. Total seed attempts
+ * = this value (the first attempt + this-minus-one retries).
+ */
+internal const val SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS: Int = 4
+
+/**
+ * Issue #693/#662: backoff between empty-capture re-tries inside
+ * [seedPaneFromCapture]. Short so a flaky-link empty capture re-tries promptly
+ * without stalling a genuinely-empty pane's reveal.
+ */
+internal const val SEED_CAPTURE_EMPTY_RETRY_DELAY_MS: Long = 120L
+
+/**
+ * Issue #693/#661: the never-reveal-black guard polls the active (visible) pane
+ * for a non-blank seed before flipping to Connected. This is how many seed
+ * retries it makes when the active pane is still blank at reveal time, so a
+ * degraded switch shows the calm "Attaching…" loading state instead of a black
+ * Connected pane.
+ */
+internal const val ACTIVE_PANE_REVEAL_SEED_ATTEMPTS: Int = 5
+
+/**
+ * Issue #693/#661: backoff between active-pane reveal-gate seed retries.
+ */
+internal const val ACTIVE_PANE_REVEAL_SEED_DELAY_MS: Long = 150L
+
+/**
+ * Issue #693: the never-black-while-connected watchdog re-checks the visible
+ * pane this often after a reveal that had to fall through with a still-blank
+ * active pane (e.g. the link stayed degraded past the reveal gate). Each tick
+ * re-seeds any blank visible pane; once a frame lands the loading overlay is
+ * cleared. Bounded by [CONNECTED_BLANK_WATCHDOG_MAX_TICKS].
+ */
+internal const val CONNECTED_BLANK_WATCHDOG_TICK_MS: Long = 500L
+
+/**
+ * Issue #693: upper bound on the never-black-while-connected watchdog ticks so
+ * a genuinely-dead channel does not spin forever; the auto-reconnect path takes
+ * over once the channel actually drops.
+ */
+internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
+
+/**
  * Parse a tmux `display-message -p '#{cursor_x},#{cursor_y}'` reply line
  * (e.g. `0,2`) into a [TmuxPaneCursor]. Returns null when the reply is
  * missing, malformed, or carries negative coordinates — callers fall back to
@@ -9925,13 +10343,27 @@ internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 
 /**
- * Issue #552: a passive tmux reader EOF during a brief foreground network
- * starvation is not enough proof that the user should see a disconnect band.
- * Hold the visible Connected frame while we try a silent same-SSH control
+ * Issue #552 / #685 (Bug A): a passive tmux reader EOF during a brief foreground
+ * network starvation is not enough proof that the user should see a disconnect
+ * band. Hold the visible Connected frame while we try a silent same-SSH control
  * client reattach. A sustained outage still falls through to the existing
  * auto-reconnect path after this bounded foreground-only window.
+ *
+ * #685 ROOT CAUSE of the "lots of reconnects on stable Wi-Fi" complaint: there
+ * used to be THREE disagreeing grace clocks — the SSH lease's 60s idle TTL
+ * ([SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS]), sshj's 15s×4 keepalive (=60s),
+ * and a stray 8s VM grace here. The 8s VM clock tore the held Connected frame
+ * down at 8s, so a sub-minute background (or a brief blip on otherwise-stable
+ * Wi-Fi) surfaced a needless reconnect even though the lease/keepalive would
+ * have held the same transport live for a full 60s. We collapse to ONE
+ * lease-anchored 60s window: the VM grace now DEFERS to the same 60s the lease
+ * owns, so a background→foreground (or a transient blip) within 60s reattaches
+ * with ZERO reconnect, and the death verdict for anything longer is left to the
+ * single 60s lease/keepalive oracle. Keep this value in lockstep with
+ * [SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS] — do NOT reintroduce a divergent
+ * shorter VM clock.
  */
-internal const val PASSIVE_DISCONNECT_GRACE_MS: Long = 8_000L
+internal val PASSIVE_DISCONNECT_GRACE_MS: Long = SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS
 internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS: Long = 5_000L
 internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS: Long = 250L
 

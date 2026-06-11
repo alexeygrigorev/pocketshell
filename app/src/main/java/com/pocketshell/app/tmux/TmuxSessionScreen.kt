@@ -349,6 +349,12 @@ public fun TmuxSessionScreen(
     // Issue #626: unified pane list for the cross-session pager.
     val unifiedPanes by viewModel.unifiedPanes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
+    // Issue #661: while a cross-session switch to a not-yet-cached target is in
+    // flight, hide the terminal surface entirely (compact "Attaching" loading
+    // state) so the leaving session's frame is NEVER painted — not even one
+    // frame. Revealed only once the new session's panes are seeded (the VM
+    // flips this false in the same mutation that flips status to Connected).
+    val switchHidesTerminal by viewModel.switchHidesTerminal.collectAsState()
     // Issue #487: active-forwarding state for the host this session belongs
     // to. `remember(hostId)` re-subscribes if the screen is reused for a
     // different host. Drives the in-session forwarding chip in the chrome.
@@ -1031,7 +1037,22 @@ public fun TmuxSessionScreen(
                                 // pane has a conversation (mockup shows
                                 // `claude-3-5-sonnet`), else fall back to the
                                 // session name.
-                                agentName = currentAgentConversation?.detection?.agent?.displayName,
+                                // Issue #661: during a cross-session switch the
+                                // header must NEVER wear the LEAVING session's
+                                // identity for even one frame. `sessionName` is
+                                // already the TARGET (the nav `replace()` updated
+                                // it before connect runs), but `agentName` is
+                                // derived from the currently-rendered pane's
+                                // detected agent — which is the leaving session's
+                                // until the new pane seeds. Suppress it while the
+                                // switch is hiding the terminal so the header
+                                // shows the target session name (a neutral label),
+                                // never the old agent's display name.
+                                agentName = if (switchHidesTerminal) {
+                                    null
+                                } else {
+                                    currentAgentConversation?.detection?.agent?.displayName
+                                },
                                 tabLabels = tabState.labels,
                                 selectedTabIndex = tabState.selectedIndex,
                                 onTabSelected = onTabSelected,
@@ -1244,7 +1265,15 @@ public fun TmuxSessionScreen(
                 modifier = Modifier
                     .weight(1f),
             ) {
-                if (showConversation) {
+                if (switchHidesTerminal) {
+                    // Issue #661: a cross-session switch is in flight — never
+                    // paint the leaving session's terminal (or its agent
+                    // conversation). Show a compact "Attaching" loading state
+                    // until the VM reveals the NEW session's seeded panes. This
+                    // takes precedence over the conversation / pager branches so
+                    // not a single frame of the previous session can leak.
+                    SwitchingLoadingPlaceholder()
+                } else if (showConversation) {
                     val paneIdForSend = currentPane!!.paneId
                     // Issue #459: the Conversation pane is now read-only
                     // chrome — search field + conversation feed. Sending is
@@ -2825,6 +2854,11 @@ internal const val TMUX_RECONNECTING_RETRY_NOW_TAG = "tmux:session:reconnecting:
 // "Connecting" overlay.
 internal const val TMUX_SWITCHING_INDICATOR_TAG = "tmux:session:switching"
 
+// Issue #661: the full-surface "Attaching" loading placeholder shown in place
+// of the terminal during a cross-session switch, so the leaving session's
+// content is never painted while the new session attaches.
+internal const val TMUX_SWITCHING_LOADING_TAG = "tmux:session:switching-loading"
+
 /**
  * Issue #165: timings for the SSH-handshake progress overlay. A
  * 2-5s handshake is the common case the audit flagged as "feels
@@ -3227,6 +3261,43 @@ private fun EmptyPanesPlaceholder() {
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyDense,
         )
+    }
+}
+
+/**
+ * Issue #661: full-surface loading state shown IN PLACE OF the terminal while a
+ * cross-session switch attaches the new session. The leaving session's frame is
+ * never painted here — the surface is a neutral background with a compact
+ * "Attaching…" indicator — so the user never sees the previous session's
+ * content for even one frame. The VM ([TmuxSessionViewModel.switchHidesTerminal])
+ * reveals the real terminal the instant the new session's panes are seeded.
+ */
+@Composable
+private fun SwitchingLoadingPlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(color = PocketShellColors.Background)
+            .testTag(TMUX_SWITCHING_LOADING_TAG),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .width(96.dp)
+                    .height(2.dp),
+                color = PocketShellColors.Accent,
+                trackColor = PocketShellColors.SurfaceElev,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Attaching…",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+            )
+        }
     }
 }
 

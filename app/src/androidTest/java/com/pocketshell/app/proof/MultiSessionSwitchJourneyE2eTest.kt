@@ -403,6 +403,14 @@ class MultiSessionSwitchJourneyE2eTest {
             ),
         )
 
+        // (1b) Issue #661/#693: the HEADER NAME must show the TARGET session,
+        // never the previous session's name. The journey previously asserted
+        // only the CONTENT marker; this locks in the maintainer's explicit
+        // header-name fix (the header breadcrumb's session crumb must flip to
+        // the target the instant the switch lands, never wear the leaving
+        // session's identity).
+        assertHeaderShowsSession(step, fromSession, toSession)
+
         // (2): no Disconnected band, and no broken-transport/EOF text.
         assertNoDisconnectBand("step$step switch to $toSession")
         assertNoBrokenTransportText("step$step switch to $toSession", visibleAfterSwitch)
@@ -449,6 +457,41 @@ class MultiSessionSwitchJourneyE2eTest {
         // The marker-routing command may itself have re-seeded the pane; assert
         // once more that the band stayed clean through the whole step.
         assertNoDisconnectBand("step$step after input to $toSession")
+    }
+
+    /**
+     * Issue #661/#693: assert the header breadcrumb's session crumb shows the
+     * TARGET session name and NOT the leaving session's name after a switch.
+     *
+     * The header session crumb is a [androidx.compose.ui.text.AnnotatedString]
+     * text node rendered by `ConsolidatedTopChrome` / `CompactBreadcrumb` from
+     * the nav-route session name (the TARGET). The session-list picker — the
+     * other place these names render — is dismissed once the switch lands, so a
+     * visible node bearing [fromSession] after the switch means the header is
+     * still wearing the leaving session's identity (the bug). We retry briefly
+     * because the crumb flips on the same frame the surface reveals.
+     */
+    private fun assertHeaderShowsSession(step: Int, fromSession: String, toSession: String) {
+        // The TARGET name must be visible in the header.
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText(toSession, substring = true, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        // The LEAVING name must NOT be visible anywhere (the picker is closed,
+        // so the only place it could appear is a stale header crumb).
+        val staleHeaderNodes =
+            compose.onAllNodesWithText(fromSession, substring = true, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+        assertTrue(
+            "step$step switch to $toSession: the HEADER must show the TARGET session " +
+                "name '$toSession', never the LEAVING session's name '$fromSession'. " +
+                "Found ${staleHeaderNodes.size} on-screen node(s) still bearing " +
+                "'$fromSession' after the switch landed — the header is wearing the " +
+                "previous session's identity (the #661/#693 header-name regression).",
+            staleHeaderNodes.isEmpty(),
+        )
+        Log.i(LOG_TAG, "header-name ok step=$step shows=$toSession not=$fromSession")
     }
 
     /**

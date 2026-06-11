@@ -87,6 +87,10 @@ class HostSessionListCache @Inject constructor(
             .put("tty", tty ?: JSONObject.NULL)
             .put("command", command ?: JSONObject.NULL)
             .put("agentKind", agentKind.name)
+            // Issue #653: persist the stable tmux window id so a cold-restored
+            // tree can prune a window by id on a live `%window-close` before the
+            // first reconcile re-tags it.
+            .put("windowId", windowId ?: JSONObject.NULL)
 
     private fun JSONObject.toFolderSessionRow(): FolderSessionRow? {
         val sessionName = optString("sessionName").takeIf { it.isNotBlank() } ?: return null
@@ -120,6 +124,7 @@ class HostSessionListCache @Inject constructor(
             tty = stringOrNull("tty"),
             command = stringOrNull("command"),
             agentKind = agentKindOrShell(optString("agentKind")),
+            windowId = stringOrNull("windowId"),
         )
     }
 

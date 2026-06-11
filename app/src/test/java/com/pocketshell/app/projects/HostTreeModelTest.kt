@@ -35,6 +35,22 @@ class HostTreeModelTest {
             windows = windows,
         )
 
+    private fun window(
+        index: Int,
+        windowId: String,
+        name: String = "win$index",
+        active: Boolean = index == 0,
+        agentKind: SessionAgentKind = SessionAgentKind.Shell,
+    ): FolderSessionWindowEntry =
+        FolderSessionWindowEntry(
+            index = index,
+            name = name,
+            active = active,
+            command = null,
+            agentKind = agentKind,
+            windowId = windowId,
+        )
+
     private fun snapshot(
         sessions: List<FolderSessionEntry>,
         resolvedRoots: Map<String, String> = emptyMap(),
@@ -171,6 +187,95 @@ class HostTreeModelTest {
             "a confirmed node is no longer optimistic and prunes on the next probe",
             "created" in tree.sessionEntries().map { it.sessionName },
         )
+    }
+
+    // --- By-id window prune on remote window-close (#653) ----------------
+
+    @Test
+    fun removeWindowPrunesExactlyThatWindowLeavingSiblingsAndSessionIntact() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        // A multi-window session plus an unrelated sibling session.
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "multi",
+                        windows = listOf(
+                            window(0, "@0"),
+                            window(1, "@1"),
+                            window(2, "@2"),
+                        ),
+                    ),
+                    session("solo", windows = listOf(window(0, "@9"))),
+                ),
+            ),
+            now = 100L,
+        )
+
+        // Window @1 of `multi` closes remotely (`%window-close @1`).
+        assertTrue("a held window is pruned by id", tree.removeWindow("@1"))
+
+        val multi = tree.sessionEntries().first { it.sessionName == "multi" }
+        // Exactly @1 is gone; @0 and @2 (and their order) remain.
+        assertEquals(
+            "only the closed window is removed; siblings keep their slots",
+            listOf("@0", "@2"),
+            multi.windows.map { it.windowId },
+        )
+        // The parent session and the unrelated sibling session are untouched.
+        assertEquals(
+            listOf("multi", "solo"),
+            tree.sessionEntries().map { it.sessionName },
+        )
+        assertEquals(
+            "the sibling session's window is untouched",
+            listOf("@9"),
+            tree.sessionEntries().first { it.sessionName == "solo" }.windows.map { it.windowId },
+        )
+    }
+
+    @Test
+    fun removeWindowIsANoOpForUnknownOrBlankId() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(listOf(session("multi", windows = listOf(window(0, "@0"), window(1, "@1"))))),
+            now = 100L,
+        )
+        assertFalse("an id no held window carries is a no-op", tree.removeWindow("@404"))
+        assertFalse("a blank id is a no-op", tree.removeWindow(""))
+        // Nothing was dropped.
+        assertEquals(
+            listOf("@0", "@1"),
+            tree.sessionEntries().first().windows.map { it.windowId },
+        )
+        // A second close of the same id (already pruned) is also a no-op.
+        assertTrue(tree.removeWindow("@1"))
+        assertFalse("a re-delivered window-close for an already-pruned id is a no-op", tree.removeWindow("@1"))
+    }
+
+    @Test
+    fun removeWindowDoesNotRebuildOrReorderSessions() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("a", windows = listOf(window(0, "@0"))),
+                    session("b", windows = listOf(window(0, "@1"), window(1, "@2"))),
+                    session("c", windows = listOf(window(0, "@3"))),
+                ),
+            ),
+            now = 100L,
+        )
+        val orderBefore = tree.sessionEntries().map { it.sessionName }
+        tree.removeWindow("@2")
+        // Session order is intrinsic and untouched by a window-level prune.
+        assertEquals(orderBefore, tree.sessionEntries().map { it.sessionName })
+        assertEquals(listOf("a", "b", "c"), orderBefore)
+        // The reconcile timestamp is NOT bumped — a window prune is not a probe.
+        assertEquals(100L, tree.lastReconciledAt)
     }
 
     @Test

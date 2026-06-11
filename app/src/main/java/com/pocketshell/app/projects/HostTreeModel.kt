@@ -116,6 +116,14 @@ internal class HostTreeModel {
         val active: Boolean,
         val command: String?,
         val agentKind: SessionAgentKind,
+        /**
+         * The stable tmux window id (`@N`, #653) — the id the live `-CC`
+         * stream reports in `%window-close @<id>`. [removeWindow] keys the
+         * window-level prune on this, not [index], because tmux renumbers
+         * window indices when a window closes. `null` for a window the probe
+         * could not tag with an id.
+         */
+        val windowId: String?,
     )
 
     /**
@@ -276,6 +284,37 @@ internal class HostTreeModel {
         if (sessions.remove(sessionName) == null) return false
         sessionFolderPaths.remove(sessionName)
         return true
+    }
+
+    /**
+     * Remove a single WINDOW by its stable tmux window id (`@N`, #653) when the
+     * live `-CC` stream reports `%window-close @<id>` while the parent session
+     * stays alive. The window-level analogue of [removeSession]:
+     *
+     *  - finds the session node holding a window with [windowId] and drops ONLY
+     *    that window from the node's window list — sibling windows and the
+     *    parent session node keep their slots untouched;
+     *  - is INCREMENTAL: it mutates the one node's `windows` list in place and
+     *    never rebuilds the session map or re-derives order/expansion — the
+     *    matching reconcile guarantee for a single window close;
+     *  - is a no-op (returns `false`) when no held window carries [windowId]
+     *    (already pruned, a window the probe never id-tagged, or an id for a
+     *    session this host's tree does not hold).
+     *
+     * The whole session is deliberately NOT removed even if this drops the
+     * session's last window: tmux closes the session itself when its final
+     * window closes, which surfaces separately as `%sessions-changed` /
+     * `removeSession` — keeping the two concerns hard-cut and single-purpose.
+     */
+    fun removeWindow(windowId: String): Boolean {
+        if (windowId.isBlank()) return false
+        sessions.values.forEach { node ->
+            if (node.windows.any { it.windowId == windowId }) {
+                node.windows = node.windows.filterNot { it.windowId == windowId }
+                return true
+            }
+        }
+        return false
     }
 
     /**
@@ -449,6 +488,7 @@ internal class HostTreeModel {
             active = active,
             command = command,
             agentKind = agentKind,
+            windowId = windowId,
         )
 
     private fun WindowState.toEntry(): FolderSessionWindowEntry =
@@ -458,6 +498,7 @@ internal class HostTreeModel {
             active = active,
             command = command,
             agentKind = agentKind,
+            windowId = windowId,
         )
 
     companion object {

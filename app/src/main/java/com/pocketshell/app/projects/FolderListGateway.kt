@@ -84,6 +84,16 @@ data class FolderSessionWindowRow(
     val tty: String?,
     val command: String?,
     val agentKind: SessionAgentKind = SessionAgentKind.Shell,
+    /**
+     * Issue #653: the stable tmux window id (`@N`) for this window. This is the
+     * id tmux reports in `%window-close @<id>` on the live `-CC` control stream,
+     * so threading it from `list-panes` (`#{window_id}`) into the maintained tree
+     * lets a single window-close prune exactly that window node by id — the
+     * window index is NOT stable across closes (tmux renumbers), so it cannot key
+     * the prune. `null` when the probe path predates the id column (e.g. an older
+     * cached row).
+     */
+    val windowId: String? = null,
 )
 
 /**
@@ -1444,7 +1454,8 @@ class SshFolderListGateway internal constructor(
             "tmux list-panes -a -F " +
                 "'#{session_name}$FIELD_SEP#{window_index}$FIELD_SEP#{window_name}$FIELD_SEP" +
                 "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
-                "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
+                "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}" +
+                "$FIELD_SEP#{window_id}'"
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
         const val POCKETSHELL_PROJECT_HISTORY_COMMAND: String =
@@ -1459,7 +1470,8 @@ class SshFolderListGateway internal constructor(
             "list-panes -a -F " +
                 "'#{session_name}$FIELD_SEP#{window_index}$FIELD_SEP#{window_name}$FIELD_SEP" +
                 "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
-                "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
+                "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}" +
+                "$FIELD_SEP#{window_id}'"
 
         /**
          * Parse the tab-delimited `list-sessions` output into
@@ -1543,7 +1555,14 @@ class SshFolderListGateway internal constructor(
 
             val rows = mutableListOf<FolderSessionWindowRow>()
             for (line in lines) {
-                val parts = line.split(FIELD_SEP, limit = 8)
+                // limit=9 so `#{window_id}` (the trailing 9th field, #653) is
+                // captured separately from `pane_current_command` (the 8th).
+                // `pane_current_command` can itself contain the rare `::`
+                // literal; with the id pinned to the LAST column the command
+                // field absorbs any interior separators only when the id column
+                // is absent (a pre-#653 cached row), so we read the id from the
+                // last part and fall back to null when fewer than 9 parts.
+                val parts = line.split(FIELD_SEP, limit = 9)
                 if (parts.size < 8) continue
                 val sessionName = parts[0].trim()
                 if (sessionName.isEmpty()) continue
@@ -1557,6 +1576,7 @@ class SshFolderListGateway internal constructor(
                     cwd = parts[5].trim().takeIf { it.isNotEmpty() },
                     tty = parts[6].trim().takeIf { it.isNotEmpty() },
                     command = parts[7].trim().takeIf { it.isNotEmpty() },
+                    windowId = parts.getOrNull(8)?.trim()?.takeIf { it.isNotEmpty() },
                 )
             }
             return rows

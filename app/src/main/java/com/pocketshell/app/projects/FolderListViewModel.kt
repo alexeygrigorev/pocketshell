@@ -54,6 +54,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -169,6 +170,14 @@ data class FolderSessionWindowEntry(
     val active: Boolean,
     val command: String?,
     val agentKind: SessionAgentKind,
+    /**
+     * Issue #653: the stable tmux window id (`@N`) — the same id the live `-CC`
+     * stream reports in `%window-close @<id>`. Carried into the maintained tree
+     * so a single window close prunes exactly that window node by id (the window
+     * index renumbers across closes and cannot key the prune). `null` for a
+     * window the probe path could not tag with an id (e.g. an older cached row).
+     */
+    val windowId: String? = null,
 )
 
 sealed interface FolderListUiState {
@@ -453,6 +462,17 @@ class FolderListViewModel internal constructor(
     private var sessionsChangedJob: Job? = null
 
     /**
+     * Issue #653: subscription to the bound host's live `tmux -CC` client's
+     * `%window-close @<id>` event ([ControlEvent.WindowClose]). When a single
+     * tmux WINDOW closes remotely while its session stays alive, this prunes
+     * exactly that window node from the maintained tree by window id — the
+     * window-level analogue of the [sessionsChangedJob] whole-session path.
+     * Re-bound per [bind] (and torn down on host change / [stopPolling]) so it
+     * always tracks the currently-shown host.
+     */
+    private var windowCloseJob: Job? = null
+
+    /**
      * EPIC #679 — the maintained in-memory project tree. Held across opens of
      * the same host; only a host CHANGE resets it ([HostTreeModel.bindHost]).
      * Order, expansion, and bucket placement are intrinsic node state, and
@@ -645,6 +665,12 @@ class FolderListViewModel internal constructor(
         // debounced reconcile. Idempotent per host — restarted here on every
         // bind so it tracks the currently-shown host.
         startSessionsChangedSubscription(params)
+        // Issue #653: (re)subscribe to the bound host's live `-CC` `%window-close`
+        // event so a single window closed remotely prunes exactly that window
+        // node from the maintained tree by id (no full reconcile, sibling windows
+        // + parent session intact). Same per-host lifecycle as the
+        // `%sessions-changed` subscription above.
+        startWindowCloseSubscription(params)
         // EPIC #679 requirement #1: opening the host detail renders the HELD
         // tree INSTANTLY. Re-binding the SAME host reuses the maintained tree
         // (no probe-on-open, no loading flash) and only kicks a reconcile if one
@@ -1165,6 +1191,53 @@ class FolderListViewModel internal constructor(
             keyPath == params.keyPath
 
     /**
+     * Issue #653: subscribe the held tree to the bound host's live `tmux -CC`
+     * client's `%window-close @<id>` event ([ControlEvent.WindowClose]) and treat
+     * it as a DIRECT, by-id window prune. When a single tmux window is closed
+     * remotely (another terminal, an agent, a `kill-window`) while its session
+     * stays alive, tmux emits `%window-close @<id>` on the already-open control
+     * channel; this drops exactly that window node from the maintained tree
+     * ([HostTreeModel.removeWindow]) — sibling windows and the parent session
+     * keep their slots — and re-projects, INCREMENTALLY, with no full reconcile.
+     *
+     * The whole-session analogue is [startSessionsChangedSubscription]; a window
+     * close that takes the session's last window also surfaces as
+     * `%sessions-changed`, which that path prunes as a whole session. There is NO
+     * debounce here: each `%window-close` carries a distinct id, so coalescing a
+     * burst would risk dropping one of several simultaneous closes — each prune
+     * is a cheap in-place mutation, so they are applied one-for-one.
+     *
+     * D21-clean: NO poll, NO Timer/AlarmManager/WorkManager. It rides the same
+     * hot `-CC` event bus as `%sessions-changed`, follows the live client with
+     * [collectLatest] across reconnects, and only mutates while the app is
+     * foregrounded ([processStarted]) and this host is still bound — so nothing
+     * runs while backgrounded.
+     */
+    private fun startWindowCloseSubscription(params: BoundParams) {
+        val registry = activeTmuxClients ?: return
+        windowCloseJob?.cancel()
+        windowCloseJob = viewModelScope.launch {
+            registry.clients
+                .map { snapshot -> snapshot[params.hostId]?.takeIf { it.matches(params) }?.client }
+                .distinctUntilChanged()
+                .collectLatest { client ->
+                    if (client == null) return@collectLatest
+                    client.events
+                        .filterIsInstance<ControlEvent.WindowClose>()
+                        .collect { event ->
+                            // Only mutate while this host is still bound, the tree
+                            // is initialised, and the app is foregrounded (D21).
+                            if (bound == params && rootSnapshotLoaded && processStarted.value) {
+                                if (tree.removeWindow(event.windowId)) {
+                                    emitReady()
+                                }
+                            }
+                        }
+                }
+        }
+    }
+
+    /**
      * Force a reconcile NOW regardless of staleness — the explicit
      * pull-to-refresh swipe (requirement #4), error-panel retry, and the
      * post-app-action confirmation. Gated only on the foreground signal (D21).
@@ -1210,6 +1283,11 @@ class FolderListViewModel internal constructor(
         // longer composed. Re-entry runs bind() again, which re-subscribes.
         sessionsChangedJob?.cancel()
         sessionsChangedJob = null
+        // Issue #653: tear down the `%window-close` subscription on the same
+        // lifecycle, so a window-close prune cannot fire for an undisplayed
+        // screen. Re-entry runs bind() again, which re-subscribes.
+        windowCloseJob?.cancel()
+        windowCloseJob = null
         scheduleWarmRelease()
     }
 
@@ -1304,6 +1382,7 @@ class FolderListViewModel internal constructor(
                     active = window.active,
                     command = window.command,
                     agentKind = window.agentKind,
+                    windowId = window.windowId,
                 )
             },
         )
@@ -1410,6 +1489,7 @@ class FolderListViewModel internal constructor(
     override fun onCleared() {
         probeJob?.cancel()
         sessionsChangedJob?.cancel()
+        windowCloseJob?.cancel()
         warmJob?.cancel()
         warmReleaseJob?.cancel()
         runBlocking {

@@ -130,12 +130,13 @@ class FolderListGatewayParserTest {
 
     @Test
     fun parseSessionWindowRowsKeepsWindowIdentityAndActiveWindowCwd() {
+        // 9-field shape (#653): the trailing column is `#{window_id}` (`@N`).
         val stdout = """
-            git-cable-world::0::node::1::1::/home/alexey/git/cable-world::/dev/pts/2::node
-            git-cable-world-map::0::claude::1::1::/home/alexey/git/cable-world::/dev/pts/3::claude
-            multi-agent::0::shell::0::1::/srv/app::/dev/pts/4::bash
-            multi-agent::1::claude::1::1::/srv/app::/dev/pts/5::claude
-            multi-agent::1::claude::1::0::/srv/app/ignored::/dev/pts/6::vim
+            git-cable-world::0::node::1::1::/home/alexey/git/cable-world::/dev/pts/2::node::@0
+            git-cable-world-map::0::claude::1::1::/home/alexey/git/cable-world::/dev/pts/3::claude::@1
+            multi-agent::0::shell::0::1::/srv/app::/dev/pts/4::bash::@2
+            multi-agent::1::claude::1::1::/srv/app::/dev/pts/5::claude::@3
+            multi-agent::1::claude::1::0::/srv/app/ignored::/dev/pts/6::vim::@3
         """.trimIndent()
 
         val windows = SshFolderListGateway.parseSessionWindowRows(stdout)
@@ -147,9 +148,25 @@ class FolderListGatewayParserTest {
         )
         assertEquals(listOf(0, 0, 0, 1), windows.map { it.index })
         assertEquals(listOf("node", "claude", "shell", "claude"), windows.map { it.name })
+        // #653: the stable tmux window id (`@N`) is threaded onto each row.
+        assertEquals(listOf("@0", "@1", "@2", "@3"), windows.map { it.windowId })
         assertEquals("/srv/app", activePanes["multi-agent"]?.cwd)
         assertEquals(1, activePanes["multi-agent"]?.windowIndex)
         assertEquals("claude", activePanes["multi-agent"]?.windowName)
+    }
+
+    @Test
+    fun parseSessionWindowRowsTreatsMissingWindowIdColumnAsNull() {
+        // Pre-#653 8-field shape (e.g. a row from an older cache or a tmux that
+        // did not emit the id column): the parser still yields the row, with a
+        // null windowId, instead of dropping it.
+        val stdout = """
+            legacy::0::bash::1::1::/srv::/dev/pts/9::bash
+        """.trimIndent()
+        val windows = SshFolderListGateway.parseSessionWindowRows(stdout)
+        assertEquals(1, windows.size)
+        assertEquals("legacy", windows[0].sessionName)
+        assertNull(windows[0].windowId)
     }
 
     @Test

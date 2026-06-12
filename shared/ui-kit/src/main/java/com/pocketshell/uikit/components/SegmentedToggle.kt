@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -18,8 +17,10 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Shared segmented toggle — the cyan-active "pick one of N" control the
@@ -52,7 +53,10 @@ fun SegmentedToggle(
     segmentTag: (index: Int) -> String? = { null },
     fillSegments: Boolean = false,
 ) {
-    val trackShape = RoundedCornerShape(10.dp)
+    // #461 token migration: the track + segments snap onto the chip shape rung
+    // (`PocketShellShapes.small` = 8dp) rather than the previous off-ladder 10dp,
+    // matching the chip/key vocabulary in the design system.
+    val trackShape = PocketShellShapes.small
     Row(
         modifier = modifier
             .heightIn(min = 32.dp)
@@ -69,17 +73,23 @@ fun SegmentedToggle(
                 modifier = (if (fillSegments) Modifier.weight(1f) else Modifier)
                     .background(
                         color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
-                        shape = RoundedCornerShape(8.dp),
+                        shape = PocketShellShapes.small,
                     )
                     .clickable(role = Role.Tab, onClick = { onSelected(index) })
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .padding(
+                        horizontal = PocketShellDensity.chipPadH,
+                        vertical = PocketShellDensity.chipPadV,
+                    )
                     .let { if (tag != null) it.testTag(tag) else it },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = label,
                     color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
+                    // #461: snap the off-ladder 12sp label onto the dense type
+                    // rung (`bodyDense` = 13sp), the design system's named size
+                    // for compact controls.
+                    style = PocketShellType.bodyDense,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

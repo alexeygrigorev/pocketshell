@@ -577,6 +577,32 @@ For every UI migration issue:
       authoritative viewport captures.
 - [ ] Leave unrelated runtime churn out of the migration.
 
+## Drift Guardrail
+
+`scripts/check-design-tokens.sh` (issue #461, slice 2 / G7) is a cheap grep-only
+guardrail that flags **new** off-ladder UI literals in `app/src/main` so the
+incremental token migration doesn't lose ground. It catches:
+
+- `RoundedCornerShape(<N>.dp)` where `<N>` is not an on-ladder radius
+  (8 / 14 / 20 / 28 — the `PocketShellShapes` rungs).
+- `fontSize = <N>.sp` where `<N>` is not an on-ladder size
+  (11 / 13 / 14 / 16 / 20 — the `PocketShellType` rungs).
+
+It uses a committed per-file **baseline** (`scripts/design-token-baseline.txt`)
+of the current offender backlog, so it does not try to force the whole Slice D
+sweep at once — it only fails when a file gains new offenders (or a brand-new
+file ships with any). Genuine sub-ladder component geometry (a thin progress
+track, an icon glyph size) is legitimate; name a private `*Radius`/`*Size`
+constant with a cite to this document, then `--update` the baseline. Migrating a
+screen lowers a file's count; the script reports the improvement and prompts a
+re-baseline. The reviewer runs it from the worktree; it is intentionally not a
+slow Gradle/emulator job.
+
+```bash
+scripts/check-design-tokens.sh            # check against the baseline
+scripts/check-design-tokens.sh --update   # re-baseline after a migration
+```
+
 ## Open Maintainer Decisions
 
 1. Should `Motion.kt` be added to `shared/ui-kit/theme`, and should it expose

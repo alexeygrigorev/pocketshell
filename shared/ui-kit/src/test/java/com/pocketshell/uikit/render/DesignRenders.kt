@@ -45,17 +45,23 @@ import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
+import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.Pill
+import com.pocketshell.uikit.components.ProgressBar
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
+import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.model.PillKind
+import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
@@ -1281,6 +1287,65 @@ class DesignRenders {
                 role = BannerRole.AgentHint,
                 leadingIcon = Icons.Filled.Info,
             )
+        }
+    }
+
+    /**
+     * Issue #461 (slice 2, G3): the four primitives migrated off off-ladder raw
+     * literals onto the token layer — [Pill] (status badges), [SegmentedToggle]
+     * (mode switch), [Breadcrumb] (path chrome), and [ProgressBar] (usage fill).
+     * This is the fast visual check that the token migration is a no-/low-op:
+     * Pill + the segment chips snap onto `PocketShellShapes.small` (8dp) and the
+     * chip padding rung; the toggle/crumb labels snap onto the type ladder; the
+     * progress track keeps its deliberate sub-ladder micro radius. Compare
+     * against `docs/mockups/usage.html` (pills/progress) and `session.html`
+     * (breadcrumb).
+     */
+    @Test
+    fun migratedPrimitives() = render("migrated-primitives") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            // Pill — all four status kinds.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Pill(label = "ok", kind = PillKind.Ok)
+                Pill(label = "warn", kind = PillKind.Warn)
+                Pill(label = "blocked", kind = PillKind.Blocked)
+                Pill(label = "error", kind = PillKind.Error)
+            }
+
+            // SegmentedToggle — the canonical 2-up header switch + a 3-up.
+            SegmentedToggle(
+                labels = listOf("Terminal", "Conversation"),
+                selectedIndex = 0,
+                onSelected = {},
+            )
+            SegmentedToggle(
+                labels = listOf("Overview", "History", "Issues"),
+                selectedIndex = 1,
+                onSelected = {},
+                fillSegments = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            // Breadcrumb — host > session > pane path chrome with the live dot.
+            Breadcrumb(
+                crumbs = listOf(
+                    Crumb(label = "hetzner", isCurrent = false, onClick = {}),
+                    Crumb(label = "agent-main", isCurrent = false, onClick = {}),
+                    Crumb(label = "claude", isCurrent = true, onClick = {}),
+                ),
+                onBack = {},
+                onMore = {},
+            )
+
+            // ProgressBar — the three usage fill levels.
+            ProgressBar(progress = 0.35f, kind = ProgressKind.Default)
+            ProgressBar(progress = 0.78f, kind = ProgressKind.Warn)
+            ProgressBar(progress = 1.0f, kind = ProgressKind.Danger)
         }
     }
 

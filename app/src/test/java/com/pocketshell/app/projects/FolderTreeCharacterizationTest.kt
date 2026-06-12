@@ -153,6 +153,98 @@ class FolderTreeCharacterizationTest {
         )
     }
 
+    // --- Sticky bucketing on a degraded probe (#729, #679 Slice 2) -------
+
+    /**
+     * #729 characterization (healthy probe): a session whose cwd sits under a
+     * watched root that the probe resolves via [resolvedWatchedRootPaths]
+     * (the watched/Room path differs from the canonical/resolved path the cwd
+     * lives under — e.g. a symlinked or alias root) buckets under that root.
+     * This pins the correct placement the sticky fix must keep identical.
+     */
+    @Test
+    fun sessionUnderAResolvedWatchedRootBucketsUnderThatRoot() {
+        val sessions = listOf(session("alpha"))
+        val tree = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = mapOf("alpha" to "/canonical/git/alpha"),
+            // Room stores the alias path; the probe resolved it to the
+            // canonical path the session cwd actually lives under.
+            watchedFolders = listOf(root("/alias/git", "git")),
+            scannedProjectFoldersByRoot = emptyMap(),
+            resolvedWatchedRootPaths = mapOf("/alias/git" to "/canonical/git"),
+        )
+        val gitRoot = tree.first { it.path == "/alias/git" }
+        assertEquals(
+            setOf("/canonical/git/alpha"),
+            gitRoot.folders.map { it.path }.toSet(),
+        )
+        assertFalse(
+            "no Other-folders bucket on a healthy probe",
+            tree.any { it.path == FolderListViewModel.OTHER_ROOT_PATH },
+        )
+    }
+
+    /**
+     * #729 FAILING-FIRST: same session, but the next probe momentarily returns
+     * an EMPTY/incomplete [resolvedWatchedRootPaths] (a transiently-degraded
+     * resolution). Without sticky bucketing, [buildFolderTree] re-runs
+     * `bestRootForPath` against the degraded roots and the session FLASHES into
+     * "Other folders". With a sticky bucket assignment held by node id, the
+     * session must STAY under the root it was previously placed under.
+     */
+    @Test
+    fun degradedResolvedRootsKeepStickyBucketUnderPreviousRoot() {
+        val sessions = listOf(session("alpha"))
+        val degradedTree = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = mapOf("alpha" to "/canonical/git/alpha"),
+            watchedFolders = listOf(root("/alias/git", "git")),
+            scannedProjectFoldersByRoot = emptyMap(),
+            // Probe momentarily degraded: resolution map empty, so the raw
+            // /alias/git no longer matches the /canonical/git/alpha cwd.
+            resolvedWatchedRootPaths = emptyMap(),
+            // Sticky: alpha was previously placed under the /alias/git root,
+            // whose authoritative resolved (match) path was /canonical/git.
+            stickyBuckets = mapOf("alpha" to "/canonical/git"),
+        )
+        assertFalse(
+            "a degraded probe must not flash the session into Other folders",
+            degradedTree.any { it.path == FolderListViewModel.OTHER_ROOT_PATH },
+        )
+        val gitRoot = degradedTree.first { it.path == "/alias/git" }
+        assertEquals(
+            "session stays bucketed under its previously-assigned root",
+            setOf("/canonical/git/alpha"),
+            gitRoot.folders.map { it.path }.toSet(),
+        )
+    }
+
+    /**
+     * #729: an AUTHORITATIVE move (the session's cwd actually changed to sit
+     * outside the held root, and the current healthy probe confirms it has no
+     * matching root) DOES re-bucket — stickiness must not pin a session to a
+     * root it genuinely left.
+     */
+    @Test
+    fun authoritativeMoveOutsideRootStillReBucketsToOtherFolders() {
+        val sessions = listOf(session("alpha"))
+        val tree = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = mapOf("alpha" to "/var/tmp/scratch"),
+            watchedFolders = listOf(root("/alias/git", "git")),
+            scannedProjectFoldersByRoot = emptyMap(),
+            // Healthy probe (resolution present) — the cwd genuinely no longer
+            // sits under the watched root.
+            resolvedWatchedRootPaths = mapOf("/alias/git" to "/canonical/git"),
+            stickyBuckets = mapOf("alpha" to "/canonical/git"),
+        )
+        val other = tree.first { it.path == FolderListViewModel.OTHER_ROOT_PATH }
+        assertEquals(setOf("/var/tmp/scratch"), other.folders.map { it.path }.toSet())
+        val gitRoot = tree.first { it.path == "/alias/git" }
+        assertTrue("the left root is now empty of sessions", gitRoot.folders.isEmpty())
+    }
+
     // --- Multi-window declutter inputs (#675) ----------------------------
 
     @Test

@@ -1994,32 +1994,55 @@ class FolderListViewModel internal constructor(
             // [groupSessionsIntoFolders]. Threaded into every session/folder
             // sort below so the tree view stays stable across a routine refresh.
             sessionOrderRank: Map<String, Int> = emptyMap(),
+            // Issue #729 (#679 Slice 2): sticky bucket placement. Maps a
+            // session name to the resolved root *match* path it was last placed
+            // under. When the current probe momentarily degrades (an empty or
+            // incomplete [resolvedWatchedRootPaths] so `bestRootForPath` no
+            // longer matches), a session whose cwd is STILL within its sticky
+            // root is held under that root instead of flashing into "Other
+            // folders". `bestRootForPath` is therefore no longer the sole
+            // per-projection authority for an already-placed node. Stickiness
+            // never pins a session whose cwd genuinely left the root — that is
+            // an authoritative move and re-buckets normally.
+            stickyBuckets: Map<String, String> = emptyMap(),
         ): List<FolderTreeRoot> {
-            val resolvedByWatchedPath = resolvedWatchedRootPaths
-                .mapKeys { (path, _) -> canonicalisePath(path) }
-                .mapValues { (_, path) -> canonicalisePath(path) }
-            val watchedRoots = watchedFolders
-                .map { root ->
-                    val path = canonicalisePath(root.path)
-                    val matchPath = resolvedByWatchedPath[path]
-                        ?.takeIf { it != UNTRACKED_PATH }
-                        ?: path
-                    val label = WatchedFoldersViewModel
-                        .stripOrderPrefix(root.label)
-                        .ifBlank { defaultLabelForPath(path) }
-                    WatchedRoot(path = path, matchPath = matchPath, label = label)
-                }
-                .distinctBy { it.path }
+            val watchedRoots = watchedRootsOf(watchedFolders, resolvedWatchedRootPaths)
+
+            val stickyByName = stickyBuckets
+                .mapValues { (_, matchPath) -> canonicalisePath(matchPath) }
 
             val sessionProjectPaths = mutableMapOf<String, MutableList<FolderSessionEntry>>()
             val otherSessionPaths = mutableMapOf<String, MutableList<FolderSessionEntry>>()
+            // #729: project paths placed by STICKINESS (not by the current probe)
+            // map to the watched-root node id that must host them. The render
+            // loop below filters session project paths by `root.matchPath`, which
+            // a degraded probe no longer matches, so these explicit assignments
+            // are what keep a sticky-held session under its node.
+            val stickyProjectRootNode = mutableMapOf<String, String>()
             for (session in sessions) {
                 val cwd = sessionFolderPaths[session.sessionName] ?: UNTRACKED_PATH
-                val root = bestRootForPath(cwd, watchedRoots)
+                // The current probe's authority first. Stickiness only engages
+                // when the live probe fails to place the node — i.e. the
+                // watched-roots resolution transiently degraded — and never
+                // overrides a live, authoritative placement.
+                val liveRoot = bestRootForPath(cwd, watchedRoots)
+                val root = liveRoot
+                    ?: stickyRootForSession(
+                        cwd = cwd,
+                        stickyMatchPath = stickyByName[session.sessionName],
+                        watchedRoots = watchedRoots,
+                    )
                 val projectPath = root?.let { projectPathUnderRoot(cwd, it.matchPath) }
                 val target = if (projectPath != null) sessionProjectPaths else otherSessionPaths
                 val key = projectPath ?: cwd
                 target.getOrPut(key) { mutableListOf() }.add(session)
+                // Record the hosting node only when stickiness (not the live
+                // probe) placed it, so the render loop can include it under the
+                // correct watched root despite the degraded match-path. A
+                // non-null [projectPath] guarantees a non-null hosting [root].
+                if (projectPath != null && liveRoot == null) {
+                    stickyProjectRootNode[projectPath] = root!!.path
+                }
             }
 
             val extraByPath = extraFolders
@@ -2038,7 +2061,13 @@ class FolderListViewModel internal constructor(
                     .map(::canonicalisePath)
                     .filter { pathWithinRoot(it, root.matchPath) }
                 val extraPaths = extraByPath.keys.filter { pathWithinRoot(it, root.matchPath) }
-                val sessionPaths = sessionProjectPaths.keys.filter { pathWithinRoot(it, root.matchPath) }
+                val sessionPaths = sessionProjectPaths.keys.filter {
+                    // #729: include a project path under this root when the live
+                    // match-path contains it OR when stickiness explicitly
+                    // assigned it to this watched-root node (degraded probe).
+                    pathWithinRoot(it, root.matchPath) ||
+                        stickyProjectRootNode[it] == root.path
+                }
                 val historyPaths = historyProjectFoldersByRoot[root.path].orEmpty() +
                     historyProjectFoldersByRoot[root.matchPath].orEmpty() +
                     historyProjectFoldersByRoot.entries
@@ -2126,6 +2155,62 @@ class FolderListViewModel internal constructor(
             val label: String,
         )
 
+        /**
+         * #729 sticky-bucket bookkeeping. Given the CURRENT (assumed healthy)
+         * probe inputs, returns the resolved root *match* path for each session
+         * the live probe places under a watched root. Sessions the probe does
+         * not place (untracked cwd, or cwd outside every root) are absent.
+         *
+         * [HostTreeModel] folds the result into its sticky memory after each
+         * reconcile: a present session refreshes/sets its sticky root, while a
+         * session that AUTHORITATIVELY moved out of every root (placed by the
+         * live probe but now matching nothing) is dropped. Held sticky entries
+         * are the held-by-id placements [buildFolderTree] honours when a later
+         * probe degrades. This reuses the exact `watchedRoots`/`bestRootForPath`
+         * resolution `buildFolderTree` uses, so the sticky path is always the
+         * same match-path the healthy projection bucketed under.
+         */
+        fun resolveStickyPlacements(
+            sessionFolderPaths: Map<String, String>,
+            watchedFolders: List<ProjectRootEntity>,
+            resolvedWatchedRootPaths: Map<String, String>,
+        ): Map<String, String> {
+            val watchedRoots = watchedRootsOf(watchedFolders, resolvedWatchedRootPaths)
+            if (watchedRoots.isEmpty()) return emptyMap()
+            val placements = LinkedHashMap<String, String>()
+            for ((sessionName, rawCwd) in sessionFolderPaths) {
+                val cwd = canonicalisePath(rawCwd)
+                val root = bestRootForPath(cwd, watchedRoots) ?: continue
+                placements[sessionName] = root.matchPath
+            }
+            return placements
+        }
+
+        /**
+         * The canonicalised watched-root overlay used by both [buildFolderTree]
+         * and [resolveStickyPlacements] so the two agree on every match-path.
+         */
+        private fun watchedRootsOf(
+            watchedFolders: List<ProjectRootEntity>,
+            resolvedWatchedRootPaths: Map<String, String>,
+        ): List<WatchedRoot> {
+            val resolvedByWatchedPath = resolvedWatchedRootPaths
+                .mapKeys { (path, _) -> canonicalisePath(path) }
+                .mapValues { (_, path) -> canonicalisePath(path) }
+            return watchedFolders
+                .map { root ->
+                    val path = canonicalisePath(root.path)
+                    val matchPath = resolvedByWatchedPath[path]
+                        ?.takeIf { it != UNTRACKED_PATH }
+                        ?: path
+                    val label = WatchedFoldersViewModel
+                        .stripOrderPrefix(root.label)
+                        .ifBlank { defaultLabelForPath(path) }
+                    WatchedRoot(path = path, matchPath = matchPath, label = label)
+                }
+                .distinctBy { it.path }
+        }
+
         private fun folderRowForTreePath(
             path: String,
             sessions: List<FolderSessionEntry>,
@@ -2157,7 +2242,63 @@ class FolderListViewModel internal constructor(
                 .maxByOrNull { it.matchPath.length }
         }
 
-        private fun pathWithinRoot(path: String, root: String): Boolean =
+        /**
+         * #729 sticky placement. Called only when the current probe's
+         * [bestRootForPath] returned null (the watched-roots resolution
+         * degraded). Holds a session under its previously-assigned root iff:
+         *
+         *  1. the session has a sticky match-path ([stickyMatchPath]),
+         *  2. its current cwd is STILL within that sticky match-path (so the
+         *     session has not authoritatively moved out of the root), and
+         *  3. a watched root still owns that match-path — identified by node id
+         *     via the canonical root *path*, not by re-running `bestRootForPath`
+         *     against the degraded `matchPath`.
+         *
+         * Returns a [WatchedRoot] whose `matchPath` is overridden to the held
+         * sticky path so [projectPathUnderRoot] computes the same project key as
+         * the healthy probe did, and whose `path` (node id) is the stable
+         * watched-root the healthy probe placed the session under so the project
+         * still renders beneath that node. Returns null when the cwd genuinely
+         * left the root (an authoritative move) or no watched root owns the
+         * sticky path.
+         */
+        private fun stickyRootForSession(
+            cwd: String,
+            stickyMatchPath: String?,
+            watchedRoots: List<WatchedRoot>,
+        ): WatchedRoot? {
+            if (cwd == UNTRACKED_PATH) return null
+            if (watchedRoots.isEmpty()) return null
+            val sticky = stickyMatchPath ?: return null
+            // Authoritative-move guard: the cwd must still sit under the sticky
+            // root, otherwise the session genuinely left it and re-buckets.
+            if (!pathWithinRoot(cwd, sticky)) return null
+            // Resolve the sticky match-path back to its stable watched-root node
+            // (held by id). The watched root's *current* match-path may be the
+            // degraded raw path, so identify the owner by node relationship, not
+            // by re-running `bestRootForPath` against the degraded roots:
+            //  1. an exact id/match-path equality (healthy or already-resolved),
+            //  2. else the longest watched root whose raw/match path is a prefix
+            //     of the sticky path or vice versa (alias/symlink resolution),
+            //  3. else, when there is a single watched root, that root.
+            val owner = watchedRoots.firstOrNull { root ->
+                root.matchPath == sticky || root.path == sticky
+            } ?: watchedRoots
+                .filter { root ->
+                    pathWithinRoot(sticky, root.path) ||
+                        pathWithinRoot(sticky, root.matchPath) ||
+                        pathWithinRoot(root.path, sticky) ||
+                        pathWithinRoot(root.matchPath, sticky)
+                }
+                .maxByOrNull { maxOf(it.path.length, it.matchPath.length) }
+                ?: watchedRoots.singleOrNull()
+                ?: return null
+            // Override the match-path to the held sticky path so the project key
+            // is identical to the healthy projection's.
+            return owner.copy(matchPath = sticky)
+        }
+
+        internal fun pathWithinRoot(path: String, root: String): Boolean =
             path == root || path.startsWith(root.trimEnd('/') + "/")
 
         private fun projectPathUnderRoot(path: String, root: String): String {

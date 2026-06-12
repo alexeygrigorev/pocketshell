@@ -94,6 +94,19 @@ internal class HostTreeModel {
     private var resolvedWatchedRootPaths: Map<String, String> = emptyMap()
 
     /**
+     * #729 (#679 Slice 2): sticky bucket placement memory. Maps a session name
+     * to the resolved root *match* path it was last AUTHORITATIVELY placed under
+     * by a healthy probe. A reconcile refreshes the entry whenever the live
+     * probe resolves the session under a watched root, and drops it when the
+     * session authoritatively moves out of every root. [project] threads this
+     * into [FolderListViewModel.buildFolderTree] so a momentarily-degraded
+     * `resolvedWatchedRootPaths` cannot flash an already-placed session into
+     * "Other folders" — the placement is held by node id, not recomputed solely
+     * from the degraded roots on every projection.
+     */
+    private val stickyBuckets = LinkedHashMap<String, String>()
+
+    /**
      * Optimistic folder overlay (#653 create/import). Holds canonical path →
      * label for a folder the app created locally before a probe confirms it.
      * Generalised from the legacy `lastCreatedFolders`; pruned once a reconcile
@@ -172,6 +185,7 @@ internal class HostTreeModel {
         scannedProjectFoldersByRoot = emptyMap()
         historyProjectFoldersByRoot = emptyMap()
         resolvedWatchedRootPaths = emptyMap()
+        stickyBuckets.clear()
         optimisticFolders.clear()
         userCollapsedProjectPaths = emptySet()
         expandedProjectPaths = emptySet()
@@ -265,6 +279,8 @@ internal class HostTreeModel {
         historyProjectFoldersByRoot = snapshot.historyProjectFoldersByRoot
         resolvedWatchedRootPaths = snapshot.resolvedWatchedRootPaths
 
+        refreshStickyBuckets()
+
         // A reconcile that observes a created folder (under a real session or
         // scan) retires its optimistic overlay entry.
         if (optimisticFolders.isNotEmpty()) {
@@ -276,6 +292,46 @@ internal class HostTreeModel {
 
         hasSnapshot = true
         lastReconciledAt = now
+    }
+
+    /**
+     * #729: fold the just-reconciled probe into the sticky-bucket memory.
+     *
+     *  - Prune sticky entries for sessions the probe no longer reports.
+     *  - For each held session the live probe AUTHORITATIVELY places under a
+     *    watched root, (re)set its sticky root to that resolved match-path.
+     *  - For a session the live probe does NOT place, KEEP its sticky entry when
+     *    its current cwd still sits within the held sticky root (a transiently
+     *    degraded `resolvedWatchedRootPaths` — the placement is preserved), and
+     *    DROP it only when the cwd has genuinely left that root (an
+     *    authoritative move — it re-buckets to "Other folders").
+     *
+     * This keeps [buildFolderTree]'s sticky honouring an already-placed-by-id
+     * node, never letting a degraded probe flash it into "Other folders".
+     */
+    private fun refreshStickyBuckets() {
+        stickyBuckets.keys.retainAll(sessionFolderPaths.keys)
+        val livePlacements = FolderListViewModel.resolveStickyPlacements(
+            sessionFolderPaths = sessionFolderPaths,
+            watchedFolders = watchedFolders,
+            resolvedWatchedRootPaths = resolvedWatchedRootPaths,
+        )
+        for ((name, cwd) in sessionFolderPaths) {
+            val live = livePlacements[name]
+            if (live != null) {
+                // Healthy placement — refresh the held root.
+                stickyBuckets[name] = live
+                continue
+            }
+            // No live placement. Keep a held sticky root only while the cwd
+            // still sits under it (degraded probe); otherwise the session
+            // authoritatively left the root, so drop the entry.
+            val held = stickyBuckets[name]
+            val canonicalCwd = FolderListViewModel.canonicalisePath(cwd)
+            if (held != null && !FolderListViewModel.pathWithinRoot(canonicalCwd, held)) {
+                stickyBuckets.remove(name)
+            }
+        }
     }
 
     /**
@@ -424,6 +480,7 @@ internal class HostTreeModel {
             historyProjectFoldersByRoot = historyProjectFoldersByRoot,
             resolvedWatchedRootPaths = resolvedWatchedRootPaths,
             extraFolders = optimisticFolders,
+            stickyBuckets = stickyBuckets,
         )
         val visibleFolders = treeRoots.flatMap { it.folders }
         val visibleProjectPaths = visibleFolders.map { it.path }.toSet()

@@ -259,6 +259,112 @@ class HostTreeModelTest {
         )
     }
 
+    // --- Sticky bucket placement on a degraded probe (#729) --------------
+
+    /**
+     * #729: a session bucketed under a watched root on a healthy probe must
+     * STAY under that root when a later probe momentarily returns an empty/
+     * incomplete [HostTreeModel.ProbeSnapshot.resolvedWatchedRootPaths]. Without
+     * sticky bucketing the degraded reconcile re-runs `bestRootForPath` against
+     * the degraded roots and the session flashes into "Other folders".
+     */
+    @Test
+    fun degradedResolvedRootsKeepSessionUnderItsBucketedRoot() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        // Room stores the alias root; the probe resolves it to the canonical
+        // path the session cwd actually lives under (symlink/alias root).
+        tree.setWatchedFolders(listOf(ProjectRootEntity(hostId = 1L, path = "/alias/git", label = "git")))
+
+        // Healthy probe: alpha's cwd /canonical/git/alpha resolves under the
+        // watched root and buckets there.
+        tree.reconcile(
+            HostTreeModel.ProbeSnapshot(
+                sessions = listOf(session("alpha")),
+                folderPaths = mapOf("alpha" to "/canonical/git/alpha"),
+                scannedProjectFoldersByRoot = emptyMap(),
+                historyProjectFoldersByRoot = emptyMap(),
+                resolvedWatchedRootPaths = mapOf("/alias/git" to "/canonical/git"),
+            ),
+            now = 100L,
+        )
+        val healthy = tree.project()
+        assertTrue(
+            "healthy probe buckets alpha under the watched root",
+            healthy.treeRoots.first { it.path == "/alias/git" }
+                .folders.any { it.path == "/canonical/git/alpha" },
+        )
+        assertFalse(
+            "no Other folders on a healthy probe",
+            healthy.treeRoots.any { it.path == FolderListViewModel.OTHER_ROOT_PATH },
+        )
+
+        // Degraded probe: same session/cwd, but resolution momentarily empty.
+        tree.reconcile(
+            HostTreeModel.ProbeSnapshot(
+                sessions = listOf(session("alpha")),
+                folderPaths = mapOf("alpha" to "/canonical/git/alpha"),
+                scannedProjectFoldersByRoot = emptyMap(),
+                historyProjectFoldersByRoot = emptyMap(),
+                resolvedWatchedRootPaths = emptyMap(),
+            ),
+            now = 200L,
+        )
+        val degraded = tree.project()
+        assertFalse(
+            "a degraded probe must NOT flash the session into Other folders",
+            degraded.treeRoots.any { it.path == FolderListViewModel.OTHER_ROOT_PATH },
+        )
+        assertTrue(
+            "session stays bucketed under its previously-assigned root",
+            degraded.treeRoots.first { it.path == "/alias/git" }
+                .folders.any { it.path == "/canonical/git/alpha" },
+        )
+    }
+
+    /**
+     * #729: stickiness must not pin a session to a root it genuinely LEFT.
+     * When a healthy probe authoritatively reports the cwd moved outside the
+     * watched root, the session re-buckets to "Other folders".
+     */
+    @Test
+    fun authoritativeCwdMoveOutsideRootReBucketsToOtherFolders() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.setWatchedFolders(listOf(ProjectRootEntity(hostId = 1L, path = "/alias/git", label = "git")))
+        tree.reconcile(
+            HostTreeModel.ProbeSnapshot(
+                sessions = listOf(session("alpha")),
+                folderPaths = mapOf("alpha" to "/canonical/git/alpha"),
+                scannedProjectFoldersByRoot = emptyMap(),
+                historyProjectFoldersByRoot = emptyMap(),
+                resolvedWatchedRootPaths = mapOf("/alias/git" to "/canonical/git"),
+            ),
+            now = 100L,
+        )
+        // Healthy probe with a genuinely changed cwd outside the root.
+        tree.reconcile(
+            HostTreeModel.ProbeSnapshot(
+                sessions = listOf(session("alpha")),
+                folderPaths = mapOf("alpha" to "/var/tmp/scratch"),
+                scannedProjectFoldersByRoot = emptyMap(),
+                historyProjectFoldersByRoot = emptyMap(),
+                resolvedWatchedRootPaths = mapOf("/alias/git" to "/canonical/git"),
+            ),
+            now = 200L,
+        )
+        val moved = tree.project()
+        assertTrue(
+            "the moved session lands in Other folders",
+            moved.treeRoots.first { it.path == FolderListViewModel.OTHER_ROOT_PATH }
+                .folders.any { it.path == "/var/tmp/scratch" },
+        )
+        assertTrue(
+            "the left root is empty of sessions",
+            moved.treeRoots.first { it.path == "/alias/git" }.folders.isEmpty(),
+        )
+    }
+
     // --- By-id optimistic mutations (#653/#678) --------------------------
 
     @Test

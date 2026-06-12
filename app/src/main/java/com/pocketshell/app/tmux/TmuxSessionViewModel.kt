@@ -6762,6 +6762,80 @@ public class TmuxSessionViewModel @Inject constructor(
         reportTerminalSurfaceFailure(paneId, cause)
     }
 
+    /**
+     * Issue #722 (characterization test seam): build a [RuntimeRefreshGuard]
+     * pinned to the VM's CURRENT live runtime (generation + active target +
+     * attached client), mirroring exactly how the production reseed/blank-
+     * watchdog call sites construct theirs (e.g. `blankReseedGuard` at the
+     * cold/slow reveal). Returns null when no client/target is attached, which
+     * is itself a characterized state (the cluster no-ops without a runtime).
+     *
+     * Test-only; adds no production behavior. Lets a JVM characterization test
+     * invoke the private reseed/watchdog cluster against a known runtime without
+     * having to drive the full connect coroutine state machine.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun currentRuntimeGuardForTest(): RuntimeRefreshGuard? {
+        val client = clientRef ?: return null
+        val target = activeTarget ?: return null
+        return RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = target,
+            client = client,
+        )
+    }
+
+    /**
+     * Issue #722 (characterization test seam): build a [RuntimeRefreshGuard]
+     * pinned to the live client/target but stamped with a SUPERSEDED generation
+     * (current `connectGeneration - 1`), modelling a guard captured BEFORE a
+     * switch/reconnect bumped the generation. [isCurrentRuntime] returns false
+     * for it, so the reseed/watchdog cluster must abort against it — WITHOUT
+     * disconnecting the live client (which would itself kick off the VM's
+     * auto-reconnect machinery and is a different scenario). Returns null when
+     * nothing is attached. Test-only; no production behavior.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun supersededRuntimeGuardForTest(): RuntimeRefreshGuard? {
+        val client = clientRef ?: return null
+        val target = activeTarget ?: return null
+        return RuntimeRefreshGuard(
+            generation = connectGeneration - 1L,
+            target = target,
+            client = client,
+        )
+    }
+
+    /**
+     * Issue #722 (characterization test seam): invoke [reseedBlankVisiblePanes]
+     * directly against the supplied guard (typically from
+     * [currentRuntimeGuardForTest]). A passthrough — no production logic.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun reseedBlankVisiblePanesForTest(guard: RuntimeRefreshGuard?) {
+        reseedBlankVisiblePanes(guard)
+    }
+
+    /**
+     * Issue #722 (characterization test seam): arm [armConnectedBlankWatchdog]
+     * directly against the supplied guard. A passthrough — no production logic.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun armConnectedBlankWatchdogForTest(guard: RuntimeRefreshGuard) {
+        armConnectedBlankWatchdog(guard)
+    }
+
+    /**
+     * Issue #722 (characterization test seam): set the loading-overlay flag
+     * [_switchHidesTerminal] so a test can recreate the exact post-reveal state
+     * the blank watchdog is handed off into (overlay raised over a blank pane).
+     * Touches only the overlay flag — NOT the connection-status machinery.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setSwitchHidesTerminalForTest(hidden: Boolean) {
+        _switchHidesTerminal.value = hidden
+    }
+
     private suspend fun preloadVisibleContentForNewPanes(
         newPanes: List<TmuxPaneState>,
         refreshGuard: RuntimeRefreshGuard? = null,
@@ -10170,7 +10244,11 @@ public class TmuxSessionViewModel @Inject constructor(
         val sessionName: String = "",
     )
 
-    private data class ConnectionTarget(
+    // Issue #722: visibility widened from `private` to `internal` (no behavior
+    // change) so it can appear as a property of the now-`internal`
+    // [RuntimeRefreshGuard] carried opaquely across the characterization-test
+    // seam boundary. Tests never name or construct it.
+    internal data class ConnectionTarget(
         val hostId: Long,
         val hostName: String,
         val host: String,
@@ -10205,7 +10283,11 @@ public class TmuxSessionViewModel @Inject constructor(
         val reason: String,
     )
 
-    private data class RuntimeRefreshGuard(
+    // Issue #722: visibility widened from `private` to `internal` (no behavior
+    // change) so the characterization test seams [currentRuntimeGuardForTest],
+    // [reseedBlankVisiblePanesForTest], and [armConnectedBlankWatchdogForTest]
+    // can carry an opaque guard across the test boundary.
+    internal data class RuntimeRefreshGuard(
         val generation: Long,
         val target: ConnectionTarget,
         val client: TmuxClient,

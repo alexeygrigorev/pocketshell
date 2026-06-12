@@ -68,6 +68,39 @@ class FolderListGatewayStaleChannelHealTest {
     }
 
     @Test
+    fun transportEofDropHealsAndRetriesOnFreshLeaseWithinSameRefresh() = runBlocking {
+        // Issue #711: the dogfood drop — a pooled transport that died mid-exec, so
+        // sshj reports `Broken transport; encountered EOF` (wrapped in a
+        // `Failed to open exec channel for <command>`). This is the SAME class of
+        // transient stale-channel symptom as #680 and must heal + retry on a fresh
+        // lease WITHIN the same refresh, not escape as a scary raw-command band.
+        val stale = TransportEofSession()
+        val healthy = HealthySession()
+        val connector = TwoSessionConnector(stale, healthy)
+        val manager = SshLeaseManager(connector = connector, idleTtlMillis = 60_000L)
+        val gateway = newGateway(manager)
+
+        val result = gateway.listSessionsWithFolder(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            watchedRoots = WATCHED_ROOTS,
+        )
+
+        assertTrue(
+            "a transient EOF drop must HEAL within the same refresh and return " +
+                "Sessions (no raw-command band), got $result",
+            result is FolderListResult.Sessions,
+        )
+        assertEquals(
+            "the poisoned lease must be evicted and a fresh transport dialled",
+            2,
+            connector.connectCount,
+        )
+        assertTrue("the EOF-poisoned transport must have been evicted (closed)", stale.closed)
+    }
+
+    @Test
     fun genuineDisconnectStillSurfacesAnError() = runBlocking {
         // Both the first lease and the heal-retry lease are dead: the host is
         // genuinely unreachable. The refresh must NOT pretend success — it
@@ -170,6 +203,37 @@ class FolderListGatewayStaleChannelHealTest {
 
         override suspend fun exec(command: String): ExecResult =
             throw SshException("SSH session is not connected")
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("not used")
+        override fun startShell(): SshShell = error("not used")
+        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
+        override suspend fun uploadStream(input: InputStream, length: Long, name: String, remotePath: String): String =
+            error("not used")
+        override fun close() {
+            closed = true
+        }
+    }
+
+    /**
+     * Issue #711: pooled session handed back as alive that throws the dogfood
+     * `Failed to open exec channel ... Broken transport; encountered EOF` on
+     * exec — the transient transport drop that must heal + retry, not surface a
+     * raw-command band.
+     */
+    private class TransportEofSession : SshSession {
+        @Volatile
+        var closed: Boolean = false
+
+        override val isConnected: Boolean get() = !closed
+
+        override suspend fun exec(command: String): ExecResult =
+            throw SshException(
+                "Failed to open exec channel for `PATH=\"\$HOME/.local/bin:\$PATH\"; " +
+                    "tmux list-sessions -F '#{session_name}' ; printf '%s\\n' __pocketshell_enum__@@`: " +
+                    "Broken transport; encountered EOF",
+            )
 
         override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
         override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =

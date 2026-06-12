@@ -218,7 +218,19 @@ sealed interface FolderListUiState {
  */
 sealed interface FolderActionStatus {
     data object Idle : FolderActionStatus
-    data class Failed(val message: String) : FolderActionStatus
+
+    /**
+     * A failure banner. [isRefreshFailure] marks the calm "couldn't refresh the
+     * project tree" band (issue #711) so its #656 auto-clear can recognise it by
+     * TYPE rather than by matching the user-facing message text. Action failures
+     * (kill / rename / create / import / host-not-found) leave it `false` — those
+     * are explicit, user-dismissed errors that must NOT be silently cleared when
+     * a later reconcile succeeds.
+     */
+    data class Failed(
+        val message: String,
+        val isRefreshFailure: Boolean = false,
+    ) : FolderActionStatus
 }
 
 /**
@@ -489,6 +501,15 @@ class FolderListViewModel internal constructor(
     private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
     private var sessionRefreshInFlight: Boolean = false
     private var refreshSessionsRequested: Boolean = false
+
+    /**
+     * Issue #711: count of consecutive QUIET retries the current refresh has
+     * already spent healing a transient transport drop (EOF / broken transport /
+     * channel closed). Bounded by [TRANSIENT_REFRESH_RETRY_LIMIT] so a genuinely
+     * unrecoverable host eventually surfaces the calm message instead of looping
+     * forever. Reset to 0 on any successful reconcile and on a fresh [bind].
+     */
+    private var transientRefreshRetries: Int = 0
     /** Foreground generation observed by the last scheduled resume reconcile. */
     private var lastResumeGenerationHandled: Long = -1L
 
@@ -690,6 +711,7 @@ class FolderListViewModel internal constructor(
         rootSnapshotLoaded = false
         lastWatchedFolders = emptyList()
         sessionRefreshInFlight = false
+        transientRefreshRetries = 0
         _state.value = loadingState()
         restoreCachedSessions(hostId)
 
@@ -1339,6 +1361,10 @@ class FolderListViewModel internal constructor(
                         process = port.processName,
                     )
                 }
+                // Issue #711: a successful reconcile clears the quiet-retry
+                // budget so a later, unrelated transient drop gets its own full
+                // retry allowance.
+                transientRefreshRetries = 0
                 setSessionRefreshInFlight(false)
                 emitReady()
                 if (refreshSessionsRequested) {
@@ -1348,16 +1374,21 @@ class FolderListViewModel internal constructor(
                 }
             }
             is FolderListResult.Failed -> {
+                if (handleTransientRefreshDrop(params, RuntimeException(result.message))) return
                 setSessionRefreshInFlight(false)
-                if (preserveReadyOnRefresh("Couldn't refresh sessions: ${result.message}")) return
-                _state.value = FolderListUiState.Failed(result.message)
+                if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
+                _state.value = FolderListUiState.Failed(REFRESH_FAILED_MESSAGE)
             }
             is FolderListResult.ConnectFailed -> {
-                val message = result.cause.message ?: "Connection failed"
+                if (handleTransientRefreshDrop(params, result.cause)) return
                 setSessionRefreshInFlight(false)
-                if (preserveReadyOnRefresh("Couldn't refresh sessions: $message")) return
+                if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
+                // Issue #711: the user-facing connect message is the calm copy,
+                // never the raw transport exception text (which embedded the
+                // entire enumeration command). The raw [cause] is still carried
+                // for Retry/diagnostics but never rendered.
                 _state.value = FolderListUiState.ConnectError(
-                    message = message,
+                    message = connectErrorCopy(result.cause),
                     cause = result.cause,
                 )
             }
@@ -1368,6 +1399,91 @@ class FolderListViewModel internal constructor(
             }
         }
     }
+
+    /**
+     * Issue #711: a transient transport drop mid-refresh (EOF / broken transport
+     * / channel closed / SSH not connected) is NOT a user-facing error — the
+     * gateway's own evict-and-retry heal (#680) usually recovers it, and the
+     * tree self-refreshes on the next reconcile. When such a transient error
+     * still escapes the gateway (e.g. the fresh lease also blipped), we retry
+     * QUIETLY here — up to [TRANSIENT_REFRESH_RETRY_LIMIT] times — instead of
+     * flashing a scary band carrying the raw enumeration command. We keep the
+     * last-known tree visible (no displacing error, no spinner-only screen) and
+     * only fall through to a COMPACT calm message if the retries are exhausted.
+     *
+     * Returns true when the drop was classified transient and a quiet retry was
+     * scheduled (the caller must `return` without surfacing any error state).
+     */
+    private fun handleTransientRefreshDrop(params: BoundParams, cause: Throwable): Boolean {
+        if (!isTransientTransportDrop(cause)) return false
+        if (transientRefreshRetries >= TRANSIENT_REFRESH_RETRY_LIMIT) {
+            // Retries exhausted: this is no longer "transient" from the user's
+            // point of view. Fall through to the calm-message path below.
+            transientRefreshRetries = 0
+            return false
+        }
+        transientRefreshRetries += 1
+        // Keep the held tree visible and quietly re-run the reconcile on a fresh
+        // lease. We do NOT clear isRefreshing here so the non-displacing progress
+        // bar (#639) keeps spinning across the silent retry — no error flash.
+        if (bound != params) {
+            transientRefreshRetries = 0
+            return true
+        }
+        launchReconcile(params)
+        return true
+    }
+
+    /**
+     * Issue #711: classify a refresh error as the TRANSIENT transport-EOF family
+     * the dogfood report surfaced — a broken transport, encountered EOF, broken
+     * pipe, a `Failed to open exec channel` wrapping that EOF, or a channel
+     * closed under the exec. This is the drop that self-recovered on the very
+     * next reconcile (the maintainer got the tree), so it must heal QUIETLY, not
+     * flash a scary band carrying the raw enumeration command.
+     *
+     * Deliberately NARROWER than the gateway's [isStaleChannelSymptom]: the
+     * "open failed" / "SSH session is not connected" stale-channel cases already
+     * have an explicit, established Retry-panel UX (#465/#680) — they surface a
+     * calm, retryable panel (now with calm copy, see [connectErrorCopy]) rather
+     * than auto-looping. Only the EOF-drop family auto-retries quietly here.
+     * Matched on message text (walking the cause chain) so it stays in lockstep
+     * with the gateway classifier without an exception-type dependency.
+     */
+    private fun isTransientTransportDrop(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                (
+                    message.contains("encountered EOF", ignoreCase = true) ||
+                        message.contains("Broken transport", ignoreCase = true) ||
+                        message.contains("broken pipe", ignoreCase = true) ||
+                        message.contains("Failed to open exec channel", ignoreCase = true) ||
+                        message.contains("channel closed", ignoreCase = true)
+                    )
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
+
+    /**
+     * Issue #711: the user-facing copy for an unrecoverable folder-tree connect
+     * error. NEVER the raw transport exception (which embedded the whole
+     * `PATH=…; tmux list-sessions …` enumeration command) — a compact, calm
+     * one-liner with a Retry affordance on the panel. The reconcile-timeout case
+     * already carries its own short, calm message, so it is passed through.
+     */
+    private fun connectErrorCopy(cause: Throwable): String =
+        if (cause is FolderReconcileTimeoutException) {
+            cause.message ?: REFRESH_FAILED_MESSAGE
+        } else {
+            REFRESH_FAILED_MESSAGE
+        }
 
     private fun FolderSessionRow.toSessionEntry(): FolderSessionEntry =
         FolderSessionEntry(
@@ -1390,7 +1506,7 @@ class FolderListViewModel internal constructor(
     private fun preserveReadyOnRefresh(message: String): Boolean {
         if (_state.value !is FolderListUiState.Ready) return false
         refreshSessionsRequested = false
-        _actionStatus.value = FolderActionStatus.Failed(message)
+        _actionStatus.value = FolderActionStatus.Failed(message, isRefreshFailure = true)
         emitReady()
         return true
     }
@@ -1406,8 +1522,15 @@ class FolderListViewModel internal constructor(
     }
 
     private fun clearRefreshFailure() {
+        // Issue #711 / #656: auto-clear the calm refresh-failure band when a later
+        // reconcile succeeds, recognising it by TYPE flag — NOT by matching the
+        // user-facing message text. The prior prefix-match (`startsWith("Couldn't
+        // refresh sessions:")`) silently stopped clearing the moment the copy
+        // changed to [REFRESH_FAILED_MESSAGE], leaving a stale band on a healthy
+        // tree. An action failure (kill / rename / create / import) is NOT a
+        // refresh failure, so it is never auto-cleared here.
         val status = _actionStatus.value as? FolderActionStatus.Failed ?: return
-        if (status.message.startsWith("Couldn't refresh sessions:")) {
+        if (status.isRefreshFailure) {
             _actionStatus.value = FolderActionStatus.Idle
         }
     }
@@ -1636,6 +1759,29 @@ class FolderListViewModel internal constructor(
          * an indefinite `Loading`.
          */
         const val RECONCILE_TIMEOUT_MS: Long = 12_000L
+
+        /**
+         * Issue #711: the COMPACT, calm, human one-liner shown when the folder
+         * tree genuinely can't refresh (after the gateway heal + the bounded
+         * quiet retries). It deliberately carries NO raw shell command and NO
+         * raw transport-exception text — just a calm sentence and a Retry
+         * affordance (the panel/banner already renders a Retry/Dismiss button).
+         * Replaces the old `"Couldn't refresh sessions: <raw exception>"` band
+         * that dumped the whole `PATH=…; tmux list-sessions …` enumeration.
+         */
+        const val REFRESH_FAILED_MESSAGE: String =
+            "Couldn't refresh the project tree — tap to retry."
+
+        /**
+         * Issue #711: how many times a single refresh quietly retries a
+         * transient transport drop (EOF / broken transport / channel closed)
+         * before falling through to the calm [REFRESH_FAILED_MESSAGE]. Small —
+         * the gateway already heals most transient drops with its own
+         * evict-and-retry-once (#680); this is the view-model's defence so a
+         * transient error that still escapes the gateway never flashes a band
+         * for a drop that recovers on the very next reconcile.
+         */
+        const val TRANSIENT_REFRESH_RETRY_LIMIT: Int = 2
 
         /**
          * Issue #706: foreground-resume "freshen" window — much shorter than the

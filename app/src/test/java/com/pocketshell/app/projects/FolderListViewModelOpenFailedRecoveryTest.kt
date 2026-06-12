@@ -154,7 +154,12 @@ class FolderListViewModelOpenFailedRecoveryTest {
             )
             val failedStatus = vm.actionStatus.value
             when (failedStatus) {
-                is FolderActionStatus.Failed -> assertTrue(failedStatus.message.contains("open failed"))
+                // Issue #711: the banner is the calm copy, NOT the raw transport
+                // exception text.
+                is FolderActionStatus.Failed -> {
+                    assertEquals(FolderListViewModel.REFRESH_FAILED_MESSAGE, failedStatus.message)
+                    assertFalse(failedStatus.message.contains("open failed"))
+                }
                 else -> fail("expected a pull-to-refresh failure banner, got $failedStatus")
             }
 
@@ -195,7 +200,11 @@ class FolderListViewModelOpenFailedRecoveryTest {
             )
             val actionStatus = vm.actionStatus.value
             when (actionStatus) {
-                is FolderActionStatus.Failed -> assertTrue(actionStatus.message.contains("open failed"))
+                // Issue #711: calm copy, no raw transport exception text.
+                is FolderActionStatus.Failed -> {
+                    assertEquals(FolderListViewModel.REFRESH_FAILED_MESSAGE, actionStatus.message)
+                    assertFalse(actionStatus.message.contains("open failed"))
+                }
                 else -> fail("expected a lightweight refresh failure banner, got $actionStatus")
             }
         } finally {
@@ -227,8 +236,11 @@ class FolderListViewModelOpenFailedRecoveryTest {
             )
             val actionStatus = vm.actionStatus.value
             when (actionStatus) {
+                // Issue #711: a genuine command failure surfaces the calm copy,
+                // never the raw command/stderr text.
                 is FolderActionStatus.Failed -> {
-                    assertTrue(actionStatus.message.contains("tmux list-sessions failed"))
+                    assertEquals(FolderListViewModel.REFRESH_FAILED_MESSAGE, actionStatus.message)
+                    assertFalse(actionStatus.message.contains("tmux list-sessions failed"))
                 }
                 else -> fail("expected a lightweight refresh failure banner, got $actionStatus")
             }

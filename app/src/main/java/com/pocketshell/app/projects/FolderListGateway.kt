@@ -633,7 +633,43 @@ class SshFolderListGateway internal constructor(
     private fun isStaleChannelSymptom(cause: Throwable?): Boolean =
         isChannelOpenFailure(cause) ||
             isTransportDisconnected(cause) ||
-            isSessionNotConnected(cause)
+            isSessionNotConnected(cause) ||
+            isTransportEofDrop(cause)
+
+    /**
+     * Issue #711: true when [cause] is the transient transport-EOF family that
+     * the dogfood report surfaced as a scary raw-command band — a pooled SSH
+     * transport that died MID-EXEC, so sshj reports `Broken transport;
+     * encountered EOF` (or a bare `encountered EOF`, a `broken pipe`, or a
+     * `Failed to open exec channel for <command>` that wraps that EOF). This is
+     * a TRANSIENT drop (the tree self-recovered on the next refresh), so it must
+     * heal + retry on a fresh lease like every other [isStaleChannelSymptom],
+     * NOT escape as a persistent error carrying the raw enumeration command.
+     *
+     * Matched on message text (walking the cause chain) so the app module need
+     * not depend on the core/sshj exception hierarchy.
+     */
+    private fun isTransportEofDrop(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                (
+                    message.contains("encountered EOF", ignoreCase = true) ||
+                        message.contains("Broken transport", ignoreCase = true) ||
+                        message.contains("broken pipe", ignoreCase = true) ||
+                        message.contains("Failed to open exec channel", ignoreCase = true) ||
+                        message.contains("channel closed", ignoreCase = true) ||
+                        message.contains("control channel closed", ignoreCase = true)
+                    )
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
 
     /**
      * Issue #680: true when [cause] is the "SSH session is not connected" probe

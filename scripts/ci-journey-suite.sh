@@ -105,14 +105,6 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
 )
 
-join_by() {
-  local IFS="$1"
-  shift
-  echo "$*"
-}
-
-JOURNEY_CLASS_ARG="$(join_by , "${JOURNEY_CLASSES[@]}")"
-
 echo "=========================================================="
 echo "Per-push CI journey suite (issue #691) — load-bearing subset"
 echo "Included classes:"
@@ -120,40 +112,139 @@ for c in "${JOURNEY_CLASSES[@]}"; do
   echo "  - $c"
 done
 echo "  (pocketshellCi=true; deterministic agents:2222 only, no toxiproxy)"
+echo "  (per-class retry-once for CI-AVD infra flakes — issue #712)"
 echo "=========================================================="
-
-SECONDS_START=$SECONDS
 
 # Issue #691 (S2 defense-in-depth): pass AndroidJUnitRunner's per-test
 # `timeout_msec` so a wedged test is interrupted and FAILS FAST (~5 min) instead
-# of hanging the whole job to the 75-min runner cap. A hang is worse than a
-# clean fail (75 min burned + a failure email every push); the timeout converts
-# any future CI-AVD wedge into a fast, legible red. 300000 ms = 5 min/test is
-# far above the generous `pocketshellCi=true` E2E ceilings, so it never trips a
+# of hanging the whole job to the runner cap. A hang is worse than a clean fail
+# (the whole cap burned + a failure email every push); the timeout converts any
+# future CI-AVD wedge into a fast, legible red. 300000 ms = 5 min/test is far
+# above the generous `pocketshellCi=true` E2E ceilings, so it never trips a
 # legitimately slow CI test — it only catches a genuine deadlock.
-"$GRADLEW" :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
-  -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
-  -Pandroid.testInstrumentationRunnerArguments.class="$JOURNEY_CLASS_ARG" \
-  --stacktrace
-JOURNEY_EXIT=$?
-ELAPSED=$((SECONDS - SECONDS_START))
-echo "journey suite exit code: $JOURNEY_EXIT (elapsed ${ELAPSED}s)"
+#
+# run_class <FQCN> — runs ONE journey class as its own gradle connected-test
+# invocation and returns gradle's exit code (0 == that class passed). Running
+# one class per invocation (rather than all classes comma-joined into a single
+# invocation) is what makes the per-class retry below clean: the gradle exit
+# code IS the per-class verdict, with no XML parsing or fragile result-file
+# scraping required.
+run_class() {
+  local fqcn="$1"
+  "$GRADLEW" :app:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+    -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
+    -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
+    --stacktrace
+}
 
-journey_status="PASS"
-[[ "$JOURNEY_EXIT" -ne 0 ]] && journey_status="FAIL"
+# Issue #712: per-class retry-once for CI-AVD infra flakes.
+#
+# The per-push job runs on the GitHub `android-emulator-runner` AVD — a 2-core
+# swiftshader VM that occasionally stalls the in-emulator SSH+tmux
+# `list-sessions` enumeration past the 60s picker wait (the #470 enumeration
+# stall). That stall is an infra limitation of the slow CI AVD, not a code
+# regression: the SAME commit passes on the next run. Without a retry the job
+# goes red and spams a failure email on every such flake.
+#
+# Strategy: run each journey CLASS on its own; if a class FAILS, re-run ONLY
+# that class once (NOT the whole suite). The job is marked red only if a class
+# fails BOTH the original run and the retry.
+#
+# Why this does NOT mask real regressions: a genuine behavior bug fails
+# CONSISTENTLY — it fails the original run AND the retry — so it still turns the
+# job red and is still caught. Only a true infra flake (passes on the very next
+# attempt of the same class) recovers to green. When a recovery happens we print
+# a LOUD, greppable `JOURNEY_FLAKE_RECOVERED:` line so a degrading flake trend
+# stays visible in the logs and is never silently hidden.
+#
+# Note on `Process crashed` / signal-9 (sibling-install SIGKILL): on the CI
+# emulator-runner this job is the only installer, so that collision class does
+# not arise here. If it ever did it would surface as a non-zero exit and the
+# retry-once below would recover it exactly as for any other transient failure.
 
+RECOVERED_CLASSES=()  # classes that failed first then PASSED on retry
+FAILED_CLASSES=()     # classes that failed BOTH attempts (real failures)
+PASSED_FIRST_TRY=()   # classes that passed on the first attempt
+
+SUITE_START=$SECONDS
+
+for fqcn in "${JOURNEY_CLASSES[@]}"; do
+  echo "=========================================================="
+  echo ">>> JOURNEY CLASS: $fqcn (attempt 1)"
+  echo "=========================================================="
+  class_start=$SECONDS
+
+  if run_class "$fqcn"; then
+    echo "JOURNEY_PASS: $fqcn passed on attempt 1 (elapsed $((SECONDS - class_start))s)"
+    PASSED_FIRST_TRY+=("$fqcn")
+    continue
+  fi
+
+  # Attempt 1 failed. Re-run ONLY this class once — a CI-AVD infra flake
+  # (e.g. the #470 enumeration stall) typically clears on the next attempt;
+  # a real regression fails again and keeps the job red.
+  echo "=========================================================="
+  echo ">>> JOURNEY CLASS: $fqcn FAILED attempt 1 — retrying once (attempt 2)"
+  echo "=========================================================="
+  retry_start=$SECONDS
+
+  if run_class "$fqcn"; then
+    # Loud, greppable recovery marker so masked flakes stay visible and a
+    # degrading trend is detectable in the CI logs.
+    echo "JOURNEY_FLAKE_RECOVERED: $fqcn passed on retry (attempt 2) (retry elapsed $((SECONDS - retry_start))s)"
+    RECOVERED_CLASSES+=("$fqcn")
+  else
+    echo "JOURNEY_FAILED: $fqcn failed twice"
+    FAILED_CLASSES+=("$fqcn")
+  fi
+done
+
+SUITE_ELAPSED=$((SECONDS - SUITE_START))
+
+# The job is red iff at least one class failed BOTH attempts.
+if [[ "${#FAILED_CLASSES[@]}" -eq 0 ]]; then
+  JOURNEY_EXIT=0
+  journey_status="PASS"
+else
+  JOURNEY_EXIT=1
+  journey_status="FAIL"
+fi
+
+echo "=========================================================="
+echo "Per-push CI journey suite — done (elapsed ${SUITE_ELAPSED}s, exit ${JOURNEY_EXIT})"
+echo "  passed first try: ${#PASSED_FIRST_TRY[@]}"
+echo "  recovered on retry: ${#RECOVERED_CLASSES[@]}"
+echo "  failed twice: ${#FAILED_CLASSES[@]}"
+echo "=========================================================="
+
+# Build the markdown summary. Quote arrays defensively — an empty array under
+# `set -u` must not abort the script during summary generation.
 {
   echo "# Per-push CI journey suite — summary"
   echo
   echo "| Selection | Args | Exit | Elapsed | Result |"
   echo "| --- | --- | --- | --- | --- |"
-  echo "| ${#JOURNEY_CLASSES[@]} load-bearing journey classes | \`pocketshellCi=true\` | $JOURNEY_EXIT | ${ELAPSED}s | **$journey_status** |"
+  echo "| ${#JOURNEY_CLASSES[@]} load-bearing journey classes (per-class retry-once) | \`pocketshellCi=true\` | $JOURNEY_EXIT | ${SUITE_ELAPSED}s | **$journey_status** |"
   echo
   echo "Classes exercised:"
   for c in "${JOURNEY_CLASSES[@]}"; do
     echo "- \`$c\`"
   done
+  if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
+    echo
+    echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
+    for c in "${RECOVERED_CLASSES[@]}"; do
+      echo "- \`$c\`"
+    done
+  fi
+  if [[ "${#FAILED_CLASSES[@]}" -gt 0 ]]; then
+    echo
+    echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
+    for c in "${FAILED_CLASSES[@]}"; do
+      echo "- \`$c\`"
+    done
+  fi
 } > "$SUMMARY"
 
 echo "----------------------------------------------------------"

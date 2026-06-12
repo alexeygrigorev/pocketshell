@@ -98,6 +98,22 @@ sealed interface ConnectionEvent {
     /** Transport is live again: lease `Connected` / `-CC` attached. */
     data object TransportLive : ConnectionEvent
 
+    /**
+     * The device network changed (Wi-Fi <-> cellular, AP handoff, etc.). The
+     * #548 suppression contract lives here: ONLY a `validatedHandoff` (a real,
+     * VALIDATED network-identity change — a genuinely different validated
+     * network, not a transient blip or a re-validation of the same one) is
+     * allowed to proactively silent-reconnect a live channel. A non-validated
+     * change is a NO-OP: the live channel is left alone (sshj 15s x 4 keepalive
+     * remains the sole death oracle), so a network blip never tears down and
+     * re-dials a healthy channel.
+     *
+     * Like every recoverable transition, a validated handoff routes through the
+     * SILENT [ConnectionState.Reconnecting] ladder — never a scary error band.
+     * A `NetworkChanged` outside a live-ish state is ignored.
+     */
+    data class NetworkChanged(val validatedHandoff: Boolean) : ConnectionEvent
+
     /** Target session was deleted elsewhere (#666). Must NOT resurrect it. */
     data class TargetGone(val targetId: SessionId) : ConnectionEvent
 

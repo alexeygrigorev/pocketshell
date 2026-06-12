@@ -98,6 +98,7 @@ class ConnectionController(
             ConnectionEvent.Background -> onBackground(current)
             is ConnectionEvent.TransportDropped -> onTransportDropped(current, event)
             ConnectionEvent.TransportLive -> onTransportLive(current)
+            is ConnectionEvent.NetworkChanged -> onNetworkChanged(current, event)
             is ConnectionEvent.TargetGone -> onTargetGone(current, event)
             is ConnectionEvent.SeedLanded -> onSeedLanded(current, event)
         }
@@ -220,6 +221,31 @@ class ConnectionController(
             is ConnectionState.Connecting -> ConnectionState.Attaching(current.host, current.targetId)
             else -> current
         }
+
+    /**
+     * Device network changed (#548 suppression contract). ONLY a real, VALIDATED
+     * identity handoff on a [ConnectionState.Live] channel proactively
+     * silent-reconnects (through the [ConnectionState.Reconnecting] ladder, NO
+     * band). A non-validated change is a no-op: the live channel is left alone so
+     * a transient blip / same-network re-validation never tears down a healthy
+     * channel (sshj keepalive stays the sole death oracle). A change in any
+     * non-live state is also a no-op — there is nothing to proactively re-dial,
+     * and an in-flight reattach/reconnect must not be disturbed.
+     */
+    private fun onNetworkChanged(
+        current: ConnectionState,
+        event: ConnectionEvent.NetworkChanged,
+    ): ConnectionState {
+        if (!event.validatedHandoff) return current
+        return when (current) {
+            is ConnectionState.Live ->
+                ConnectionState.Reconnecting(current.host, current.targetId, attempt = 1)
+            // Connecting/Attaching/Reattaching/Reconnecting already have a
+            // dial/heal in flight; Backgrounded/Idle/Gone/Unreachable have no live
+            // channel to proactively replace. Suppress in all of them.
+            else -> current
+        }
+    }
 
     /**
      * Target deleted elsewhere (#666). Drops events for a non-current target.

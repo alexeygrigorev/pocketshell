@@ -2,4 +2,6 @@
 # This is the MemoryMax ceiling for each tmux session shell created in this repo.
 # Heavy emulator + parallel-agent + connected-test work needs headroom; 30G keeps
 # a runaway session from OOM-killing itself while staying well under robust.slice.
+# PocketShell is a Gradle/Kotlin project (no pyproject.toml), so the cap lives in
+# a dedicated cgroups.toml rather than a [tool.tmuxctl] section.
 mem = "30G"

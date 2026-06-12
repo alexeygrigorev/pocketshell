@@ -38,12 +38,15 @@ subprocess exit code and stderr are proxied through unchanged.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 from typing import Any, Optional, Sequence
 
 import click
+
+from . import resume as _resume
 
 
 def _resolve_tmuxctl_binary() -> Optional[str]:
@@ -208,3 +211,173 @@ def sessions_list(ctx: click.Context, sort_by: Optional[str]) -> None:
     if envelope is None:
         envelope = _run_tmuxctl_capture(args)
     _emit_envelope(ctx, envelope)
+
+
+# ---------------------------------------------------------------------------
+# `sessions resumable` / `sessions resume` — AI-CLI conversation discovery (#725)
+# ---------------------------------------------------------------------------
+#
+# Unlike `sessions list` (live tmux sessions, delegated to `tmuxctl`), these two
+# commands enumerate *resumable* AI-CLI conversations (claude / codex /
+# opencode) recorded on the host and resume a selected one inside a
+# memory-capped tmux session. The discovery + builder logic is pure and lives in
+# :mod:`pocketshell.resume`; this module owns only the Click wiring + presentation.
+# Per D22 this is the canonical command; there is no legacy fallback path.
+
+# Default memory cap applied to a resumed conversation. A conversation that
+# OOM-killed once comes back capped under tmuxctl's cgroup scope; overridable
+# with `--mem`.
+_DEFAULT_RESUME_MEM = "24G"
+
+
+def _discover_marked() -> list[_resume.ResumableSession]:
+    """Discover every resumable conversation and flag the live ones.
+
+    The ``running`` flag is computed over *all* discovered sessions (before any
+    cwd/engine filtering) so a live session is never offered for resume even
+    when it sits in a different project than the current directory.
+    """
+    discovered = _resume.discover_all()
+    return _resume.mark_running(discovered, _resume.list_live_panes())
+
+
+def _selected_sessions(
+    *, all_projects: bool, engine: Optional[str], limit: Optional[int]
+) -> list[_resume.ResumableSession]:
+    """Discover, mark running, then filter/sort exactly as the list is printed.
+
+    Both `resumable` and `resume` share this so the 1-based index a user sees in
+    `resumable` resolves to the same session under `resume`.
+    """
+    cwd = None if all_projects else os.getcwd()
+    return _resume.merge_sessions(
+        sessions=_discover_marked(),
+        cwd=cwd,
+        engine=engine,
+        limit=limit,
+    )
+
+
+def _format_resumable_table(sessions: Sequence[_resume.ResumableSession]) -> str:
+    """Render the fixed-column ``IDX ENGINE PROJECT WHEN LABEL`` table.
+
+    Newest-first order is the caller's responsibility (sessions arrive already
+    sorted). A live conversation is tagged ``(running)`` after its label so the
+    user can see it is not offered for resume.
+    """
+    header = f"{'IDX':<4}{'ENGINE':<10}{'PROJECT':<20}{'WHEN':<8}LABEL"
+    lines = [header]
+    for idx, session in enumerate(sessions, start=1):
+        label = session.label or "(no prompt)"
+        if session.running:
+            label = f"{label} (running)"
+        when = _resume.format_relative(session.last_activity)
+        lines.append(
+            f"{idx:<4}{session.engine:<10}{session.project:<20}{when:<8}{label}"
+        )
+    return "\n".join(lines)
+
+
+@sessions_group.command(
+    "resumable",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.option(
+    "--all",
+    "all_projects",
+    is_flag=True,
+    default=False,
+    help="List resumable conversations from every project (default: only the current directory).",
+)
+@click.option(
+    "--engine",
+    type=click.Choice(list(_resume.ENGINES), case_sensitive=False),
+    default=None,
+    help="Restrict to one engine (claude / codex / opencode).",
+)
+@click.option(
+    "-n",
+    "limit",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Show at most N conversations (newest first).",
+)
+def sessions_resumable(
+    all_projects: bool, engine: Optional[str], limit: Optional[int]
+) -> None:
+    """List resumable AI-CLI conversations (claude / codex / opencode).
+
+    Conversations are merged across engines and printed newest-first. A live
+    conversation (matching a running tmux pane) is tagged ``(running)`` and is
+    not offered for resume (respects #666).
+    """
+    sessions = _selected_sessions(
+        all_projects=all_projects, engine=engine, limit=limit
+    )
+    click.echo(_format_resumable_table(sessions))
+
+
+@sessions_group.command(
+    "resume",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.argument("selector")
+@click.option(
+    "--all",
+    "all_projects",
+    is_flag=True,
+    default=False,
+    help="Resolve the selector against conversations from every project (default: current directory only).",
+)
+@click.option(
+    "--engine",
+    type=click.Choice(list(_resume.ENGINES), case_sensitive=False),
+    default=None,
+    help="Restrict the candidate set to one engine before resolving the selector.",
+)
+@click.option(
+    "--mem",
+    default=_DEFAULT_RESUME_MEM,
+    show_default=True,
+    help="Memory cap for the resumed session's tmuxctl scope.",
+)
+@click.pass_context
+def sessions_resume(
+    ctx: click.Context,
+    selector: str,
+    all_projects: bool,
+    engine: Optional[str],
+    mem: str,
+) -> None:
+    """Resume a recorded AI-CLI conversation inside a memory-capped tmux session.
+
+    SELECTOR is the 1-based index from `sessions resumable`, or an exact /
+    unambiguous-prefix session id. The selected conversation is launched via
+    `tmuxctl create-or-attach --mem`, cd-ing to its recorded cwd first. A
+    conversation already running in tmux is refused (it is never double-attached).
+    """
+    sessions = _selected_sessions(
+        all_projects=all_projects, engine=engine, limit=None
+    )
+    session = _resume.select_session(sessions, selector)
+    if session is None:
+        click.echo(f"pocketshell: no resumable session matches {selector!r}.", err=True)
+        ctx.exit(2)
+        return
+    if session.running:
+        click.echo(
+            f"pocketshell: that conversation is already running in tmux "
+            f"({session.engine} @ {session.project}); refusing to double-attach.",
+            err=True,
+        )
+        ctx.exit(3)
+        return
+    tmuxctl_path = _resolve_tmuxctl_binary()
+    if tmuxctl_path is None:
+        click.echo(_tmuxctl_missing_message(), err=True)
+        ctx.exit(127)
+        return
+    argv = _resume.tmuxctl_resume_argv(session, tmuxctl_path=tmuxctl_path, mem=mem)
+    completed = subprocess.run(argv, check=False)
+    if completed.returncode != 0:
+        ctx.exit(completed.returncode)

@@ -346,6 +346,29 @@ public class TmuxSessionViewModel @Inject constructor(
         _connectionStatus.asStateFlow()
 
     /**
+     * EPIC #687 slice 1b: the VM-internal [ConnectionState] that [_connectionStatus]
+     * is now a projection of. Tracked alongside [_connectionStatus] so the two move
+     * together; every status emission goes through [setConnectionState], which sets
+     * this and projects via [connectionStatusFor]. Slice 1c lets
+     * `ConnectionController.state` feed this same field. Not exposed — purely
+     * VM-internal source-of-truth for the view-facing [ConnectionStatus] facade.
+     */
+    private var _connectionState: ConnectionState = ConnectionState.Idle
+
+    /**
+     * EPIC #687 slice 1b: the single emission point — set the VM-internal
+     * [ConnectionState] and project it to the view-facing [ConnectionStatus] via the
+     * pure [connectionStatusFor] mapper. Replaces the scattered direct
+     * `_connectionStatus.value = ...` writes so the status is always a projection of
+     * an explicit state. Zero behavior change: the projected value is byte-identical
+     * to the previous direct assignment.
+     */
+    private fun setConnectionState(state: ConnectionState) {
+        _connectionState = state
+        _connectionStatus.value = connectionStatusFor(state)
+    }
+
+    /**
      * Issue #661: while a CROSS-session switch to a NOT-yet-cached target is in
      * flight, the screen must NEVER paint the leaving session's terminal frame —
      * not even for one Compose frame. #634 kept the previous frame painted to
@@ -891,11 +914,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 // still in flight — this open coalesces onto it, no second dial.
                 val warmOpen = !shouldForceFreshLease(effectiveTrigger) &&
                     sshLeaseManager.hasLiveOrConnectingLease(target.toSshLeaseTarget().leaseKey)
-                _connectionStatus.value = if (warmOpen) {
-                    ConnectionStatus.Switching(host, port, user)
-                } else {
-                    ConnectionStatus.Connecting(host, port, user)
-                }
+                setConnectionState(
+                    if (warmOpen) {
+                        ConnectionState.Attaching(host, port, user)
+                    } else {
+                        ConnectionState.Connecting(host, port, user)
+                    }
+                )
                 runConnect(target, attempt, effectiveTrigger, warmReveal = warmOpen)
             }
             return
@@ -951,11 +976,13 @@ public class TmuxSessionViewModel @Inject constructor(
         val warmOpenHint = !willFastSwitch &&
             !shouldForceFreshLease(effectiveTrigger) &&
             liveLeaseKeys.contains(target.toSshLeaseTarget().leaseKey)
-        _connectionStatus.value = if (willFastSwitch || warmOpenHint) {
-            ConnectionStatus.Switching(host, port, user)
-        } else {
-            ConnectionStatus.Connecting(host, port, user)
-        }
+        setConnectionState(
+            if (willFastSwitch || warmOpenHint) {
+                ConnectionState.Attaching(host, port, user)
+            } else {
+                ConnectionState.Connecting(host, port, user)
+            }
+        )
         // Issue #661: a cross-session fast switch must NOT paint the leaving
         // session's frame for even one Compose frame. Hide the terminal surface
         // SYNCHRONOUSLY (the screen shows a compact "Attaching" loading state
@@ -1103,7 +1130,7 @@ public class TmuxSessionViewModel @Inject constructor(
                         // [warmOpenHint] above already chose it for a live pooled
                         // lease; re-assert here in case anything raced).
                         if (_connectionStatus.value !is ConnectionStatus.Switching) {
-                            _connectionStatus.value = ConnectionStatus.Switching(host, port, user)
+                            setConnectionState(ConnectionState.Attaching(host, port, user))
                         }
                     } else if (_connectionStatus.value is ConnectionStatus.Switching) {
                         // The synchronous hint said warm, but the authoritative
@@ -1112,7 +1139,7 @@ public class TmuxSessionViewModel @Inject constructor(
                         // downgrade to the full-screen [Connecting] overlay and
                         // blank the (empty) pane area so the cold reveal path
                         // behaves exactly as a never-warm first connect.
-                        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+                        setConnectionState(ConnectionState.Connecting(host, port, user))
                         _panes.value = emptyList()
                         rebuildUnifiedPanes()
                     }
@@ -1357,8 +1384,8 @@ public class TmuxSessionViewModel @Inject constructor(
         connectJob = null
         connectingTarget = null
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Failed(
-            "Connect cancelled by user.",
+        setConnectionState(
+            ConnectionState.Unreachable("Connect cancelled by user."),
         )
         return true
     }
@@ -1452,8 +1479,10 @@ public class TmuxSessionViewModel @Inject constructor(
             connectingTarget = target
             refreshReconnectAvailability()
         }
-        _connectionStatus.value = ConnectionStatus.Failed(
-            "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
+        setConnectionState(
+            ConnectionState.Unreachable(
+                "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
+            ),
         )
     }
 
@@ -2767,10 +2796,12 @@ public class TmuxSessionViewModel @Inject constructor(
         // frame to hide here; clear the gate defensively in case a prior
         // in-flight fast switch had set it.
         _switchHidesTerminal.value = false
-        _connectionStatus.value = ConnectionStatus.Connected(
-            target.host,
-            target.port,
-            target.user,
+        setConnectionState(
+            ConnectionState.Live(
+                target.host,
+                target.port,
+                target.user,
+            ),
         )
         markSuccessfulAttachForNetworkCoalescing(target, trigger)
     }
@@ -3093,10 +3124,12 @@ public class TmuxSessionViewModel @Inject constructor(
             // seeded panes rather than staying on the loading placeholder — but
             // only when the active pane actually has content (#693).
             _switchHidesTerminal.value = !activePaneSeeded
-            _connectionStatus.value = ConnectionStatus.Connected(
-                target.host,
-                target.port,
-                target.user,
+            setConnectionState(
+                ConnectionState.Live(
+                    target.host,
+                    target.port,
+                    target.user,
+                ),
             )
             if (!activePaneSeeded) armConnectedBlankWatchdog(blankReseedGuard)
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
@@ -3217,8 +3250,8 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = null
         connectingTarget = null
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Failed(
-            "Session “${target.sessionName}” has ended.",
+        setConnectionState(
+            ConnectionState.Unreachable("Session “${target.sessionName}” has ended."),
         )
         _sessionEnded.tryEmit(target.sessionName)
     }
@@ -3279,7 +3312,7 @@ public class TmuxSessionViewModel @Inject constructor(
         autoReconnectJob = null
         connectingTarget = target
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        setConnectionState(ConnectionState.Connecting(host, port, user))
         connectJob = viewModelScope.launch {
             val leaseTarget = target.toSshLeaseTarget()
             val lease = sshLeaseManager.acquire(leaseTarget).getOrNull()
@@ -3400,10 +3433,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     runCatching { lease.release() }
                 }
                 sessionRef = null
-                _connectionStatus.value = ConnectionStatus.Connecting(
-                    target.host,
-                    target.port,
-                    target.user,
+                setConnectionState(
+                    ConnectionState.Connecting(
+                        target.host,
+                        target.port,
+                        target.user,
+                    ),
                 )
                 _panes.value = emptyList()
                 rebuildUnifiedPanes()
@@ -3489,10 +3524,12 @@ public class TmuxSessionViewModel @Inject constructor(
             // overlay raised and hand off to [armConnectedBlankWatchdog] so the
             // user sees a calm "Attaching…" rather than a black Connected pane.
             _switchHidesTerminal.value = !activePaneSeeded
-            _connectionStatus.value = ConnectionStatus.Connected(
-                target.host,
-                target.port,
-                target.user,
+            setConnectionState(
+                ConnectionState.Live(
+                    target.host,
+                    target.port,
+                    target.user,
+                ),
             )
             if (!activePaneSeeded) armConnectedBlankWatchdog(fastSwitchRevealGuard)
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
@@ -3568,10 +3605,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 refreshReconnectAvailability()
                 // Escalate from the keep-frame [Switching] to the full-screen
                 // [Connecting] overlay: we are now doing a real fresh handshake.
-                _connectionStatus.value = ConnectionStatus.Connecting(
-                    target.host,
-                    target.port,
-                    target.user,
+                setConnectionState(
+                    ConnectionState.Connecting(
+                        target.host,
+                        target.port,
+                        target.user,
+                    ),
                 )
                 _panes.value = emptyList()
                 rebuildUnifiedPanes()
@@ -3786,14 +3825,21 @@ public class TmuxSessionViewModel @Inject constructor(
             // target` early-return guard while this failing job unwinds.
             connectingTarget = null
             refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Reconnecting(
-                host = target.host,
-                port = target.port,
-                user = target.user,
-                attempt = 1,
-                maxAttempts = 1,
-                retryDelayMs = 0L,
-                reason = "Reattaching ${target.user}@${target.host}:${target.port}.",
+            // EPIC #687 slice 1b: this is the silent within-grace reattach, so it
+            // maps to the controller-parity [ConnectionState.Reattaching] — which
+            // projects to the SAME [ConnectionStatus.Reconnecting] band (the §1
+            // `Reattaching/Reconnecting → Reconnecting` mapping), so the surfaced
+            // status is byte-identical to before.
+            setConnectionState(
+                ConnectionState.Reattaching(
+                    host = target.host,
+                    port = target.port,
+                    user = target.user,
+                    attempt = 1,
+                    maxAttempts = 1,
+                    retryDelayMs = 0L,
+                    reason = "Reattaching ${target.user}@${target.host}:${target.port}.",
+                ),
             )
             // Drop any cached runtimes for this host asynchronously (as the
             // fast-switch leave path does) so the upcoming re-dial never blocks
@@ -3831,7 +3877,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #661: a failed switch must drop the cross-session "hide terminal"
         // gate so the Failed band is shown (not the loading placeholder).
         _switchHidesTerminal.value = false
-        _connectionStatus.value = ConnectionStatus.Failed(message)
+        setConnectionState(ConnectionState.Unreachable(message))
     }
 
     /**
@@ -4700,10 +4746,12 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             connectingTarget = null
             refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Connected(
-                target.host,
-                target.port,
-                target.user,
+            setConnectionState(
+                ConnectionState.Live(
+                    target.host,
+                    target.port,
+                    target.user,
+                ),
             )
             // Issue #693: never leave a reattached pane black on a live (green)
             // connection. If the active pane is still blank after the reconnect
@@ -4897,10 +4945,12 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             connectingTarget = null
             refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Connected(
-                target.host,
-                target.port,
-                target.user,
+            setConnectionState(
+                ConnectionState.Live(
+                    target.host,
+                    target.port,
+                    target.user,
+                ),
             )
             // Issue #693: never leave a reattached pane black on a live (green)
             // connection after a fresh-transport reconnect.
@@ -5064,7 +5114,7 @@ public class TmuxSessionViewModel @Inject constructor(
             connectingTarget = null
             refreshReconnectAvailability()
         }
-        _connectionStatus.value = ConnectionStatus.Failed(reason)
+        setConnectionState(ConnectionState.Unreachable(reason))
     }
 
     private fun shouldAutoReconnectPassiveDisconnect(disconnectEvent: TmuxDisconnectEvent): Boolean =
@@ -5167,14 +5217,16 @@ public class TmuxSessionViewModel @Inject constructor(
                     trigger = trigger,
                     generation = generation,
                 )
-                _connectionStatus.value = ConnectionStatus.Reconnecting(
-                    host = target.host,
-                    port = target.port,
-                    user = target.user,
-                    attempt = index + 1,
-                    maxAttempts = delays.size,
-                    retryDelayMs = delayMs,
-                    reason = reason,
+                setConnectionState(
+                    ConnectionState.Reconnecting(
+                        host = target.host,
+                        port = target.port,
+                        user = target.user,
+                        attempt = index + 1,
+                        maxAttempts = delays.size,
+                        retryDelayMs = delayMs,
+                        reason = reason,
+                    ),
                 )
                 DiagnosticEvents.record(
                     "connection",
@@ -5294,9 +5346,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                     connectingTarget = target
                     refreshReconnectAvailability()
-                    _connectionStatus.value = ConnectionStatus.Failed(
-                        "$reason Auto reconnect stopped: ${nonRetryableReason(failureCause)}. " +
-                            "Tap Reconnect to retry.",
+                    setConnectionState(
+                        ConnectionState.Unreachable(
+                            "$reason Auto reconnect stopped: ${nonRetryableReason(failureCause)}. " +
+                                "Tap Reconnect to retry.",
+                        ),
                     )
                     recordAutoReconnectDecision(
                         decision = "suppressed_manual_only",
@@ -5314,8 +5368,10 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             connectingTarget = target
             refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Failed(
-                "$reason Auto reconnect failed after ${delays.size} attempts.",
+            setConnectionState(
+                ConnectionState.Unreachable(
+                    "$reason Auto reconnect failed after ${delays.size} attempts.",
+                ),
             )
             recordAutoReconnectDecision(
                 decision = "exhausted",
@@ -5354,8 +5410,10 @@ public class TmuxSessionViewModel @Inject constructor(
             cause = cause,
             *diagnosticFields,
         )
-        _connectionStatus.value = ConnectionStatus.Failed(
-            "$reason Auto reconnect paused while PocketShell is in the background.",
+        setConnectionState(
+            ConnectionState.Unreachable(
+                "$reason Auto reconnect paused while PocketShell is in the background.",
+            ),
         )
     }
 
@@ -5367,7 +5425,7 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun attachClientForTest(client: TmuxClient) {
         attachClient(client)
-        _connectionStatus.value = ConnectionStatus.Connected("test", 0, "test")
+        setConnectionState(ConnectionState.Live("test", 0, "test"))
     }
 
     internal fun attachSessionForAgentRetryForTest(session: SshSession) {
@@ -5384,7 +5442,7 @@ public class TmuxSessionViewModel @Inject constructor(
             startDirectory = null,
         )
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Connected("test", 0, "test")
+        setConnectionState(ConnectionState.Live("test", 0, "test"))
     }
 
     internal fun replaceClientForTest(
@@ -5435,7 +5493,7 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         refreshReconnectAvailability()
         bindProjectRootsForHost(hostId)
-        _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        setConnectionState(ConnectionState.Live(host, port, user))
         maybeRefreshControlClientSize()
     }
 
@@ -5492,7 +5550,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // surface ([_switchHidesTerminal]) so the leaving frame is never painted
         // until the new session's panes are seeded.
         _switchHidesTerminal.value = true
-        _connectionStatus.value = ConnectionStatus.Switching(host, port, user)
+        setConnectionState(ConnectionState.Attaching(host, port, user))
         recordWarmSwitchMilestone(
             attempt = attempt,
             target = target,
@@ -5556,7 +5614,7 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         // Issue #661: reveal the new session's surface at the Connected flip.
         _switchHidesTerminal.value = false
-        _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        setConnectionState(ConnectionState.Live(host, port, user))
         recordWarmSwitchMilestone(
             attempt = attempt,
             target = target,
@@ -5635,7 +5693,7 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = target
         activeTarget = target
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        setConnectionState(ConnectionState.Connecting(host, port, user))
         recordWarmSwitchMilestone(
             attempt = attempt,
             target = target,
@@ -5675,7 +5733,7 @@ public class TmuxSessionViewModel @Inject constructor(
             reseedAllVisiblePanes()
             connectingTarget = null
             refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+            setConnectionState(ConnectionState.Live(host, port, user))
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             recordWarmSwitchMilestone(
                 attempt = attempt,
@@ -5733,7 +5791,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        setConnectionState(ConnectionState.Connecting(host, port, user))
         connectJob = job
         return job
     }
@@ -10147,6 +10205,131 @@ public class TmuxSessionViewModel @Inject constructor(
         ) : ConnectionStatus
         public data class Failed(val message: String) : ConnectionStatus
     }
+
+    /**
+     * EPIC #687 slice 1b: a VM-internal connection state whose vocabulary
+     * mirrors `:shared:core-connection`'s `ConnectionController.ConnectionState`
+     * (`Idle/Connecting/Attaching/Live/Backgrounded/Reattaching/Reconnecting/
+     * Unreachable/Gone`), so slice 1c can let `ConnectionController.state` drive
+     * [_connectionStatus] through the same [connectionStatusFor] mapper instead
+     * of being a body-swap rewrite.
+     *
+     * The view-facing [ConnectionStatus] becomes a pure PROJECTION of this
+     * state: every emission sets a [ConnectionState] and [connectionStatusFor]
+     * maps it to the exact [ConnectionStatus] the suite pins. To keep slice 1b a
+     * ZERO-behavior-change refactor (`ConnectionStatus` byte-identical to before),
+     * each state variant carries the full payload its projected [ConnectionStatus]
+     * needs. The unused-today variants ([Backgrounded], [Reattaching], [Gone]) are
+     * defined for 1c parity with the controller enum but are never emitted yet, so
+     * they change no current behavior.
+     *
+     * The §1 seam-table mapping (controller → status): `Connecting→Connecting`,
+     * `Attaching→Switching`, `Live→Connected`, `Reattaching/Reconnecting→
+     * Reconnecting`, `Unreachable→Failed`, `Gone→Failed`-equivalent, `Idle→Idle`.
+     * Deliberately, slice 1b does NOT simplify the `Failed`/"Tap Reconnect" band
+     * (that is the flagged slice-1c MIGRATE with maintainer sign-off); the mapper
+     * reproduces today's `Failed`/`Connected`/etc. payloads exactly.
+     */
+    private sealed interface ConnectionState {
+        data object Idle : ConnectionState
+
+        data class Connecting(val host: String, val port: Int, val user: String) :
+            ConnectionState
+
+        /** Warm same-host switch / warm open — projects to [ConnectionStatus.Switching]. */
+        data class Attaching(val host: String, val port: Int, val user: String) :
+            ConnectionState
+
+        /** Attached, input enabled — projects to [ConnectionStatus.Connected]. */
+        data class Live(val host: String, val port: Int, val user: String) :
+            ConnectionState
+
+        /**
+         * Controller-parity state for the backgrounded-but-warm window. Not emitted
+         * by the VM today (background detach keeps the prior status), so it is never
+         * mapped in practice in slice 1b; defined for 1c. Projects to the same
+         * [ConnectionStatus] as [Live] (the only sane projection if it ever flows).
+         */
+        data class Backgrounded(val host: String, val port: Int, val user: String) :
+            ConnectionState
+
+        /**
+         * Controller-parity silent in-grace reattach state. Not emitted by the VM
+         * today (the within-grace reattach path emits [Reconnecting]); defined for
+         * 1c. Projects to [ConnectionStatus.Reconnecting] like [Reconnecting].
+         */
+        data class Reattaching(
+            val host: String,
+            val port: Int,
+            val user: String,
+            val attempt: Int,
+            val maxAttempts: Int,
+            val retryDelayMs: Long,
+            val reason: String,
+        ) : ConnectionState
+
+        data class Reconnecting(
+            val host: String,
+            val port: Int,
+            val user: String,
+            val attempt: Int,
+            val maxAttempts: Int,
+            val retryDelayMs: Long,
+            val reason: String,
+        ) : ConnectionState
+
+        /**
+         * Controller-parity "target session deleted elsewhere" state (#666). Not
+         * emitted as a distinct status by the VM today; defined for 1c. Projects to
+         * [ConnectionStatus.Failed] (the `Gone→Failed`-equivalent §1 mapping).
+         */
+        data class Gone(val message: String) : ConnectionState
+
+        /** The honest error band — projects to [ConnectionStatus.Failed]. */
+        data class Unreachable(val message: String) : ConnectionState
+    }
+
+    /**
+     * EPIC #687 slice 1b: the PURE `ConnectionState → ConnectionStatus` projection
+     * from the §1 seam-reconciliation table. Reproduces every currently-pinned
+     * [ConnectionStatus] value BYTE-IDENTICALLY — the state variants carry the
+     * exact payloads, so this is a 1:1 facade map with no behavior change. Slice 1c
+     * will reuse this mapper to project `ConnectionController.state`.
+     */
+    private fun connectionStatusFor(state: ConnectionState): ConnectionStatus =
+        when (state) {
+            is ConnectionState.Idle -> ConnectionStatus.Idle
+            is ConnectionState.Connecting ->
+                ConnectionStatus.Connecting(state.host, state.port, state.user)
+            is ConnectionState.Attaching ->
+                ConnectionStatus.Switching(state.host, state.port, state.user)
+            is ConnectionState.Live ->
+                ConnectionStatus.Connected(state.host, state.port, state.user)
+            is ConnectionState.Backgrounded ->
+                ConnectionStatus.Connected(state.host, state.port, state.user)
+            is ConnectionState.Reattaching ->
+                ConnectionStatus.Reconnecting(
+                    host = state.host,
+                    port = state.port,
+                    user = state.user,
+                    attempt = state.attempt,
+                    maxAttempts = state.maxAttempts,
+                    retryDelayMs = state.retryDelayMs,
+                    reason = state.reason,
+                )
+            is ConnectionState.Reconnecting ->
+                ConnectionStatus.Reconnecting(
+                    host = state.host,
+                    port = state.port,
+                    user = state.user,
+                    attempt = state.attempt,
+                    maxAttempts = state.maxAttempts,
+                    retryDelayMs = state.retryDelayMs,
+                    reason = state.reason,
+                )
+            is ConnectionState.Gone -> ConnectionStatus.Failed(state.message)
+            is ConnectionState.Unreachable -> ConnectionStatus.Failed(state.message)
+        }
 
 }
 

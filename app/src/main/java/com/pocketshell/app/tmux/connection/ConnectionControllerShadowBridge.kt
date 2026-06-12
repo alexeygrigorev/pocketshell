@@ -16,38 +16,50 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 
 /**
- * EPIC #687 Phase-2, slice 1c-iii — the OBSERVE-ONLY EQUIVALENCE BRIDGE.
+ * EPIC #687 Phase-2, slice 1c-iv-prep — the OBSERVE-ONLY EQUIVALENCE BRIDGE,
+ * now driven by REAL transport/seed feedback.
  *
  * A real `:shared:core-connection` [ConnectionController] runs in SHADOW: the VM
  * feeds it the same lifecycle inputs (Background / Foreground / NetworkChanged /
  * TransportDropped) the inline `reduceConnection` path already dispatches, PLUS
- * the connect/attach/seed transitions the inline write-path already produces
- * (mirrored from the single 1b `setConnectionState` choke point as
- * Enter/Switch/TransportLive/SeedLanded/TargetGone). The controller computes its
- * [ConnectionState] from those events — but its state **DRIVES NOTHING**.
+ * the open/switch INTENT mirrored from the single 1b `setConnectionState` choke
+ * point ([observeInlineTransition] → Enter/Switch/TargetGone/drop-ladder). The
+ * controller then reaches [ConnectionState.Live] from **REAL feedback**, not by
+ * mirroring the inline Live transition:
+ *  - [observeTransportLive] is fed at the EXISTING point a lease goes
+ *    `Connected` (the VM's `SshLeaseManager.stateEvents` collector) — the real
+ *    "transport became live" signal.
+ *  - [observeSeedLanded] is fed at the EXISTING point a `capture-pane` lands for
+ *    the active pane (the VM's `seedPaneFromCaptureOnce` success) — the real
+ *    "seed/capture landed" signal.
+ * The controller computes its [ConnectionState] from those events — but its
+ * state **DRIVES NOTHING**.
  *
  * ## Observe-only contract (hard rule)
  * - The bridge NEVER calls back into the VM and NEVER mutates VM state.
- * - The bridge feeds events DERIVED FROM the inline transitions the VM already
- *   makes; it does NOT add new emissions to the attach/capture/disconnect
- *   write-path. So the write-path stays byte-identical — observation cannot leak
+ * - The real-feedback feeds ([observeTransportLive]/[observeSeedLanded]) are
+ *   FIRE-AND-OBSERVE emits placed AFTER the existing write-path side effect they
+ *   observe (the `liveLeaseKeys.add` / `panesSeededThisAttach.add` line). They
+ *   add NO new control flow, NO new IO, and do not change the attach/seed timing
+ *   or ordering — the write-path stays byte-identical. Observation cannot leak
  *   into behavior.
  * - The controller's [shadowState] / [shadowStatusName] / [shadowIndicator] are
  *   read-only diagnostics. Nothing in the VM reads them to gate an effect, a job,
- *   `_connectionStatus`, or the header indicator. They exist ONLY so the slice
- *   1c-iii equivalence tests can prove the controller produces the right state
- *   from the real event stream BEFORE 1c-iv lets it drive.
+ *   `_connectionStatus`, or the header indicator. They exist ONLY so the
+ *   equivalence tests can prove the controller produces the right state from the
+ *   real event stream BEFORE 1c-iv lets it drive.
  *
- * ## Why mirror the inline transitions instead of synthesising independent feedback
- * The inline VM has no discrete `SeedLanded`/`TransportLive` signal — those land
- * INLINE inside the successful attach path (the `setConnectionState(Live(...))`
- * choke point). Emitting fresh `SeedLanded`/`TransportLive` events from the
- * attach/capture code IS the write-path rewrite (slice W) and would risk a
- * behavior change. The observe-only bridge instead READS each inline transition
- * and mirrors it into the controller. This keeps the write-path untouched while
- * still proving the controller's reducer maps the real event sequence to the
- * right state — and pinpoints the exactly-two approved divergences (recoverable
- * drop, within-grace foreground) that 1c-iv will flip to.
+ * ## Why the inline mirror still feeds the INTENT (Enter/Switch)
+ * The controller must know WHICH host/target it is connecting/switching to before
+ * the real `TransportLive`/`SeedLanded` can promote it. The inline transition is
+ * the cheapest place to read that intent (the VM already knows the
+ * active/connecting target there), and mirroring Enter/Switch changes no
+ * write-path behavior. What is NO LONGER synthesised from the inline mirror is
+ * the Live promotion itself: [observeInlineTransition] for an inline `Live` only
+ * ensures the controller is targeting the right id; the actual promotion to
+ * [ConnectionState.Live] now comes from the REAL [observeTransportLive] +
+ * [observeSeedLanded] feedback. This is the final 1c-iv prerequisite: the shadow
+ * controller reaches Live independently, from genuine signals.
  *
  * The single [ShadowTransportPort.isWarm] snapshot the controller consults
  * synchronously is supplied by the VM's existing live-lease-key set; no transport
@@ -118,11 +130,14 @@ class ConnectionControllerShadowBridge(
                 }
             }
             "Live" -> {
+                // The inline Live transition mirror only ensures the controller is
+                // TARGETING this id — it no longer SYNTHESISES the Live promotion.
+                // The promotion to ConnectionState.Live now comes from the REAL
+                // feedback feeds (observeTransportLive + observeSeedLanded). This is
+                // what makes the controller reach Live INDEPENDENTLY of the inline
+                // transition (the 1c-iv prerequisite).
                 if (host != null && targetId != null) {
-                    // Ensure the controller is targeting this id, then land it.
                     ensureTargeting(host, targetId)
-                    controller.submit(ConnectionEvent.TransportLive)
-                    controller.submit(ConnectionEvent.SeedLanded(targetId, paneId = "active"))
                 }
             }
             "Reconnecting" -> {
@@ -170,6 +185,53 @@ class ConnectionControllerShadowBridge(
      *  [ConnectionState.Reattaching] silently — the approved divergence. */
     fun observeTransportDropped(reason: String) {
         controller.submit(ConnectionEvent.TransportDropped(reason))
+    }
+
+    /**
+     * Observe the REAL "transport became live" signal — fed at the EXISTING point
+     * a lease transitions to `Connected` (the VM's `SshLeaseManager.stateEvents`
+     * collector). Submits the real [ConnectionEvent.TransportLive]. On a cold dial
+     * this promotes `Connecting → Attaching`; on a reattach/reconnect it lands
+     * `Live`. [TransportLive] carries no target id, so the controller applies it to
+     * its CURRENT target — the inline intent mirror (Enter/Switch) already
+     * established that target, so no re-targeting is done here (re-targeting from a
+     * feedback emit could wrongly Switch on a stale signal).
+     *
+     * @param host the host the lease came live for (diagnostic; the controller's
+     *   current state already carries the host).
+     * FIRE-AND-OBSERVE: the caller emits this AFTER the existing `liveLeaseKeys`
+     * write, so it adds no write-path control flow — pure observation.
+     */
+    fun observeTransportLive(
+        @Suppress("UNUSED_PARAMETER") host: HostKey,
+        @Suppress("UNUSED_PARAMETER") targetId: SessionId,
+    ) {
+        controller.submit(ConnectionEvent.TransportLive)
+    }
+
+    /**
+     * Observe the REAL "seed/capture landed" signal — fed at the EXISTING point a
+     * `capture-pane` lands for a pane (the VM's `seedPaneFromCaptureOnce` success,
+     * after `panesSeededThisAttach.add`). Submits the real
+     * [ConnectionEvent.SeedLanded] tagged with [targetId]. The controller's own
+     * DROP-BY-ID check (`event.targetId != currentTargetId → ignore`) drops a seed
+     * for a SUPERSEDED target, so a late capture from a session the user already
+     * switched away from never promotes the wrong target. A landing for the current
+     * target while attaching/reattaching/reconnecting promotes to
+     * [ConnectionState.Live] — this is how the shadow controller reaches Live from
+     * REAL feedback, independently of the inline transition. No re-targeting is
+     * done here for the same stale-signal reason as [observeTransportLive].
+     *
+     * @param host the host the seed came from (diagnostic).
+     * FIRE-AND-OBSERVE: the caller emits this AFTER the existing seed side effect,
+     * so it adds no write-path control flow — pure observation.
+     */
+    fun observeSeedLanded(
+        @Suppress("UNUSED_PARAMETER") host: HostKey,
+        targetId: SessionId,
+        paneId: String,
+    ) {
+        controller.submit(ConnectionEvent.SeedLanded(targetId, paneId))
     }
 
     private fun ensureTargeting(host: HostKey, targetId: SessionId) {

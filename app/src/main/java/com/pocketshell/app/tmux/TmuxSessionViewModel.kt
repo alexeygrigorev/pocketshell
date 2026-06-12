@@ -396,12 +396,24 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun shadowHostAndTarget(): Pair<HostKey?, SessionId?> {
         val target = activeTarget ?: connectingTarget ?: return (null to null)
-        val host = HostKey(
-            "${target.user}@${target.host}:${target.port}/${target.hostId}",
-        )
-        val session = SessionId("${target.hostId}/${target.sessionName}")
-        return (host to session)
+        return (shadowHostKey(target) to shadowSessionId(target))
     }
+
+    /**
+     * EPIC #687 slice 1c-iv-prep: mint the shadow controller's [HostKey] through
+     * the SAME [hostKeyFor] encoding the [liveLeaseKeys]-backed warm snapshot uses
+     * (`hostKeyFor(leaseKey)`). Previously this path encoded the host as
+     * `user@host:port/hostId` while the warm snapshot encoded it as
+     * `user@host:port/credentialId/knownHostsId`, so the controller's `isWarm`
+     * predicate was ALWAYS FALSE for a genuinely warm host. Routing both sides
+     * through [hostKeyFor] off the one [ConnectionTarget.toSshLeaseTarget] lease
+     * key aligns the encoding so `isWarm` returns true for a warm host.
+     */
+    private fun shadowHostKey(target: ConnectionTarget): HostKey =
+        hostKeyFor(target.toSshLeaseTarget().leaseKey)
+
+    private fun shadowSessionId(target: ConnectionTarget): SessionId =
+        SessionId("${target.hostId}/${target.sessionName}")
 
     /**
      * EPIC #687 slice 1b: the single emission point — set the VM-internal
@@ -441,6 +453,23 @@ public class TmuxSessionViewModel @Inject constructor(
             is ConnectionState.Unreachable -> "Unreachable"
         }
         connectionControllerShadow.observeInlineTransition(inlineName, host, target)
+    }
+
+    /**
+     * EPIC #687 slice 1c-iv-prep: feed the shadow controller the REAL
+     * [com.pocketshell.core.connection.ConnectionEvent.SeedLanded] for a pane the
+     * write-path just captured. Observe-only — never mutates VM state, never reads
+     * the shadow state back. Keyed to the active/connecting target so a seed for
+     * the session the shadow tracks promotes it (Attaching/Reattaching → Live);
+     * the controller's own drop-by-id check ignores a seed for any other target.
+     */
+    private fun observeSeedLandedInShadow(paneId: String) {
+        val target = activeTarget ?: connectingTarget ?: return
+        connectionControllerShadow.observeSeedLanded(
+            shadowHostKey(target),
+            shadowSessionId(target),
+            paneId,
+        )
     }
 
     /**
@@ -597,8 +626,34 @@ public class TmuxSessionViewModel @Inject constructor(
                     com.pocketshell.core.ssh.SshLeaseConnectionState.Closed,
                     -> liveLeaseKeys.remove(event.key)
                 }
+                // EPIC #687 slice 1c-iv-prep: feed the shadow controller the REAL
+                // "transport became live" signal at the EXISTING point a lease goes
+                // Connected — a FIRE-AND-OBSERVE emit placed AFTER the liveLeaseKeys
+                // write above, so it adds no write-path control flow. The shadow
+                // controller now reaches Live from this real feedback (plus the real
+                // seed landing) rather than mirroring the inline Live transition.
+                if (event.state == com.pocketshell.core.ssh.SshLeaseConnectionState.Connected) {
+                    observeTransportLiveInShadow(event.key)
+                }
             }
         }
+    }
+
+    /**
+     * EPIC #687 slice 1c-iv-prep: feed the shadow controller a REAL
+     * [com.pocketshell.core.connection.ConnectionEvent.TransportLive] when the
+     * lease for the active/connecting target goes `Connected`. Observe-only —
+     * never mutates VM state, never reads the shadow state back. Only fired for the
+     * target the shadow is currently tracking (active or connecting) so a lease
+     * event for an unrelated host does not spuriously promote the shadow.
+     */
+    private fun observeTransportLiveInShadow(leaseKey: SshLeaseKey) {
+        val target = activeTarget ?: connectingTarget ?: return
+        if (target.toSshLeaseTarget().leaseKey != leaseKey) return
+        connectionControllerShadow.observeTransportLive(
+            shadowHostKey(target),
+            shadowSessionId(target),
+        )
     }
     private var clientRef: TmuxClient? = null
     private var clientRegistration: ActiveTmuxClients.Registration? = null
@@ -7023,6 +7078,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // attach so the post-attach reveal can skip the redundant second full
         // reseed for panes already painted in this pass.
         panesSeededThisAttach.add(pane.paneId)
+        // EPIC #687 slice 1c-iv-prep: feed the shadow controller the REAL
+        // "seed/capture landed" signal at the EXISTING point a capture-pane lands
+        // for a pane — a FIRE-AND-OBSERVE emit placed AFTER the panesSeededThisAttach
+        // write above, so it adds no write-path control flow. Combined with the real
+        // TransportLive feedback this is how the shadow controller reaches Live from
+        // genuine signals (the active-pane landing promotes Attaching → Live).
+        observeSeedLandedInShadow(pane.paneId)
         if (recordMilestone) {
             activeAttachMilestone?.let { milestone ->
                 if (!milestone.firstCaptureReadyLogged) {

@@ -64,6 +64,7 @@ import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.seconds
 import net.schmizz.sshj.common.DisconnectReason
 import net.schmizz.sshj.transport.TransportException
 import org.junit.After
@@ -188,7 +189,14 @@ class TmuxSessionViewModelTest {
         // suite — it would surface as a real failure rather than the flake.
         factoryScope.cancel()
         runBlocking {
-            withTimeoutOrNull(5_000) {
+            // Issue #713: same real-`Dispatchers.IO` contention class as the
+            // slow-feed drains — this is an await-for-quiescence join that
+            // returns the instant the IO children unwind, so the generous
+            // ceiling only adds headroom on a contended box (a premature 5s
+            // give-up here lets an IO coroutine survive into the next class's
+            // setMain and flake inter-class). A genuinely wedged coroutine
+            // still surfaces as the documented bounded-wait failure.
+            withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 factoryScope.coroutineContext.job.children.forEach { it.join() }
             }
         }
@@ -3471,7 +3479,8 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexScaleTmuxOutputFloodKeepsTerminalAndConnectionStateConsistent() = runTest(scheduler) {
+    fun codexScaleTmuxOutputFloodKeepsTerminalAndConnectionStateConsistent() =
+        runTest(scheduler, timeout = SLOW_FEED_RUN_TEST_TIMEOUT) {
         val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -3503,7 +3512,7 @@ class TmuxSessionViewModelTest {
                 }
             }
 
-            val completed = withTimeoutOrNull(5_000) {
+            val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 while (sender.isActive) {
                     shadowOf(Looper.getMainLooper()).idle()
                     runCurrent()
@@ -3555,7 +3564,8 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexLikeTmuxOutputWithSlowTerminalSideChannelRendersFinalMarkerWithoutReconnect() = runTest(scheduler) {
+    fun codexLikeTmuxOutputWithSlowTerminalSideChannelRendersFinalMarkerWithoutReconnect() =
+        runTest(scheduler, timeout = SLOW_FEED_RUN_TEST_TIMEOUT) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val diagnostics = installRecordingDiagnosticSink()
         val vm = newVm()
@@ -3599,7 +3609,7 @@ class TmuxSessionViewModelTest {
                     }
                 }
 
-                val completed = withTimeoutOrNull(5_000) {
+                val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                     while (sender.isActive) {
                         shadowOf(Looper.getMainLooper()).idle()
                         runCurrent()
@@ -3623,7 +3633,7 @@ class TmuxSessionViewModelTest {
                 // marker genuinely never lands the loop still times out and the
                 // assertTrue below fails.
                 var transcript = ""
-                val markerDeadline = System.currentTimeMillis() + 5_000
+                val markerDeadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
                 do {
                     advanceUntilIdle()
                     shadowOf(Looper.getMainLooper()).idle()
@@ -3689,7 +3699,8 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexLikePaneOutputOverflowStaysLocalAndNeverReconnectsStableTransport() = runTest(scheduler) {
+    fun codexLikePaneOutputOverflowStaysLocalAndNeverReconnectsStableTransport() =
+        runTest(scheduler, timeout = SLOW_FEED_RUN_TEST_TIMEOUT) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
@@ -3763,7 +3774,7 @@ class TmuxSessionViewModelTest {
                     if (!client.tryEmitPaneOutput("%0", chunk)) rejectedChunks += 1
                 }
             }
-            val completed = withTimeoutOrNull(5_000) {
+            val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 sender.await()
                 true
             } ?: false
@@ -3893,7 +3904,8 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun seedGateLiveBufferOverflowIsLocalPaneErrorNotReconnect() = runTest(scheduler) {
+    fun seedGateLiveBufferOverflowIsLocalPaneErrorNotReconnect() =
+        runTest(scheduler, timeout = SLOW_FEED_RUN_TEST_TIMEOUT) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val diagnostics = installRecordingDiagnosticSink()
         val registry = ActiveTmuxClients()
@@ -3933,7 +3945,7 @@ class TmuxSessionViewModelTest {
                 ),
             )
             runCurrent()
-            val paneOutputSubscribersReady = withTimeoutOrNull(5_000) {
+            val paneOutputSubscribersReady = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 client.emittedPaneOutputs.subscriptionCount.first { subscriberCount ->
                     // Terminal producer, output-activity observer, and port detector.
                     subscriberCount >= 3
@@ -6873,7 +6885,8 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun codexAgentLogRetryWithTerminalFloodKeepsConversationAndTerminalConsistent() = runTest(scheduler) {
+    fun codexAgentLogRetryWithTerminalFloodKeepsConversationAndTerminalConsistent() =
+        runTest(scheduler, timeout = SLOW_FEED_RUN_TEST_TIMEOUT) {
         val vm = newVm()
         val client = FakeTmuxClient()
         val detection = newCodexDetection()
@@ -6938,7 +6951,7 @@ class TmuxSessionViewModelTest {
                     client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
                 }
             }
-            val completed = withTimeoutOrNull(5_000) {
+            val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 while (sender.isActive) {
                     shadowOf(Looper.getMainLooper()).idle()
                     runCurrent()
@@ -12077,6 +12090,27 @@ class TmuxSessionViewModelTest {
     }
 
     private companion object {
+        // Issue #713: the slow-feed / real-async terminal tests below keep
+        // `factoryScope` on real `Dispatchers.IO` (#708 judgment call A), so
+        // they drain the real bridge feed / final marker via real-wall-clock
+        // await-for-condition loops. These return the instant the condition is
+        // ready, so a generous ceiling only adds headroom for a contended dev
+        // box (observed >5s under 15+ load) WITHOUT slowing a passing run. A
+        // genuinely stuck feed still times out and fails the assertion below.
+        const val SLOW_FEED_DRAIN_TIMEOUT_MS = 30_000L
+
+        // Issue #713: `runTest` enforces its OWN default 60s wall-clock budget.
+        // The slow-feed drains above busy-wait (Thread.sleep / real-IO feed) for
+        // real wall-clock time, so raising the drain ceiling to 30s alone can,
+        // under heavy box contention, push the whole `runTest` body past that
+        // default budget — which fails as an outer `runTest` timeout attributed
+        // to the test's lambda line, NOT the inner marker assertion. Give the
+        // slow-feed tests an explicit, generous `runTest` timeout (well above
+        // the 30s drain + setup) so the headroom is real and a genuine failure
+        // still surfaces as the specific inner assertion, never an opaque
+        // outer-timeout flake.
+        val SLOW_FEED_RUN_TEST_TIMEOUT = 120.seconds
+
         const val CODEX_SCALE_OUTPUT_CHUNKS = 320
         const val CODEX_SCALE_OUTPUT_LINES_PER_CHUNK = 20
         const val CODEX_SCALE_OUTPUT_BYTES = 1_500_000

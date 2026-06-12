@@ -186,6 +186,13 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
 
+    // Issue #714: real YAML serializer for the file-viewer review export
+    // (`pocketshell_review` schema). YAML, not hand-rolled string concat —
+    // comment text + code lines contain colons/quotes/`#`/newlines, and
+    // multi-line `text` must emit as a block scalar. snakeyaml is pure Java
+    // with no transitive surface.
+    implementation(libs.snakeyaml)
+
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)

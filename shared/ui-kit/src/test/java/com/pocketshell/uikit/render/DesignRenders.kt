@@ -1299,6 +1299,88 @@ class DesignRenders {
     }
 
     /**
+     * Issue #714: the file-viewer review-mode commentable text panel. The real
+     * `CommentableTextPanel` lives in the `app` module, which the ui-kit render
+     * harness can't import, so this mirrors its per-line row layout with the
+     * same theme tokens: a gutter (1-based line number, accent + a dot when
+     * commented) plus the monospace source line, and a subtle row tint on a
+     * commented line. Lines 4 and 9 carry comments here (gutter dots). The
+     * emulator review-flow run is slice 2's acceptance; this is the fast first
+     * design check for the gutter + dot affordance.
+     */
+    @Test
+    fun reviewCommentableTextPanel() = render("review-commentable-text-panel") {
+        val lines = listOf(
+            "package com.example.hot",
+            "",
+            "class Loop(val n: Int) {",
+            "    val cache = compute(n)   // commented",
+            "",
+            "    fun run(): Result {",
+            "        for (i in 0 until n) {",
+            "            step(i)",
+            "            return null      // commented",
+            "        }",
+            "    }",
+            "}",
+        )
+        val commented = setOf(4, 9)
+        Column(modifier = Modifier.fillMaxWidth().background(PocketShellColors.TermBg)) {
+            lines.forEachIndexed { index, text ->
+                ReviewLineRow(lineNo = index + 1, text = text, commented = (index + 1) in commented)
+            }
+        }
+    }
+
+    /** Mirror of the app's `CommentableLineRow` (#714): gutter + dot + line text. */
+    @Composable
+    private fun ReviewLineRow(lineNo: Int, text: String, commented: Boolean) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (commented) {
+                        Modifier.background(PocketShellColors.SurfaceElev.copy(alpha = 0.4f))
+                    } else {
+                        Modifier
+                    },
+                ),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Row(
+                modifier = Modifier
+                    .width(56.dp)
+                    .padding(start = 8.dp, top = 2.dp, bottom = 2.dp, end = 6.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.Top,
+            ) {
+                if (commented) {
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 4.dp, end = 4.dp)
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(PocketShellColors.Accent),
+                    )
+                }
+                Text(
+                    text = lineNo.toString(),
+                    color = if (commented) PocketShellColors.Accent else PocketShellColors.TextMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                )
+            }
+            Text(
+                text = text,
+                color = PocketShellColors.TermText,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f).padding(end = 12.dp, top = 2.dp, bottom = 2.dp),
+            )
+        }
+    }
+
+    /**
      * Issue #461 (slice 1): the shared [Banner] callout in all four semantic
      * roles. Proves each [BannerRole] paints its own foreground (text + icon +
      * border) + 12%-alpha fill purely from `LocalPocketShellSemantic` — Info

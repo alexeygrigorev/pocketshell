@@ -1,6 +1,7 @@
 package com.pocketshell.app.fileviewer
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.sessions.LeaseSessionExec
@@ -20,6 +21,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import javax.inject.Inject
 
 /**
@@ -138,6 +141,14 @@ class FileViewerViewModel @Inject constructor(
     )
     val readingPrefs: StateFlow<FileViewerReadingPrefs> = _readingPrefs.asStateFlow()
 
+    /**
+     * Review-comments state (issue #714). Held here — not in Compose `remember`
+     * — so the pending comments survive scroll and config change. Cleared on a
+     * successful submit (slice 2).
+     */
+    private val _reviewState = MutableStateFlow(ReviewState())
+    val reviewState: StateFlow<ReviewState> = _reviewState.asStateFlow()
+
     private var loadJob: Job? = null
     private var lastRequest: Request? = null
 
@@ -171,6 +182,66 @@ class FileViewerViewModel @Inject constructor(
         val next = !_readingPrefs.value.renderMarkdown
         prefs.setRenderMarkdown(next)
         _readingPrefs.value = _readingPrefs.value.copy(renderMarkdown = next)
+    }
+
+    // --- Review mode (issue #714) -------------------------------------------
+
+    /** Turn review mode on/off (the per-line comment gutter + header actions). */
+    fun toggleReviewMode() {
+        _reviewState.value = _reviewState.value.copy(active = !_reviewState.value.active)
+    }
+
+    /**
+     * Set or overwrite the comment on [line] (1-based). A blank [text] clears
+     * the line's comment (an emptied edit sheet removes it).
+     */
+    fun setLineComment(line: Int, text: String) {
+        _reviewState.value = _reviewState.value.withLineComment(line, text)
+    }
+
+    /** Delete the comment on [line] (1-based). */
+    fun deleteLineComment(line: Int) {
+        _reviewState.value = _reviewState.value.withoutLineComment(line)
+    }
+
+    /** Set or overwrite the whole-file comment; a blank [text] clears it. */
+    fun setFileComment(text: String) {
+        _reviewState.value = _reviewState.value.withFileComment(text)
+    }
+
+    /** Clear the whole-file comment. */
+    fun deleteFileComment() {
+        _reviewState.value = _reviewState.value.withoutFileComment()
+    }
+
+    /**
+     * Build the `pocketshell_review` YAML for the current pending comments and
+     * (slice 1) log + expose it. The SSH write to the reviewed host's
+     * `~/inbox/pocketshell/reviews/` inbox is slice 2 — wired but stubbed here.
+     *
+     * [host] is the host alias (the YAML `host` field; the screen threads it in
+     * from the navigation destination). Returns the built YAML so callers/tests
+     * can inspect it; returns `null` when there are no pending comments.
+     */
+    fun submitReview(host: String): String? {
+        val current = _reviewState.value
+        if (!current.hasPending) return null
+        val text = (_state.value as? FileViewerUiState.TextContent) ?: return null
+        val lines = text.content.split("\n")
+        val yaml = ReviewExport.buildReviewYaml(
+            state = current,
+            host = host,
+            file = text.displayPath,
+            lines = lines,
+            submittedAt = isoUtcNow(),
+        )
+        // TODO(#714 slice 2): deliver `yaml` to the reviewed host's inbox at
+        //   `~/inbox/pocketshell/reviews/<sanitized-file>-<timestamp>.yaml` over
+        //   the reused viewer SSH lease (LeaseSessionExec.withSession, no new
+        //   dial — D21), then clear the pending set on success / keep it on
+        //   failure with a toast. Slice 1 only builds + logs the YAML.
+        Log.d(REVIEW_LOG_TAG, "Built pocketshell_review YAML (${current.pendingCount} comments):\n$yaml")
+        return yaml
     }
 
     /**
@@ -408,7 +479,15 @@ class FileViewerViewModel @Inject constructor(
         }
     }
 
+    /** ISO-8601 UTC timestamp (second precision) for the review's `submitted_at`. */
+    private fun isoUtcNow(): String =
+        Instant.now().truncatedTo(ChronoUnit.SECONDS).toString()
+
     companion object {
+
+        /** Logcat tag for the slice-1 review-YAML build (slice 2 writes it over SSH). */
+        internal const val REVIEW_LOG_TAG = "FileViewerReview"
+
         /**
          * Hard ceiling on a previewable file. 20 MB comfortably covers any
          * screenshot/PNG an agent shares and any log/source file, while

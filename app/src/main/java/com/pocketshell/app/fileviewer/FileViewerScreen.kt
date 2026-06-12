@@ -102,6 +102,28 @@ const val FILE_VIEWER_SAVE_TAG = "fileViewerSave"
 const val FILE_VIEWER_WRAP_TAG = "fileViewerWrap"
 const val FILE_VIEWER_RENDER_MD_TAG = "fileViewerRenderMarkdown"
 
+// Issue #714 — review-comments mode (per-line + whole-file feedback).
+const val FILE_VIEWER_REVIEW_TOGGLE_TAG = "fileViewerReviewToggle"
+const val FILE_VIEWER_REVIEW_FILE_NOTE_TAG = "fileViewerReviewFileNote"
+const val FILE_VIEWER_REVIEW_TRAY_TAG = "fileViewerReviewTray"
+const val FILE_VIEWER_COMMENTABLE_TEXT_TAG = "fileViewerCommentableText"
+const val FILE_VIEWER_REVIEW_LINE_SHEET_TAG = "fileViewerReviewLineSheet"
+const val FILE_VIEWER_REVIEW_FILE_SHEET_TAG = "fileViewerReviewFileSheet"
+const val FILE_VIEWER_REVIEW_TRAY_SHEET_TAG = "fileViewerReviewTraySheet"
+const val FILE_VIEWER_REVIEW_COMMENT_FIELD_TAG = "fileViewerReviewCommentField"
+const val FILE_VIEWER_REVIEW_SAVE_TAG = "fileViewerReviewSave"
+const val FILE_VIEWER_REVIEW_DELETE_TAG = "fileViewerReviewDelete"
+const val FILE_VIEWER_REVIEW_SUBMIT_TAG = "fileViewerReviewSubmit"
+
+/** Test tag for the gutter tap target of a 1-based [line] in the commentable panel. */
+fun fileViewerLineGutterTag(line: Int): String = "fileViewerLineGutter-$line"
+
+/** Test tag for the comment dot marker of a commented 1-based [line]. */
+fun fileViewerLineDotTag(line: Int): String = "fileViewerLineDot-$line"
+
+/** Test tag for a pending-tray row addressing a 1-based [line] (-1 = file note). */
+fun fileViewerTrayRowTag(line: Int): String = "fileViewerTrayRow-$line"
+
 // Issue #623 — download-only panel for unsupported file types (binary, archives, etc.).
 const val FILE_VIEWER_DOWNLOAD_ONLY_TAG = "fileViewerDownloadOnly"
 const val FILE_VIEWER_DOWNLOAD_BUTTON_TAG = "fileViewerDownloadButton"
@@ -148,14 +170,22 @@ fun FileViewerScreen(
     }
     val state by viewModel.state.collectAsState()
     val readingPrefs by viewModel.readingPrefs.collectAsState()
+    val reviewState by viewModel.reviewState.collectAsState()
     FileViewerScaffold(
         hostName = hostName,
         state = state,
         readingPrefs = readingPrefs,
+        reviewState = reviewState,
         onBack = onBack,
         onRetry = viewModel::retry,
         onToggleWordWrap = viewModel::toggleWordWrap,
         onToggleRenderMarkdown = viewModel::toggleRenderMarkdown,
+        onToggleReviewMode = viewModel::toggleReviewMode,
+        onSetLineComment = viewModel::setLineComment,
+        onDeleteLineComment = viewModel::deleteLineComment,
+        onSetFileComment = viewModel::setFileComment,
+        onDeleteFileComment = viewModel::deleteFileComment,
+        onSubmitReview = { viewModel.submitReview(hostName) },
         modifier = modifier,
     )
 }
@@ -166,6 +196,7 @@ fun FileViewerScreen(
  * session. Mirrors the [com.pocketshell.app.projects.RepoBrowserScaffold]
  * convention.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 internal fun FileViewerScaffold(
     hostName: String,
@@ -173,14 +204,32 @@ internal fun FileViewerScaffold(
     onBack: () -> Unit,
     onRetry: () -> Unit,
     readingPrefs: FileViewerReadingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
+    reviewState: ReviewState = ReviewState(),
     onToggleWordWrap: () -> Unit = {},
     onToggleRenderMarkdown: () -> Unit = {},
+    onToggleReviewMode: () -> Unit = {},
+    onSetLineComment: (Int, String) -> Unit = { _, _ -> },
+    onDeleteLineComment: (Int) -> Unit = {},
+    onSetFileComment: (String) -> Unit = {},
+    onDeleteFileComment: () -> Unit = {},
+    onSubmitReview: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // The wrap / Markdown-render toggles only apply to the text reading
     // surface, so the app bar offers them only for a TextContent state.
     val textState = state as? FileViewerUiState.TextContent
     val isMarkdown = textState != null && MarkdownParser.isMarkdownPath(textState.displayPath)
+
+    // Issue #714 — which comment sheet (if any) is open: a line sheet, the
+    // file-note sheet, or the pending-comments tray. Held here, not in the
+    // ViewModel, since it is transient UI affordance state (the comments
+    // themselves live in the ViewModel and survive config change).
+    var activeSheet by remember { mutableStateOf<ReviewSheet?>(null) }
+    // Close any open sheet if review mode is turned off.
+    LaunchedEffect(reviewState.active) {
+        if (!reviewState.active) activeSheet = null
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -193,25 +242,57 @@ internal fun FileViewerScaffold(
                 displayPath = state.displayPath(),
                 shareable = state.shareable(),
                 onBack = onBack,
+                // Review header actions only make sense for a text file in
+                // review mode: a "File note" entry point and the pending tray.
+                reviewActions = if (textState != null && reviewState.active) {
+                    {
+                        HeaderAction(
+                            label = "File note",
+                            testTag = FILE_VIEWER_REVIEW_FILE_NOTE_TAG,
+                            onClick = { activeSheet = ReviewSheet.File },
+                        )
+                        HeaderAction(
+                            label = "Review (${reviewState.pendingCount})",
+                            testTag = FILE_VIEWER_REVIEW_TRAY_TAG,
+                            onClick = { activeSheet = ReviewSheet.Tray },
+                        )
+                    }
+                } else {
+                    null
+                },
             )
             if (textState != null) {
                 TextReadingToggleBar(
                     wordWrap = readingPrefs.wordWrap,
                     showMarkdownToggle = isMarkdown,
                     renderMarkdown = readingPrefs.renderMarkdown,
+                    reviewActive = reviewState.active,
                     onToggleWordWrap = onToggleWordWrap,
                     onToggleRenderMarkdown = onToggleRenderMarkdown,
+                    onToggleReviewMode = onToggleReviewMode,
                 )
             }
             when (state) {
                 is FileViewerUiState.Loading -> LoadingPanel()
                 is FileViewerUiState.Image -> ImagePanel(state.cacheFile)
-                is FileViewerUiState.TextContent -> TextPanel(
-                    content = state.content,
-                    wordWrap = readingPrefs.wordWrap,
-                    isMarkdown = isMarkdown,
-                    renderMarkdown = readingPrefs.renderMarkdown,
-                )
+                is FileViewerUiState.TextContent -> if (reviewState.active) {
+                    // Review mode forces the per-line source rows (markdown
+                    // render is not line-addressable — #714 fallback); the
+                    // file-level note still works from the header.
+                    CommentableTextPanel(
+                        content = state.content,
+                        wordWrap = readingPrefs.wordWrap,
+                        lineComments = reviewState.lineComments,
+                        onLineTap = { line -> activeSheet = ReviewSheet.Line(line) },
+                    )
+                } else {
+                    TextPanel(
+                        content = state.content,
+                        wordWrap = readingPrefs.wordWrap,
+                        isMarkdown = isMarkdown,
+                        renderMarkdown = readingPrefs.renderMarkdown,
+                    )
+                }
                 is FileViewerUiState.Pdf -> PdfPanel(state.cacheFile)
                 is FileViewerUiState.Audio -> AudioPanel(state.cacheFile)
                 is FileViewerUiState.CannotPreview -> if (state.cacheFile != null) {
@@ -228,6 +309,27 @@ internal fun FileViewerScaffold(
                 }
             }
         }
+
+        // Review sheets (issue #714). The content lines power the line sheet's
+        // header snippet + the tray's per-row snippets.
+        val lines = remember(textState?.content) {
+            textState?.content?.split("\n") ?: emptyList()
+        }
+        ReviewSheets(
+            activeSheet = activeSheet,
+            reviewState = reviewState,
+            lines = lines,
+            onDismiss = { activeSheet = null },
+            onSetLineComment = onSetLineComment,
+            onDeleteLineComment = onDeleteLineComment,
+            onSetFileComment = onSetFileComment,
+            onDeleteFileComment = onDeleteFileComment,
+            onOpenLine = { line -> activeSheet = ReviewSheet.Line(line) },
+            onSubmitReview = {
+                onSubmitReview()
+                activeSheet = null
+            },
+        )
     }
 }
 
@@ -370,6 +472,7 @@ private fun FileViewerAppBar(
     displayPath: String,
     shareable: Shareable?,
     onBack: () -> Unit,
+    reviewActions: (@Composable () -> Unit)? = null,
 ) {
     // Slice E1b (#539): the bespoke 60dp bar + raw `sp` title/breadcrumb adopt
     // the shared `ScreenHeader`. The file name is the title; the full remote
@@ -404,25 +507,32 @@ private fun FileViewerAppBar(
                 )
             }
         },
-        trailing = if (shareable == null) {
+        trailing = if (shareable == null && reviewActions == null) {
             null
         } else {
             {
-                HeaderAction(
-                    label = "Save",
-                    testTag = FILE_VIEWER_SAVE_TAG,
-                    onClick = { saveFileToLocal(context, shareable) },
-                )
-                HeaderAction(
-                    label = "Share",
-                    testTag = FILE_VIEWER_SHARE_TAG,
-                    onClick = { shareFile(context, shareable) },
-                )
-                HeaderAction(
-                    label = "Copy",
-                    testTag = FILE_VIEWER_COPY_TAG,
-                    onClick = { copyFileToClipboard(context, shareable) },
-                )
+                // Issue #714: in review mode the File-note + pending-tray
+                // actions take the trailing slot (the share/copy/save chrome is
+                // suppressed so the row stays uncrowded while reviewing).
+                if (reviewActions != null) {
+                    reviewActions()
+                } else if (shareable != null) {
+                    HeaderAction(
+                        label = "Save",
+                        testTag = FILE_VIEWER_SAVE_TAG,
+                        onClick = { saveFileToLocal(context, shareable) },
+                    )
+                    HeaderAction(
+                        label = "Share",
+                        testTag = FILE_VIEWER_SHARE_TAG,
+                        onClick = { shareFile(context, shareable) },
+                    )
+                    HeaderAction(
+                        label = "Copy",
+                        testTag = FILE_VIEWER_COPY_TAG,
+                        onClick = { copyFileToClipboard(context, shareable) },
+                    )
+                }
             }
         },
     )
@@ -440,8 +550,10 @@ private fun TextReadingToggleBar(
     wordWrap: Boolean,
     showMarkdownToggle: Boolean,
     renderMarkdown: Boolean,
+    reviewActive: Boolean,
     onToggleWordWrap: () -> Unit,
     onToggleRenderMarkdown: () -> Unit,
+    onToggleReviewMode: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -466,6 +578,15 @@ private fun TextReadingToggleBar(
                 onClick = onToggleRenderMarkdown,
             )
         }
+        // Issue #714: review-mode toggle. When on, the blob text view swaps to
+        // the per-line commentable panel and the header gains the File-note +
+        // pending-tray actions.
+        ToggleChip(
+            label = if (reviewActive) "Review: on" else "Review",
+            active = reviewActive,
+            testTag = FILE_VIEWER_REVIEW_TOGGLE_TAG,
+            onClick = onToggleReviewMode,
+        )
     }
 }
 

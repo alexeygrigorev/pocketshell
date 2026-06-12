@@ -107,6 +107,17 @@ roborazzi = "1.46.1"
 firebase-bom = "33.7.0"
 google-services = "4.4.2"
 
+# snakeyaml (issue #714). Real YAML serializer for the file-viewer review
+# export (`pocketshell_review` schema). The maintainer chose YAML over JSON
+# (issue #714 format decision) because multi-line comment `text` emits as a
+# block scalar (`|`) without escaping and is human-readable on its own.
+# Hand-rolled string concatenation is forbidden here — comment text and code
+# lines contain colons, quotes, `#`, and newlines, so we drive a real
+# serializer (`Yaml.dump` with a literal-block representer for multi-line
+# strings). 2.3 is the current stable on the pure-Java org.yaml:snakeyaml line
+# (no Android/Play-Services surface, no transitive deps).
+snakeyaml = "2.3"
+
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
@@ -178,6 +189,10 @@ roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "robora
 # `firebase-bom` platform aligns them.
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebase-bom" }
 firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+
+# snakeyaml (issue #714). The pure-Java YAML serializer behind the file-viewer
+# review export builder (`buildReviewYaml`).
+snakeyaml = { group = "org.yaml", name = "snakeyaml", version.ref = "snakeyaml" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -557,6 +557,30 @@ public fun TmuxSessionScreen(
     val paletteAgent: AgentKind? = liveAgentForPane
         ?: currentPaneId?.let { stickyAgentForPane[it] }
 
+    // Issue #716 (Slice A): default to presumed-agent during detection
+    // uncertainty so the composer / Conversation tab / agent-aware chips never
+    // vanish while detection is slow or null right after attach/switch/send.
+    // The agent surface collapses ONLY on a positively-confirmed shell verdict;
+    // Slice A has no trustworthy shell signal at this layer yet (today's tree
+    // returns Shell on mere absence of an agent match — the bug Slice C fixes),
+    // so `confirmedShell` is always false here and the surface stays available.
+    // See [tmuxSessionPresumedAgent].
+    val presumedAgent = currentPane != null &&
+        tmuxSessionPresumedAgent(
+            hasLiveDetection = currentAgentConversation?.detection != null,
+            stickyAgent = paletteAgent,
+            confirmedShell = false,
+        )
+    // The agent kind to use when sending to a presumed-agent pane that has no
+    // live detection/transcript yet: the sticky/last-known kind. Null when this
+    // pane has never been an agent in the current attach (then a presumed send
+    // falls back to raw bytes).
+    val presumedAgentKind: AgentKind? = if (currentAgentConversation?.detection == null) {
+        paletteAgent
+    } else {
+        null
+    }
+
     // Issue #167: intercept system-back so the user returns to the host
     // list instead of exiting the activity. Without this `BackHandler`
     // Android's default activity-back finishes the task — the user-visible
@@ -988,7 +1012,7 @@ public fun TmuxSessionScreen(
             // currently visible pane only. A sibling pane/window's agent
             // no longer keeps Conversation mounted or routes sends away
             // from what the user is looking at.
-            val tabState = tmuxSessionTabState(currentAgentConversation)
+            val tabState = tmuxSessionTabState(currentAgentConversation, presumedAgent)
             val onTabSelected: (Int) -> Unit = { index ->
                 if (index == 1) {
                     currentPane
@@ -1226,6 +1250,16 @@ public fun TmuxSessionScreen(
             // terminal pager with no cross-window follow or explanation
             // banner.
             val visibleConversation = currentPane?.paneId?.let { agentConversations[it] }
+            // Whether to render the Conversation *content* (transcript) in place
+            // of the terminal pager. This is the actual content swap, distinct
+            // from whether the Conversation *tab* exists (#716 presumed-agent —
+            // see [tmuxSessionTabState]). A presumed agent with no live
+            // detection has no transcript to show and the ViewModel refuses to
+            // switch its `selectedTab` to Conversation until detection lands, so
+            // this stays terminal-first during the slow-detection window — the
+            // tab is present (composer + agent send-context available), but the
+            // content remains the live terminal until the agent transcript is
+            // ready.
             val showConversation = currentPane != null &&
                 visibleConversation?.detection != null &&
                 visibleConversation.selectedTab == SessionTab.Conversation
@@ -1439,7 +1473,13 @@ public fun TmuxSessionScreen(
             )
 
             currentPane?.let { pane ->
-                val isAgentPane = currentAgentConversation?.detection != null
+                // Issue #716: agent-aware chips/affordances follow presumed-agent,
+                // not just live detection, so they don't flip to shell chips
+                // during the slow-detection window.
+                val isAgentPane = tmuxSessionIsAgentPane(
+                    hasLiveDetection = currentAgentConversation?.detection != null,
+                    presumedAgent = presumedAgent,
+                )
                 val bottomControlsModifier = if (isImeVisible) {
                     Modifier
                 } else {
@@ -1837,15 +1877,34 @@ public fun TmuxSessionScreen(
                 if (pane == null) {
                     false
                 } else {
-                    val agent = currentAgentConversation?.detection?.agent
-                    val sent = when {
+                    val liveAgent = currentAgentConversation?.detection?.agent
+                    // Issue #716: a presumed-agent pane with no live detection
+                    // routes the send to the agent (payload formatting), not
+                    // raw bytes, using its sticky/last-known kind.
+                    val route = tmuxComposerSendRoute(
+                        viewingConversation = viewingConversation,
+                        liveAgent = liveAgent,
+                        presumedAgentKind = presumedAgentKind,
+                        withEnter = withEnter,
+                    )
+                    val sent = when (route) {
                         // Conversation tab: submit to the agent and echo the
                         // optimistic user Message into the feed (#459).
-                        viewingConversation ->
+                        TmuxComposerSendRoute.AgentConversation ->
                             viewModel.sendToAgentPaneResult(pane.paneId, text).isSuccess
-                        withEnter && agent == AgentKind.Codex ->
-                            viewModel.sendAgentPayloadToPaneResult(pane.paneId, text, agent).isSuccess
-                        else -> {
+                        // Agent payload formatting: the Codex with-Enter case
+                        // (live agent) or a presumed-agent send (#716). The
+                        // agent kind is the live one when present, else the
+                        // sticky/last-known presumed kind.
+                        TmuxComposerSendRoute.AgentPayload ->
+                            (liveAgent ?: presumedAgentKind)?.let { agentKind ->
+                                viewModel.sendAgentPayloadToPaneResult(
+                                    pane.paneId,
+                                    text,
+                                    agentKind,
+                                ).isSuccess
+                            } ?: false
+                        TmuxComposerSendRoute.RawBytes -> {
                             val payload = if (withEnter) text + "\r" else text
                             viewModel.writeInputToPaneResult(
                                 pane.paneId,
@@ -2482,15 +2541,133 @@ internal data class TmuxSessionTabState(
     val showsConversationTab: Boolean,
 )
 
+/**
+ * Issue #716 (Slice A): is the visible pane an agent OR a *presumed* agent?
+ *
+ * The maintainer's #1 complaint: agent-detection is slow/uncertain right after
+ * attach/switch/send, so `detection == null` for a while even though the
+ * session IS an agent. The old gating keyed the whole agent surface
+ * (Conversation tab, agent-aware chips, agent send-routing) on the single
+ * positive signal `detection != null` — so the composer/agent surface
+ * *vanished* during that window and the user couldn't type to the agent.
+ *
+ * The fix is to default to **presumed-agent** during uncertainty: a pane is
+ * presumed-agent when
+ *  - live detection landed (`detection != null`), OR
+ *  - this pane was/is known to be an agent (the #462 `stickyAgentForPane` /
+ *    `paletteAgent` last-known kind), OR
+ *  - detection simply has not positively confirmed a shell yet.
+ *
+ * The agent surface is hidden ONLY on a positively-confirmed shell verdict
+ * ([confirmedShell]). For Slice A there is no trustworthy confirmed-shell
+ * signal at the screen layer yet — today's tree/gateway returns
+ * `SessionAgentKind.Shell` on the mere *absence* of an agent match, which is
+ * exactly the unreliable signal Slice C fixes. So Slice A always passes
+ * `confirmedShell = false` and the surface stays available throughout the
+ * detection window; the reliable confirmed-shell collapse arrives with Slice C.
+ *
+ * Net effect: the composer/agent surface is always available unless/until a
+ * trustworthy shell verdict exists. A genuine shell session may show an empty
+ * Conversation tab in the interim — an accepted trade-off (the maintainer's
+ * explicit non-goal is a per-session toggle).
+ */
+internal fun tmuxSessionPresumedAgent(
+    hasLiveDetection: Boolean,
+    stickyAgent: AgentKind?,
+    confirmedShell: Boolean,
+): Boolean {
+    // A trustworthy confirmed-shell verdict is the ONLY thing that collapses
+    // the agent surface. Live detection or a known agent kind obviously make
+    // the pane presumed-agent; but even with neither, absence of a positive
+    // shell verdict means "not yet known to be shell" — which #716 treats as
+    // presumed-agent so the composer/agent surface stays available during the
+    // slow-detection window. (Slice A always passes `confirmedShell = false`;
+    // Slice C supplies the real verdict from the maintained tree.)
+    if (confirmedShell) return false
+    return true
+}
+
+/**
+ * Issue #716 (Slice A): the visible pane wears agent-aware chrome (agent
+ * chips, no snippet picker, agent-payload send) for a live-detected agent OR a
+ * presumed agent. Equivalent to [presumedAgent] today since presumed-agent
+ * already subsumes the live-detection case, but kept as a named helper so the
+ * call site reads intentionally and so a future confirmed-shell signal flows
+ * through one place.
+ */
+internal fun tmuxSessionIsAgentPane(
+    hasLiveDetection: Boolean,
+    presumedAgent: Boolean,
+): Boolean = hasLiveDetection || presumedAgent
+
 internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,
+    presumedAgent: Boolean = false,
 ): TmuxSessionTabState {
-    val hasAgent = currentAgentConversation?.detection != null
+    // The Conversation tab exists for a live-detected agent OR a presumed
+    // agent (#716). For a presumed agent that has not yet detected, the tab is
+    // present (so it does not flicker away mid-detection) but the active index
+    // can only become Conversation once a live detection arrives, because the
+    // ViewModel refuses to switch to the Conversation tab while
+    // `detection == null` (it has no transcript to show yet).
+    val hasLiveDetection = currentAgentConversation?.detection != null
+    val showsConversationTab = hasLiveDetection || presumedAgent
     return TmuxSessionTabState(
-        labels = if (hasAgent) listOf("Terminal", "Conversation") else listOf("Terminal"),
-        selectedIndex = if (hasAgent && currentAgentConversation.selectedTab == SessionTab.Conversation) 1 else 0,
-        showsConversationTab = hasAgent,
+        labels = if (showsConversationTab) listOf("Terminal", "Conversation") else listOf("Terminal"),
+        selectedIndex = if (hasLiveDetection &&
+            currentAgentConversation?.selectedTab == SessionTab.Conversation
+        ) {
+            1
+        } else {
+            0
+        },
+        showsConversationTab = showsConversationTab,
     )
+}
+
+/**
+ * Issue #716 (Slice A): which send path the unified prompt composer uses for
+ * the visible pane.
+ *
+ *  - [AgentConversation]: live-detected agent on the Conversation tab — submit
+ *    to the agent AND echo the optimistic user turn into the transcript
+ *    (`sendToAgentPaneResult`). Unchanged from before #716.
+ *  - [AgentPayload]: route through the agent payload formatter
+ *    (`sendAgentPayloadToPaneResult`) so the prompt reaches the agent without a
+ *    raw-bytes fallthrough. Two cases land here, both preserving prior
+ *    behaviour for confirmed agents:
+ *      1. The pre-#716 Codex-on-Terminal-tab `withEnter` special case
+ *         (`liveAgent == Codex`).
+ *      2. #716: a *presumed* agent with NO live detection yet
+ *         (`liveAgent == null`) but a known/last-known agent kind
+ *         ([presumedAgentKind]) — the slow-detection window. The prompt still
+ *         reaches the agent (no raw-bytes fallthrough); there is no transcript
+ *         to echo into yet, so no optimistic turn is inserted.
+ *  - [RawBytes]: the plain shell write path. A *confirmed* agent
+ *    (`liveAgent != null`) on the Terminal tab keeps its pre-#716 raw-bytes
+ *    behaviour here (except the Codex special case above), so a confirmed agent
+ *    is unchanged. RawBytes is also the path for a genuine no-agent pane.
+ */
+internal enum class TmuxComposerSendRoute { AgentConversation, AgentPayload, RawBytes }
+
+internal fun tmuxComposerSendRoute(
+    viewingConversation: Boolean,
+    liveAgent: AgentKind?,
+    presumedAgentKind: AgentKind?,
+    withEnter: Boolean,
+): TmuxComposerSendRoute = when {
+    // Conversation tab of a live-detected agent: agent submit + optimistic echo.
+    viewingConversation -> TmuxComposerSendRoute.AgentConversation
+    // Codex on the Terminal tab keeps its with-Enter payload formatting (the
+    // pre-#716 special case) — route through the agent payload path.
+    withEnter && liveAgent == AgentKind.Codex -> TmuxComposerSendRoute.AgentPayload
+    // Confirmed agent (live detection) on the Terminal tab: unchanged pre-#716
+    // raw-bytes behaviour. Only Codex (above) deviates.
+    liveAgent != null -> TmuxComposerSendRoute.RawBytes
+    // #716: presumed-agent without a live transcript yet — still route to the
+    // agent, not raw bytes, using the known/last-known agent kind.
+    presumedAgentKind != null -> TmuxComposerSendRoute.AgentPayload
+    else -> TmuxComposerSendRoute.RawBytes
 }
 
 internal fun handleTmuxSessionSelection(

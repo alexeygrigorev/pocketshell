@@ -364,6 +364,191 @@ class TmuxSessionScreenTest {
         assertTrue(state.showsConversationTab)
     }
 
+    // ─── Issue #716 (Slice A): presumed-agent keeps the composer/agent ──
+    // surface available during the slow/uncertain detection window. ────────
+
+    @Test
+    fun presumedAgentIsTrueForFreshlyAttachedPaneWithNoDetection() {
+        // A freshly attached pane with no live detection and no sticky agent
+        // still defaults to presumed-agent — there is no positive shell verdict
+        // yet, so the composer/agent surface must stay available (criterion #2).
+        assertTrue(
+            tmuxSessionPresumedAgent(
+                hasLiveDetection = false,
+                stickyAgent = null,
+                confirmedShell = false,
+            ),
+        )
+    }
+
+    @Test
+    fun presumedAgentIsTrueForStickyAgentDuringTransientNull() {
+        // A pane that WAS detected as an agent (sticky kind present) but whose
+        // live detection transiently dropped to null stays presumed-agent so
+        // the surface does not flicker out (criterion #3, reuses #462 sticky).
+        assertTrue(
+            tmuxSessionPresumedAgent(
+                hasLiveDetection = false,
+                stickyAgent = AgentKind.ClaudeCode,
+                confirmedShell = false,
+            ),
+        )
+    }
+
+    @Test
+    fun presumedAgentIsFalseOnlyOnConfirmedShell() {
+        // The ONLY thing that collapses the agent surface is a positively
+        // confirmed shell verdict. Slice A never supplies one (Slice C will),
+        // but the guard must honour it when it arrives.
+        assertTrue(
+            !tmuxSessionPresumedAgent(
+                hasLiveDetection = false,
+                stickyAgent = null,
+                confirmedShell = true,
+            ),
+        )
+        // Even a known agent kind is overridden by a confirmed-shell verdict
+        // (an explicit agent->shell downgrade event, not mere absence).
+        assertTrue(
+            !tmuxSessionPresumedAgent(
+                hasLiveDetection = true,
+                stickyAgent = AgentKind.ClaudeCode,
+                confirmedShell = true,
+            ),
+        )
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationTabForPresumedAgentWithoutDetection() {
+        // Presumed-agent, no live detection: the Conversation tab EXISTS (it
+        // does not vanish during slow detection), but the active index stays on
+        // Terminal because there is no transcript to switch to yet.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = true,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateHidesConversationTabWhenNotPresumedAndNoDetection() {
+        // The only way the Conversation tab is absent is a non-presumed pane
+        // (a confirmed shell) with no live detection.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+        )
+
+        assertEquals(listOf("Terminal"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(!state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateConfirmedAgentOnConversationTabIsUnchanged() {
+        // A confirmed agent already on the Conversation tab selects index 1,
+        // exactly as before #716 (criterion (b): confirmed agent unchanged).
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = claudeDetection(),
+                selectedTab = SessionTab.Conversation,
+            ),
+            presumedAgent = true,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(1, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun isAgentPaneFollowsPresumedAgent() {
+        // Agent chips/affordances follow presumed-agent, so they don't flip to
+        // shell chips during the slow-detection window.
+        assertTrue(tmuxSessionIsAgentPane(hasLiveDetection = false, presumedAgent = true))
+        assertTrue(tmuxSessionIsAgentPane(hasLiveDetection = true, presumedAgent = false))
+        assertTrue(!tmuxSessionIsAgentPane(hasLiveDetection = false, presumedAgent = false))
+    }
+
+    @Test
+    fun composerSendRoutesToAgentPayloadForPresumedAgentWithoutDetection() {
+        // Criterion (a): a presumed-agent pane (sticky kind, no live detection)
+        // routes the composer send to the agent payload path, NOT raw bytes.
+        assertEquals(
+            TmuxComposerSendRoute.AgentPayload,
+            tmuxComposerSendRoute(
+                viewingConversation = false,
+                liveAgent = null,
+                presumedAgentKind = AgentKind.ClaudeCode,
+                withEnter = true,
+            ),
+        )
+    }
+
+    @Test
+    fun composerSendRoutesToConversationForConfirmedAgentOnConversationTab() {
+        // A live-detected agent on the Conversation tab keeps the optimistic
+        // agent-conversation send (criterion (b): confirmed agent unchanged).
+        assertEquals(
+            TmuxComposerSendRoute.AgentConversation,
+            tmuxComposerSendRoute(
+                viewingConversation = true,
+                liveAgent = AgentKind.ClaudeCode,
+                presumedAgentKind = null,
+                withEnter = true,
+            ),
+        )
+    }
+
+    @Test
+    fun composerSendKeepsRawBytesForConfirmedAgentOnTerminalTab() {
+        // A confirmed (live) Claude agent on the Terminal tab still writes raw
+        // bytes — #716 must NOT change this (only the Codex with-Enter case and
+        // the presumed-agent-without-detection case route to agent payload).
+        assertEquals(
+            TmuxComposerSendRoute.RawBytes,
+            tmuxComposerSendRoute(
+                viewingConversation = false,
+                liveAgent = AgentKind.ClaudeCode,
+                presumedAgentKind = null,
+                withEnter = true,
+            ),
+        )
+    }
+
+    @Test
+    fun composerSendKeepsCodexWithEnterPayloadSpecialCase() {
+        // The pre-#716 Codex-on-Terminal-tab with-Enter payload formatting is
+        // preserved.
+        assertEquals(
+            TmuxComposerSendRoute.AgentPayload,
+            tmuxComposerSendRoute(
+                viewingConversation = false,
+                liveAgent = AgentKind.Codex,
+                presumedAgentKind = null,
+                withEnter = true,
+            ),
+        )
+    }
+
+    @Test
+    fun composerSendFallsBackToRawBytesForGenuineNoAgentPane() {
+        // No live agent, no sticky/presumed kind: a genuine no-agent send still
+        // writes raw bytes.
+        assertEquals(
+            TmuxComposerSendRoute.RawBytes,
+            tmuxComposerSendRoute(
+                viewingConversation = false,
+                liveAgent = null,
+                presumedAgentKind = null,
+                withEnter = false,
+            ),
+        )
+    }
+
     @Test
     fun conversationSyncStatusLabelsExposeLiveStaleAndUnavailable() {
         assertEquals("Live", conversationSyncStatusLabel(AgentConversationSyncStatus.Live))

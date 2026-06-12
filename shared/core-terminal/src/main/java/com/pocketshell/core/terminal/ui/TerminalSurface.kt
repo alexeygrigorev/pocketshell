@@ -300,6 +300,19 @@ fun TerminalSurface(
         }
     }
 
+    // Issue #721: a force-full-repaint signal (emitted on tmux reattach re-seed)
+    // means the EXISTING screen content must be redrawn from the buffer, not just
+    // the newly-changed rows the #469 dirty-region path would pick. This resets
+    // the renderer's dirty cache and issues a full invalidate(), so a reattach
+    // RESEED repaints every row regardless of cache state.
+    LaunchedEffect(state, terminalView) {
+        val view = terminalView ?: return@LaunchedEffect
+        state.fullRepaintRequests.collect {
+            runCatching { view.forceFullRepaint() }
+                .onFailure { onLocalTerminalError?.invoke(it) }
+        }
+    }
+
     // If the caller installed an onKeyEvent slot, chain it onto the
     // user-supplied modifier so the Compose focus system routes key events
     // through it before the embedded TerminalView gets a chance. We tack
@@ -432,8 +445,19 @@ fun TerminalSurface(
                     // recompositions.
                     if (desiredSession != null) {
                         if (desiredSession !== current) {
-                            runCatching { view.attachSession(desiredSession) }
-                                .onFailure { onLocalTerminalError?.invoke(it) }
+                            runCatching {
+                                view.attachSession(desiredSession)
+                                // Issue #721: attaching a session that already
+                                // holds buffer content (a tmux session switch via
+                                // pager dispose, or any attach with no fresh bytes
+                                // pending) updates the emulator the View points at
+                                // but does not, on its own, repaint the existing
+                                // screen — the #469 dirty cache still assumes the
+                                // previous surface pixels. Force a full repaint so
+                                // the whole buffer is redrawn on attach, not just
+                                // newly-written cells.
+                                view.forceFullRepaint()
+                            }.onFailure { onLocalTerminalError?.invoke(it) }
                         }
                     } else if (desiredSession !== current) {
                         // No public detach on TerminalView; clear the

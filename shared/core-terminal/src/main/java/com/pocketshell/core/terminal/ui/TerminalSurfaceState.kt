@@ -152,6 +152,24 @@ class TerminalSurfaceState(
     internal val renderRequests: SharedFlow<Unit> get() = _renderRequests.asSharedFlow()
 
     /**
+     * Force-full-repaint requests (PocketShell #721). Unlike [renderRequests]
+     * — which feed the #469 dirty-region path and repaint only changed rows —
+     * a signal here means "the EXISTING screen content must be redrawn from the
+     * buffer, regardless of the renderer's dirty cache". It is emitted at the
+     * rare reveal/seed boundaries where freshly-written cells would otherwise
+     * paint over a black/cleared canvas: namely a tmux reattach re-seed
+     * ([appendRemoteOutput]). [TerminalSurface] collects this and calls
+     * [com.termux.view.TerminalView.forceFullRepaint]. Kept off Compose state
+     * for the same burst-coalescing reasons as [renderRequests].
+     */
+    private val _fullRepaintRequests = MutableSharedFlow<Unit>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    internal val fullRepaintRequests: SharedFlow<Unit> get() = _fullRepaintRequests.asSharedFlow()
+
+    /**
      * Callback fired when the embedded text-selection action mode's "Copy"
      * button is tapped. Issue #175 wires the [TerminalSurface] composable to
      * install a default sink that copies the selected text into the system
@@ -297,6 +315,12 @@ class TerminalSurfaceState(
         // already-open-gate no-op.
         activeBridge.seedThenOpenGate(clean)
         _output.tryEmit(clean)
+        // Issue #721: a re-seed applies the captured snapshot to the emulator
+        // buffer but does not change which rows the renderer's #469 dirty cache
+        // considers stale — so a plain render request would repaint only freshly
+        // changed cells and leave the rest of the existing screen black. Signal a
+        // FULL repaint so every row is redrawn straight from the buffer.
+        _fullRepaintRequests.tryEmit(Unit)
         bufferTick.value = bufferTick.value + 1
     }
 

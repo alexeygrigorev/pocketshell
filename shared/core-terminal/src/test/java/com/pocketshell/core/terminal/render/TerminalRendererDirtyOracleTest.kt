@@ -7,6 +7,8 @@ import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalOutput
 import com.termux.view.TerminalRenderer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -284,6 +286,67 @@ class TerminalRendererDirtyOracleTest {
             add(Step(b("final line\r\n")))
         }
         runOracle("mixed", 50, 8, steps)
+    }
+
+    /**
+     * Issue #721 — force-full-repaint on reattach/reveal/re-seed.
+     *
+     * The View's surface can lose the pixels the #469 dirty cache assumes are still
+     * painted: a recreated/reattached View starts black, and a re-seed (capture-pane)
+     * updates the buffer without changing which rows the cache considers stale. The fix
+     * is [TerminalRenderer.invalidateDirtyCache] (called by
+     * [com.termux.view.TerminalView.forceFullRepaint]), which must make the NEXT
+     * [TerminalRenderer.peekDirtyRows] return [TerminalRenderer.PEEK_FULL] — every row
+     * repaints straight from the buffer — even though no row generation changed.
+     *
+     * The negative control (no force) returns dirty-only / [TerminalRenderer.PEEK_NONE],
+     * which is exactly today's bug: only newly-written cells paint over a black canvas.
+     */
+    @Test
+    fun forceFullRepaintMarksEveryRowDirtyAfterReveal() {
+        val columns = 40
+        val rows = 8
+        val terminal = TerminalEmulator(SinkOutput, columns, rows, 13, 15, rows * 4, null)
+        val renderer = TerminalRenderer(TEXT_SIZE_PX, Typeface.MONOSPACE)
+        val scratchCanvas = newScratchCanvas()
+        val dirty = BooleanArray(rows)
+
+        // Fill a multi-line screen and render once so the dirty cache is populated and
+        // every row is considered "already painted". Hide the cursor so the negative
+        // control below is a true "nothing changed" (a visible cursor row is always
+        // re-marked dirty by peekDirtyRows for blink, which is unrelated to #721).
+        val seed = b("${ESC}[?25lline one\r\nline two\r\nline three\r\nline four\r\nline five\r\n")
+        terminal.append(seed, seed.size)
+        renderer.render(terminal, scratchCanvas, 0, -1, -1, -1, -1)
+
+        // NEGATIVE CONTROL — a no-op reattach WITHOUT the force: the buffer content did
+        // not change, so peekDirtyRows does NOT force a full repaint and does NOT mark
+        // every row dirty. On a black/cleared surface that is precisely the #721 bug —
+        // only newly-changed rows paint, and the existing screen is never redrawn.
+        val noForce = renderer.peekDirtyRows(terminal, 0, -1, -1, -1, -1, dirty)
+        assertNotEquals(
+            "without forceFullRepaint a no-op reattach must NOT force a full repaint " +
+                "(encodes the #721 bug: existing screen stays black)",
+            TerminalRenderer.PEEK_FULL, noForce,
+        )
+        assertTrue(
+            "without the force the existing screen is NOT fully repainted: at least " +
+                "one row must be left clean (the #721 bug)",
+            (0 until rows).any { !dirty[it] },
+        )
+
+        // THE FIX — forceFullRepaint() resets the dirty cache. The very next peek must be
+        // PEEK_FULL with every row marked, so render() repaints the WHOLE buffer even
+        // though no row's content generation changed since the last frame.
+        renderer.invalidateDirtyCache()
+        val forced = renderer.peekDirtyRows(terminal, 0, -1, -1, -1, -1, dirty)
+        assertEquals(
+            "after invalidateDirtyCache() the next peek must force a full repaint",
+            TerminalRenderer.PEEK_FULL, forced,
+        )
+        for (r in 0 until rows) {
+            assertEquals("row $r must be dirty after the force", true, dirty[r])
+        }
     }
 
     private companion object {

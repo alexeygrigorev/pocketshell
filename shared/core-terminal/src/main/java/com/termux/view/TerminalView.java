@@ -141,6 +141,40 @@ public final class TerminalView extends View {
         }
     }
 
+    /**
+     * Force the WHOLE buffer to repaint on the next frame (PocketShell #721).
+     *
+     * <p>The dirty-region optimization (#469) only invalidates rows whose content
+     * generation changed since the last painted frame. That is correct for
+     * steady-state streaming, but it is WRONG at a reveal/seed boundary where the
+     * View's surface no longer holds the pixels the cache assumes are still there:
+     *
+     * <ul>
+     *   <li>A reattached/recreated View (pager dispose on session switch, or a
+     *       background→foreground resume that reused a View with a stale cache) starts
+     *       with a black/cleared canvas, yet the renderer's generation cache still
+     *       thinks every row is painted — so {@code peekDirtyRows} returns dirty-only
+     *       and only freshly-written cells paint over black.</li>
+     *   <li>A re-seed (capture-pane → emulator buffer) updates the buffer but does not
+     *       change which rows the cache considers stale, so the existing screen content
+     *       is never redrawn.</li>
+     * </ul>
+     *
+     * <p>This resets the renderer's dirty cache via
+     * {@link TerminalRenderer#invalidateDirtyCache()} (so the next
+     * {@link TerminalRenderer#peekDirtyRows} returns {@link TerminalRenderer#PEEK_FULL}
+     * → every row repaints straight from the buffer) and then issues a full
+     * {@code invalidate()}. It costs one full repaint at the rare reveal/seed boundary;
+     * it does NOT touch the steady-state streaming path, which keeps the #469
+     * dirty-region win.
+     */
+    public void forceFullRepaint() {
+        if (mRenderer != null) {
+            mRenderer.invalidateDirtyCache();
+        }
+        invalidate();
+    }
+
     float mScaleFactor = 1.f;
     final GestureAndScaleRecognizer mGestureRecognizer;
 
@@ -1779,6 +1813,13 @@ public final class TerminalView extends View {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+
+        // PocketShell #721: a View reattached to the window (pager dispose on session
+        // switch, or a background→foreground resume that reused this View) starts with a
+        // black/cleared canvas while the renderer's #469 dirty cache still assumes the
+        // previous frame's pixels are on the surface. Force a full repaint of the whole
+        // buffer so the EXISTING screen content is redrawn, not just newly-written cells.
+        forceFullRepaint();
 
         if (mTextSelectionCursorController != null) {
             getViewTreeObserver().addOnTouchModeChangeListener(mTextSelectionCursorController);

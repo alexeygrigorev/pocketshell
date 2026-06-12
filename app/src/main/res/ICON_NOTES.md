@@ -3,8 +3,9 @@
 ## Scope
 
 - Adaptive icon vectors: `drawable/ic_launcher_background.xml` (flat
-  `#0B0F14` fill) and `drawable/ic_launcher_foreground.xml` (D/1
-  pocket-terminal mark with a cyan frame and prompt/cursor glyph).
+  `#0B0F14` fill) and `drawable/ic_launcher_foreground.xml` (the "C1"
+  mark: a bold cyan prompt chevron `>` plus a cursor block `_` on a dark
+  rounded "pocket" plate).
 - Adaptive icon entries: `mipmap-anydpi-v26/ic_launcher.xml` and
   `mipmap-anydpi-v26/ic_launcher_round.xml`.
 - Manifest `<application>` references `@mipmap/ic_launcher` and
@@ -38,15 +39,20 @@ not launcher assets:
 - Brand board:
   https://github.com/alexeygrigorev/pocketshell/releases/download/feedback-assets/pocketshell-brand-board-20260607.png
 
-## Design intent
+## Design intent — mark "C1"
 
 - Background: near-black navy (`#0B0F14`) from the selected Brand
   Board Direction 1 / "Pocket Terminal" palette.
-- Foreground: direction D plus Direction 1, redrawn as a compact
-  pocket-terminal mark. The cyan (`#22D3EE`) frame/title bar/cursor
-  carries the brand color; the white prompt chevron preserves contrast
-  inside the small Android icon mask.
-- Artwork is constrained to a conservative inner 44dp x 50dp
-  adaptive-icon safe zone. The right-side detail from the first D/1 vector
-  pass was removed because real Pixel Launcher folder previews made it read
-  like the icon was clipped by the circular mask.
+- Foreground: the **C1** mark chosen by the maintainer (#612). The shell
+  prompt itself is the logo — a bold cyan (`#22D3EE`) chevron `>` with a
+  near-white (`#F8FAFC`) cursor block `_`, set on a dark rounded "pocket"
+  plate (`#0F1A22`, a hair lighter than the background for depth). It
+  reads as a terminal / agent CLI and stays legible down to mdpi (48px).
+- The earlier terminal-frame mark (cyan frame + title bar + white arrow)
+  is removed outright — a hard cut per D22, not kept as an alternative.
+- Every painted element, **including the backdrop plate**, is constrained
+  to the conservative inner safe box (viewport `32..76` on X, `30..80` on
+  Y) that `LauncherIconVectorTest` enforces, so nothing clips under the
+  circular / squircle / rounded-square OEM masks or Pixel Launcher folder
+  previews. Glyphs are filled polygons (no thin strokes) so they stay
+  crisp after the mask scales the artwork down.

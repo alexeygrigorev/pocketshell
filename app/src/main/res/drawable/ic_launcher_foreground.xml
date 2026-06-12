@@ -1,22 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    PocketShell launcher foreground for issue #612.
+    PocketShell launcher foreground for issue #612 — mark "C1".
 
-    The maintainer selected icon direction D plus Brand Board Direction 1
-    ("Pocket Terminal"). This redraws that direction as clean vector
-    geometry instead of embedding the generated contact-sheet raster:
-    a pocket-sized terminal frame with a bold prompt chevron and cursor.
+    The maintainer selected direction D + Brand Board Direction 1
+    ("Pocket Terminal") and, after the circular-mask clipping complaint,
+    chose the refined "C1" mark: a bold cyan shell prompt chevron (`>`)
+    with a cursor block (`_`) sitting on a dark rounded "pocket" plate.
+    The prompt itself IS the logo — it reads instantly as a terminal /
+    agent CLI and stays legible down to mdpi (48px). The earlier
+    terminal-frame mark is removed outright (hard cut, D22); we do not
+    keep both.
 
-    Adaptive-icon canvas is 108x108. The OEM mask crops/scales aggressively,
-    and Pixel Launcher folder previews add another circular crop, so all
-    artwork is kept inside a conservative inner 44x50 zone (viewport coords
-    32..76 on X, 30..80 on Y). Strokes are bold enough to render at mdpi
-    (48px) without melting, and the right edge avoids decorative details that
-    can read as clipping inside circular launcher masks.
+    Adaptive-icon canvas is 108x108. OEM masks (circle, squircle,
+    rounded-square) plus Pixel Launcher folder previews crop aggressively,
+    so every painted element — INCLUDING the backdrop plate — is kept
+    inside a conservative inner safe box (viewport coords 32..76 on X,
+    30..80 on Y). LauncherIconVectorTest enforces that box. Strokes are
+    avoided in favour of filled polygons so nothing thins out after the
+    mask scales the artwork down.
 
-    Source design references:
-    - https://github.com/alexeygrigorev/pocketshell/releases/download/feedback-assets/pocketshell-icon-contact-sheet-20260607.png
-    - https://github.com/alexeygrigorev/pocketshell/releases/download/feedback-assets/pocketshell-brand-board-20260607.png
+    Colors:
+    - Plate fill #0F1A22 — a hair lighter than the #0B0F14 background, for
+      depth without competing with the cyan.
+    - Chevron #22D3EE — the brand accent cyan, matching the token accent.
+    - Cursor block #F8FAFC — near-white for high contrast against the cyan.
+
+    Source design references (issue #612 / feedback-assets):
+    - issue-612-icon-decision-20260611.png (C1 vs alternatives, all masks)
+    - issue-612-c1-final-masks-20260611.png (C1 under each OEM mask)
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -24,30 +35,18 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Pocket terminal frame. Thick stroke keeps the silhouette at mdpi. -->
+    <!-- Dark rounded "pocket" plate. Filled, inside the safe box. -->
     <path
-        android:fillColor="@android:color/transparent"
-        android:strokeColor="#22D3EE"
-        android:strokeWidth="4"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M38,32 L70,32 Q74,32 74,36 L74,74 Q74,78 70,78 L38,78 Q34,78 34,74 L34,36 Q34,32 38,32 Z" />
+        android:fillColor="#0F1A22"
+        android:pathData="M41,37 L67,37 Q71,37 71,41 L71,71 Q71,75 67,75 L41,75 Q37,75 37,71 L37,41 Q37,37 41,37 Z" />
 
-    <!-- Terminal title bar / pocket lip. -->
+    <!-- Bold prompt chevron `>`. Filled polygon so it never thins out. -->
     <path
         android:fillColor="#22D3EE"
-        android:pathData="M36,41 L72,41 L72,46 L36,46 Z" />
+        android:pathData="M43,43 L50,43 L63,57 L50,71 L43,71 L56,57 Z" />
 
-    <!-- Prompt chevron. Filled polygons avoid thin strokes after masking. -->
+    <!-- Cursor block `_` at the bottom-right of the plate. -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M39,55 L43.2,51.7 L56,63.5 L51.8,66.8 Z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M43.2,76.3 L39,73 L51.8,61.2 L56,63.5 Z" />
-
-    <!-- Cursor block. -->
-    <path
-        android:fillColor="#22D3EE"
-        android:pathData="M60,70 L70,70 L70,76 L60,76 Z" />
+        android:fillColor="#F8FAFC"
+        android:pathData="M58,65 L66,65 Q68,65 68,67 L68,69 Q68,71 66,71 L58,71 Q56,71 56,69 L56,67 Q56,65 58,65 Z" />
 </vector>

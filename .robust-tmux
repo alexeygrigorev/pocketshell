@@ -1,0 +1,5 @@
+# tmuxctl per-session memory cap for PocketShell sessions (robust.py read_project_mem).
+# This is the MemoryMax ceiling for each tmux session shell created in this repo.
+# Heavy emulator + parallel-agent + connected-test work needs headroom; 30G keeps
+# a runaway session from OOM-killing itself while staying well under robust.slice.
+mem = "30G"

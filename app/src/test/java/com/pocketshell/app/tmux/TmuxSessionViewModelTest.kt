@@ -8,6 +8,7 @@ import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
@@ -138,6 +139,7 @@ class TmuxSessionViewModelTest {
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
         folderListGateway: FolderListGateway? = null,
         hostDao: HostDao? = null,
+        agentRepository: AgentConversationRepository = AgentConversationRepository(),
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
@@ -148,6 +150,7 @@ class TmuxSessionViewModelTest {
             agentSessionMemory = agentSessionMemory,
             sshLeaseManager = sshLeaseManager,
             sessionLifecycleSignals = sessionLifecycleSignals,
+            agentRepository = agentRepository,
         ).also { createdViewModels += it }
 
     /**
@@ -6504,7 +6507,11 @@ class TmuxSessionViewModelTest {
             fromLineExclusive = 0L,
         )
 
-        assertSame(tailJob, started)
+        // Issue #576: the VM now wires the batched tail, so the returned Job is
+        // the umbrella that owns the underlying SSH tail + drain (not the raw
+        // tail job). The contract the test cares about is that a tail started
+        // and its terminal cause still drives the conversation sync status.
+        assertNotNull(started)
         assertEquals(AgentConversationSyncStatus.Live, vm.agentConversations.value["%0"]!!.syncStatus)
 
         tailJob.complete()
@@ -6516,6 +6523,91 @@ class TmuxSessionViewModelTest {
             vm.agentConversations.value["%0"]!!.syncStatus,
         )
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun codexNewReplayBurstCoalescesIntoFewStateFlowEmissionsNotPerLine() = runTest(scheduler) {
+        // Issue #576 (the load-bearing regression): a Codex `/new` rewrites
+        // the rollout JSONL with thousands of lines. With the per-line tail
+        // (the old shape) each parsed event drove its own
+        // `appendAgentEvents` → `updateAgentConversation` → ONE
+        // `_agentConversations` StateFlow emission, so an N-line replay fired
+        // N emissions → N O(n) conversation re-derivations on the main thread
+        // (the recompose storm the maintainer saw). The VM now wires
+        // `tailEventsBatchedFromLine`, so the burst must collapse to a HANDFUL
+        // of emissions, NOT one per line — while still ingesting every event.
+        val lineCount = 2_000
+        val replay = (0 until lineCount).map { index ->
+            """{"type":"user","uuid":"u$index","message":{"role":"user","content":"replayed $index"}}"""
+        }
+        // The repository's tail drain runs on `tailScope`; wiring it to this
+        // test's virtual clock makes the 50 ms debounce window deterministic.
+        val repository = AgentConversationRepository(
+            tailScope = backgroundScope,
+            tailBatchWindowMillis = 50L,
+        )
+        val vm = newVm(agentRepository = repository)
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        vm.startAgentConversationForTest("%0", detection)
+
+        // Count distinct `agentConversations` emissions for the pane: each
+        // emission is one reconcile + one recompose trigger. A per-line tail
+        // would produce ~`lineCount` of these; the batched tail a handful.
+        var emissionCount = 0
+        var lastEventCount = 0
+        val collector = backgroundScope.launch {
+            vm.agentConversations.collect { map ->
+                map["%0"]?.let {
+                    emissionCount += 1
+                    lastEventCount = it.events.size
+                }
+            }
+        }
+        runCurrent()
+        val emissionsAfterRegister = emissionCount
+
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = ReplayTailSshSession(replayLines = replay),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+        // Let the drain coroutine fire its debounce window(s). The whole
+        // replay arrives in one synchronous burst from the fake tail, so it
+        // coalesces into a single batch → a single append → a single emission.
+        advanceTimeBy(500L)
+        runCurrent()
+        collector.cancel()
+
+        val burstEmissions = emissionCount - emissionsAfterRegister
+        // The headline assertion: O(batches), NOT O(N). A per-line tail would
+        // have produced ~2000 burst emissions; the batched tail a tiny number.
+        assertTrue(
+            "expected a handful of burst emissions, got $burstEmissions for $lineCount replayed lines",
+            burstEmissions in 1..5,
+        )
+        // ...and the conversation is still correct: every event was ingested,
+        // then bounded to the most-recent window (the same final feed a
+        // per-line ingest would yield — reconcile is order-preserving and the
+        // bound trims the oldest). The most recent replayed id must survive.
+        assertEquals(
+            "batched ingest must produce the bounded feed, not drop to empty",
+            500,
+            lastEventCount,
+        )
+        val finalEvents = vm.agentConversations.value["%0"]!!.events
+        assertEquals(500, finalEvents.size)
+        assertEquals(
+            "the most-recent replayed event must be present after coalesced ingest",
+            "u${lineCount - 1}",
+            finalEvents.last().id,
+        )
+        assertEquals(
+            "the oldest surviving event is the start of the bounded window",
+            "u${lineCount - 500}",
+            finalEvents.first().id,
+        )
     }
 
     @Test
@@ -12134,6 +12226,58 @@ class TmuxSessionViewModelTest {
         override fun close() {
             closed = true
         }
+    }
+
+    /**
+     * Issue #576: a fake SSH session whose tail feeds a fixed list of JSONL
+     * lines to `onLine` synchronously (one burst), the way a Codex `/new`
+     * rollout replay arrives. Lets the VM burst-emit test drive a real
+     * [AgentConversationRepository] tail end-to-end and observe how many
+     * `agentConversations` emissions the batched ingest produces.
+     */
+    private class ReplayTailSshSession(
+        private val replayLines: List<String>,
+    ) : com.pocketshell.core.ssh.SshSession {
+        override val isConnected: Boolean = true
+
+        override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
+            val stdout = if (command.contains("wc -l < ")) "0\n" else ""
+            return com.pocketshell.core.ssh.ExecResult(stdout = stdout, stderr = "", exitCode = 0)
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job {
+            replayLines.forEach(onLine)
+            return Job()
+        }
+
+        override fun tail(
+            path: String,
+            fromLineExclusive: Long,
+            onLine: (String) -> Unit,
+        ): kotlinx.coroutines.Job {
+            replayLines.forEach(onLine)
+            return Job()
+        }
+
+        override fun openLocalPortForward(
+            remoteHost: String,
+            remotePort: Int,
+            localPort: Int,
+        ): com.pocketshell.core.ssh.SshPortForward = throw NotImplementedError()
+
+        override fun startShell(): com.pocketshell.core.ssh.SshShell = throw NotImplementedError()
+
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+            error("uploadFile not used in this test")
+
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used in this test")
+
+        override fun close() = Unit
     }
 
     // ─── Issue #628: previousSessionName state ───

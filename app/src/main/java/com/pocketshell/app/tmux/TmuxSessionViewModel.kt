@@ -189,6 +189,11 @@ public class TmuxSessionViewModel @Inject constructor(
     // keeps the existing unit-test constructors working without the singleton;
     // when absent the send path falls back to the built-in defaults.
     private val settingsRepository: com.pocketshell.app.settings.SettingsRepository? = null,
+    // Issue #576: the agent-conversation tail/ingest repository. Defaulted so
+    // production and existing unit-test constructors are unchanged, but
+    // injectable so a burst-ingest test can wire a repository whose tail
+    // drain runs on the test scheduler (deterministic batch coalescing).
+    private val agentRepository: AgentConversationRepository = AgentConversationRepository(),
 ) : ViewModel() {
 
     /**
@@ -606,7 +611,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private var appliedControlClientRows: Int = 0
     private var controlClientSizeGeneration: Long = 0L
     private var windowSizePolicyAppliedForAttach: Boolean = false
-    private val agentRepository: AgentConversationRepository = AgentConversationRepository()
     // Issue #495/#554: injected process-scoped memory of which tmux windows
     // are agent windows (and which agent + the user's last tab choice), keyed
     // by stable host/session/window identity. This lets a reconnect or VM
@@ -7246,8 +7250,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
         // identically to Claude and Codex. No more polling branch — the
         // tmux pane gets the same real-time refresh as the raw-SSH route.
-        val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
-            appendAgentEvents(paneId, listOf(event))
+        // Issue #576: use the batched/debounced tail so a Codex `/new`
+        // (or any large JSONL replay) collapses into a handful of
+        // reconcile + StateFlow-emit cycles instead of one per line.
+        val followJob = agentRepository.tailEventsBatchedFromLine(session, detection, lineCount) { batch ->
+            appendAgentEvents(paneId, batch)
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
             followJob?.cancel()
@@ -7316,8 +7323,9 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         if (!isCurrentRuntime(refreshGuard)) return
         markRestoredAgentTailLive(paneId, detection, initialEvents)
-        val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
-            appendAgentEvents(paneId, listOf(event))
+        // Issue #576: batched/debounced tail (see startAgentConversationForPane).
+        val followJob = agentRepository.tailEventsBatchedFromLine(session, detection, lineCount) { batch ->
+            appendAgentEvents(paneId, batch)
         }
         if (!isCurrentRuntime(refreshGuard)) {
             followJob?.cancel()
@@ -8049,8 +8057,9 @@ public class TmuxSessionViewModel @Inject constructor(
         detection: AgentDetection,
         fromLineExclusive: Long,
     ): Job? {
-        val job = agentRepository.tailEventsFromLine(session, detection, fromLineExclusive) { event ->
-            appendAgentEvents(paneId, listOf(event))
+        // Issue #576: batched/debounced tail (see startAgentConversationForPane).
+        val job = agentRepository.tailEventsBatchedFromLine(session, detection, fromLineExclusive) { batch ->
+            appendAgentEvents(paneId, batch)
         }
         if (job != null) {
             val tailGeneration = nextAgentTailGeneration(paneId)

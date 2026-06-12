@@ -249,7 +249,11 @@ private const val PROCESS_TREE_SCAN_COMMAND: String =
     "ps -eo pid,ppid,tty,comm,args 2>/dev/null | " +
         "grep -E 'claude|codex|opencode|node' | grep -v grep || true"
 
-internal class AgentConversationRepository(
+// Issue #576: public type (the TmuxSessionViewModel constructor now takes it
+// as an injectable parameter so a burst-ingest test can wire a repository
+// whose tail drain runs on the test scheduler), but the constructor stays
+// `internal` so only this module constructs it.
+public class AgentConversationRepository internal constructor(
     private val detector: AgentDetector = AgentDetector(),
     private val tailScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val openCodePollIntervalMillis: Long = 2_000L,
@@ -785,16 +789,44 @@ internal class AgentConversationRepository(
             return null
         }
 
-        // Tie the two together: cancelling the umbrella job cancels both,
-        // and either one completing on its own tears the other down. A
-        // final synchronous flush on cancellation would race the reader, so
+        // The umbrella Job the caller observes must carry the SAME terminal
+        // lifecycle semantics as the per-line [tailEventsFromLine] it
+        // replaces: the underlying tail's normal completion (EOF → the
+        // conversation feed is Stale) propagates as a normal completion, and
+        // its failure (transport drop → LogUnavailable) propagates as that
+        // failure cause. The ViewModel's `invokeOnCompletion` consults
+        // `cause` to mark Stale vs LogUnavailable and ignores
+        // CancellationException (an intentional switch/reattach teardown), so
+        // we must NOT collapse a real tail EOF into a blanket `cancel()` —
+        // doing so would silently drop the Stale/LogUnavailable marking the
+        // UI relies on.
+        //
+        // The TAIL is the authoritative lifecycle signal; the drain is a
+        // bookkeeping coroutine. So:
+        //  - tail terminates  -> complete the umbrella with the tail's cause
+        //    (null = normal/Stale, throwable = failure/LogUnavailable), then
+        //    stop the drain.
+        //  - caller cancels the umbrella -> cancel both tail and drain (the
+        //    completion handler still fires with a CancellationException, which
+        //    the caller ignores).
+        //  - drain dies on its own (scope cancelled) -> tear the tail down;
+        //    that path completes the umbrella via the tail's resulting
+        //    cancellation, again ignored by the caller.
+        //
+        // A final synchronous flush on cancellation would race the reader, so
         // any residue that lands after the last drain tick is intentionally
         // dropped — the conversation feed is reseeded from the initial read
-        // on the next attach, and the tail bound trims replay surplus
-        // anyway.
+        // on the next attach, and the tail bound trims replay surplus anyway.
         val umbrella = Job()
-        drainJob.invokeOnCompletion { umbrella.cancel() }
-        tailJob.invokeOnCompletion { umbrella.cancel() }
+        tailJob.invokeOnCompletion { cause ->
+            when (cause) {
+                null -> umbrella.complete()
+                is CancellationException -> umbrella.cancel(cause)
+                else -> umbrella.completeExceptionally(cause)
+            }
+            drainJob.cancel()
+        }
+        drainJob.invokeOnCompletion { tailJob.cancel() }
         umbrella.invokeOnCompletion {
             drainJob.cancel()
             tailJob.cancel()

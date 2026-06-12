@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.tmux.TmuxClientFactory
 import dagger.Module
 import dagger.Provides
@@ -55,6 +56,17 @@ internal object TmuxModule {
     fun provideTmuxClientFactory(
         @TmuxApplicationScope scope: CoroutineScope,
     ): TmuxClientFactory = TmuxClientFactory(scope)
+
+    /**
+     * Issue #576: the agent-conversation tail/ingest repository consumed by
+     * [TmuxSessionViewModel]. Its constructor is `internal` (only this module
+     * builds it) and unscoped here so each ViewModel gets a fresh instance —
+     * preserving the prior `private val agentRepository = AgentConversationRepository()`
+     * field semantics now that it is a constructor-injected parameter.
+     */
+    @Provides
+    fun provideAgentConversationRepository(): AgentConversationRepository =
+        AgentConversationRepository()
 
     // Issue #46 / cross-host session dashboard: the
     // [com.pocketshell.app.sessions.ActiveTmuxClients] registry is

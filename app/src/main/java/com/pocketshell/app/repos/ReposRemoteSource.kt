@@ -140,8 +140,41 @@ public class ReposRemoteSource @Inject constructor(
     public companion object {
         public const val LOCAL_ROOT_CACHE_TTL_MILLIS: Long = 10_000L
 
+        /**
+         * Build a PATH-augmented remote command that runs under an EXPLICIT
+         * POSIX shell, regardless of the user's login shell.
+         *
+         * Issue #633: `sshj`'s `session.exec(string)` hands the command to the
+         * remote account's LOGIN shell. The previous form emitted a bare POSIX
+         * one-liner (`PATH="$HOME/.local/bin:…"; <cmd>`) and assumed that login
+         * shell was POSIX. On a host whose login shell is `fish`, the inline
+         * `PATH=…` assignment is a hard syntax error — fish rejects it with
+         * `fish: Unsupported use of '='` and exits 127 BEFORE the real command
+         * ever runs. Every folder/session probe (`tmux list-sessions`,
+         * `list-panes`, `printf "$HOME"`, `pocketshell sessions`, port scan,
+         * watched-root expansion) therefore failed on a fish-login host, so the
+         * folder list never reached a usable Ready state — exactly the
+         * `fish-user-local-path` setup-detection failure this fixes.
+         *
+         * The fix mirrors the non-POSIX-shell handling the host bootstrapper
+         * already uses ([com.pocketshell.app.bootstrap.HostBootstrapper.posixShellCommand],
+         * commit a5c55f44): wrap the POSIX body in `/bin/sh -lc '<body>'` so the
+         * augmentation + command are parsed by `/bin/sh` instead of the login
+         * shell. `/bin/sh` is present on every host the app supports, so this is
+         * a single shell-agnostic path — no per-shell branching, no login-shell
+         * fallback (hard-cut, D22). The body is single-quoted with
+         * [shellQuote], so any single quotes it contains (e.g. tmux `-F`
+         * format strings, `printf '%s\n'`) survive intact.
+         */
         public fun pathAwareCommand(command: String): String =
-            "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+            posixShellCommand("PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command")
+
+        /**
+         * Wrap [command] so it runs under an explicit POSIX `/bin/sh`, immune
+         * to a non-POSIX login shell (fish). See [pathAwareCommand] (#633).
+         */
+        private fun posixShellCommand(command: String): String =
+            "/bin/sh -lc ${shellQuote(command)}"
 
         public fun shellQuote(value: String): String =
             "'" + value.replace("'", "'\"'\"'") + "'"

@@ -387,6 +387,60 @@ class ReposRemoteSourceTest {
         override fun close() = Unit
     }
 
+    // Issue #633: the PATH-augmented remote command MUST run under an explicit
+    // POSIX `/bin/sh`, not the user's login shell. A fish login shell rejects the
+    // bare `PATH="…"; cmd` form with `fish: Unsupported use of '='` (exit 127),
+    // which silently broke every folder/session probe on a fish-login host so the
+    // folder list never reached Ready. Wrapping in `/bin/sh -lc '…'` forces a
+    // POSIX parse regardless of the login shell.
+    @Test
+    fun pathAwareCommand_wrapsInPosixSh_immuneToFishLoginShell() {
+        val wrapped = ReposRemoteSource.pathAwareCommand("tmux list-sessions")
+
+        // Runs under an explicit POSIX shell, so fish never parses the body.
+        assertTrue(
+            "expected /bin/sh -lc wrapper but was: $wrapped",
+            wrapped.startsWith("/bin/sh -lc '"),
+        )
+        // The PATH augmentation and the real command are INSIDE the sh body, not
+        // emitted as a bare login-shell one-liner.
+        assertTrue(wrapped.contains("PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\""))
+        assertTrue(wrapped.contains("tmux list-sessions"))
+        // The old bare form (which fish rejects) must NOT be what we send: the
+        // command must not START with the inline assignment.
+        assertTrue(
+            "must not emit a bare login-shell PATH assignment: $wrapped",
+            !wrapped.startsWith("PATH="),
+        )
+    }
+
+    // Single quotes embedded in the command body (tmux `-F` format strings,
+    // `printf '%s\n'`) must survive the sh-quoting intact, or the wrapped command
+    // would be malformed on every host (POSIX or fish).
+    @Test
+    fun pathAwareCommand_preservesEmbeddedSingleQuotes() {
+        val wrapped = ReposRemoteSource.pathAwareCommand(
+            "tmux list-sessions -F '#{session_name}'",
+        )
+
+        assertTrue(wrapped.startsWith("/bin/sh -lc '"))
+        // The body's own single quotes are escaped with shellQuote's
+        // close/double-quote-single/reopen style (`'` -> `'"'"'`), so the body
+        // survives the outer single-quoting intact. The format string's quotes
+        // become `'"'"'#{session_name}'"'"'`.
+        assertTrue(
+            "embedded single quotes should be sh-escaped: $wrapped",
+            wrapped.contains("'\"'\"'#{session_name}'\"'\"'"),
+        )
+        // And the whole wrapper remains balanced /bin/sh -lc '…' (starts & ends
+        // with the outer single quote).
+        assertTrue("wrapper should end with the closing single quote: $wrapped", wrapped.endsWith("'"))
+    }
+
+    // Delegate to the production builder so the FakeSshSession command-map keys
+    // always match what the source actually sends — including issue #633's
+    // `/bin/sh -lc '…'` POSIX wrapper that makes the probe immune to a fish
+    // login shell.
     private fun pathAware(command: String): String =
-        "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        ReposRemoteSource.pathAwareCommand(command)
 }

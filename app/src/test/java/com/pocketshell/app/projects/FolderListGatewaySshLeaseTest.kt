@@ -99,11 +99,17 @@ class FolderListGatewaySshLeaseTest {
 
     @Test
     fun renameSessionRunsTmuxRenameAndVerifiesResult() = runTest {
+        // Issue #633: the gateway now wraps every probe in `/bin/sh -lc '…'` so a
+        // fish login shell can't break it. That outer sh-quoting re-escapes the
+        // inner `'old'\''s'` apostrophe quoting, so match on the EXACT wrapped
+        // command strings the gateway sends rather than a fragile substring.
+        val hasOldQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t 'old'\\''s'")
+        val hasNewQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t 'new name'")
         val session = FakeSshSession { command ->
-            when {
-                command.contains("has-session -t 'old'\\''s'") ->
+            when (command) {
+                hasOldQuoted ->
                     ExecResult(stdout = "", stderr = "", exitCode = 1)
-                command.contains("has-session -t 'new name'") ->
+                hasNewQuoted ->
                     ExecResult(stdout = "", stderr = "", exitCode = 0)
                 else ->
                     ExecResult(stdout = "", stderr = "", exitCode = 0)

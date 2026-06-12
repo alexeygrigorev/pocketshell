@@ -39,6 +39,10 @@ import com.pocketshell.app.session.canRetryAgentStream
 import com.pocketshell.app.session.markOptimisticFailed
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
+import com.pocketshell.app.tmux.connection.ConnectionControllerShadowBridge
+import com.pocketshell.app.tmux.connection.hostKeyFor
+import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.uikit.model.KeyModifierState
@@ -361,16 +365,82 @@ public class TmuxSessionViewModel @Inject constructor(
     private var _connectionState: ConnectionState = ConnectionState.Idle
 
     /**
+     * EPIC #687 slice 1c-iii: the OBSERVE-ONLY EQUIVALENCE BRIDGE. A real
+     * `:shared:core-connection` `ConnectionController` runs in SHADOW. It is fed
+     * the same lifecycle inputs the inline `reduceConnection` path dispatches
+     * ([observeBackground]/[observeForeground]/[observeNetworkChanged]/
+     * [observeTransportDropped]) PLUS every inline connection transition mirrored
+     * from the single [setConnectionState] choke point. The controller computes
+     * its `ConnectionState` in SHADOW, but its state DRIVES NOTHING — it is NOT
+     * projected to [_connectionStatus], NOT used to gate any effect/job, NOT read
+     * by the indicator. Pure observation. Its sole purpose is the slice-1c-iii
+     * equivalence tests (which read [connectionControllerShadow]'s shadow status
+     * via the test-only accessor) that prove the controller produces the right
+     * state from real events BEFORE 1c-iv lets it drive.
+     *
+     * The warm-lease snapshot is the VM's existing [liveLeaseKeys] set, so the
+     * controller's within-grace predicate reads the same warm signal the inline
+     * fast-switch path already consults — without performing any transport IO.
+     */
+    private val connectionControllerShadow: ConnectionControllerShadowBridge =
+        ConnectionControllerShadowBridge(
+            warmSnapshot = { hostKey ->
+                liveLeaseKeys.any { leaseKey -> hostKeyFor(leaseKey) == hostKey }
+            },
+        )
+
+    /**
+     * The opaque [HostKey] / [SessionId] the shadow bridge keys on, derived from
+     * the inline transition's active/connecting target. Returns null when there is
+     * no target (Idle transition), in which case the bridge mirrors an Idle.
+     */
+    private fun shadowHostAndTarget(): Pair<HostKey?, SessionId?> {
+        val target = activeTarget ?: connectingTarget ?: return (null to null)
+        val host = HostKey(
+            "${target.user}@${target.host}:${target.port}/${target.hostId}",
+        )
+        val session = SessionId("${target.hostId}/${target.sessionName}")
+        return (host to session)
+    }
+
+    /**
      * EPIC #687 slice 1b: the single emission point — set the VM-internal
      * [ConnectionState] and project it to the view-facing [ConnectionStatus] via the
      * pure [connectionStatusFor] mapper. Replaces the scattered direct
      * `_connectionStatus.value = ...` writes so the status is always a projection of
      * an explicit state. Zero behavior change: the projected value is byte-identical
      * to the previous direct assignment.
+     *
+     * EPIC #687 slice 1c-iii: ALSO mirrors the transition into the OBSERVE-ONLY
+     * shadow controller ([connectionControllerShadow]). This is pure observation —
+     * the inline `_connectionStatus` write above is the sole source of truth; the
+     * shadow controller's resulting state is collected for equivalence only and
+     * drives nothing.
      */
     private fun setConnectionState(state: ConnectionState) {
         _connectionState = state
         _connectionStatus.value = connectionStatusFor(state)
+        observeConnectionTransitionInShadow(state)
+    }
+
+    /**
+     * EPIC #687 slice 1c-iii: feed the inline transition to the shadow controller.
+     * Observe-only — never mutates VM state, never reads the shadow state back.
+     */
+    private fun observeConnectionTransitionInShadow(state: ConnectionState) {
+        val (host, target) = shadowHostAndTarget()
+        val inlineName = when (state) {
+            is ConnectionState.Idle -> "Idle"
+            is ConnectionState.Connecting -> "Connecting"
+            is ConnectionState.Attaching -> "Attaching"
+            is ConnectionState.Live -> "Live"
+            is ConnectionState.Backgrounded -> "Live"
+            is ConnectionState.Reattaching -> "Reconnecting"
+            is ConnectionState.Reconnecting -> "Reconnecting"
+            is ConnectionState.Gone -> "Gone"
+            is ConnectionState.Unreachable -> "Unreachable"
+        }
+        connectionControllerShadow.observeInlineTransition(inlineName, host, target)
     }
 
     /**
@@ -1445,6 +1515,9 @@ public class TmuxSessionViewModel @Inject constructor(
         appActive = false
         foregroundRuntimeProbeJob?.cancel()
         foregroundRuntimeProbeJob = null
+        // EPIC #687 slice 1c-iii: observe-only — feed the shadow controller the
+        // same lifecycle event; it drives nothing.
+        connectionControllerShadow.observeBackground()
         when (reduceConnection(ConnectionEvent.Background)) {
             ConnectionDecision.PauseReconnectForBackground ->
                 pauseReconnectForBackground()
@@ -1589,6 +1662,9 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onAppForegrounded() {
         appActive = true
+        // EPIC #687 slice 1c-iii: observe-only — the single grace predicate in the
+        // shadow controller decides reattach-vs-reconnect; it drives nothing.
+        connectionControllerShadow.observeForeground()
         when (reduceConnection(ConnectionEvent.Foreground)) {
             ConnectionDecision.ReplayPendingReattach ->
                 replayPendingReattach()
@@ -2244,6 +2320,14 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onNetworkChanged(change: TerminalNetworkChange) {
         val target = activeTarget ?: connectingTarget
+        // EPIC #687 slice 1c-iii: observe-only — feed the shadow controller the
+        // #548 validated-handoff signal it suppresses on (computed identically to
+        // the inline reducer). It drives nothing.
+        connectionControllerShadow.observeNetworkChanged(
+            validatedHandoff = change.previousValidated?.let { previous ->
+                !previous.hasSameNetworkIdentityAs(change.current)
+            } ?: false,
+        )
         when (reduceConnection(ConnectionEvent.NetworkChanged(change))) {
             ConnectionDecision.SuppressNetworkNotValidated ->
                 if (target != null) suppressNetworkNotValidated(change, target)
@@ -4494,6 +4578,11 @@ public class TmuxSessionViewModel @Inject constructor(
         val current = _connectionStatus.value as? ConnectionStatus.Connected ?: return
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
+        // EPIC #687 slice 1c-iii: observe-only — feed the shadow controller the
+        // passive transport drop. On a live channel it heals silently through
+        // Reattaching (the approved divergence — inline shows a band, the
+        // controller stays calm). It drives nothing.
+        connectionControllerShadow.observeTransportDropped(reason)
         when (reduceConnection(ConnectionEvent.TransportDropped(client))) {
             ConnectionDecision.SkipPassiveInAppNavigation ->
                 if (target != null) skipPassiveInAppNavigation(target)

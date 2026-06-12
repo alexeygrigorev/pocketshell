@@ -7,13 +7,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Unit tests for the per-agent launch-command assembly (issues #428 / #703).
+ * Unit tests for the per-agent launch-command assembly (issues #428 / #703 /
+ * #718).
  *
  * Since #703 the app emits the SHORT server-side wrapper line
  * (`pocketshell agent <kind> --dir '<dir>' …`) instead of the old
  * ~1500-char inline `env -u …(71)… <agent>`. The wrapper owns the env
  * merge, the OpenCode-only env strip, the first-run-prompt suppression,
- * and the exec. These tests pin the exact short command the app types.
+ * and the exec. Since #718 a selected, non-default profile is passed BY
+ * NAME as `--profile '<name>'` (the host resolves it to
+ * `CLAUDE_CONFIG_DIR` / `CODEX_HOME`) instead of the old client-resolved
+ * `--config-dir '<path>'`. These tests pin the exact short command the app
+ * types.
  */
 class SessionTypeChoiceCommandTest {
 
@@ -82,6 +87,20 @@ class SessionTypeChoiceCommandTest {
         }
     }
 
+    @Test
+    fun commandNeverContainsLegacyConfigDirFlag() {
+        // Hard-cut (#718): the client no longer resolves a profile to a path
+        // and never emits `--config-dir`; profiles are passed by name.
+        val profiles = listOf(ClaudeProfile(name = "work"))
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "/srv/app",
+            claudeProfileName = "work",
+        )
+        assertFalse(choice.startCommand(claudeProfiles = profiles)!!.contains("--config-dir"))
+    }
+
     // --- --dir handling / shell quoting ---
 
     @Test
@@ -103,70 +122,69 @@ class SessionTypeChoiceCommandTest {
         assertTrue(command.endsWith("'"))
     }
 
-    // --- Claude profile → --config-dir (issue #627) ---
+    // --- Claude profile → --profile <name> (issue #718) ---
 
     @Test
-    fun claudeWithProfileSetsConfigDir() {
+    fun claudeWithProfilePassesProfileName() {
         val profiles = listOf(
-            ClaudeProfile(name = "work", configDir = "/home/user/.claude-work"),
+            ClaudeProfile(name = "Claude (Z.AI)"),
         )
         val choice = SessionTypeChoice(
             type = SessionType.Agent,
             agent = AgentCli.Claude,
             startDirectory = "/srv/app",
             skipPermissions = true,
-            claudeProfileName = "work",
+            claudeProfileName = "Claude (Z.AI)",
         )
         val command = choice.startCommand(claudeProfiles = profiles)!!
         assertEquals(
-            "pocketshell agent claude --dir '/srv/app' --config-dir '/home/user/.claude-work'",
+            "pocketshell agent claude --dir '/srv/app' --profile 'Claude (Z.AI)'",
             command,
         )
     }
 
     @Test
-    fun claudeWithoutProfileHasNoConfigDir() {
+    fun claudeWithoutProfileHasNoProfileFlag() {
         val command = agentChoice(AgentCli.Claude, skip = true).startCommand()!!
-        assertFalse(command.contains("--config-dir"))
+        assertFalse(command.contains("--profile"))
+    }
+
+    @Test
+    fun claudeDefaultProfileEmitsNoProfileFlag() {
+        // The engine's default profile means "built-in config dir": no flag.
+        val profiles = listOf(ClaudeProfile(name = "Claude", default = true))
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "/srv/app",
+            claudeProfileName = "Claude",
+        )
+        assertFalse(choice.startCommand(claudeProfiles = profiles)!!.contains("--profile"))
     }
 
     @Test
     fun claudeMissingProfileFallsBackToDefault() {
-        val profiles = listOf(
-            ClaudeProfile(name = "work", configDir = "/home/user/.claude-work"),
-        )
+        val profiles = listOf(ClaudeProfile(name = "work"))
         val choice = SessionTypeChoice(
             type = SessionType.Agent,
             agent = AgentCli.Claude,
             startDirectory = "/srv/app",
             claudeProfileName = "personal",  // not in profiles
         )
-        assertFalse(choice.startCommand(claudeProfiles = profiles)!!.contains("--config-dir"))
+        assertFalse(choice.startCommand(claudeProfiles = profiles)!!.contains("--profile"))
     }
 
     @Test
-    fun claudeEmptyConfigDirDoesNotEmitConfigDir() {
-        val profiles = listOf(ClaudeProfile(name = "default", configDir = ""))
+    fun claudeProfileNameIsShellQuoted() {
+        val profiles = listOf(ClaudeProfile(name = "weird's name"))
         val choice = SessionTypeChoice(
             type = SessionType.Agent,
             agent = AgentCli.Claude,
             startDirectory = "/srv/app",
-            claudeProfileName = "default",
-        )
-        assertFalse(choice.startCommand(claudeProfiles = profiles)!!.contains("--config-dir"))
-    }
-
-    @Test
-    fun claudeConfigDirIsShellQuoted() {
-        val profiles = listOf(ClaudeProfile(name = "test", configDir = "/path/it's/weird"))
-        val choice = SessionTypeChoice(
-            type = SessionType.Agent,
-            agent = AgentCli.Claude,
-            startDirectory = "/srv/app",
-            claudeProfileName = "test",
+            claudeProfileName = "weird's name",
         )
         val command = choice.startCommand(claudeProfiles = profiles)!!
-        assertTrue(command.contains("--config-dir '/path/it'\\''s/weird'"))
+        assertTrue(command.contains("--profile 'weird'\\''s name'"))
     }
 
     @Test
@@ -177,7 +195,7 @@ class SessionTypeChoiceCommandTest {
             startDirectory = "/srv/app",
             claudeProfileName = "work",
         )
-        assertFalse(choice.startCommand()!!.contains("--config-dir"))
+        assertFalse(choice.startCommand()!!.contains("--profile"))
     }
 
     @Test
@@ -191,12 +209,12 @@ class SessionTypeChoiceCommandTest {
         assertNull(choice.startCommand())
     }
 
-    // --- Codex profile → --config-dir (issue #631) ---
+    // --- Codex profile → --profile <name> (issue #718) ---
 
     @Test
-    fun codexWithProfileSetsConfigDir() {
+    fun codexWithProfilePassesProfileName() {
         val profiles = listOf(
-            CodexProfile(name = "work", configDir = "/home/user/.codex-work"),
+            CodexProfile(name = "work"),
         )
         val choice = SessionTypeChoice(
             type = SessionType.Agent,
@@ -207,53 +225,51 @@ class SessionTypeChoiceCommandTest {
         )
         val command = choice.startCommand(codexProfiles = profiles)!!
         assertEquals(
-            "pocketshell agent codex --dir '/srv/app' --config-dir '/home/user/.codex-work'",
+            "pocketshell agent codex --dir '/srv/app' --profile 'work'",
             command,
         )
     }
 
     @Test
-    fun codexWithoutProfileHasNoConfigDir() {
-        assertFalse(agentChoice(AgentCli.Codex, skip = true).startCommand()!!.contains("--config-dir"))
+    fun codexWithoutProfileHasNoProfileFlag() {
+        assertFalse(agentChoice(AgentCli.Codex, skip = true).startCommand()!!.contains("--profile"))
+    }
+
+    @Test
+    fun codexDefaultProfileEmitsNoProfileFlag() {
+        val profiles = listOf(CodexProfile(name = "Codex", default = true))
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Codex,
+            startDirectory = "/srv/app",
+            codexProfileName = "Codex",
+        )
+        assertFalse(choice.startCommand(codexProfiles = profiles)!!.contains("--profile"))
     }
 
     @Test
     fun codexMissingProfileFallsBackToDefault() {
-        val profiles = listOf(
-            CodexProfile(name = "work", configDir = "/home/user/.codex-work"),
-        )
+        val profiles = listOf(CodexProfile(name = "work"))
         val choice = SessionTypeChoice(
             type = SessionType.Agent,
             agent = AgentCli.Codex,
             startDirectory = "/srv/app",
             codexProfileName = "personal",  // not in profiles
         )
-        assertFalse(choice.startCommand(codexProfiles = profiles)!!.contains("--config-dir"))
+        assertFalse(choice.startCommand(codexProfiles = profiles)!!.contains("--profile"))
     }
 
     @Test
-    fun codexEmptyConfigDirDoesNotEmitConfigDir() {
-        val profiles = listOf(CodexProfile(name = "default", configDir = ""))
+    fun codexProfileNameIsShellQuoted() {
+        val profiles = listOf(CodexProfile(name = "weird's name"))
         val choice = SessionTypeChoice(
             type = SessionType.Agent,
             agent = AgentCli.Codex,
             startDirectory = "/srv/app",
-            codexProfileName = "default",
-        )
-        assertFalse(choice.startCommand(codexProfiles = profiles)!!.contains("--config-dir"))
-    }
-
-    @Test
-    fun codexConfigDirIsShellQuoted() {
-        val profiles = listOf(CodexProfile(name = "test", configDir = "/path/it's/weird"))
-        val choice = SessionTypeChoice(
-            type = SessionType.Agent,
-            agent = AgentCli.Codex,
-            startDirectory = "/srv/app",
-            codexProfileName = "test",
+            codexProfileName = "weird's name",
         )
         val command = choice.startCommand(codexProfiles = profiles)!!
-        assertTrue(command.contains("--config-dir '/path/it'\\''s/weird'"))
+        assertTrue(command.contains("--profile 'weird'\\''s name'"))
     }
 
     @Test
@@ -264,7 +280,7 @@ class SessionTypeChoiceCommandTest {
             startDirectory = "/srv/app",
             codexProfileName = "work",
         )
-        assertFalse(choice.startCommand()!!.contains("--config-dir"))
+        assertFalse(choice.startCommand()!!.contains("--profile"))
     }
 
     @Test
@@ -302,155 +318,5 @@ class SessionTypeChoiceCommandTest {
         )
         assertTrue(choice.skipPermissions)
         assertEquals("pocketshell agent claude --dir '/srv/app'", choice.startCommand())
-    }
-}
-
-/** Unit tests for [ClaudeProfile] JSON serialization (issue #627). */
-class ClaudeProfileTest {
-
-    @Test
-    fun fromJsonReturnsEmptyListForNull() {
-        assertEquals(emptyList<ClaudeProfile>(), ClaudeProfile.fromJson(null))
-    }
-
-    @Test
-    fun fromJsonReturnsEmptyListForBlank() {
-        assertEquals(emptyList<ClaudeProfile>(), ClaudeProfile.fromJson("  "))
-    }
-
-    @Test
-    fun fromJsonReturnsEmptyListForInvalidJson() {
-        assertEquals(emptyList<ClaudeProfile>(), ClaudeProfile.fromJson("not json"))
-    }
-
-    @Test
-    fun fromJsonParsesValidArray() {
-        val json = """[{"name":"work","configDir":"/home/.claude-work"},{"name":"personal","configDir":""}]"""
-        val profiles = ClaudeProfile.fromJson(json)
-        assertEquals(2, profiles.size)
-        assertEquals("work", profiles[0].name)
-        assertEquals("/home/.claude-work", profiles[0].configDir)
-        assertEquals("personal", profiles[1].name)
-        assertEquals("", profiles[1].configDir)
-    }
-
-    @Test
-    fun fromJsonSkipsEntriesWithBlankName() {
-        val json = """[{"name":"","configDir":"/dir"},{"name":"valid","configDir":""}]"""
-        val profiles = ClaudeProfile.fromJson(json)
-        assertEquals(1, profiles.size)
-        assertEquals("valid", profiles[0].name)
-    }
-
-    @Test
-    fun fromJsonSkipsNonObjectEntries() {
-        val json = """["string",{"name":"ok","configDir":""}]"""
-        val profiles = ClaudeProfile.fromJson(json)
-        assertEquals(1, profiles.size)
-        assertEquals("ok", profiles[0].name)
-    }
-
-    @Test
-    fun toJsonReturnsNullForEmptyList() {
-        assertNull(ClaudeProfile.toJson(emptyList()))
-    }
-
-    @Test
-    fun toJsonProducesValidJsonArray() {
-        val profiles = listOf(
-            ClaudeProfile(name = "work", configDir = "/home/.claude-work"),
-            ClaudeProfile(name = "default", configDir = ""),
-        )
-        val json = ClaudeProfile.toJson(profiles)!!
-        // Round-trip.
-        val parsed = ClaudeProfile.fromJson(json)
-        assertEquals(profiles, parsed)
-    }
-
-    @Test
-    fun roundTripPreservesProfiles() {
-        val profiles = listOf(
-            ClaudeProfile(name = "a", configDir = "/a"),
-            ClaudeProfile(name = "b"),
-            ClaudeProfile(name = "c", configDir = "/path with spaces"),
-        )
-        val json = ClaudeProfile.toJson(profiles)
-        val restored = ClaudeProfile.fromJson(json)
-        assertEquals(profiles, restored)
-    }
-}
-
-/** Unit tests for [CodexProfile] JSON serialization (issue #631). */
-class CodexProfileTest {
-
-    @Test
-    fun fromJsonReturnsEmptyListForNull() {
-        assertEquals(emptyList<CodexProfile>(), CodexProfile.fromJson(null))
-    }
-
-    @Test
-    fun fromJsonReturnsEmptyListForBlank() {
-        assertEquals(emptyList<CodexProfile>(), CodexProfile.fromJson("  "))
-    }
-
-    @Test
-    fun fromJsonReturnsEmptyListForInvalidJson() {
-        assertEquals(emptyList<CodexProfile>(), CodexProfile.fromJson("not json"))
-    }
-
-    @Test
-    fun fromJsonParsesValidArray() {
-        val json = """[{"name":"work","configDir":"/home/.codex-work"},{"name":"personal","configDir":""}]"""
-        val profiles = CodexProfile.fromJson(json)
-        assertEquals(2, profiles.size)
-        assertEquals("work", profiles[0].name)
-        assertEquals("/home/.codex-work", profiles[0].configDir)
-        assertEquals("personal", profiles[1].name)
-        assertEquals("", profiles[1].configDir)
-    }
-
-    @Test
-    fun fromJsonSkipsEntriesWithBlankName() {
-        val json = """[{"name":"","configDir":"/dir"},{"name":"valid","configDir":""}]"""
-        val profiles = CodexProfile.fromJson(json)
-        assertEquals(1, profiles.size)
-        assertEquals("valid", profiles[0].name)
-    }
-
-    @Test
-    fun fromJsonSkipsNonObjectEntries() {
-        val json = """["string",{"name":"ok","configDir":""}]"""
-        val profiles = CodexProfile.fromJson(json)
-        assertEquals(1, profiles.size)
-        assertEquals("ok", profiles[0].name)
-    }
-
-    @Test
-    fun toJsonReturnsNullForEmptyList() {
-        assertNull(CodexProfile.toJson(emptyList()))
-    }
-
-    @Test
-    fun toJsonProducesValidJsonArray() {
-        val profiles = listOf(
-            CodexProfile(name = "work", configDir = "/home/.codex-work"),
-            CodexProfile(name = "default", configDir = ""),
-        )
-        val json = CodexProfile.toJson(profiles)!!
-        // Round-trip.
-        val parsed = CodexProfile.fromJson(json)
-        assertEquals(profiles, parsed)
-    }
-
-    @Test
-    fun roundTripPreservesProfiles() {
-        val profiles = listOf(
-            CodexProfile(name = "a", configDir = "/a"),
-            CodexProfile(name = "b"),
-            CodexProfile(name = "c", configDir = "/path with spaces"),
-        )
-        val json = CodexProfile.toJson(profiles)
-        val restored = CodexProfile.fromJson(json)
-        assertEquals(profiles, restored)
     }
 }

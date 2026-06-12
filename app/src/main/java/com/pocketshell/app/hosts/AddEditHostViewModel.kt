@@ -2,8 +2,6 @@ package com.pocketshell.app.hosts
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.app.projects.ClaudeProfile
-import com.pocketshell.app.projects.CodexProfile
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
@@ -95,20 +93,6 @@ data class HostFormState(
      * app deliberately doesn't second-guess the user's wrapper script.
      */
     val usageCommand: String = "",
-    /**
-     * Issue #627: Claude Code profiles for this host. Each profile has a
-     * display name and an optional config directory path on the remote host.
-     * Persisted as JSON in [HostEntity.claudeProfilesJson]. Empty means
-     * only the default profile (no config dir override).
-     */
-    val claudeProfiles: List<ClaudeProfile> = emptyList(),
-    /**
-     * Issue #631: Codex profiles for this host. Each profile has a display
-     * name and an optional config directory path on the remote host that
-     * maps to `CODEX_HOME`. Persisted as JSON in
-     * [HostEntity.codexProfilesJson]. Empty means only the default profile.
-     */
-    val codexProfiles: List<CodexProfile> = emptyList(),
     val fieldErrors: HostFormErrors = HostFormErrors(),
     val firstInvalidField: HostFormField? = null,
     val error: String? = null,
@@ -161,9 +145,7 @@ class AddEditHostViewModel @Inject constructor(
             s.port != baseline.port ||
             s.username != baseline.username ||
             s.selectedKeyId != baseline.selectedKeyId ||
-            s.usageCommand != baseline.usageCommand ||
-            s.claudeProfiles != baseline.claudeProfiles ||
-            s.codexProfiles != baseline.codexProfiles
+            s.usageCommand != baseline.usageCommand
     }
 
     /**
@@ -182,8 +164,6 @@ class AddEditHostViewModel @Inject constructor(
                 username = host.username,
                 selectedKeyId = host.keyId,
                 usageCommand = host.usageCommandOverride.orEmpty(),
-                claudeProfiles = ClaudeProfile.fromJson(host.claudeProfilesJson),
-                codexProfiles = CodexProfile.fromJson(host.codexProfilesJson),
                 fieldErrors = HostFormErrors(),
                 firstInvalidField = null,
                 error = null,
@@ -244,8 +224,6 @@ class AddEditHostViewModel @Inject constructor(
 
         viewModelScope.launch {
             val usageOverride = s.usageCommand.trim().takeIf { it.isNotEmpty() }
-            val profilesJson = ClaudeProfile.toJson(s.claudeProfiles)
-            val codexProfilesJson = CodexProfile.toJson(s.codexProfiles)
             val editingId = editingHostId
             val host = if (editingId != null) {
                 // Merge form fields into the persisted row so bootstrap
@@ -269,8 +247,6 @@ class AddEditHostViewModel @Inject constructor(
                     username = s.username.trim(),
                     keyId = checkNotNull(s.selectedKeyId),
                     usageCommandOverride = usageOverride,
-                    claudeProfilesJson = profilesJson,
-                    codexProfilesJson = codexProfilesJson,
                 )
             } else {
                 HostEntity(
@@ -281,8 +257,6 @@ class AddEditHostViewModel @Inject constructor(
                     username = s.username.trim(),
                     keyId = checkNotNull(s.selectedKeyId),
                     usageCommandOverride = usageOverride,
-                    claudeProfilesJson = profilesJson,
-                    codexProfilesJson = codexProfilesJson,
                 )
             }
             if (editingId != null) {

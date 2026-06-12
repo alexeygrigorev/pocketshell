@@ -4,7 +4,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,8 +46,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.pocketshell.app.projects.ClaudeProfile
-import com.pocketshell.app.projects.CodexProfile
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -296,24 +293,11 @@ fun AddEditHostScreen(
                             testTag = ADD_HOST_USAGE_COMMAND_FIELD_TAG,
                         )
 
-                        // Issue #627: Claude Code profile configuration.
-                        // Each profile has a name (display label) and an
-                        // optional config directory path on the remote host
-                        // that maps to CLAUDE_CONFIG_DIR.
-                        ClaudeProfilesSection(
-                            profiles = state.claudeProfiles,
-                            onProfilesChange = { profiles ->
-                                viewModel.updateState { it.copy(claudeProfiles = profiles) }
-                            },
-                        )
-
-                        // Issue #631: Codex profile configuration.
-                        CodexProfilesSection(
-                            profiles = state.codexProfiles,
-                            onProfilesChange = { profiles ->
-                                viewModel.updateState { it.copy(codexProfiles = profiles) }
-                            },
-                        )
+                        // Issue #718 (hard-cut, D22): the per-host Claude/Codex
+                        // profile editors were removed. Agent profiles are now
+                        // discovered ON THE HOST (`pocketshell profiles list`)
+                        // and fetched at session-create time, so there is
+                        // nothing to hand-edit on the phone.
 
                         // The legacy global prose error survives only for the
                         // "no SSH keys exist on the device at all" hint — that's
@@ -765,217 +749,4 @@ private fun DiscardChangesDialog(
         },
         containerColor = PocketShellColors.Surface,
     )
-}
-
-/**
- * Issue #627: Claude Code profile editor for the host form.
- *
- * Displays a list of named profiles with optional config directory paths.
- * The user can add, edit, and remove profiles. Each profile maps to a
- * `CLAUDE_CONFIG_DIR` value on the remote host when launching Claude Code.
- */
-@Composable
-private fun ClaudeProfilesSection(
-    profiles: List<ClaudeProfile>,
-    onProfilesChange: (List<ClaudeProfile>) -> Unit,
-) {
-    val cardShape = RoundedCornerShape(8.dp)
-    Column(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            text = "Claude Code profiles",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = "Optional: configure named profiles for CLAUDE_CONFIG_DIR.",
-            color = PocketShellColors.TextMuted,
-            style = MaterialTheme.typography.labelSmall,
-        )
-
-        profiles.forEachIndexed { index, profile ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(PocketShellColors.SurfaceElev, cardShape)
-                    .border(1.dp, PocketShellColors.BorderSoft, cardShape)
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    OutlinedTextField(
-                        value = profile.name,
-                        onValueChange = { newName ->
-                            val updated = profiles.toMutableList()
-                            updated[index] = profile.copy(name = newName)
-                            onProfilesChange(updated)
-                        },
-                        label = { Text("Profile name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = PocketShellColors.Text,
-                            unfocusedTextColor = PocketShellColors.Text,
-                            focusedBorderColor = PocketShellColors.Accent,
-                            unfocusedBorderColor = PocketShellColors.Border,
-                            focusedContainerColor = PocketShellColors.Surface,
-                            unfocusedContainerColor = PocketShellColors.Surface,
-                            cursorColor = PocketShellColors.Accent,
-                        ),
-                    )
-                    OutlinedTextField(
-                        value = profile.configDir,
-                        onValueChange = { newDir ->
-                            val updated = profiles.toMutableList()
-                            updated[index] = profile.copy(configDir = newDir)
-                            onProfilesChange(updated)
-                        },
-                        label = { Text("Config dir (optional)") },
-                        placeholder = { Text("~/.claude") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = PocketShellColors.Text,
-                            unfocusedTextColor = PocketShellColors.Text,
-                            focusedBorderColor = PocketShellColors.Accent,
-                            unfocusedBorderColor = PocketShellColors.Border,
-                            focusedContainerColor = PocketShellColors.Surface,
-                            unfocusedContainerColor = PocketShellColors.Surface,
-                            cursorColor = PocketShellColors.Accent,
-                        ),
-                    )
-                }
-                TextButton(
-                    onClick = {
-                        val updated = profiles.toMutableList()
-                        updated.removeAt(index)
-                        onProfilesChange(updated)
-                    },
-                ) {
-                    Text("Remove", color = PocketShellColors.Red)
-                }
-            }
-        }
-
-        TextButton(
-            onClick = {
-                onProfilesChange(profiles + ClaudeProfile(name = ""))
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("+ Add profile", color = PocketShellColors.Accent)
-        }
-    }
-}
-
-/**
- * Issue #631: Codex profile editor for the host form.
- *
- * Mirrors [ClaudeProfilesSection] for Codex. Each profile maps to a
- * `CODEX_HOME` value on the remote host when launching Codex.
- */
-@Composable
-private fun CodexProfilesSection(
-    profiles: List<CodexProfile>,
-    onProfilesChange: (List<CodexProfile>) -> Unit,
-) {
-    val cardShape = RoundedCornerShape(8.dp)
-    Column(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            text = "Codex profiles",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = "Optional: configure named profiles for CODEX_HOME.",
-            color = PocketShellColors.TextMuted,
-            style = MaterialTheme.typography.labelSmall,
-        )
-
-        profiles.forEachIndexed { index, profile ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(PocketShellColors.SurfaceElev, cardShape)
-                    .border(1.dp, PocketShellColors.BorderSoft, cardShape)
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    OutlinedTextField(
-                        value = profile.name,
-                        onValueChange = { newName ->
-                            val updated = profiles.toMutableList()
-                            updated[index] = profile.copy(name = newName)
-                            onProfilesChange(updated)
-                        },
-                        label = { Text("Profile name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = PocketShellColors.Text,
-                            unfocusedTextColor = PocketShellColors.Text,
-                            focusedBorderColor = PocketShellColors.Accent,
-                            unfocusedBorderColor = PocketShellColors.Border,
-                            focusedContainerColor = PocketShellColors.Surface,
-                            unfocusedContainerColor = PocketShellColors.Surface,
-                            cursorColor = PocketShellColors.Accent,
-                        ),
-                    )
-                    OutlinedTextField(
-                        value = profile.configDir,
-                        onValueChange = { newDir ->
-                            val updated = profiles.toMutableList()
-                            updated[index] = profile.copy(configDir = newDir)
-                            onProfilesChange(updated)
-                        },
-                        label = { Text("Config dir (optional)") },
-                        placeholder = { Text("~/.codex") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = PocketShellColors.Text,
-                            unfocusedTextColor = PocketShellColors.Text,
-                            focusedBorderColor = PocketShellColors.Accent,
-                            unfocusedBorderColor = PocketShellColors.Border,
-                            focusedContainerColor = PocketShellColors.Surface,
-                            unfocusedContainerColor = PocketShellColors.Surface,
-                            cursorColor = PocketShellColors.Accent,
-                        ),
-                    )
-                }
-                TextButton(
-                    onClick = {
-                        val updated = profiles.toMutableList()
-                        updated.removeAt(index)
-                        onProfilesChange(updated)
-                    },
-                ) {
-                    Text("Remove", color = PocketShellColors.Red)
-                }
-            }
-        }
-
-        TextButton(
-            onClick = {
-                onProfilesChange(profiles + CodexProfile(name = ""))
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("+ Add profile", color = PocketShellColors.Accent)
-        }
-    }
 }

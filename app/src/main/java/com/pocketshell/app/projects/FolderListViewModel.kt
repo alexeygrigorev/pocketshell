@@ -346,6 +346,12 @@ class FolderListViewModel internal constructor(
     // picker within seconds — not the 15-min staleness gate. Null in unit tests
     // that don't exercise the live-event trigger.
     private val activeTmuxClients: ActiveTmuxClients? = null,
+    // Issue #718: fetch the host's agent profiles (discovered server-side)
+    // over the SAME warm SSH lease the gateway uses, replacing the old
+    // client-stored per-host JSON. Null in unit tests that don't exercise the
+    // picker profile fetch (the picker then falls back to the default-only
+    // profile set).
+    private val profilesGateway: ProfilesGateway? = null,
     // Issue #430: when true the view model attaches a
     // [ProcessLifecycleOwner] observer in [init] so the session-discovery
     // poll loop is gated on the whole-process foreground signal. Always
@@ -389,6 +395,8 @@ class FolderListViewModel internal constructor(
         // and the dashboard use, so the live-`-CC`-client `%sessions-changed`
         // subscription rides the already-open control channel.
         activeTmuxClients: ActiveTmuxClients,
+        // Issue #718: the host-discovered agent-profile fetch gateway.
+        profilesGateway: ProfilesGateway,
     ) : this(
         gateway = gateway,
         hostDao = hostDao,
@@ -401,6 +409,7 @@ class FolderListViewModel internal constructor(
         forwardingController = forwardingController,
         sessionLifecycleSignals = sessionLifecycleSignals,
         activeTmuxClients = activeTmuxClients,
+        profilesGateway = profilesGateway,
         attachLifecycle = true,
     )
 
@@ -413,18 +422,20 @@ class FolderListViewModel internal constructor(
     val actionStatus: StateFlow<FolderActionStatus> = _actionStatus.asStateFlow()
 
     /**
-     * Issue #627: Claude Code profiles for this host, loaded from
-     * [HostEntity.claudeProfilesJson] during [bind]. Empty when the host
-     * has only the default profile (the common case).
+     * Issue #718: Claude Code profiles for this host, DISCOVERED on the host
+     * and fetched via [ProfilesGateway] during [bind] (was the #627
+     * client-stored JSON, hard-cut per D22). Empty when the host has only the
+     * default profile, when the CLI is missing, or when the fetch fails (the
+     * picker then shows no profile selector).
      */
     private val _claudeProfiles: MutableStateFlow<List<ClaudeProfile>> =
         MutableStateFlow(emptyList())
     val claudeProfiles: StateFlow<List<ClaudeProfile>> = _claudeProfiles.asStateFlow()
 
     /**
-     * Issue #631: Codex profiles for this host, loaded from
-     * [HostEntity.codexProfilesJson] during [bind]. Empty when the host
-     * has only the default profile (the common case).
+     * Issue #718: Codex profiles for this host, discovered on the host and
+     * fetched via [ProfilesGateway] during [bind] (was the #631 client-stored
+     * JSON, hard-cut per D22). Empty for the default-only / unavailable cases.
      */
     private val _codexProfiles: MutableStateFlow<List<CodexProfile>> =
         MutableStateFlow(emptyList())
@@ -715,17 +726,11 @@ class FolderListViewModel internal constructor(
         _state.value = loadingState()
         restoreCachedSessions(hostId)
 
-        // Issue #627: load Claude Code profiles for this host.
-        viewModelScope.launch {
-            val host = withContext(ioDispatcher) { hostDao.getById(hostId) }
-            _claudeProfiles.value = ClaudeProfile.fromJson(host?.claudeProfilesJson)
-        }
-
-        // Issue #631: load Codex profiles for this host.
-        viewModelScope.launch {
-            val host = withContext(ioDispatcher) { hostDao.getById(hostId) }
-            _codexProfiles.value = CodexProfile.fromJson(host?.codexProfilesJson)
-        }
+        // Issue #718: fetch the host-DISCOVERED agent profiles over the warm
+        // SSH lease (was the #627/#631 client-stored JSON, hard-cut per D22).
+        // The default-only / CLI-missing / fetch-failure cases all collapse to
+        // an empty list, so the picker simply shows no profile selector.
+        fetchProfiles(params)
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {
@@ -752,6 +757,56 @@ class FolderListViewModel internal constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Issue #718: fetch the host-discovered agent profiles via
+     * [ProfilesGateway] and split them by engine into the picker's
+     * [claudeProfiles] / [codexProfiles] flows. Foreground, on bind. Any
+     * non-success result (CLI missing, connect/parse failure, no gateway in
+     * tests) leaves the flows empty so the picker shows no profile selector —
+     * the safe default-only behaviour.
+     */
+    private fun fetchProfiles(params: BoundParams) {
+        val gw = profilesGateway ?: run {
+            _claudeProfiles.value = emptyList()
+            _codexProfiles.value = emptyList()
+            return
+        }
+        viewModelScope.launch {
+            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: return@launch
+            val result = withContext(ioDispatcher) {
+                gw.listProfiles(
+                    host = host,
+                    keyPath = params.keyPath,
+                    passphrase = params.passphrase,
+                )
+            }
+            // Ignore a stale result if the host changed while we were fetching.
+            if (bound?.hostId != params.hostId) return@launch
+            when (result) {
+                is ProfilesResult.Profiles -> applyProfiles(result.profiles)
+                else -> {
+                    _claudeProfiles.value = emptyList()
+                    _codexProfiles.value = emptyList()
+                }
+            }
+        }
+    }
+
+    /**
+     * Issue #718: project the host-discovered [RemoteProfile] rows onto the
+     * picker's per-engine flows. The default profile is included so the picker
+     * shows the full "Claude" / "Claude (Z.AI)" choice and pre-selects the
+     * default; the launch command omits `--profile` for the default.
+     */
+    private fun applyProfiles(profiles: List<RemoteProfile>) {
+        _claudeProfiles.value = profiles
+            .filter { it.engine == RemoteProfile.ENGINE_CLAUDE }
+            .map { ClaudeProfile(name = it.name, default = it.default) }
+        _codexProfiles.value = profiles
+            .filter { it.engine == RemoteProfile.ENGINE_CODEX }
+            .map { CodexProfile(name = it.name, default = it.default) }
     }
 
     /**

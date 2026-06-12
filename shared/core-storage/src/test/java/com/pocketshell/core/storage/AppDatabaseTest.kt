@@ -408,7 +408,6 @@ class AppDatabaseTest {
             assertEquals(true, hosts[0].enabled)
             assertNull(hosts[0].pocketshellDaemonRunning)
             assertNull(hosts[0].pocketshellDaemonEnabled)
-            assertNull(hosts[0].claudeProfilesJson)
 
             val key = migratedDb.sshKeyDao().getById(1)
             assertNotNull(key)
@@ -446,7 +445,7 @@ class AppDatabaseTest {
     }
 
     @Test
-    fun migrationFromVersionThirteen_preservesUserRowsAndAddsClaudeProfilesJson() = runTest {
+    fun migrationFromVersionThirteen_preservesUserRows() = runTest {
         val databaseName = "v13-to-current-${System.nanoTime()}.db"
         seedVersionThirteenDatabaseWithUserRows(databaseName)
 
@@ -457,44 +456,23 @@ class AppDatabaseTest {
             val hosts = migratedDb.hostDao().getAll().first()
             assertEquals(1, hosts.size)
             assertEquals("prod", hosts[0].name)
-            // The new column should be null after migration (no profiles).
-            assertNull(hosts[0].claudeProfilesJson)
+            assertEquals("example.com", hosts[0].hostname)
+            assertEquals(true, hosts[0].enabled)
         } finally {
             migratedDb.close()
         }
         context.deleteDatabase(databaseName)
     }
 
-    @Test
-    fun migrationFromVersionThirteen_claudeProfilesJsonRoundTrips() = runTest {
-        val databaseName = "v13-roundtrip-${System.nanoTime()}.db"
-        seedVersionThirteenDatabaseWithUserRows(databaseName)
-
-        val migratedDb = openOnDiskDatabase(databaseName)
-        try {
-            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
-
-            val hosts = migratedDb.hostDao().getAll().first()
-            val host = hosts[0]
-            // Update with profiles JSON.
-            val profilesJson = """[{"name":"work","configDir":"/home/.claude-work"}]"""
-            migratedDb.hostDao().update(
-                host.copy(claudeProfilesJson = profilesJson),
-            )
-            val updated = migratedDb.hostDao().getById(host.id)
-            assertEquals(profilesJson, updated!!.claudeProfilesJson)
-        } finally {
-            migratedDb.close()
-        }
-        context.deleteDatabase(databaseName)
-    }
-
-    // --- Issue #631: v14 -> v15 migration (codexProfilesJson) ---
+    // --- Issue #718: v15 -> v16 migration drops the client-stored profile
+    // JSON columns (claudeProfilesJson / codexProfilesJson). Profiles are now
+    // discovered host-side. The migration is a table rebuild, so host rows and
+    // FK-scoped children must survive while the two columns disappear.
 
     @Test
-    fun migrationFromVersionFourteen_preservesUserRowsAndAddsCodexProfilesJson() = runTest {
-        val databaseName = "v14-to-current-${System.nanoTime()}.db"
-        seedVersionFourteenDatabaseWithUserRows(databaseName)
+    fun migrationFromVersionFifteen_preservesUserRowsAndDropsProfileColumns() = runTest {
+        val databaseName = "v15-to-current-${System.nanoTime()}.db"
+        seedVersionFifteenDatabaseWithUserRows(databaseName)
 
         val migratedDb = openOnDiskDatabase(databaseName)
         try {
@@ -503,34 +481,27 @@ class AppDatabaseTest {
             val hosts = migratedDb.hostDao().getAll().first()
             assertEquals(1, hosts.size)
             assertEquals("prod", hosts[0].name)
-            // claudeProfilesJson preserved from v14.
-            assertNotNull(hosts[0].claudeProfilesJson)
-            // The new column should be null after migration (no Codex profiles).
-            assertNull(hosts[0].codexProfilesJson)
-        } finally {
-            migratedDb.close()
-        }
-        context.deleteDatabase(databaseName)
-    }
+            assertEquals("example.com", hosts[0].hostname)
+            assertEquals(2222, hosts[0].port)
+            assertEquals(true, hosts[0].enabled)
+            assertEquals("pocketshell usage --json", hosts[0].usageCommandOverride)
+            assertEquals("0.3.14", hosts[0].pocketshellCliVersion)
+            assertEquals(true, hosts[0].pocketshellDaemonRunning)
 
-    @Test
-    fun migrationFromVersionFourteen_codexProfilesJsonRoundTrips() = runTest {
-        val databaseName = "v14-roundtrip-${System.nanoTime()}.db"
-        seedVersionFourteenDatabaseWithUserRows(databaseName)
+            // The FK-scoped key + child rows survive the table rebuild.
+            val key = migratedDb.sshKeyDao().getById(1)
+            assertNotNull(key)
+            assertEquals("deploy-key", key!!.name)
 
-        val migratedDb = openOnDiskDatabase(databaseName)
-        try {
-            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+            val roots = migratedDb.projectRootDao().getByHostId(1).first()
+            assertEquals(listOf("~/git/pocketshell"), roots.map { it.path })
 
-            val hosts = migratedDb.hostDao().getAll().first()
-            val host = hosts[0]
-            // Update with Codex profiles JSON.
-            val profilesJson = """[{"name":"work","configDir":"/home/.codex-work"}]"""
-            migratedDb.hostDao().update(
-                host.copy(codexProfilesJson = profilesJson),
-            )
-            val updated = migratedDb.hostDao().getById(host.id)
-            assertEquals(profilesJson, updated!!.codexProfilesJson)
+            val sessions = migratedDb.sessionDao().getByHostId(1).first()
+            assertEquals(listOf("main"), sessions.map { it.name })
+
+            // The two profile columns are gone.
+            assertColumnMissing(databaseName, "hosts", "claudeProfilesJson")
+            assertColumnMissing(databaseName, "hosts", "codexProfilesJson")
         } finally {
             migratedDb.close()
         }
@@ -849,20 +820,21 @@ class AppDatabaseTest {
         db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
     }
 
-    // --- Issue #631: v14 seed helpers ---
+    // --- Issue #718: v15 seed helpers (the last schema WITH the profile JSON
+    // columns, dropped by MIGRATION_15_16). ---
 
-    private fun seedVersionFourteenDatabaseWithUserRows(databaseName: String) {
+    private fun seedVersionFifteenDatabaseWithUserRows(databaseName: String) {
         context.deleteDatabase(databaseName)
         val databaseFile = context.getDatabasePath(databaseName)
         databaseFile.parentFile?.mkdirs()
 
         val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
         sqlite.use {
-            createVersionFourteenSchema(it)
+            createVersionFifteenSchema(it)
             it.execSQL(
                 """
                 INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt)
-                VALUES(1, 'deploy-key', '/keys/deploy', 'sha256:v14', 1, 100)
+                VALUES(1, 'deploy-key', '/keys/deploy', 'sha256:v15', 1, 100)
                 """.trimIndent(),
             )
             it.execSQL(
@@ -873,23 +845,35 @@ class AppDatabaseTest {
                     lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
                     pocketshellCliVersion, pocketshellExpectedCliVersion,
                     pocketshellVersionCompatible, pocketshellDaemonRunning,
-                    pocketshellDaemonEnabled, usageCommandOverride, claudeProfilesJson
+                    pocketshellDaemonEnabled, usageCommandOverride,
+                    claudeProfilesJson, codexProfilesJson
                 ) VALUES(
                     1, 'prod', 'example.com', 2222, 'alexey', 1, 10000, 1000,
                     5, 1, 101, 102, 1, 103, 1, 104, '0.3.14', '0.3.14', 1, 1, 1,
                     'pocketshell usage --json',
-                    '[{"name":"work","configDir":"/home/.claude-work"}]'
+                    '[{"name":"work","configDir":"/home/.claude-work"}]',
+                    '[{"name":"work","configDir":"/home/.codex-work"}]'
                 )
                 """.trimIndent(),
             )
-            it.execSQL("PRAGMA user_version = 14")
+            it.execSQL(
+                "INSERT INTO project_roots(id, hostId, label, path, createdAt) " +
+                    "VALUES(1, 1, 'repo', '~/git/pocketshell', 110)"
+            )
+            it.execSQL(
+                "INSERT INTO sessions(id, hostId, name, lastSeenAt, tags) " +
+                    "VALUES(1, 1, 'main', 120, 'work')"
+            )
+            it.execSQL("PRAGMA user_version = 15")
         }
     }
 
-    private fun createVersionFourteenSchema(db: SQLiteDatabase) {
-        // v14 = v13 schema + claudeProfilesJson column on hosts.
+    private fun createVersionFifteenSchema(db: SQLiteDatabase) {
+        // v15 = v13 schema + claudeProfilesJson (MIGRATION_13_14) +
+        // codexProfilesJson (MIGRATION_14_15) columns on hosts.
         createVersionThirteenSchema(db)
         db.execSQL("ALTER TABLE hosts ADD COLUMN claudeProfilesJson TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN codexProfilesJson TEXT")
     }
 
     private fun createVersionEightSchema(db: SQLiteDatabase) {

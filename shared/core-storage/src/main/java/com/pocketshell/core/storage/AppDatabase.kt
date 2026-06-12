@@ -27,7 +27,7 @@ import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 15
+const val APP_DATABASE_SCHEMA_VERSION = 16
 
 /**
  * Issue #261 left a deliberately unsupported pre-migration v1 shape in the
@@ -178,6 +178,75 @@ val MIGRATION_14_15: Migration = object : Migration(14, 15) {
     }
 }
 
+/**
+ * Issue #718 (slice 2, hard-cut per D22): drop the client-stored
+ * `claudeProfilesJson` (#627) and `codexProfilesJson` (#631) columns now
+ * that agent profiles are discovered ON THE HOST and fetched at runtime by
+ * `ProfilesGateway`. SQLite can't portably `DROP COLUMN` on the engine
+ * versions Room targets, so this rebuilds the `hosts` table without the two
+ * columns — the proven [MIGRATION_8_10] table-rebuild shape (create a
+ * sibling table with the kept columns, copy the rows over, drop the old
+ * table, rename, recreate the index). Host rows and every FK-scoped child
+ * table (sessions, snippets, port_remappings, project_roots, …) are
+ * preserved; only the two profile columns disappear.
+ */
+val MIGRATION_15_16: Migration = object : Migration(15, 16) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE hosts_migration_15_16 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                tmuxInstalled INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                pocketshellCliVersion TEXT,
+                pocketshellExpectedCliVersion TEXT,
+                pocketshellVersionCompatible INTEGER,
+                pocketshellDaemonRunning INTEGER,
+                pocketshellDaemonEnabled INTEGER,
+                usageCommandOverride TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_migration_15_16 (
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                pocketshellCliVersion, pocketshellExpectedCliVersion,
+                pocketshellVersionCompatible, pocketshellDaemonRunning,
+                pocketshellDaemonEnabled, usageCommandOverride
+            )
+            SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                pocketshellCliVersion, pocketshellExpectedCliVersion,
+                pocketshellVersionCompatible, pocketshellDaemonRunning,
+                pocketshellDaemonEnabled, usageCommandOverride
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_migration_15_16 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_8_10,
     MIGRATION_10_11,
@@ -185,4 +254,5 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_12_13,
     MIGRATION_13_14,
     MIGRATION_14_15,
+    MIGRATION_15_16,
 )

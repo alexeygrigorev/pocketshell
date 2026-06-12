@@ -658,6 +658,20 @@ class DesignRenders {
                     },
                     onClick = {},
                 )
+
+                // Issue #718: the Profile selector now shows the HOST-DISCOVERED
+                // Claude profiles (fetched via `pocketshell profiles list`),
+                // e.g. the default "Claude" + a "Claude (Z.AI)" alias profile.
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    SectionHeader(label = "Profile")
+                    SegmentedToggle(
+                        labels = listOf("Claude", "Claude (Z.AI)"),
+                        selectedIndex = 0,
+                        onSelected = {},
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        fillSegments = true,
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))

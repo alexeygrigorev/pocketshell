@@ -42,8 +42,6 @@ import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
-import org.json.JSONArray
-import org.json.JSONObject
 
 /**
  * Picker for "new session" type — issue #171 round 2.
@@ -403,8 +401,11 @@ data class SessionTypeChoice(
      * - Skip-permissions defaults ON in the wrapper, so `--no-skip-permissions`
      *   is emitted only when the user turned it OFF (and never for OpenCode,
      *   where it is a no-op).
-     * - The Claude (#627) / Codex (#631) profile maps to `--config-dir`
-     *   (the wrapper turns it into `CLAUDE_CONFIG_DIR` / `CODEX_HOME`).
+     * - The selected Claude / Codex profile (issue #718) is passed by NAME as
+     *   `--profile '<name>'`; the host-side wrapper resolves the name to its
+     *   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` via the same discovery the picker
+     *   was populated from. The default profile is omitted (the wrapper uses
+     *   the engine's built-in config dir).
      */
     fun startCommand(
         claudeProfiles: List<ClaudeProfile> = emptyList(),
@@ -438,9 +439,10 @@ enum class AgentCli(val command: String) {
      * - [skipPermissions] defaults ON in the wrapper, so the app emits
      *   `--no-skip-permissions` only when it is OFF. OpenCode never gets a
      *   skip flag (it is a no-op there — permissions are config-driven).
-     * - A non-default Claude (#627) / Codex (#631) profile → `--config-dir
-     *   '<path>'` (the wrapper maps it to `CLAUDE_CONFIG_DIR` / `CODEX_HOME`).
-     *   OpenCode has no profile config dir.
+     * - A non-default Claude / Codex profile (issue #718) → `--profile
+     *   '<name>'`; the wrapper resolves the name to `CLAUDE_CONFIG_DIR` /
+     *   `CODEX_HOME` host-side. The default profile (and OpenCode, which has
+     *   no profiles) emits no `--profile`.
      */
     fun launchCommand(
         directory: String,
@@ -450,9 +452,14 @@ enum class AgentCli(val command: String) {
         codexProfileName: String? = null,
         codexProfiles: List<CodexProfile> = emptyList(),
     ): String {
-        val configDir: String? = when (this) {
-            Claude -> claudeProfiles.firstOrNull { it.name == claudeProfileName }?.configDir
-            Codex -> codexProfiles.firstOrNull { it.name == codexProfileName }?.configDir
+        // Resolve the selected profile and only pass it by NAME when it is a
+        // real, non-default profile. The default profile means "use the
+        // engine's built-in config dir", so no `--profile` is emitted.
+        val profileName: String? = when (this) {
+            Claude -> claudeProfiles.firstOrNull { it.name == claudeProfileName }
+                ?.takeUnless { it.default }?.name
+            Codex -> codexProfiles.firstOrNull { it.name == codexProfileName }
+                ?.takeUnless { it.default }?.name
             OpenCode -> null
         }?.trim()?.takeIf { it.isNotBlank() }
 
@@ -465,15 +472,15 @@ enum class AgentCli(val command: String) {
             kind = command,
             directory = directory,
             noSkipPermissions = emitNoSkip,
-            configDir = configDir,
+            profileName = profileName,
         )
     }
 
     companion object {
         /**
          * Assemble `pocketshell agent <kind> --dir '<dir>' [--no-skip-permissions]
-         * [--config-dir '<path>']` (issue #703). Paths are single-quoted so a
-         * folder path with spaces or shell metacharacters cannot break out of
+         * [--profile '<name>']` (issue #703 / #718). Paths and names are
+         * single-quoted so spaces or shell metacharacters cannot break out of
          * the argument or inject a command. The whole line is single-quoted
          * again by the gateway when it is passed to `tmux send-keys`.
          */
@@ -481,7 +488,7 @@ enum class AgentCli(val command: String) {
             kind: String,
             directory: String,
             noSkipPermissions: Boolean,
-            configDir: String?,
+            profileName: String?,
         ): String {
             val parts = StringBuilder("pocketshell agent ")
             parts.append(kind)
@@ -489,8 +496,8 @@ enum class AgentCli(val command: String) {
             if (noSkipPermissions) {
                 parts.append(" --no-skip-permissions")
             }
-            if (configDir != null) {
-                parts.append(" --config-dir ").append(shellQuote(configDir))
+            if (profileName != null) {
+                parts.append(" --profile ").append(shellQuote(profileName))
             }
             return parts.toString()
         }
@@ -533,98 +540,32 @@ private val AGENT_CLI_SEGMENT_TAGS = listOf(
 )
 
 /**
- * A named Claude Code configuration profile (issue #627).
+ * A named Claude Code configuration profile shown in the picker — issue #718.
  *
- * Each profile maps to a `CLAUDE_CONFIG_DIR` on the remote host. The
- * default profile has an empty [configDir] (Claude Code uses its built-in
- * default `~/.claude`).
+ * Profiles are now DISCOVERED on the host (`pocketshell profiles list`) and
+ * fetched by [ProfilesGateway], not stored on the phone (the #627
+ * client-stored JSON model was hard-cut per D22). The selected profile name
+ * is passed to the server as `pocketshell agent claude --profile <name>`,
+ * which resolves it to `CLAUDE_CONFIG_DIR` host-side.
  *
- * Serialized as a JSON array in [HostEntity.claudeProfilesJson].
+ * @property default whether this is the engine's built-in default profile
+ *   (no `--profile` flag is emitted for the default — the wrapper uses the
+ *   engine's own config dir).
  */
 data class ClaudeProfile(
     val name: String,
-    /** Remote path for `CLAUDE_CONFIG_DIR`. Empty string = default (no override). */
-    val configDir: String = "",
-) {
-    companion object {
-        /**
-         * Parse a JSON array of `{"name":"...","configDir":"..."}` objects.
-         * Returns an empty list for null/blank input (the common case for
-         * hosts with only the default profile).
-         */
-        fun fromJson(json: String?): List<ClaudeProfile> {
-            if (json.isNullOrBlank()) return emptyList()
-            val array = try { JSONArray(json) } catch (_: Throwable) { return emptyList() }
-            return (0 until array.length()).mapNotNull { i ->
-                val obj = array.optJSONObject(i) ?: return@mapNotNull null
-                val name = obj.optString("name", "").trim()
-                if (name.isEmpty()) return@mapNotNull null
-                ClaudeProfile(
-                    name = name,
-                    configDir = obj.optString("configDir", "").trim(),
-                )
-            }
-        }
-
-        /** Serialize a list of profiles to a JSON array string. */
-        fun toJson(profiles: List<ClaudeProfile>): String? {
-            if (profiles.isEmpty()) return null
-            val array = JSONArray()
-            for (profile in profiles) {
-                val obj = JSONObject()
-                obj.put("name", profile.name)
-                obj.put("configDir", profile.configDir)
-                array.put(obj)
-            }
-            return array.toString()
-        }
-    }
-}
+    val default: Boolean = false,
+)
 
 /**
- * A named Codex configuration profile (issue #631).
+ * A named Codex configuration profile shown in the picker — issue #718.
  *
- * Each profile maps to a `CODEX_HOME` on the remote host. The default
- * profile has an empty [configDir] (Codex uses its built-in default).
- *
- * Serialized as a JSON array in [HostEntity.codexProfilesJson].
+ * Mirrors [ClaudeProfile] for Codex. Discovered host-side and fetched by
+ * [ProfilesGateway]; the selected name is passed as
+ * `pocketshell agent codex --profile <name>` (resolved to `CODEX_HOME`
+ * host-side).
  */
 data class CodexProfile(
     val name: String,
-    /** Remote path for `CODEX_HOME`. Empty string = default (no override). */
-    val configDir: String = "",
-) {
-    companion object {
-        /**
-         * Parse a JSON array of `{"name":"...","configDir":"..."}` objects.
-         * Returns an empty list for null/blank input (the common case for
-         * hosts with only the default profile).
-         */
-        fun fromJson(json: String?): List<CodexProfile> {
-            if (json.isNullOrBlank()) return emptyList()
-            val array = try { JSONArray(json) } catch (_: Throwable) { return emptyList() }
-            return (0 until array.length()).mapNotNull { i ->
-                val obj = array.optJSONObject(i) ?: return@mapNotNull null
-                val name = obj.optString("name", "").trim()
-                if (name.isEmpty()) return@mapNotNull null
-                CodexProfile(
-                    name = name,
-                    configDir = obj.optString("configDir", "").trim(),
-                )
-            }
-        }
-
-        /** Serialize a list of profiles to a JSON array string. */
-        fun toJson(profiles: List<CodexProfile>): String? {
-            if (profiles.isEmpty()) return null
-            val array = JSONArray()
-            for (profile in profiles) {
-                val obj = JSONObject()
-                obj.put("name", profile.name)
-                obj.put("configDir", profile.configDir)
-                array.put(obj)
-            }
-            return array.toString()
-        }
-    }
-}
+    val default: Boolean = false,
+)

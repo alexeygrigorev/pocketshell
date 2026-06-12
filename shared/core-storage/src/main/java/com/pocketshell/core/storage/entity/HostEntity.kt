@@ -54,18 +54,12 @@ import androidx.room.PrimaryKey
  * [pocketshellDaemonEnabled] so optional jobs-daemon capability can be shown
  * separately from the required tmux + compatible CLI setup cache.
  *
- * Issue #627 adds [claudeProfilesJson] for per-host Claude Code profile
- * configuration. Each profile has a name and an optional config directory
- * path on the remote host that maps to `CLAUDE_CONFIG_DIR`. The JSON list
- * is parsed by `ClaudeProfile.fromJson()` in the app module. `null` means
- * "only the default profile" (no config dir override) — the common case
- * for hosts with a single Claude Code installation.
- *
- * Issue #631 adds [codexProfilesJson] for per-host Codex profile
- * configuration, mirroring [claudeProfilesJson]. Each Codex profile has a
- * name and an optional config directory path that maps to `CODEX_HOME`.
- * `null` means "only the default profile" — the common case for hosts
- * with a single Codex installation.
+ * Issue #718 (slice 2, hard-cut per D22) REMOVED the client-stored
+ * `claudeProfilesJson` / `codexProfilesJson` columns (added by #627/#631).
+ * Agent profiles are now discovered ON THE HOST (`pocketshell profiles list
+ * --json`) and fetched over the existing SSH lease by `ProfilesGateway`, so
+ * the client no longer stores or hand-edits them. `MIGRATION_15_16` drops
+ * the two columns via a table rebuild.
  */
 @Entity(
     tableName = "hosts",
@@ -102,20 +96,4 @@ data class HostEntity(
     val pocketshellDaemonRunning: Boolean? = null,
     val pocketshellDaemonEnabled: Boolean? = null,
     val usageCommandOverride: String? = null,
-    /**
-     * JSON-encoded list of Claude Code profiles (issue #627). Each entry
-     * has `name` (display label) and `configDir` (remote path for
-     * `CLAUDE_CONFIG_DIR`; empty/missing for the default profile).
-     * `null` means "only the default profile exists" — no profile
-     * selector is shown in the session type picker.
-     */
-    val claudeProfilesJson: String? = null,
-    /**
-     * JSON-encoded list of Codex profiles (issue #631). Each entry has
-     * `name` (display label) and `configDir` (remote path for `CODEX_HOME`;
-     * empty/missing for the default profile). `null` means "only the
-     * default profile exists" — no profile selector is shown in the
-     * session type picker.
-     */
-    val codexProfilesJson: String? = null,
 )

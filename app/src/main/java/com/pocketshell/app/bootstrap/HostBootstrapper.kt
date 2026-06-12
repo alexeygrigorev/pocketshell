@@ -574,9 +574,6 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         bootstrapPath: String?,
     ): InstallResult = runPythonToolUpgrade(session, installer, installerPath, tool, bootstrapPath)
 
-    public suspend fun installPocketshellDaemon(session: SshSession): InstallResult =
-        installPocketshellUserDaemon(session, detectBootstrapPath(session))
-
     /**
      * Detect the host's OS family and run the matching package-manager
      * install. Best-effort one-tap install — we deliberately don't run
@@ -714,40 +711,6 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             PythonToolInstaller.Pipx -> "$executable upgrade ${tool.packageName}"
         }
         return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
-    }
-
-    private suspend fun installPocketshellUserDaemon(
-        session: SshSession,
-        bootstrapPath: String?,
-    ): InstallResult {
-        val pocketshell = when (val status = checkToolWithPath(session, BINARY_POCKETSHELL, bootstrapPath)) {
-            is ToolStatus.Installed -> status.path
-            is ToolStatus.VersionMismatch -> status.path
-            is ToolStatus.AppUpdateRequired -> status.path
-            ToolStatus.Missing -> return InstallResult.Error("pocketshell is not installed; install it before enabling the jobs daemon.")
-            is ToolStatus.Unknown -> return InstallResult.Error("could not locate pocketshell: ${status.reason}")
-        }
-        if (checkToolWithPath(session, "systemctl", bootstrapPath) !is ToolStatus.Installed) {
-            return InstallResult.Error("systemctl is not installed on this host; enable pocketshell jobs daemon manually.")
-        }
-        val command = buildString {
-            append("mkdir -p ~/.config/systemd/user && ")
-            append("cat > ~/.config/systemd/user/pocketshell-jobs.service <<'EOF'\n")
-            append("[Unit]\n")
-            append("Description=pocketshell jobs daemon\n")
-            append("After=default.target\n\n")
-            append("[Service]\n")
-            append("Type=simple\n")
-            append("ExecStart=${systemdExecArg(pocketshell)} jobs daemon\n")
-            append("Restart=on-failure\n")
-            append("RestartSec=5s\n\n")
-            append("[Install]\n")
-            append("WantedBy=default.target\n")
-            append("EOF\n")
-            append("systemctl --user daemon-reload && ")
-            append("systemctl --user enable --now pocketshell-jobs.service")
-        }
-        return runInstall(session, systemdUserCommand(command, bootstrapPath), needsRoot = false)
     }
 
     private suspend fun runningAsRoot(session: SshSession): Boolean = try {
@@ -911,12 +874,6 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             "Alternative:\npipx install pocketshell\n\n" +
             "Make sure ~/.local/bin is on the remote PATH."
 
-    private fun systemdExecArg(value: String): String =
-        "\"" + value
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("%", "%%") + "\""
-
     private fun ExecResult.combinedOutput(): String =
         listOf(stdout.trim(), stderr.trim()).filter { it.isNotBlank() }.joinToString("\n")
 
@@ -935,14 +892,6 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             this is ToolStatus.AppUpdateRequired
 
     public companion object {
-        /**
-         * Binary name of the unified `pocketshell` CLI — the single
-         * required server-side tool (issue #231, D22 hard cut). Used by
-         * the tool probe ([checkTool] via [BootstrapTool.Pocketshell])
-         * and the jobs-daemon installer. Centralised so the probe and
-         * install paths agree on the spelling.
-         */
-        public const val BINARY_POCKETSHELL: String = "pocketshell"
         private val VERSION_PATTERN: Regex = Regex("""\b(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b""")
         private const val PATH_BEGIN: String = "__POCKETSHELL_PATH_BEGIN__"
         private const val PATH_END: String = "__POCKETSHELL_PATH_END__"

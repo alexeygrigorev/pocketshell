@@ -88,9 +88,6 @@ data class PendingTranscriptionEntity(
         /** Destination tag for the key-bar inline dictation surface. */
         const val DESTINATION_INLINE_DICTATION: String = "inline-dictation"
 
-        /** Destination tag for an external Voice share into the app. */
-        const val DESTINATION_SHARE_TARGET: String = "share-target"
-
         /**
          * Maximum retry attempts before the UI hides the Retry button and
          * offers Delete / Save-as-audio instead. Matches the cap called

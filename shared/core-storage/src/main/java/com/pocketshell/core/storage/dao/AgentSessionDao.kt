@@ -23,9 +23,6 @@ interface AgentSessionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(agentSession: AgentSessionEntity): Long
 
-    @Query("DELETE FROM agent_sessions WHERE paneRef = :paneRef")
-    suspend fun deleteByPaneRef(paneRef: String)
-
     @Query("DELETE FROM agent_sessions")
     suspend fun deleteAll()
 }

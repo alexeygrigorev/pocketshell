@@ -6,7 +6,6 @@ import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.entity.SnippetEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -285,13 +284,4 @@ public open class SnippetsViewModel @Inject constructor(
     public fun clearError() {
         _error.value = null
     }
-
-    /**
-     * Test seam: the [snippets] StateFlow uses
-     * [SharingStarted.WhileSubscribed], so tests that want to assert
-     * against the latest emission without collecting can use this to
-     * reach the raw upstream flow.
-     */
-    internal fun snippetsFlowFor(hostId: Long): Flow<List<SnippetEntity>> =
-        snippetDao.getByHostId(hostId)
 }

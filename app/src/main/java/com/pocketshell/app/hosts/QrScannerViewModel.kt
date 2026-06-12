@@ -62,9 +62,7 @@ class QrScannerViewModel @Inject constructor() : ViewModel() {
         data class Scanning(
             val scanCount: Int = 0,
             val scanTotal: Int = 0,
-        ) : State {
-            val isMultiPart: Boolean get() = scanTotal > 1
-        }
+        ) : State
 
         /** A complete payload has been assembled. */
         data class Decoded(val payload: String) : State
@@ -142,12 +140,6 @@ class QrScannerViewModel @Inject constructor() : ViewModel() {
     fun retry() {
         assembler.reset()
         _state.value = State.RequestingPermission
-    }
-
-    /** Consume the [State.Decoded] payload — for unit-test inspection. */
-    fun consumeDecoded(): String? {
-        val current = _state.value
-        return (current as? State.Decoded)?.payload
     }
 
     override fun onCleared() {

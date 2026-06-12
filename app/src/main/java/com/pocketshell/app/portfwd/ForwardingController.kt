@@ -23,7 +23,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -174,28 +173,6 @@ class ForwardingController(
      * blip reads as "restoring" rather than "removed".
      */
     fun flowOfRestoringHostCount(): StateFlow<Int> = restoringHostCount.asStateFlow()
-
-    suspend fun startForwarding(
-        host: HostEntity,
-        keyPath: String,
-        passphrase: CharArray?,
-    ): Result<Unit> {
-        val firstSession = connector.connect(host, keyPath, passphrase).getOrElse { failure ->
-            return Result.failure(failure)
-        }
-        val remappings = runCatching {
-            portRemappingDao.getByHostId(host.id).first()
-                .associate { it.remotePort to it.localPort }
-        }.getOrElse { emptyMap() }
-        startForwardingWithSession(
-            host = host,
-            keyPath = keyPath,
-            passphrase = passphrase,
-            firstSession = firstSession,
-            initialRemappings = remappings,
-        )
-        return Result.success(Unit)
-    }
 
     fun adoptForwardingSession(
         host: HostEntity,

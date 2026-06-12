@@ -6,7 +6,6 @@ import com.pocketshell.core.storage.dao.CommandTemplateDao
 import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -104,9 +103,6 @@ public open class CommandTemplatesViewModel @Inject constructor(
     public fun clearError() {
         _error.value = null
     }
-
-    internal fun templatesFlowFor(hostId: Long): Flow<List<CommandTemplateEntity>> =
-        commandTemplateDao.getByHostId(hostId)
 }
 
 internal fun normaliseCommandTemplateCommands(commands: String): String =

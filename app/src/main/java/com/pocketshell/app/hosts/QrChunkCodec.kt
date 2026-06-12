@@ -55,14 +55,6 @@ object QrChunkCodec {
     const val ChunkSize: Int = 1500
 
     /**
-     * Threshold above which a payload is split into multiple chunks. A
-     * payload below this size produces exactly one envelope-wrapped QR.
-     * Picked equal to [ChunkSize] so a payload that fits the budget
-     * never needs more than one QR even when sequencing is enabled.
-     */
-    const val SingleQrThresholdBytes: Int = ChunkSize
-
-    /**
      * Encode [payload] into one or more envelope strings ready to be
      * rendered as QRs. Order is part 1 → part N. The [id] is generated
      * automatically; use the overload with `id` for deterministic tests.

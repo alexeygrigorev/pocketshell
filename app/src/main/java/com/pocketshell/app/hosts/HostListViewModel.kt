@@ -1379,36 +1379,6 @@ class HostListViewModel internal constructor(
         }
     }
 
-    fun setupBootstrapDaemon() {
-        val session = bootstrapSession
-        val prompt = _bootstrapState.value as? HostBootstrapSheetState.Prompt
-        if (session == null || prompt == null) {
-            _bootstrapState.value = HostBootstrapSheetState.Failed(
-                message = "Connection closed before setup could start. Tap the host again to retry.",
-            )
-            return
-        }
-        _bootstrapState.value = HostBootstrapSheetState.Installing
-        viewModelScope.launch {
-            when (val result = bootstrapper.installPocketshellDaemon(session)) {
-                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
-                is InstallResult.SetupIncomplete -> _bootstrapState.value = HostBootstrapSheetState.Prompt(
-                    needsTmux = prompt.needsTmux,
-                    report = result.report,
-                )
-                is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
-                    message = result.stderr.ifBlank { "exit ${result.exitCode}" },
-                )
-
-                is InstallResult.UnsupportedOs -> _bootstrapState.value = HostBootstrapSheetState.Failed(
-                    message = "PocketShell couldn't enable the pocketshell jobs daemon on this host.",
-                )
-
-                is InstallResult.Error -> _bootstrapState.value = HostBootstrapSheetState.Failed(message = result.reason)
-            }
-        }
-    }
-
     /**
      * User tapped Skip / Continue / Close on the sheet (or swiped it
      * down). Close the probe session and flush the pending navigation so

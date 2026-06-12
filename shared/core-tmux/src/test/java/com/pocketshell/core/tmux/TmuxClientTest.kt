@@ -42,6 +42,16 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
+ * Generous ceiling for await-style waits (`withTimeout(N) { deferred.await() }`
+ * and `withTimeout(N) { while (!cond) { yield(); delay() } }`). These return the
+ * instant the real async result/condition is ready, so a large ceiling does NOT
+ * slow a passing run — it only adds headroom before declaring a genuine hang.
+ * The previous 3_000 ms ceiling tripped intermittently when the real reader loop
+ * on `Dispatchers.IO` was scheduled late under CI / dev-box load (#709).
+ */
+private const val ASYNC_AWAIT_TIMEOUT_MS = 15_000L
+
+/**
  * Unit tests for [RealTmuxClient] driven against a fake [SshSession] / fake
  * [SshShell] pair.
  *
@@ -273,7 +283,7 @@ class TmuxClientTest {
                 "%session-changed \$0 main\n" +
                     "%window-add @0\n",
             )
-            val events = withTimeout(3_000) { collected.await() }
+            val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { collected.await() }
             assertEquals(2, events.size)
             assertTrue(events[0] is ControlEvent.SessionChanged)
             assertEquals("\$0", (events[0] as ControlEvent.SessionChanged).sessionId)
@@ -316,7 +326,7 @@ class TmuxClientTest {
                     "session 1: 2 windows\n" +
                     "%end 1700000000 5 0\n",
             )
-            val result = withTimeout(3_000) { response.await() }
+            val result = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
             assertEquals(5L, result.number)
             assertFalse(result.isError)
             assertEquals(
@@ -352,7 +362,7 @@ class TmuxClientTest {
                     "no such window: @99\n" +
                     "%error 1700000000 7 0\n",
             )
-            val result = withTimeout(3_000) { response.await() }
+            val result = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
             assertEquals(7L, result.number)
             assertTrue(result.isError)
             assertEquals(listOf("no such window: @99"), result.output)
@@ -402,7 +412,7 @@ class TmuxClientTest {
                     "%end 1700000000 11 0\n",
             )
 
-            val combined = withTimeout(3_000) { result.await() }
+            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { result.await() }
             assertFalse(combined.capture.isError)
             assertEquals(listOf("line-one", "line-two"), combined.capture.output)
             assertEquals("4,2", combined.cursorReply)
@@ -439,7 +449,7 @@ class TmuxClientTest {
                     "%end 1700000000 10 0\n",
             )
 
-            val combined = withTimeout(3_000) { result.await() }
+            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { result.await() }
             assertFalse(combined.capture.isError)
             assertEquals(listOf("only-capture"), combined.capture.output)
             assertNull(combined.cursorReply)
@@ -486,7 +496,7 @@ class TmuxClientTest {
                     "%end 1700000000 21 0\n",
             )
 
-            val responses = withTimeout(3_000) { result.await() }
+            val responses = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { result.await() }
             assertEquals(2, responses.size)
             assertFalse(responses[0].isError)
             assertEquals(listOf("sess-a", "sess-b"), responses[0].output)
@@ -527,7 +537,7 @@ class TmuxClientTest {
                     "%end 1700000000 20 0\n",
             )
 
-            val responses = withTimeout(3_000) { result.await() }
+            val responses = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { result.await() }
             assertEquals(2, responses.size)
             assertFalse(responses[0].isError)
             assertEquals(listOf("sess-a"), responses[0].output)
@@ -580,7 +590,7 @@ class TmuxClientTest {
 
             // Concurrent enumeration can't acquire the wedged mutex; the bounded
             // acquire must degrade to error responses rather than hang.
-            val responses = withTimeout(3_000) {
+            val responses = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 client.sendChainedCommands(listOf("list-sessions", "list-panes -a"))
             }
             assertEquals(2, responses.size)
@@ -589,7 +599,7 @@ class TmuxClientTest {
             // The holder is still parked (it never got its response). Releasing
             // its timeout lets it finish so the test tears down cleanly.
             timeoutGate.fireNextTimeout()
-            withTimeout(3_000) { holder.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { holder.await() }
             Unit
         } finally {
             client.close()
@@ -623,7 +633,7 @@ class TmuxClientTest {
                 "%begin 1700000000 8 0\n" +
                     "%end 1700000000 8 0\n",
             )
-            assertFalse(withTimeout(3_000) { response.await() }.isError)
+            assertFalse(withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }.isError)
         } finally {
             client.close()
         }
@@ -656,7 +666,7 @@ class TmuxClientTest {
             }
             timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
-            val outcome = withTimeout(3_000) { sent.await() }
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -688,7 +698,7 @@ class TmuxClientTest {
                     "list-panes-ok\n" +
                     "%end 1 11 0\n",
             )
-            val nextResponse = withTimeout(3_000) { next.await() }
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
             assertEquals(11L, nextResponse.number)
             assertEquals(listOf("list-panes-ok"), nextResponse.output)
             assertFalse("follow-up command must not disconnect client", client.disconnected.value)
@@ -721,7 +731,7 @@ class TmuxClientTest {
                 "%begin 1700000000 9 0\n" +
                     "%end 1700000000 9 0\n",
             )
-            assertFalse(withTimeout(3_000) { response.await() }.isError)
+            assertFalse(withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }.isError)
         } finally {
             client.close()
         }
@@ -774,7 +784,7 @@ class TmuxClientTest {
             }
             timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
-            val outcome = withTimeout(3_000) { sent.await() }
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -806,7 +816,7 @@ class TmuxClientTest {
                     "list-panes-ok\n" +
                     "%end 1 11 0\n",
             )
-            val nextResponse = withTimeout(3_000) { next.await() }
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
             assertEquals(11L, nextResponse.number)
             assertEquals(listOf("list-panes-ok"), nextResponse.output)
             assertFalse("follow-up command must not disconnect client", client.disconnected.value)
@@ -848,7 +858,7 @@ class TmuxClientTest {
                     "ok1\n" +
                     "%end 1 1 0\n",
             )
-            val res1 = withTimeout(3_000) { r1.await() }
+            val res1 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { r1.await() }
             assertEquals(1L, res1.number)
             assertEquals(listOf("ok1"), res1.output)
 
@@ -861,7 +871,7 @@ class TmuxClientTest {
                     "ok2\n" +
                     "%end 2 2 0\n",
             )
-            val res2 = withTimeout(3_000) { r2.await() }
+            val res2 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { r2.await() }
             assertEquals(2L, res2.number)
             assertEquals(listOf("ok2"), res2.output)
         } finally {
@@ -890,8 +900,8 @@ class TmuxClientTest {
                     "%output %0 again\n",
             )
 
-            val p0 = withTimeout(3_000) { pane0Events.await() }
-            val p1 = withTimeout(3_000) { pane1Events.await() }
+            val p0 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane0Events.await() }
+            val p1 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane1Events.await() }
 
             assertEquals(2, p0.size)
             assertEquals("%0", p0[0].paneId)
@@ -944,14 +954,14 @@ class TmuxClientTest {
                 )
             }
 
-            withTimeout(3_000) { firstGlobalEventSeen.await() }
-            val output = withTimeout(3_000) { targetOutput.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { firstGlobalEventSeen.await() }
+            val output = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { targetOutput.await() }
 
             assertEquals("%target", output.paneId)
             assertEquals("visible", String(output.data, StandardCharsets.US_ASCII))
 
             releaseGlobalCollector.complete(Unit)
-            withTimeout(3_000) { feedJob.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { feedJob.await() }
             globalCollector.cancel()
         } finally {
             releaseGlobalCollector.complete(Unit)
@@ -1006,18 +1016,18 @@ class TmuxClientTest {
                 shell.feed(codexScaleControlModeFlood(commandNumber = 1L, outputCount = outputCount))
             }
 
-            withTimeout(3_000) { firstOutputBlocked.await() }
-            val result = withTimeout(3_000) { response.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { firstOutputBlocked.await() }
+            val result = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
             assertFalse(result.isError)
             assertEquals(listOf("ok"), result.output)
             assertFalse(
                 "slow terminal output fanout must not be classified as a tmux disconnect",
                 client.disconnected.value,
             )
-            withTimeout(3_000) { feedJob.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { feedJob.await() }
 
             releasePaneCollector.complete(Unit)
-            withTimeout(3_000) { allOutputDelivered.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { allOutputDelivered.await() }
             assertEquals(
                 "pane output backlog must remain lossless; do not silently drop terminal bytes",
                 outputCount,
@@ -1084,22 +1094,22 @@ class TmuxClientTest {
                 shell.feed(codexScaleControlModeFlood(commandNumber = 1L, outputCount = 5_000))
             }
 
-            withTimeout(3_000) { firstOutputBlocked.await() }
-            val overflowEvent = withTimeout(3_000) { overflow.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { firstOutputBlocked.await() }
+            val overflowEvent = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { overflow.await() }
             assertEquals("%0", overflowEvent.paneId)
             assertTrue("overflow must report dropped events", overflowEvent.droppedEvents > 0)
-            withTimeout(3_000) {
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 while (diagnosticEvents.isEmpty()) { yield(); delay(10) }
             }
 
-            val result = withTimeout(3_000) { response.await() }
+            val result = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
             assertFalse(result.isError)
             assertEquals(listOf("ok"), result.output)
             assertFalse(
                 "output backlog overflow is a local terminal condition, not a transport disconnect",
                 client.disconnected.value,
             )
-            withTimeout(3_000) { feedJob.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { feedJob.await() }
             assertEquals(
                 "core overflow diagnostics must be first-overflow-only per pipe",
                 1,
@@ -1139,7 +1149,7 @@ class TmuxClientTest {
             while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
         }
         client.close()
-        val outcome = withTimeout(3_000) { response.await() }
+        val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
         assertTrue("expected failure, got ${outcome.getOrNull()}", outcome.isFailure)
         val ex = outcome.exceptionOrNull()!!
         assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
@@ -1183,7 +1193,7 @@ class TmuxClientTest {
             // (no late response is fed, so the quarantine expires).
             timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
-            val outcome = withTimeout(3_000) { sent.await() }
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -1225,7 +1235,7 @@ class TmuxClientTest {
                     "next-ok\n" +
                     "%end 1 11 0\n",
             )
-            val nextResponse = withTimeout(3_000) { next.await() }
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
             assertEquals(11L, nextResponse.number)
             assertEquals(listOf("next-ok"), nextResponse.output)
             assertFalse("follow-up command must not disconnect client", client.disconnected.value)
@@ -1272,7 +1282,7 @@ class TmuxClientTest {
                 while (shell.stdinAsString() != "kill-pane -t %0\n") { yield(); delay(10) }
             }
             timeoutGate.fireNextTimeout()
-            val outcome = withTimeout(3_000) { sent.await() }
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
             assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -1350,7 +1360,7 @@ class TmuxClientTest {
             // best-effort late-drain quarantine expire deterministically.
             timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
-            val outcome = withTimeout(3_000) { sent.await() }
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
             assertTrue("expected best-effort timeout, got ${outcome.getOrNull()}", outcome.isFailure)
             val ex = outcome.exceptionOrNull()!!
@@ -1378,7 +1388,7 @@ class TmuxClientTest {
                     "next-ok\n" +
                     "%end 1 10 0\n",
             )
-            val nextResponse = withTimeout(3_000) { next.await() }
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
             assertEquals(10L, nextResponse.number)
             assertEquals(listOf("next-ok"), nextResponse.output)
             assertFalse("follow-up command must not disconnect client", client.disconnected.value)
@@ -1569,7 +1579,7 @@ class TmuxClientTest {
         // In a real session tmux would close the stdio when the
         // control client exits; the fake mirrors that semantic.
         shell.closeStdoutPipe()
-        withTimeout(3_000) { detachJob.await() }
+        withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { detachJob.await() }
 
         assertTrue("expected detachCleanly to close the shell", shell.closed)
         assertTrue(
@@ -1607,7 +1617,7 @@ class TmuxClientTest {
             }
 
             shell.closeStdoutPipe()
-            withTimeout(3_000) {
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 while (!client.disconnected.value) { yield(); delay(10) }
             }
 
@@ -1643,7 +1653,7 @@ class TmuxClientTest {
         )
         try {
             client.connect()
-            withTimeout(3_000) {
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 while (!client.disconnected.value) { yield(); delay(10) }
             }
 
@@ -1717,7 +1727,7 @@ class TmuxClientTest {
         // command and disconnected-wait, so the call should unblock
         // within ~400ms even with no server response. We assert with
         // a generous ceiling to avoid CI swiftshader flake.
-        withTimeout(3_000) { client.detachCleanly(timeoutMs = 400L) }
+        withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { client.detachCleanly(timeoutMs = 400L) }
         val elapsed = System.currentTimeMillis() - started
 
         assertTrue("expected detachCleanly under 2s, took ${elapsed}ms", elapsed < 2_000L)
@@ -1809,9 +1819,9 @@ class TmuxClientTest {
                     "%end 1 1 0\n" +
                     "%output %0 after\n",
             )
-            val r = withTimeout(3_000) { response.await() }
+            val r = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
             assertEquals(listOf("row"), r.output)
-            val events = withTimeout(3_000) { collected.await() }
+            val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { collected.await() }
             assertEquals(4, events.size)
             assertTrue(events[0] is ControlEvent.Output)
             assertTrue(events[1] is ControlEvent.Begin)
@@ -1899,7 +1909,7 @@ class TmuxClientTest {
                     "%end 1 10 0\n",
             )
 
-            val timedOut = withTimeout(3_000) { outcome.await() }
+            val timedOut = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { outcome.await() }
             assertTrue("expected best-effort timeout, got ${timedOut.getOrNull()}", timedOut.isFailure)
             val ex = timedOut.exceptionOrNull()!!
             assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
@@ -1926,7 +1936,7 @@ class TmuxClientTest {
                     "next-ok\n" +
                     "%end 1 11 0\n",
             )
-            val nextResponse = withTimeout(3_000) { next.await() }
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
             assertEquals(11L, nextResponse.number)
             assertEquals(listOf("next-ok"), nextResponse.output)
             assertFalse("follow-up command must not disconnect client", client.disconnected.value)
@@ -1941,7 +1951,7 @@ class TmuxClientTest {
         name: String,
         predicate: (Map<String, Any?>) -> Boolean = { true },
     ): Map<String, Any?> =
-        withTimeout(3_000) {
+        withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
             while (true) {
                 synchronized(events) {
                     events.firstOrNull { it.first == name && predicate(it.second) }?.second
@@ -2024,7 +2034,7 @@ class TmuxClientTest {
          *   timeout must trip before the body reaches its write checkpoint.
          */
         suspend fun fireNextTimeout(afterWrite: Boolean = true) {
-            val slot = withTimeout(3_000) {
+            val slot = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 var pending = pendings.pollFirst()
                 while (pending == null) {
                     yield()

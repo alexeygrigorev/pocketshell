@@ -150,16 +150,18 @@ jobs:
   # never-black / wrong-session / EOF-on-switch regressions are caught at PR
   # time, not the next morning by nightly or at release by the gate.
   #
-  # Issue #691 (STABILIZE): MultiSessionSwitchJourneyE2eTest is QUARANTINED from
-  # this per-push subset — it WEDGES (its rapidMultiSessionSwitch... test starts
-  # but never finishes) on the GitHub android-emulator-runner AVD while passing
-  # on the local pooled AVD, hanging the job to the timeout cap. The per-push
-  # subset is now the picker-FREE DeepLinkSessionSwitchE2eTest plus
-  # ColdRestoreGoneSessionNoResurrectE2eTest, ReconnectRepaintE2eTest, and
-  # BackgroundGraceReconnectE2eTest (see scripts/ci-journey-suite.sh for the
-  # inline DEFERRED note). The suite also passes AndroidJUnitRunner's per-test
-  # `timeout_msec` so any future wedge fails fast instead of hanging, and the
-  # job `timeout-minutes` below is a 45-min backstop.
+  # Issue #710 (RE-ADDED): MultiSessionSwitchJourneyE2eTest is back in this
+  # per-push subset. It was quarantined under #691 because it WEDGED on the
+  # GitHub android-emulator-runner AVD (rapid A->B->C->A backgrounded a
+  # just-switched runtime whose VM-clear park stalled the main thread on an
+  # UNBOUNDED `cancelAndJoin()`). #710 bounds that teardown at
+  # SYNC_DETACH_TIMEOUT_MS so the main thread is guaranteed to return. The
+  # per-push subset is therefore the full A->B->C->A switch journey plus
+  # DeepLinkSessionSwitchE2eTest, ColdRestoreGoneSessionNoResurrectE2eTest,
+  # ReconnectRepaintE2eTest, and BackgroundGraceReconnectE2eTest (see
+  # scripts/ci-journey-suite.sh for the inline note). The suite also passes
+  # AndroidJUnitRunner's per-test `timeout_msec` so any future wedge fails fast
+  # instead of hanging, and the job `timeout-minutes` below is a 45-min backstop.
   #
   # This is intentionally the FAST subset (scripts/ci-journey-suite.sh), not the
   # full connected suite — the heavy/long-running + toxiproxy network-fault +

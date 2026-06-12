@@ -84,23 +84,22 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 # `terminal_foreground_reattach` it forbade was a benign fan-out marker, not a
 # reconnect; the assertion is narrowed to genuine reconnect signals only.
 #
-# Issue #691 (STABILIZE): MultiSessionSwitchJourneyE2eTest is QUARANTINED from
-# this per-push subset — it wedges (never finishes) on the GitHub
-# android-emulator-runner AVD while passing on the local pooled AVD, hanging the
-# job to the 75-min cap. See the DEFERRED note inline below. The remaining 4
-# classes stay per-push. A per-test instrumentation timeout (timeout_msec) is
-# also passed below so ANY future wedge fails fast (~5 min) instead of hanging.
+# Issue #710 (RE-ADDED): MultiSessionSwitchJourneyE2eTest is back in this
+# per-push subset. It was quarantined under #691 (58d9957f) because it wedged
+# (never finished) on the GitHub android-emulator-runner AVD while passing on
+# the local pooled AVD — the rapid A->B->C->A switch backgrounded a just-switched
+# runtime whose VM-clear park then stalled the main thread on an UNBOUNDED
+# `cancelAndJoin()` over a pane job wedged in a non-cooperative `-CC` socket read
+# (run 27368527630 burned ~67 min to the job cap). #710 bounds that teardown
+# (`CachedTmuxRuntime.closeCachedRuntime` + `closeCachedRuntimesBlocking`) at
+# SYNC_DETACH_TIMEOUT_MS so the main thread is guaranteed to return, removing the
+# CI-AVD wedge. The per-test `timeout_msec` backstop below stays as defense in
+# depth so ANY future wedge fails fast (~5 min) instead of hanging the job.
 JOURNEY_CLASSES=(
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
-  # DEFERRED (#691): MultiSessionSwitchJourneyE2eTest wedges on the GitHub
-  # android-emulator-runner AVD (passes on the local pooled AVD). The hung run
-  # 27368527630 reports show its rapidMultiSessionSwitchAlwaysShowsCorrect...
-  # test STARTED (instrumentation current=3) but NEVER finished — the per-test
-  # logcat trails off into idle system noise with no `TestRunner: finished`,
-  # and the job burned ~67 min until the job timeout cancelled it. This is the
-  # picker/lease-enumeration wedge family (CI-AVD-only). Re-add after the wedge
-  # is fixed on the CI AVD (needs the terminal lane, locked by #708/#687).
-  # "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
+  # RE-ADDED (#710): the CI-AVD wedge was the unbounded VM-clear park teardown,
+  # now bounded at SYNC_DETACH_TIMEOUT_MS. See the block comment above.
+  "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"

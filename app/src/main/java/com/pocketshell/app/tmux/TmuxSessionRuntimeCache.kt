@@ -9,6 +9,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.LinkedHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -265,18 +266,43 @@ internal data class CachedTmuxRuntime(
 internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
     detachTimeoutMs: Long = 1_000L,
 ) {
-    try {
+    // Issue #710: this teardown must be bounded so a pane job wedged in a
+    // non-cooperative `-CC` socket read (which never honours cancellation)
+    // cannot freeze the caller. `onCleared()` parks the runtime on the MAIN
+    // thread via `runBlocking`, so an unbounded `cancelAndJoin()` or a
+    // `NonCancellable` `lease.release()` would stall the main thread
+    // indefinitely (activity never DESTROYED; real-device freeze on
+    // background-mid-rapid-switch).
+    //
+    // Bound only the steps that can suspend forever: the three cancel/join
+    // sweeps and the `lease.release()`. Each gets its own [detachTimeoutMs]
+    // budget so the normal clean-close path (every step finishes in low
+    // single-digit millis) is unaffected, while a single wedged job/lease can't
+    // consume another step's budget. After a timeout we abandon the stuck
+    // jobs/lease to the grace TTL / GC and return. `detachCleanly` is already
+    // internally bounded and stays as-is.
+    //
+    // If a join times out we stop joining and fall through to the non-suspending
+    // cleanup (queue close, producer detach, client close) so those still run.
+    withTimeoutOrNull(detachTimeoutMs) {
         paneProducerJobs.values.forEach { it.cancelAndJoin() }
         paneInputJobs.values.forEach { it.cancelAndJoin() }
         paneAgentJobs.values.forEach { it.cancelAndJoin() }
-        paneInputQueues.values.forEach { it.close() }
-        panes.forEach { pane ->
-            runCatching { pane.terminalState.detachExternalProducer() }
-        }
-        runCatching { client.detachCleanly(timeoutMs = detachTimeoutMs) }
-    } finally {
-        runCatching { client.close() }
-        withContext(NonCancellable) {
+    }
+    paneInputQueues.values.forEach { runCatching { it.close() } }
+    panes.forEach { pane ->
+        runCatching { pane.terminalState.detachExternalProducer() }
+    }
+    runCatching { client.detachCleanly(timeoutMs = detachTimeoutMs) }
+    runCatching { client.close() }
+    withContext(NonCancellable) {
+        // A wedged `lease.release()` (e.g. a transport stuck in a blocking
+        // close) must not outlive the budget either: bound it so the main
+        // thread is guaranteed to return. The abandoned lease falls to the
+        // grace TTL / GC. NonCancellable keeps the release itself from being
+        // cancelled by the parent runBlocking scope; withTimeoutOrNull adds
+        // the wall-clock ceiling on top of that.
+        withTimeoutOrNull(detachTimeoutMs) {
             runCatching { lease?.release() }
         }
     }

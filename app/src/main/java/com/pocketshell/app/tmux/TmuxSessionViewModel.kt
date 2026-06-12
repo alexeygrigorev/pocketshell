@@ -2731,10 +2731,19 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun closeCachedRuntimesBlocking(runtimes: List<CachedTmuxRuntime>) {
         if (runtimes.isEmpty()) return
+        // Issue #710: this runs on the MAIN thread (onCleared park-on-clear).
+        // [closeCachedRuntime] already bounds its own suspending steps at
+        // SYNC_DETACH_TIMEOUT_MS, but we add a belt-and-suspenders outer ceiling
+        // so the main thread is GUARANTEED to return even if a future teardown
+        // step regresses to unbounded. The outer budget scales with the runtime
+        // count (each runtime gets its detach budget) so the normal one/two
+        // runtime park stays fast.
         runCatching {
             runBlocking(Dispatchers.IO) {
-                runtimes.forEach { runtime ->
-                    runtime.closeCachedRuntime(detachTimeoutMs = SYNC_DETACH_TIMEOUT_MS)
+                withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS * runtimes.size) {
+                    runtimes.forEach { runtime ->
+                        runtime.closeCachedRuntime(detachTimeoutMs = SYNC_DETACH_TIMEOUT_MS)
+                    }
                 }
             }
         }

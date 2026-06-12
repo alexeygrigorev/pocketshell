@@ -178,6 +178,22 @@ fun FileViewerScreen(
     val state by viewModel.state.collectAsState()
     val readingPrefs by viewModel.readingPrefs.collectAsState()
     val reviewState by viewModel.reviewState.collectAsState()
+
+    // Issue #714 slice 2 — surface the review-submit outcome as a toast. Success
+    // confirms how many comments landed where; failure shows the calm reason
+    // (the pending comments are kept by the ViewModel so nothing is lost).
+    val context = LocalContext.current
+    LaunchedEffect(viewModel) {
+        viewModel.reviewEvents.collect { event ->
+            val message = when (event) {
+                is ReviewSubmitEvent.Success ->
+                    "Sent ${event.count} ${if (event.count == 1) "comment" else "comments"} to ${event.host}"
+                is ReviewSubmitEvent.Failure -> event.message
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     FileViewerScaffold(
         hostName = hostName,
         state = state,

@@ -88,6 +88,8 @@ class FileViewerDockerTest {
                     for (path in seededPaths) {
                         runCatching { session.exec("rm -f '$path'") }
                     }
+                    // Sweep the review-submit inbox so a rerun starts clean.
+                    runCatching { session.exec("rm -rf \"\$HOME/inbox/pocketshell/reviews\"") }
                 }
             }
         }
@@ -374,6 +376,92 @@ class FileViewerDockerTest {
             leasing.handshakeCount.get(),
         )
         warmLease.release()
+    }
+
+    @Test
+    fun submitsAReviewYamlToTheReviewsInboxOverTheReusedLease(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val srcPath = "/tmp/issue714-review-$suffix.kt"
+        val srcBody = "val x = doThing(y)\nreturn null\n"
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec("cat > '$srcPath' <<'PSEOF'\n$srcBody\nPSEOF")
+                assertEquals("seed source exit", 0, exit.exitCode)
+                seededPaths += srcPath
+                // Start from a clean reviews inbox so we can assert on the one file.
+                session.exec("rm -rf \"\$HOME/inbox/pocketshell/reviews\"")
+            } ?: error("could not connect to seed fixture file")
+        }
+
+        val viewModel = FileViewerViewModel(
+            InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+            leasing.manager,
+        )
+        composeRule.setContent {
+            FileViewerScreen(
+                hostId = TEST_HOST_ID,
+                hostName = "agents",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                remotePath = srcPath,
+                cwd = null,
+                onBack = {},
+                viewModel = viewModel,
+            )
+        }
+
+        // The text view renders, then we enter review mode and add a line +
+        // file comment (driven through the ViewModel — the same state the gutter
+        // tap writes to), and submit through the real tray Submit button.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(FILE_VIEWER_TEXT_TAG)
+        }
+        composeRule.runOnUiThread {
+            viewModel.toggleReviewMode()
+            viewModel.setLineComment(1, "this allocation is on the hot path")
+            viewModel.setFileComment("overall structure is good")
+        }
+        composeRule.waitForIdle()
+
+        // Open the pending tray and submit.
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTagExists(FILE_VIEWER_REVIEW_TRAY_TAG)
+        }
+        composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_TRAY_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTagExists(FILE_VIEWER_REVIEW_SUBMIT_TAG)
+        }
+        composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_SUBMIT_TAG).performClick()
+
+        // The pending set clears once the SSH write lands.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            !viewModel.reviewState.value.hasPending
+        }
+        WalkthroughScreenshotArtifacts.capture("issue714-review-submitted")
+
+        // Read the YAML back off the host and prove it parses as a
+        // pocketshell_review with the expected fields.
+        val yaml = withTimeout(20_000) {
+            connect()?.use { session ->
+                val ls = session.exec("ls \"\$HOME/inbox/pocketshell/reviews/\"")
+                assertEquals("reviews dir listing exit", 0, ls.exitCode)
+                val name = ls.stdout.lineSequence().map { it.trim() }
+                    .firstOrNull { it.endsWith(".yaml") }
+                    ?: error("no .yaml landed in the reviews inbox; ls=\n${ls.stdout}")
+                val cat = session.exec("cat \"\$HOME/inbox/pocketshell/reviews/$name\"")
+                assertEquals("cat review yaml exit", 0, cat.exitCode)
+                cat.stdout
+            } ?: error("could not connect to read the review yaml")
+        }
+        assertTrue("YAML must be a pocketshell_review, was:\n$yaml", yaml.contains("type: pocketshell_review"))
+        assertTrue(yaml.contains("host: agents"))
+        assertTrue(yaml.contains("file: $srcPath"))
+        assertTrue(yaml.contains("this allocation is on the hot path"))
+        assertTrue(yaml.contains("overall structure is good"))
+        assertTrue("YAML must carry the verbatim line code, was:\n$yaml", yaml.contains("val x = doThing(y)"))
     }
 
     private suspend fun connect() = SshConnection.connect(

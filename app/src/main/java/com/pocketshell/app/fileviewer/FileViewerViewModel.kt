@@ -6,6 +6,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
+import com.pocketshell.app.share.FilenameSanitiser
+import com.pocketshell.app.share.ShareUploader
+import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshFileNotFoundException
 import com.pocketshell.core.ssh.SshFileTooLargeException
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -15,14 +18,18 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 import javax.inject.Inject
 
 /**
@@ -149,6 +156,19 @@ class FileViewerViewModel @Inject constructor(
     private val _reviewState = MutableStateFlow(ReviewState())
     val reviewState: StateFlow<ReviewState> = _reviewState.asStateFlow()
 
+    /**
+     * One-shot results of a [submitReview] (issue #714, slice 2). The screen
+     * collects this to surface a confirmation / error toast. A buffered
+     * [MutableSharedFlow] (replay 0, extraBufferCapacity 1) so an emit from the
+     * submit coroutine never suspends and a transient lack of collectors (a
+     * config change mid-submit) doesn't deadlock the write.
+     */
+    private val _reviewEvents = MutableSharedFlow<ReviewSubmitEvent>(
+        replay = 0,
+        extraBufferCapacity = 1,
+    )
+    val reviewEvents: SharedFlow<ReviewSubmitEvent> = _reviewEvents.asSharedFlow()
+
     private var loadJob: Job? = null
     private var lastRequest: Request? = null
 
@@ -215,34 +235,107 @@ class FileViewerViewModel @Inject constructor(
     }
 
     /**
-     * Build the `pocketshell_review` YAML for the current pending comments and
-     * (slice 1) log + expose it. The SSH write to the reviewed host's
-     * `~/inbox/pocketshell/reviews/` inbox is slice 2 — wired but stubbed here.
+     * Submit the pending review (issue #714, slice 2). Builds the
+     * `pocketshell_review` YAML for the current pending comments and writes it to
+     * the reviewed host's `~/inbox/pocketshell/reviews/<sanitised>-<ts>.yaml` over
+     * the SAME warm viewer SSH lease — NO new connection (D21): the borrow is
+     * keyed byte-identically to the viewer's `fetch`, so it reuses the pooled
+     * transport and only releases the refcount.
+     *
+     * Lifecycle:
+     *  - sets [ReviewState.submitting] true for the duration (the tray Submit
+     *    button disables off this);
+     *  - on success clears the pending set and emits a confirmation
+     *    [ReviewSubmitEvent.Success];
+     *  - on failure KEEPS every pending comment (nothing lost) and emits a calm
+     *    [ReviewSubmitEvent.Failure] (message via the [ShareUploader]-shaped
+     *    [reviewErrorMessage]).
      *
      * [host] is the host alias (the YAML `host` field; the screen threads it in
-     * from the navigation destination). Returns the built YAML so callers/tests
-     * can inspect it; returns `null` when there are no pending comments.
+     * from the navigation destination). A no-op when there are no pending
+     * comments, the open file isn't text, or a submit is already in flight.
      */
-    fun submitReview(host: String): String? {
+    fun submitReview(host: String) {
         val current = _reviewState.value
-        if (!current.hasPending) return null
-        val text = (_state.value as? FileViewerUiState.TextContent) ?: return null
-        val lines = text.content.split("\n")
-        val yaml = ReviewExport.buildReviewYaml(
-            state = current,
-            host = host,
-            file = text.displayPath,
-            lines = lines,
-            submittedAt = isoUtcNow(),
-        )
-        // TODO(#714 slice 2): deliver `yaml` to the reviewed host's inbox at
-        //   `~/inbox/pocketshell/reviews/<sanitized-file>-<timestamp>.yaml` over
-        //   the reused viewer SSH lease (LeaseSessionExec.withSession, no new
-        //   dial — D21), then clear the pending set on success / keep it on
-        //   failure with a toast. Slice 1 only builds + logs the YAML.
-        Log.d(REVIEW_LOG_TAG, "Built pocketshell_review YAML (${current.pendingCount} comments):\n$yaml")
-        return yaml
+        if (!current.hasPending || current.submitting) return
+        val text = (_state.value as? FileViewerUiState.TextContent) ?: return
+        val request = lastRequest ?: return
+
+        _reviewState.value = current.copy(submitting = true)
+        viewModelScope.launch {
+            val lines = text.content.split("\n")
+            val yaml = ReviewExport.buildReviewYaml(
+                state = current,
+                host = host,
+                file = text.displayPath,
+                lines = lines,
+                submittedAt = isoUtcNow(),
+            )
+            Log.d(REVIEW_LOG_TAG, "Submitting pocketshell_review YAML (${current.pendingCount} comments):\n$yaml")
+
+            val result = withContext(Dispatchers.IO) {
+                writeReview(request, text.displayPath, yaml)
+            }
+            result.fold(
+                onSuccess = { remotePath ->
+                    // Clear the pending set but keep review mode active so the
+                    // user can keep reviewing the same file.
+                    _reviewState.value = _reviewState.value.cleared()
+                    _reviewEvents.tryEmit(
+                        ReviewSubmitEvent.Success(host = host, count = current.pendingCount, remotePath = remotePath),
+                    )
+                },
+                onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    // Keep the pending comments — nothing is silently lost.
+                    _reviewState.value = _reviewState.value.copy(submitting = false)
+                    _reviewEvents.tryEmit(ReviewSubmitEvent.Failure(reviewErrorMessage(error)))
+                    Log.w(REVIEW_LOG_TAG, "Review submit failed: ${error.message}", error)
+                },
+            )
+        }
     }
+
+    /**
+     * Write [yaml] to `~/inbox/pocketshell/reviews/<sanitised>-<ts>.yaml` on the
+     * reviewed host over the reused viewer lease. Mirrors [ShareUploader]'s
+     * `mkdir -p` + `uploadStream` (`cat > '<path>'`) mechanism, but drives it
+     * through [LeaseSessionExec.withSession] so it borrows the SAME warm
+     * transport the viewer already holds instead of dialing a fresh connection.
+     * Resolves `$HOME` to an absolute prefix first (the single-quoted `cat >`
+     * path never expands `~`). Returns the absolute remote path written.
+     */
+    private suspend fun writeReview(
+        request: Request,
+        displayPath: String,
+        yaml: String,
+    ): Result<String> =
+        LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = request.toLeaseTarget(),
+        ) { session ->
+            val home = remoteHomeDirectory(session)
+                ?: conventionalRemoteHome(request.username)
+                ?: throw SshException("Couldn't resolve the remote home directory")
+            val reviewsDir = "$home/$REVIEWS_SUBDIR"
+            val mk = session.exec("mkdir -p '$reviewsDir'")
+            if (mk.exitCode != 0) {
+                throw SshException(
+                    "Couldn't create $reviewsDir: ${mk.stderr.ifBlank { mk.stdout.trim() }.ifBlank { "exit ${mk.exitCode}" }}",
+                )
+            }
+            val name = reviewFileName(displayPath)
+            val remotePath = "$reviewsDir/$name"
+            val bytes = yaml.toByteArray(Charsets.UTF_8)
+            bytes.inputStream().use { input ->
+                session.uploadStream(
+                    input = input,
+                    length = bytes.size.toLong(),
+                    name = name,
+                    remotePath = remotePath,
+                )
+            }
+        }
 
     /**
      * Bind to a host + path and fetch. Re-binding with the identical request
@@ -485,8 +578,51 @@ class FileViewerViewModel @Inject constructor(
 
     companion object {
 
-        /** Logcat tag for the slice-1 review-YAML build (slice 2 writes it over SSH). */
+        /** Logcat tag for the review-YAML submit (slice 2 writes it over SSH). */
         internal const val REVIEW_LOG_TAG = "FileViewerReview"
+
+        /** Inbox subdirectory (under `~/inbox/pocketshell/`) reviews land in. */
+        internal const val REVIEWS_SUBDIR: String = "inbox/pocketshell/reviews"
+
+        /**
+         * Remote filename for a submitted review: `<sanitised-basename>-<ts>.yaml`.
+         * Reuses [FilenameSanitiser] (shell-safe, single-quote-safe `[A-Za-z0-9._-]`)
+         * + [ShareUploader.formatTimestamp] so it mirrors the screenshot-inbox
+         * naming; the `.yaml` extension is forced regardless of the source file's
+         * extension. The basename is derived from the reviewed file's path.
+         */
+        internal fun reviewFileName(displayPath: String): String {
+            val basename = displayPath.substringAfterLast('/').ifBlank { "review" }
+            // Keep the source file's name as the stem; the review export is YAML
+            // regardless of the reviewed file's type, so force the `.yaml` ext.
+            val sanitised = FilenameSanitiser.sanitise(basename)
+            val stem = sanitised.render().ifBlank { "review" }
+            val timestamp = ShareUploader.formatTimestamp(System.currentTimeMillis())
+            return "$stem-$timestamp.yaml"
+        }
+
+        /**
+         * Map a submit failure to a short, calm, one-line message — the same
+         * shape [ShareUploader] uses for shares (never let a JVM stack dump reach
+         * the toast). Narrow keyword match on the common SSH failures, with a
+         * trimmed first-line fallback.
+         */
+        internal fun reviewErrorMessage(error: Throwable): String {
+            val raw = (error.message ?: error.javaClass.simpleName).trim()
+            val lower = raw.lowercase(Locale.ROOT)
+            return when {
+                lower.contains("permission denied") -> raw.replaceFirstChar { it.uppercase() }
+                lower.contains("connection refused") -> "Connection refused"
+                lower.contains("connection reset") || lower.contains("connection closed") ->
+                    "Connection lost while sending comments"
+                lower.contains("unknownhost") || lower.contains("unknown host") ->
+                    "Cannot resolve host"
+                lower.contains("auth") -> "Authentication failed"
+                lower.contains("timed out") || lower.contains("timeout") ->
+                    "Connection timed out"
+                else -> raw.lineSequence().firstOrNull()?.take(160) ?: "Couldn't send comments"
+            }
+        }
 
         /**
          * Hard ceiling on a previewable file. 20 MB comfortably covers any

@@ -278,6 +278,41 @@ Genuine design-reference mockups that belong in the committed doc set may still
 be added under `docs/` deliberately; routine feedback screenshots use this
 release-asset path.
 
+## Maintainer File-Review Comments → `reviews/` inbox (pickup convention)
+
+The file viewer's review-comments flow (#714) is the code/text-feedback sibling
+of the screenshot→inbox flow. In the in-app file viewer the maintainer leaves
+per-line and/or whole-file comments on a host file, taps **Submit**, and the app
+writes ONE YAML file over the SAME warm viewer SSH session (no new connection —
+D21) to the reviewed host at:
+
+```
+~/inbox/pocketshell/reviews/<sanitised-file>-<timestamp>.yaml
+```
+
+The orchestrator/agent watches `~/inbox/pocketshell/reviews/` on a host the same
+way it watches `~/inbox/pocketshell/` for screenshots. On a new `*.yaml`:
+
+1. Read it. The document is a `pocketshell_review` (schema 1):
+   - `host` — the host alias the review was filed against.
+   - `file` — the absolute remote path of the reviewed file.
+   - `submitted_at` — ISO-8601 UTC.
+   - `comments` — a list of either a per-line comment
+     (`{line: <n>, code: "<verbatim source of that line>", text: "<comment>"}`)
+     or a file-level comment (`{scope: file, text: "<comment>"}`). Multi-line
+     `text` is emitted as a literal block scalar (`|`), so read the whole block.
+2. Apply the feedback to `file` on `host`. The `code` field is a re-anchor: if
+   the agent's copy of the file has drifted by a few lines, match on the verbatim
+   `code` to relocate the commented line rather than trusting the raw `line`
+   number blindly.
+3. Archive or delete the YAML once handled, so the inbox doesn't pile up (same
+   hygiene as the screenshot inbox).
+
+One-way for v1 (maintainer → agent): the app does not read agent replies back
+out of `reviews/`. Treat the YAML as a trusted maintainer artifact — it is
+authored by the maintainer's own device over their own SSH session, not an
+untrusted third party.
+
 ## Workflow Per Issue
 
 1. Orchestrator refines the issue. Acceptance criteria must be specific and verifiable.

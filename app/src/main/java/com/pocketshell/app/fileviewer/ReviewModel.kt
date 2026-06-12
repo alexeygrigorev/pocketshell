@@ -82,6 +82,25 @@ data class ReviewState(
 }
 
 /**
+ * One-shot result of a review submit (issue #714, slice 2). The file viewer
+ * screen collects these from [FileViewerViewModel.reviewEvents] and surfaces a
+ * toast — a confirmation on success, a calm one-line error on failure.
+ */
+sealed interface ReviewSubmitEvent {
+    /**
+     * The review YAML was written to [remotePath] on [host]; [count] comments
+     * were sent. The pending set has been cleared.
+     */
+    data class Success(val host: String, val count: Int, val remotePath: String) : ReviewSubmitEvent
+
+    /**
+     * The submit failed; [message] is a short user-facing reason. The pending
+     * comments are kept (nothing lost) so the user can retry.
+     */
+    data class Failure(val message: String) : ReviewSubmitEvent
+}
+
+/**
  * One comment in the `pocketshell_review` export — either anchored to a line
  * (with the verbatim [code] of that line so an agent can re-locate it if its
  * copy drifted) or scoped to the whole file.

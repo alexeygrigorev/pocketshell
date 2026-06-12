@@ -138,6 +138,101 @@ run_class() {
     --stacktrace
 }
 
+# ---------------------------------------------------------------------------
+# Issue #724: optional cross-lane sharding.
+#
+# The DEFAULT path (below this block) is unchanged: a SINGLE serial loop over
+# the load-bearing classes on one emulator + agents:2222, WITH the #712
+# per-class retry-once. That is the clean fallback CI relies on — the GitHub
+# android-emulator-runner gives one AVD and the workflow brings up one `agents`
+# on 2222, so `POCKETSHELL_JOURNEY_SHARD` is never set there and this block is
+# skipped entirely.
+#
+# When run on the multi-lane dev box, opt in with `POCKETSHELL_JOURNEY_SHARD=1`
+# (requires scripts/avd-pool.sh + scripts/agents-pool.sh warmed). Each lane is a
+# background `connected-test.sh --pool` invocation that self-allocates a free
+# (emulator serial, agents port) pair, so the classes run across however many
+# lanes are free instead of strictly serially. The number of concurrent lanes
+# is bounded by POCKETSHELL_JOURNEY_LANES (default 2). connected-test's own
+# per-lane flock means we never oversubscribe a serial/port; lanes that can't
+# claim a pair simply wait, so this degrades gracefully to serial when only one
+# lane is free. Each lane carries the SAME pocketshellCi + timeout_msec args as
+# the serial run_class, and a failing lane is retried once (parity with #712)
+# so a CI-AVD infra flake on a sharded run recovers exactly as in serial.
+shard_class() {
+  # Run ONE class on a self-allocated pool lane, returning the lane's exit code.
+  local idx="$1"
+  local fqcn="$2"
+  "$REPO_ROOT/scripts/connected-test.sh" --pool --suffix "ij$idx" \
+    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+    -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
+    -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
+    --stacktrace
+}
+
+shard_run() {
+  local lanes="${POCKETSHELL_JOURNEY_LANES:-2}"
+  echo "=========================================================="
+  echo ">>> SHARDED journey run (issue #724): up to ${lanes} concurrent lanes"
+  echo "    each lane self-allocates (emulator serial, agents port) via"
+  echo "    scripts/connected-test.sh --pool  (retry-once per class — #712)"
+  echo "=========================================================="
+
+  local rc=0
+  local idx=0
+  local -a pids=()
+  local -a pid_classes=()
+  local -a pid_idx=()
+  for fqcn in "${JOURNEY_CLASSES[@]}"; do
+    # Throttle to `lanes` concurrent background runs.
+    while (( $(jobs -rp | wc -l) >= lanes )); do
+      wait -n 2>/dev/null || true
+    done
+    idx=$((idx + 1))
+    local logf
+    logf="$ARTIFACT_DIR/shard-lane-$idx-$(basename "$fqcn").log"
+    echo ">>> dispatch lane $idx: $fqcn (log: $logf)"
+    (
+      # Per-class retry-once (parity with the serial #712 path): a CI-AVD infra
+      # flake clears on the next attempt; a real regression fails both.
+      if shard_class "$idx" "$fqcn"; then
+        exit 0
+      fi
+      echo "SHARD_LANE_RETRY: $fqcn failed attempt 1 — retrying once"
+      if shard_class "$idx" "$fqcn"; then
+        echo "JOURNEY_FLAKE_RECOVERED: $fqcn passed on retry (sharded lane $idx)"
+        exit 0
+      fi
+      exit 1
+    ) > "$logf" 2>&1 &
+    pids+=("$!")
+    pid_classes+=("$fqcn")
+    pid_idx+=("$idx")
+  done
+
+  # Collect every lane's verdict.
+  local i
+  for i in "${!pids[@]}"; do
+    if ! wait "${pids[$i]}"; then
+      echo "SHARD_LANE_FAILED: ${pid_classes[$i]} (lane ${pid_idx[$i]}, log: $ARTIFACT_DIR/shard-lane-${pid_idx[$i]}-$(basename "${pid_classes[$i]}").log)"
+      rc=1
+    else
+      echo "SHARD_LANE_PASS: ${pid_classes[$i]} (lane ${pid_idx[$i]})"
+    fi
+  done
+  return "$rc"
+}
+
+if [[ "${POCKETSHELL_JOURNEY_SHARD:-0}" == "1" ]]; then
+  if shard_run; then
+    echo "Sharded journey run: PASS"
+    exit 0
+  else
+    echo "Sharded journey run: FAIL (see shard-lane-*.log under $ARTIFACT_DIR)"
+    exit 1
+  fi
+fi
+
 # Issue #712: per-class retry-once for CI-AVD infra flakes.
 #
 # The per-push job runs on the GitHub `android-emulator-runner` AVD — a 2-core

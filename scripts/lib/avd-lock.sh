@@ -89,11 +89,16 @@ pocketshell_acquire_avd_lock() {
   trap pocketshell_release_all EXIT
 }
 
-# Combined EXIT handler so the single-lock release and the pool-claim release
-# never clobber each other's trap. Both acquire paths register THIS handler;
-# each inner release is a no-op when its own state is absent.
+# Combined EXIT handler so the single-lock release, the pool-claim release, and
+# the agents-fixture-port release never clobber each other's trap. Every acquire
+# path registers THIS handler; each inner release is a no-op when its own state
+# is absent. The agents-port release (issue #724) is invoked defensively only
+# when that helper has been sourced into the shell.
 pocketshell_release_all() {
   pocketshell_release_pool_serial
+  if declare -F pocketshell_release_agents_port >/dev/null 2>&1; then
+    pocketshell_release_agents_port
+  fi
   pocketshell_release_avd_lock
 }
 

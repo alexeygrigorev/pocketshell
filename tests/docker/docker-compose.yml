@@ -63,14 +63,39 @@ services:
   # Deterministic local target for emulator smoke tests. It exposes the
   # same SSH port as `sshd`; run one or the other, not both:
   #   docker compose -f tests/docker/docker-compose.yml up -d --build agents
+  #
+  # Issue #724 (agents-fixture pool): this service is bringable up as N
+  # ISOLATED instances on distinct host ports so parallel emulator lanes each
+  # get their OWN SSH/tmux fixture and never share tmux state. Two knobs make
+  # that work, BOTH defaulted so the single-lane path is byte-for-byte unchanged:
+  #
+  #   * AGENTS_HOST_PORT  — host port to publish (default 2222). A lane sets its
+  #     claimed port, e.g. AGENTS_HOST_PORT=2243.
+  #   * AGENTS_CONTAINER_NAME — the daemon-global container name (default
+  #     `pocketshell-test-agents`, kept so the existing single-lane
+  #     `docker inspect pocketshell-test-agents` diagnostics still resolve). A
+  #     fixed name is global to the Docker daemon and ignores the compose
+  #     project, so two concurrent `docker compose up` invocations would COLLIDE
+  #     on it; a lane therefore overrides it to a per-lane name (e.g.
+  #     `pocketshell-test-agents-2243`) AND runs under a distinct
+  #     COMPOSE_PROJECT_NAME. With both overridden, lanes are fully independent.
+  #
+  # Bring up one lane (the lane allocator does this for you):
+  #   COMPOSE_PROJECT_NAME=psagents2243 \
+  #     AGENTS_HOST_PORT=2243 AGENTS_CONTAINER_NAME=pocketshell-test-agents-2243 \
+  #     docker compose -f tests/docker/docker-compose.yml up -d --build agents
+  # Tear it down:
+  #   COMPOSE_PROJECT_NAME=psagents2243 \
+  #     AGENTS_HOST_PORT=2243 AGENTS_CONTAINER_NAME=pocketshell-test-agents-2243 \
+  #     docker compose -f tests/docker/docker-compose.yml down -v
   agents:
     build:
       context: ../..
       dockerfile: tests/docker/Dockerfile.agents
     image: pocketshell-test:agents
-    container_name: pocketshell-test-agents
+    container_name: ${AGENTS_CONTAINER_NAME:-pocketshell-test-agents}
     ports:
-      - "2222:22"
+      - "${AGENTS_HOST_PORT:-2222}:22"
     healthcheck: *ssh-healthcheck
 
   # Issue #632 (slice 2): the 7 bootstrap setup-detection fixtures bind disjoint

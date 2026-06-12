@@ -187,6 +187,36 @@ ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.
 The `agents` and `sshd` compose services both map host port 2222. Run one at a
 time.
 
+### Agents-fixture pool — parallel journey lanes (issue #724)
+
+For parallel emulator+Docker journey testing (the Docker half of the #674 AVD
+pool), the `agents` fixture is bringable up as N ISOLATED instances on distinct
+host ports — `2222 2243 2244 2245` by default — so two emulator lanes never
+share one container's tmux state. Each lane runs under its own
+`COMPOSE_PROJECT_NAME` + per-port container name, both defaulted to the legacy
+single-lane identity (`pocketshell-test-agents` on 2222) when no override is
+given.
+
+Bring lanes up / inspect / tear down with `scripts/agents-pool.sh`:
+
+```bash
+scripts/agents-pool.sh up 2222 2243   # warm two isolated agents fixtures
+scripts/agents-pool.sh status         # PORT / CLAIMED / HEALTH / CONTAINER
+scripts/agents-pool.sh down 2222 2243 # tear the lanes down (-v)
+```
+
+`scripts/connected-test.sh --pool --suffix iN` then self-allocates a full lane —
+a free emulator serial (per-serial flock, #674) AND a free agents port (per-port
+flock + brings the fixture up healthy) — and threads the port into the
+androidTest suite via
+`-Pandroid.testInstrumentationRunnerArguments.agentsPort=<port>`. Two concurrent
+invocations land on different `(emulator, port)` lanes with no cross-talk. The
+androidTest target host:port is centralized in `AgentsFixtureTarget`
+(`AndroidSshTestFixtures.kt`), defaulting to `10.0.2.2:2222`, so single-lane and
+CI runs (one emulator, one `agents` on 2222) are unchanged. `ci-journey-suite.sh`
+shards across lanes only when `POCKETSHELL_JOURNEY_SHARD=1`; its default is the
+clean single-lane serial loop.
+
 ### Fixture JSONLs for agent tests
 
 The agent target seeds `testuser`'s home with recent deterministic fixtures on

@@ -24,9 +24,85 @@ import java.io.FileOutputStream
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
-const val DEFAULT_HOST: String = "10.0.2.2"
-const val DEFAULT_PORT: Int = 2222
-const val DEFAULT_USER: String = "testuser"
+/**
+ * Issue #724: the SINGLE source of truth for the connected-test SSH/tmux
+ * fixture's host:port. Historically every journey/Docker test hard-coded
+ * `10.0.2.2:2222`, so parallel lanes all targeted ONE shared `agents`
+ * container and corrupted each other's tmux state. This object centralizes
+ * the target so a per-lane allocator can point a run at its OWN fixture.
+ *
+ * The port (and, for completeness, the host) are read from instrumentation
+ * runner arguments, DEFAULTING to `10.0.2.2:2222` (D22: one config source,
+ * defaulted — there is no second "legacy" hard-coded path). The lane allocator
+ * in `scripts/connected-test.sh --pool` threads its claimed agents port through
+ * gradle as:
+ *
+ *   -Pandroid.testInstrumentationRunnerArguments.agentsPort=2243
+ *
+ * With no arg present every test behaves exactly as before (host `10.0.2.2`,
+ * port `2222`, user `testuser`), so single-lane and CI runs are unchanged.
+ *
+ * NOTE (phase-2 follow-up, issue #724): the 5 load-bearing journey classes
+ * (`DeepLinkSessionSwitchE2eTest`, `MultiSessionSwitchJourneyE2eTest`,
+ * `ColdRestoreGoneSessionNoResurrectE2eTest`, `ReconnectRepaintE2eTest`,
+ * `BackgroundGraceReconnectE2eTest`) plus every test that already imports the
+ * `DEFAULT_HOST` / `DEFAULT_PORT` / `DEFAULT_USER` identifiers below now resolve
+ * their target through this single helper automatically (the identifiers are
+ * property-backed). The remaining ~15 `*DockerTest` files that STILL hard-code
+ * their own `10.0.2.2` / `2222` string/int literals (e.g. the local
+ * `const val DEFAULT_HOST` in `HostBootstrapScenarioSuiteTest` and
+ * `DefaultHostLaunchE2eTest`) are an explicit phase-2 literal sweep, kept out
+ * of this slice to avoid conflicting with in-flight androidTest work.
+ */
+object AgentsFixtureTarget {
+    private const val HOST_ARG_KEY: String = "agentsHost"
+    private const val PORT_ARG_KEY: String = "agentsPort"
+
+    const val DEFAULT_FIXTURE_HOST: String = "10.0.2.2"
+    const val DEFAULT_FIXTURE_PORT: Int = 2222
+    const val DEFAULT_FIXTURE_USER: String = "testuser"
+
+    /**
+     * The fixture SSH host. The emulator reaches the host loopback at
+     * `10.0.2.2`, so this is overridden only in exotic setups; it stays
+     * defaulted for every normal run.
+     */
+    val host: String
+        get() = InstrumentationRegistry.getArguments()
+            .getString(HOST_ARG_KEY)
+            ?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_FIXTURE_HOST
+
+    /**
+     * The fixture SSH host port. Defaults to 2222 (the long-standing single
+     * shared `agents` fixture); the lane allocator overrides it to that lane's
+     * claimed agents port (e.g. 2243) so parallel lanes hit DISTINCT fixtures.
+     */
+    val port: Int
+        get() = InstrumentationRegistry.getArguments()
+            .getString(PORT_ARG_KEY)
+            ?.trim()
+            ?.toIntOrNull()
+            ?: DEFAULT_FIXTURE_PORT
+
+    val user: String
+        get() = DEFAULT_FIXTURE_USER
+}
+
+/**
+ * The connected-test SSH fixture host. Backed by [AgentsFixtureTarget] so the
+ * whole androidTest suite resolves ONE target; defaults to `10.0.2.2`.
+ */
+val DEFAULT_HOST: String get() = AgentsFixtureTarget.host
+
+/**
+ * The connected-test SSH fixture port. Backed by [AgentsFixtureTarget] so a
+ * per-lane allocator can point this run at its own agents container via the
+ * `agentsPort` instrumentation arg; defaults to `2222`.
+ */
+val DEFAULT_PORT: Int get() = AgentsFixtureTarget.port
+
+val DEFAULT_USER: String get() = AgentsFixtureTarget.user
 
 data class ShellHandle(
     val client: SSHClient,

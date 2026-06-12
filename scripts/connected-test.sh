@@ -30,13 +30,26 @@ set -euo pipefail
 #                        [A-Za-z0-9._]+.  Default empty -> base package, so the
 #                        wrapper is identical to a plain connectedDebugAndroidTest
 #                        when no suffix is given.
-#   --pool               AVD pool mode (issue #674): claim the first FREE
-#                        emulator from the live pool (per-serial flock), export
-#                        ANDROID_SERIAL so AGP/adb pin to it, run there, then
-#                        release on exit. Without --pool the behaviour is
-#                        unchanged: if ANDROID_SERIAL is preset it locks that
-#                        serial, otherwise it takes the single global AVD lock.
-#                        Pool emulators are booted via scripts/avd-pool.sh.
+#   --pool               Lane pool mode (issues #674 + #724): claim a full
+#                        ISOLATED lane = (a free emulator serial + a free agents
+#                        fixture port). It (1) claims the first FREE emulator
+#                        from the live pool (per-serial flock), exports
+#                        ANDROID_SERIAL so AGP/adb pin to it; and (2) claims the
+#                        first FREE agents fixture port (per-port flock), brings
+#                        that agents container up healthy if needed, and threads
+#                        it into gradle as
+#                        -Pandroid.testInstrumentationRunnerArguments.agentsPort=<port>
+#                        so the androidTest suite targets THIS lane's own
+#                        SSH/tmux fixture (no cross-talk). Both the serial and
+#                        the port are released on exit. Without --pool the
+#                        behaviour is unchanged: if ANDROID_SERIAL is preset it
+#                        locks that serial, otherwise it takes the single global
+#                        AVD lock, and the agents port defaults to 2222.
+#                        Pool emulators are booted via scripts/avd-pool.sh; the
+#                        agents fixture pool is scripts/agents-pool.sh. When no
+#                        emulator serial is claimable as a SECOND lane (single
+#                        AVD, e.g. CI), --pool falls back cleanly to that one
+#                        emulator + port 2222.
 #   --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i*
 #                        (and .test) package from the target device, then exit.
 #                        Prevents install pile-up across worktrees.
@@ -49,6 +62,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+# Issue #724: agents-fixture pool helpers (Docker half of parallel journey
+# testing). Sourcing this makes pocketshell_release_all also release the claimed
+# agents port on exit, and provides pocketshell_claim_agents_port below.
+source "$ROOT_DIR/scripts/lib/agents-pool.sh"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -112,6 +129,21 @@ if [[ "$USE_POOL" == "1" && -z "${ANDROID_SERIAL:-}" ]]; then
   printf 'Pool mode: running on %s\n' "${ANDROID_SERIAL:-?}" >&2
 fi
 
+# Pool mode (issue #724): claim a free agents fixture PORT to pair with the
+# emulator lane, bring its container up healthy, and thread the port into the
+# gradle instrumentation arg so the androidTest suite targets THIS lane's own
+# SSH/tmux fixture. The claim's flock + container stay tied to this process and
+# the port is released by the shared pocketshell_release_all EXIT trap. When the
+# caller preset POCKETSHELL_AGENTS_PORT (explicit target) we honour it and skip
+# the claim. This MUST run before gradle is invoked so the arg is available.
+if [[ "$USE_POOL" == "1" && -z "${POCKETSHELL_AGENTS_PORT:-}" ]]; then
+  if ! pocketshell_claim_agents_port "$ROOT_DIR"; then
+    printf 'FAIL: could not claim/bring up a free agents fixture port.\n' >&2
+    exit 1
+  fi
+  printf 'Pool mode: agents fixture on host port %s\n' "${POCKETSHELL_AGENTS_PORT:-?}" >&2
+fi
+
 # Per-serial lock when a specific emulator is targeted; otherwise the single
 # global lock. This keeps single-emulator agents serialised (option 1) while
 # distinct emulators (pool mode) do not block each other.
@@ -163,6 +195,17 @@ else
   printf 'Running connectedDebugAndroidTest as com.pocketshell.app (no suffix)\n' >&2
 fi
 
+# Issue #724: thread the claimed (or caller-preset) agents fixture port into the
+# androidTest suite so this run targets THIS lane's own SSH/tmux fixture. The
+# AgentsFixtureTarget helper reads `agentsPort` and defaults to 2222, so a run
+# WITHOUT a port set is byte-for-byte the legacy single-lane behaviour — we only
+# pass the arg when a port was actually claimed/preset.
+if [[ -n "${POCKETSHELL_AGENTS_PORT:-}" ]]; then
+  GRADLE_SUFFIX_ARGS+=("-Pandroid.testInstrumentationRunnerArguments.agentsPort=$POCKETSHELL_AGENTS_PORT")
+  printf 'androidTest targets agents fixture host port %s (agentsPort arg)\n' \
+    "$POCKETSHELL_AGENTS_PORT" >&2
+fi
+
 # Serial pinning (issue #674): AGP's connected device provider installs +
 # instruments on EVERY connected device by default. When more than one emulator
 # is online (the pool), that would cross-install onto siblings and break them.
@@ -176,6 +219,37 @@ if [[ -n "${ANDROID_SERIAL:-}" ]]; then
     "$ANDROID_SERIAL" >&2
 else
   printf 'No ANDROID_SERIAL set: AGP will target the only connected device (single-emulator path)\n' >&2
+fi
+
+# Per-lane build-directory isolation (issue #724). Two `--pool` lanes run in the
+# SAME git checkout, so a plain concurrent build has BOTH writing the one
+# `app/build/intermediates/...` tree and racing on directory deletion (one lane
+# dies with "Unable to delete directory ...transformDebugAndroidTestClassesWithAsm").
+# applicationIdSuffix isolates the INSTALLED app identity but NOT the on-disk
+# build outputs. So in pool mode we relocate every project's build directory to a
+# per-suffix path via a generated init script — keeping the lanes' build outputs
+# fully disjoint. This is gated on --pool: the single-lane / CI path is untouched
+# and keeps the default `app/build`.
+GRADLE_INIT_ARGS=()
+LANE_INIT_SCRIPT=""
+if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
+  LANE_INIT_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/pocketshell-lane-init-$SUFFIX.XXXXXX.gradle")"
+  # Relocate each project's build dir to build/lane-<suffix> under the project
+  # dir, so concurrent lanes never share intermediates. Nesting UNDER the
+  # existing per-project `build/` keeps the lane outputs inside the already
+  # gitignored build tree (/build, /app/build, /shared/*/build, */build/), so a
+  # lane run never pollutes `git status` or risks being committed. allprojects
+  # covers the root + every module the connected build touches.
+  cat > "$LANE_INIT_SCRIPT" <<INIT
+allprojects {
+    layout.buildDirectory.set(file("\${projectDir}/build/lane-$SUFFIX"))
+}
+INIT
+  GRADLE_INIT_ARGS+=("--init-script" "$LANE_INIT_SCRIPT")
+  printf 'Pool lane build isolation: per-project build dir -> build/lane-%s\n' "$SUFFIX" >&2
+  # Clean up the temp init script when this shell exits (the build dirs
+  # themselves are left for artifact inspection; sweep with the suffix sweep).
+  trap 'rm -f "$LANE_INIT_SCRIPT" 2>/dev/null || true; pocketshell_release_all' EXIT
 fi
 
 # Run gradle as a CHILD process, NOT via `exec`. `exec` would replace this shell
@@ -199,6 +273,7 @@ trap 'forward_signal INT' INT
 trap 'forward_signal TERM' TERM
 
 ./gradlew --no-daemon :app:connectedDebugAndroidTest \
+  "${GRADLE_INIT_ARGS[@]}" \
   "${GRADLE_SUFFIX_ARGS[@]}" \
   "${GRADLE_ARGS[@]}" &
 GRADLE_PID="$!"

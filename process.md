@@ -343,6 +343,7 @@ Parallelism is issue-scoped, not role-skipping:
 - Concurrent-agent cap: **up to ~10 background agents** can run in parallel under normal load (research spikes + implementers + reviewers combined). When the cap is reached and more work is queued, prefer firing read-only research/Explore spikes (no filesystem contention) over additional implementers. Drop below the cap only when an agent completes; do not pause running agents to make room.
 - Push for parallelism actively: when an agent completes, the orchestrator's next step is normally "what else can dispatch right now?" not "wait for the next user message." Independent research (audits, spikes, library feasibility) is especially good for filling capacity because it doesn't compete for the AVD.
 - Emulator-touching work is the contention bottleneck, not the agent count itself. **Run every connected/emulator test through `scripts/connected-test.sh --suffix i<issue> <gradle args>`** (#672). It (a) wraps the run in the shared AVD `flock` (`scripts/lib/avd-lock.sh`) and (b) builds + installs with a per-worktree `applicationIdSuffix` (`-PpocketshellAppIdSuffix=i<issue>`) so the APK installs as `com.pocketshell.app.i<issue>` and **coexists** with sibling agents' APKs on the one emulator instead of `adb install` SIGKILL-ing them mid-run. This is what makes parallel agents safe — prefer it over serializing. `--cleanup-suffixes` sweeps leftover `com.pocketshell.app.i*` (it spares the base package). A raw `./gradlew connectedDebugAndroidTest` (no wrapper) still races siblings; only fall back to it (with retry-once on a `Process crashed`/signal-9 SIGKILL, which is a sibling install, not an assertion failure) when the wrapper is unavailable. The release-emulator-validation gate scripts hold an exclusive `flock` (#182) and will block sibling worktrees during a release run.
+- For **parallel emulator+Docker journey lanes**, a single `agents` fixture on host port 2222 is shared state — two lanes corrupt each other's tmux. Run journey lanes through `scripts/connected-test.sh --pool --suffix i<issue> <gradle args>` (#724) instead: it self-allocates a full lane — a free emulator serial AND a distinct `agents` fixture port (`2222 2243 2244 2245`), each its own isolated container — so concurrent lanes claim distinct `(emulator, port)` fixtures and never collide. Warm/inspect/tear the fixture pool with `scripts/agents-pool.sh up|status|down [PORT...]`. Single-lane and CI runs (one emulator + `agents` on 2222) are unchanged when `--pool` is omitted. See [docs/testing.md](docs/testing.md#agents-fixture-pool--parallel-journey-lanes-issue-724) for the full pool detail.
 
 ### Choosing the right agent type
 
@@ -475,6 +476,12 @@ the same as one created by the raw commands above.
   if held, wait or retry once, and surface persistent contention in the
   status comment. A `Process crashed`/signal-9 with fewer tests than
   expected is a sibling-install SIGKILL, not an assertion failure.
+- For a **parallel emulator+Docker journey lane**, warm the agents-fixture
+  pool with `scripts/agents-pool.sh up [PORT...]` and run the lane via
+  `scripts/connected-test.sh --pool --suffix i<issue> <gradle args>` (#724):
+  it self-allocates a free emulator serial AND a distinct isolated `agents`
+  fixture port so sibling lanes don't share one container's tmux state. Omit
+  `--pool` for single-lane runs. See [docs/testing.md](docs/testing.md#agents-fixture-pool--parallel-journey-lanes-issue-724).
 - Report by posting a comment on the GitHub issue. Include the absolute
   worktree path in the final message back to the orchestrator so the diff
   can be reviewed and merged.
@@ -490,7 +497,11 @@ the same as one created by the raw commands above.
   install coexists with sibling agents on the shared AVD instead of
   SIGKILL-ing them; a `Process crashed`/signal-9 with fewer tests than
   expected is a sibling-install collision, not a real failure — re-run, don't
-  report it as the implementer's bug.
+  report it as the implementer's bug. To exercise concurrent journey lanes,
+  run `scripts/connected-test.sh --pool --suffix i<issue> <gradle args>`
+  (#724) per lane — each claims a distinct `(emulator, agents-port)` fixture
+  from the pool (`scripts/agents-pool.sh up|status|down`), so lanes run in
+  parallel without tmux cross-talk. See [docs/testing.md](docs/testing.md#agents-fixture-pool--parallel-journey-lanes-issue-724).
 - Approve or request changes via an issue comment as usual. The reviewer
   does not need its own worktree.
 

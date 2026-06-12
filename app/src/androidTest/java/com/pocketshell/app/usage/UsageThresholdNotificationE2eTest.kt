@@ -380,20 +380,25 @@ class UsageThresholdNotificationE2eTest {
 
         /**
          * Generous deadline for the AppOps OP_POST_NOTIFICATION /
-         * areNotificationsEnabled() signal to propagate after pm grant.
+         * areNotificationsEnabled() signal to propagate after pm grant. Raised
+         * from 5s (issue #723): on a cold, heavily-contended emulator (4-up
+         * parallel agents) the very first run after install can lose this race
+         * within 5s, so widen the window the polling rides out instead of
+         * re-introducing a CI skip.
          */
-        const val GRANT_PROPAGATION_TIMEOUT_MS: Long = 5_000L
+        const val GRANT_PROPAGATION_TIMEOUT_MS: Long = 15_000L
 
         /**
          * Generous deadline for the notify() -> activeNotifications status-bar
-         * registration to become observable.
+         * registration to become observable. Raised from 10s (issue #723) for
+         * the same cold/contended-first-run reason as the grant window above.
          */
-        const val POST_APPEARS_TIMEOUT_MS: Long = 10_000L
+        const val POST_APPEARS_TIMEOUT_MS: Long = 20_000L
 
         /** Time to let an (incorrect) async re-post register before asserting absence. */
         const val POST_SETTLE_MS: Long = 750L
 
         /** Deadline for the delete-intent broadcast to record the dismissal. */
-        const val DISMISS_RECORD_TIMEOUT_MS: Long = 3_000L
+        const val DISMISS_RECORD_TIMEOUT_MS: Long = 5_000L
     }
 }

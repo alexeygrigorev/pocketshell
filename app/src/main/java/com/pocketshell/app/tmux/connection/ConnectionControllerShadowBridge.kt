@@ -130,14 +130,25 @@ class ConnectionControllerShadowBridge(
                 }
             }
             "Live" -> {
-                // The inline Live transition mirror only ensures the controller is
-                // TARGETING this id — it no longer SYNTHESISES the Live promotion.
-                // The promotion to ConnectionState.Live now comes from the REAL
-                // feedback feeds (observeTransportLive + observeSeedLanded). This is
-                // what makes the controller reach Live INDEPENDENTLY of the inline
-                // transition (the 1c-iv prerequisite).
+                // EPIC #687 slice 1c-iv-a (THE STATUS FLIP): the inline reveal choke
+                // point is the AUTHORITATIVE "the user is now connected" moment — the
+                // VM only calls `setConnectionState(Live)` once the active pane is
+                // seeded and the surface is revealed. Now that the controller's state
+                // DRIVES the view-facing `_connectionStatus`, the inline Live mirror
+                // must promote the controller to [ConnectionState.Live] in lockstep so
+                // the displayed `Connected` flips at exactly the inline moment (no
+                // status-timing regression on any preserved path, including the test
+                // seams that fake a seeded reveal).
+                //
+                // 1c-iv-prep had this mirror only `ensureTargeting` to PROVE the
+                // controller can reach Live independently from the real
+                // TransportLive/SeedLanded feedback (a de-risking proof). Those real
+                // feeds REMAIN (idempotent — a TransportLive/SeedLanded for an
+                // already-Live current target is a no-op in the reducer); the inline
+                // reveal is simply the authoritative status moment for the flip.
                 if (host != null && targetId != null) {
                     ensureTargeting(host, targetId)
+                    promoteToLive(host, targetId)
                 }
             }
             "Reconnecting" -> {
@@ -243,6 +254,22 @@ class ConnectionControllerShadowBridge(
                 controller.submit(ConnectionEvent.Switch(targetId))
             else -> Unit
         }
+    }
+
+    /**
+     * Walk the controller to [ConnectionState.Live] for [targetId] from whatever
+     * pre-reveal state it is in. The reducer reaches Live via:
+     *  - `Connecting --TransportLive--> Attaching --SeedLanded--> Live`
+     *  - `Attaching --SeedLanded--> Live`
+     *  - `Reattaching/Reconnecting --TransportLive--> Live`
+     * so submitting `TransportLive` then `SeedLanded` covers every pre-reveal state.
+     * Idempotent: each event is a no-op when the controller is already Live for this
+     * target ([onTransportLive]/[onSeedLanded] return current for a Live state).
+     */
+    private fun promoteToLive(host: HostKey, targetId: SessionId) {
+        if (controller.state.value.targetIdOrNull() != targetId) return
+        controller.submit(ConnectionEvent.TransportLive)
+        controller.submit(ConnectionEvent.SeedLanded(targetId, paneId = "inline-reveal"))
     }
 
     private fun exhaustToUnreachable() {

@@ -41,6 +41,7 @@ import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.connection.ConnectionControllerShadowBridge
 import com.pocketshell.app.tmux.connection.hostKeyFor
+import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
@@ -431,8 +432,70 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun setConnectionState(state: ConnectionState) {
         _connectionState = state
-        _connectionStatus.value = connectionStatusFor(state)
+        // EPIC #687 slice 1c-iv-a (THE STATUS FLIP): the inline path NO LONGER
+        // writes [_connectionStatus]. The view-facing status is now projected SOLELY
+        // from the shadow [ConnectionController]'s state — the controller is the
+        // single source of truth for what the user SEES. The inline EFFECT machinery
+        // (reconnect jobs, generation counter, named coroutine jobs, reduceConnection
+        // bodies) keeps running UNCHANGED; it just no longer owns the displayed
+        // status. Inline effects that need to gate on "am I connected?" read the
+        // VM-internal [inlineConnectionStatus] (a pure projection of [_connectionState]
+        // — byte-identical to the status this method used to write), NOT the
+        // controller-driven [_connectionStatus]. 1c-iv-b hard-cuts the inline
+        // [_connectionState]/effect machinery once the controller drives effects too.
         observeConnectionTransitionInShadow(state)
+        projectStatusFromController(state)
+    }
+
+    /**
+     * EPIC #687 slice 1c-iv-a: the inline EFFECT machinery's own "current status"
+     * view — a pure projection of the inline [_connectionState] through the same
+     * [connectionStatusFor] mapper this VM has always used. Before the flip,
+     * [_connectionStatus] was always exactly `connectionStatusFor(_connectionState)`,
+     * so reading this is byte-identical to the old `_connectionStatus.value` reads:
+     * the ~20 inline effect call sites that gate on `Connected`/`Reconnecting`/
+     * `Failed` keep behaving identically while the DISPLAYED [_connectionStatus]
+     * follows the controller (and diverges only on the two approved #685 paths).
+     * This is NOT a second status SOURCE — nothing writes it; it is the inline
+     * effect state read back. 1c-iv-b deletes it with the rest of the inline machinery.
+     */
+    private val inlineConnectionStatus: ConnectionStatus
+        get() = connectionStatusFor(_connectionState)
+
+    /**
+     * EPIC #687 slice 1c-iv-a: project the shadow [ConnectionController]'s state onto
+     * the view-facing [_connectionStatus] — the SINGLE status source. The coarse
+     * SHAPE (Idle/Connecting/Switching/Connected/Reconnecting/Failed) comes from the
+     * controller; the display PAYLOAD (host/port/user, reconnect attempt/reason, the
+     * failure message) comes from the inline [state] the VM constructed for this
+     * transition (the controller's core state carries opaque HostKey/SessionId, not
+     * the host/port/user the view renders).
+     *
+     * The two approved #685 behavior changes fall out of the controller's state for
+     * free: a recoverable drop leaves the controller in `Reattaching`/`Reconnecting`
+     * (calm) rather than the inline `Unreachable`, so the user sees a calm
+     * `Reconnecting` band, NOT the scary `Failed`/"Tap Reconnect" control-channel
+     * band; and a within-grace foreground keeps the controller `Live`, so the user
+     * sees `Connected` with no probe band. #720: a true `Unreachable` projects to a
+     * [ConnectionStatus.Failed] whose curated message + calm tappable "Tap to
+     * reconnect" band ([FailedConnectionRow]) replace the scary error text.
+     */
+    private fun projectStatusFromController(inlineState: ConnectionState) {
+        _connectionStatus.value =
+            connectionStatusForController(connectionControllerShadow.shadowState, inlineState)
+    }
+
+    /**
+     * Re-project [_connectionStatus] from the controller after a NON-`setConnectionState`
+     * bridge feed (a lifecycle event — background / foreground / network-change /
+     * transport-drop, or the real transport-live / seed-landed feedback) that can
+     * move the controller's state. Uses the current inline [_connectionState] as the
+     * payload carrier. The controller is the single status source, so its state must
+     * be re-projected whenever it can change — not only at the inline
+     * [setConnectionState] choke point.
+     */
+    private fun projectStatusFromController() {
+        projectStatusFromController(_connectionState)
     }
 
     /**
@@ -470,6 +533,9 @@ public class TmuxSessionViewModel @Inject constructor(
             shadowSessionId(target),
             paneId,
         )
+        // The seed may have promoted the controller Attaching/Reattaching → Live;
+        // re-project the displayed status (the controller is the single source).
+        projectStatusFromController()
     }
 
     /**
@@ -654,6 +720,9 @@ public class TmuxSessionViewModel @Inject constructor(
             shadowHostKey(target),
             shadowSessionId(target),
         )
+        // A real transport-live may have promoted Connecting → Attaching or
+        // Reattaching/Reconnecting → Live; re-project the displayed status.
+        projectStatusFromController()
     }
     private var clientRef: TmuxClient? = null
     private var clientRegistration: ActiveTmuxClients.Registration? = null
@@ -885,7 +954,7 @@ public class TmuxSessionViewModel @Inject constructor(
         if (
             !interruptedPassiveRecovery &&
             !shouldForceFreshLease(trigger) &&
-            _connectionStatus.value is ConnectionStatus.Connected &&
+            inlineConnectionStatus is ConnectionStatus.Connected &&
             activeTarget == target
         ) {
             return
@@ -1258,10 +1327,10 @@ public class TmuxSessionViewModel @Inject constructor(
                         // Confirm the green Switching affordance (the synchronous
                         // [warmOpenHint] above already chose it for a live pooled
                         // lease; re-assert here in case anything raced).
-                        if (_connectionStatus.value !is ConnectionStatus.Switching) {
+                        if (inlineConnectionStatus !is ConnectionStatus.Switching) {
                             setConnectionState(ConnectionState.Attaching(host, port, user))
                         }
-                    } else if (_connectionStatus.value is ConnectionStatus.Switching) {
+                    } else if (inlineConnectionStatus is ConnectionStatus.Switching) {
                         // The synchronous hint said warm, but the authoritative
                         // pool probe found no live lease (it was evicted / closed
                         // between the hint and now). This is a genuine COLD dial:
@@ -1504,7 +1573,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * state flow.
      */
     public fun cancelConnect(): Boolean {
-        val current = _connectionStatus.value
+        val current = inlineConnectionStatus
         if (current !is ConnectionStatus.Connecting && current !is ConnectionStatus.Reconnecting) return false
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
@@ -1580,6 +1649,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 detachForBackground()
             else -> Unit
         }
+        // The controller moved to Backgrounded (mapped → Connected, the inline
+        // "keep prior status on background" behavior); re-project after the inline
+        // effects ran (they read inlineConnectionStatus, unaffected by this).
+        projectStatusFromController()
     }
 
     /**
@@ -1588,7 +1661,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * behavior; only the decision moved to [reduceConnection].
      */
     private fun pauseReconnectForBackground() {
-        val reconnecting = _connectionStatus.value as? ConnectionStatus.Reconnecting ?: return
+        val reconnecting = inlineConnectionStatus as? ConnectionStatus.Reconnecting ?: return
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = activeTarget ?: connectingTarget
@@ -1737,6 +1810,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                 }
         }
+        // The controller's single grace predicate decided reattach-vs-reconnect:
+        // within grace (warm lease) it is Reattaching and the active-pane reseed will
+        // land it back to Live → Connected (the approved #685 Bug-A divergence — NO
+        // probe churn); beyond grace it is Reconnecting (matches inline). Re-project
+        // after the inline effects ran.
+        projectStatusFromController()
     }
 
     /**
@@ -1822,7 +1901,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun probeCurrentRuntimeOnForegroundIfNeeded(): Boolean {
-        val current = _connectionStatus.value
+        val current = inlineConnectionStatus
         if (current !is ConnectionStatus.Connected) return false
         val target = activeTarget ?: return false
         val client = clientRef ?: return false
@@ -1881,7 +1960,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 clientRef !== client ||
                 sessionRef !== session ||
                 activeTarget?.let { sameSessionIdentity(it, target) } != true ||
-                _connectionStatus.value !is ConnectionStatus.Connected
+                inlineConnectionStatus !is ConnectionStatus.Connected
             ) {
                 ReconnectCauseTrail.record(
                     stage = "tmux_probe_result",
@@ -1984,7 +2063,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun resumePausedAutoReconnect(paused: PausedAutoReconnect) {
         pausedAutoReconnect = null
         val target = paused.target
-        if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
+        if (inlineConnectionStatus is ConnectionStatus.Connected && activeTarget == target) return
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-auto-reconnect-resume-on-foreground " +
@@ -2392,6 +2471,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (target != null) scheduleNetworkReconnect(change, target)
             else -> Unit
         }
+        // NOTE: the network-change reconnect/coalesce decision is INLINE EFFECT
+        // machinery (the #548 suppression + the post-grace deferred-replay COALESCE)
+        // that 1c-iv-b owns — it is NOT one of the two approved #685 display changes.
+        // The controller's `onNetworkChanged` is intentionally more eager (a validated
+        // handoff → Reconnecting) than the inline coalesce, so we do NOT project the
+        // controller's network-change transition here: when the inline path actually
+        // reconnects it goes through [setConnectionState] (which projects); when it
+        // COALESCES (deferred replay after a fresh lifecycle attach) the display
+        // correctly stays Connected. Driving the controller's eager reconnect here
+        // would regress the coalesce. The bridge still observes the event (above) for
+        // the 1c-iv-b effect flip.
     }
 
     /**
@@ -2528,7 +2618,7 @@ public class TmuxSessionViewModel @Inject constructor(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
-        val current = _connectionStatus.value as? ConnectionStatus.Connected ?: return
+        val current = inlineConnectionStatus as? ConnectionStatus.Connected ?: return
         val reason = change.reason
         val realValidatedIdentityChange = true
         lifecycleReattachNetworkCoalesce = null
@@ -4630,7 +4720,7 @@ public class TmuxSessionViewModel @Inject constructor(
         client: TmuxClient,
         disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
     ) {
-        val current = _connectionStatus.value as? ConnectionStatus.Connected ?: return
+        val current = inlineConnectionStatus as? ConnectionStatus.Connected ?: return
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
         // EPIC #687 slice 1c-iii: observe-only — feed the shadow controller the
@@ -4647,6 +4737,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 silentReattachWithinPassiveGrace(client, target, reason, disconnectEvent)
             else -> Unit
         }
+        // APPROVED #685 divergence #1 (silent recovery): a recoverable live-channel
+        // drop moves the controller Live → Reattaching, so the displayed status is a
+        // CALM Reconnecting — NOT the scary inline Failed/"control channel closed/Tap
+        // Reconnect" band. Only after the silent reconnect ladder truly exhausts does
+        // the controller reach Unreachable (→ the #720 calm "Tap to reconnect").
+        // Re-project after the inline effects ran (they read inlineConnectionStatus).
+        projectStatusFromController()
     }
 
     /**
@@ -4757,7 +4854,7 @@ public class TmuxSessionViewModel @Inject constructor(
         return withTimeoutOrNull<Boolean>(passiveDisconnectGraceMs) {
             while (true) {
                 if (!appActive) return@withTimeoutOrNull false
-                if (_connectionStatus.value !is ConnectionStatus.Connected) return@withTimeoutOrNull false
+                if (inlineConnectionStatus !is ConnectionStatus.Connected) return@withTimeoutOrNull false
                 val currentClient = clientRef
                 if (currentClient !== staleClient && currentClient?.disconnected?.value != true) {
                     return@withTimeoutOrNull true
@@ -5205,7 +5302,7 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget?,
         disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
     ) {
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return
         if (clientRef !== client) return
         if (target != null && shouldAutoReconnectPassiveDisconnect(disconnectEvent)) {
             scheduleAutoReconnect(
@@ -5220,7 +5317,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return
         }
-        val current = _connectionStatus.value as? ConnectionStatus.Connected
+        val current = inlineConnectionStatus as? ConnectionStatus.Connected
         Log.w(
             ISSUE_145_RECONNECT_TAG,
             "tmux-mid-session-disconnect host=${current?.host ?: target?.host.orEmpty()} " +
@@ -5483,7 +5580,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 connectingTarget = target
                 refreshReconnectAvailability()
                 runConnect(target, attempt, trigger)
-                if (_connectionStatus.value is ConnectionStatus.Connected) {
+                if (inlineConnectionStatus is ConnectionStatus.Connected) {
                     autoReconnectJob = null
                     return@launch
                 }
@@ -6914,7 +7011,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
-                if (_connectionStatus.value !is ConnectionStatus.Connected) return@launch
+                if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
                 val activePane = activeVisiblePane()
                 if (activePane == null || !activePane.terminalState.visibleScreenIsBlank()) {
                     // A frame landed (seed or live %output) — drop the loading
@@ -7606,19 +7703,19 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun liveSessionForAttachmentOrNull(): SshSession? {
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return null
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return null
         return sessionRef?.takeIf { it.isConnected }
     }
 
     private suspend fun awaitLiveTmuxClientForSend(): TmuxClient? {
         liveTmuxClientForSendOrNull()?.let { return it }
         if (
-            _connectionStatus.value is ConnectionStatus.Failed &&
+            inlineConnectionStatus is ConnectionStatus.Failed &&
             isNonRetryableConnectFailure(lastConnectFailureCause)
         ) {
             return null
         }
-        when (_connectionStatus.value) {
+        when (inlineConnectionStatus) {
             is ConnectionStatus.Connecting,
             is ConnectionStatus.Reconnecting,
             is ConnectionStatus.Switching,
@@ -7639,7 +7736,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun liveTmuxClientForSendOrNull(): TmuxClient? {
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return null
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return null
         return clientRef?.takeUnless { it.disconnected.value }
     }
 
@@ -7881,7 +7978,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     public fun retryAgentConversationStreamForPane(paneId: String): Boolean {
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
         val pane = paneRows[paneId] ?: return false
         val guard = RuntimeRefreshGuard(
             generation = connectGeneration,
@@ -9501,7 +9598,7 @@ public class TmuxSessionViewModel @Inject constructor(
         processForeground: Boolean,
     ): Boolean {
         if (processForeground) return false
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
         val target = activeTarget ?: return false
         val client = clientRef ?: return false
         if (client.disconnected.value) return false
@@ -10269,7 +10366,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
 
     private fun reduceBackground(): ConnectionDecision {
-        if (_connectionStatus.value is ConnectionStatus.Reconnecting) {
+        if (inlineConnectionStatus is ConnectionStatus.Reconnecting) {
             return ConnectionDecision.PauseReconnectForBackground
         }
         if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
@@ -10291,7 +10388,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * the decision is hoisted into the reducer.
      */
     private fun canProbeCurrentRuntimeOnForeground(): Boolean {
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
         if (activeTarget == null) return false
         if (clientRef == null) return false
         if (sessionRef == null) return false
@@ -10301,7 +10398,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun reduceNetworkChanged(change: TerminalNetworkChange): ConnectionDecision {
         if (!appActive) return ConnectionDecision.Ignore
         if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
         val target = activeTarget ?: connectingTarget ?: return ConnectionDecision.Ignore
         if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
         val previousValidated = change.previousValidated
@@ -10320,7 +10417,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun reduceTransportDropped(client: TmuxClient): ConnectionDecision {
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
         // Only react if this is still THE active client (a fresh connect may have
         // swapped in a new client whose Connected status this drop must not stomp).
         if (clientRef !== client) return ConnectionDecision.Ignore
@@ -10498,6 +10595,192 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             is ConnectionState.Gone -> ConnectionStatus.Failed(state.message)
             is ConnectionState.Unreachable -> ConnectionStatus.Failed(state.message)
+        }
+
+    /**
+     * EPIC #687 slice 1c-iv-a (THE STATUS FLIP): project the SHADOW
+     * [ConnectionController]'s core [com.pocketshell.core.connection.ConnectionState]
+     * onto the view-facing [ConnectionStatus] — the SINGLE source of the displayed
+     * status. The coarse SHAPE comes from the controller; the display PAYLOAD
+     * (host/port/user, reconnect attempt/reason, the failure message) is read from
+     * the inline [inlineState] the VM just constructed for this transition, because
+     * the controller's core state carries opaque [HostKey]/[SessionId], not the
+     * host/port/user/attempt the view needs.
+     *
+     * §1 seam table: `Connecting→Connecting`, `Attaching→Switching`, `Live→Connected`,
+     * `Backgrounded→Connected`, `Reattaching/Reconnecting→Reconnecting`,
+     * `Gone/Unreachable→Failed`. The two approved #685 divergences are intrinsic to
+     * the controller and surface here as the calmer status: a recoverable drop reads
+     * `Reconnecting` (the controller is `Reattaching`/`Reconnecting`, not the inline
+     * `Unreachable`), and a within-grace foreground reads `Connected` (the controller
+     * stays `Live`). #720: a controller `Unreachable` projects to a
+     * [ConnectionStatus.Failed] rendered by the calm tappable "Tap to reconnect"
+     * [FailedConnectionRow] band — never raw `TransportException`/SSH text and never
+     * "open the session again".
+     */
+    private fun connectionStatusForController(
+        controllerState: com.pocketshell.core.connection.ConnectionState,
+        inlineState: ConnectionState,
+    ): ConnectionStatus {
+        // The controller drives the status ONLY while it is tracking a target. When
+        // the controller has no target yet (Idle) but the inline path has moved on,
+        // there is no controller state to project — this happens only for degenerate,
+        // target-less test seams (e.g. attachClientForTest, which fakes a Live with no
+        // ConnectionTarget so the bridge has nothing to track). Fall back to the inline
+        // projection there so those seams stay byte-identical. In every real open /
+        // switch / recovery path the VM has set a target, so the controller is tracking
+        // and is the single source.
+        if (controllerState is com.pocketshell.core.connection.ConnectionState.Idle &&
+            inlineState !is ConnectionState.Idle
+        ) {
+            return connectionStatusFor(inlineState)
+        }
+        val hpu = hostPortUserFor(inlineState)
+        return when (controllerState) {
+            is com.pocketshell.core.connection.ConnectionState.Idle ->
+                ConnectionStatus.Idle
+            // OPEN states: the cold-dial (`Connecting`, overlay) vs warm-switch
+            // (`Attaching`/`Switching`, no overlay) distinction is the INLINE open
+            // path's authoritative decision (#437), NOT one of the two approved #685
+            // divergences — which all live in the drop/foreground RECOVERY paths. The
+            // controller's own `isWarm` predicate can read a different cold/warm signal
+            // at the exact open instant (the lease may already be in liveLeaseKeys), so
+            // for the pre-reveal Connecting/Attaching pair we follow the inline open
+            // state. Everything from Live onward (and all recovery) is controller-driven.
+            is com.pocketshell.core.connection.ConnectionState.Connecting,
+            is com.pocketshell.core.connection.ConnectionState.Attaching ->
+                when (inlineState) {
+                    is ConnectionState.Connecting ->
+                        ConnectionStatus.Connecting(hpu.host, hpu.port, hpu.user)
+                    is ConnectionState.Attaching ->
+                        ConnectionStatus.Switching(hpu.host, hpu.port, hpu.user)
+                    // The inline state is past the open (e.g. a recovery transition the
+                    // controller is still walking to Live): honor the controller's
+                    // pre-reveal shape.
+                    else -> if (controllerState is com.pocketshell.core.connection.ConnectionState.Connecting) {
+                        ConnectionStatus.Connecting(hpu.host, hpu.port, hpu.user)
+                    } else {
+                        ConnectionStatus.Switching(hpu.host, hpu.port, hpu.user)
+                    }
+                }
+            is com.pocketshell.core.connection.ConnectionState.Live ->
+                ConnectionStatus.Connected(hpu.host, hpu.port, hpu.user)
+            // BACKGROUNDED: the displayed status while the app is not visible is the
+            // INLINE path's decision (keep the prior status, OR a paused
+            // auto-reconnect → the manual-retry Failed band). This is NOT one of the
+            // two approved #685 divergences (those are within-grace FOREGROUND and the
+            // live-channel drop), and the user cannot see the status while backgrounded
+            // anyway — so we follow the inline state to keep the backgrounded surface
+            // byte-identical. The controller's grace deadline still governs the next
+            // foreground reattach-vs-reconnect decision.
+            is com.pocketshell.core.connection.ConnectionState.Backgrounded ->
+                connectionStatusFor(inlineState)
+            // APPROVED #685 divergence #1 (silent recovery): a recoverable drop leaves
+            // the controller Reattaching/Reconnecting → a CALM Reconnecting band, NOT
+            // the scary Failed. The display payload (attempt/reason) is the inline
+            // reconnect bookkeeping.
+            is com.pocketshell.core.connection.ConnectionState.Reattaching ->
+                reconnectingStatusFor(inlineState, hpu)
+            is com.pocketshell.core.connection.ConnectionState.Reconnecting ->
+                reconnectingStatusFor(inlineState, hpu)
+            is com.pocketshell.core.connection.ConnectionState.Gone ->
+                terminalOrInlineStatus(inlineState, hpu)
+            is com.pocketshell.core.connection.ConnectionState.Unreachable ->
+                // #720: the ONLY honest error. The CAUSE message is preserved (it is
+                // already a curated, user-facing string — never raw
+                // `TransportException`/SSH text); the CALM, tappable "Tap to reconnect"
+                // affordance + the dropped "Open the session again" instruction live in
+                // the screen band ([FailedConnectionRow]) and the calm
+                // [ConnectionIndicator.Unreachable] indicator. "Failed only after retries
+                // truly exhaust" tracks the INLINE ladder (see [terminalOrInlineStatus]).
+                terminalOrInlineStatus(inlineState, hpu)
+        }
+    }
+
+    /**
+     * Project a controller TERMINAL state (Unreachable/Gone). The brief's approved
+     * #685 change is "Failed/Unreachable only AFTER retries truly exhaust". The
+     * authoritative "retries exhausted" signal is the INLINE reconnect ladder (the
+     * effect machinery 1c-iv-b owns) — the controller's own drop-ladder counter can
+     * over-exhaust because the bridge mirrors each inline reconnect transition as a
+     * drop. So: surface Failed ONLY when the inline state is ALSO terminal
+     * (Unreachable/Gone). While the inline ladder is still recovering
+     * (Reconnecting/Reattaching) OR back Live, follow the inline state — a calm
+     * Reconnecting band or Connected, never a premature scary Failed.
+     */
+    private fun terminalOrInlineStatus(
+        inlineState: ConnectionState,
+        hpu: HostPortUser,
+    ): ConnectionStatus =
+        when (inlineState) {
+            is ConnectionState.Unreachable,
+            is ConnectionState.Gone ->
+                ConnectionStatus.Failed(failedMessageFor(inlineState))
+            is ConnectionState.Reconnecting,
+            is ConnectionState.Reattaching ->
+                reconnectingStatusFor(inlineState, hpu)
+            // Inline already recovered (Live) or is mid-open: the controller
+            // over-exhausted; follow the inline truth, not a premature Failed.
+            else -> connectionStatusFor(inlineState)
+        }
+
+    private data class HostPortUser(val host: String, val port: Int, val user: String)
+
+    /** Best-effort host/port/user for the view, from the inline transition payload
+     *  (the controller's core state does not carry it). Falls back to the active /
+     *  connecting target, then to blanks for a payload-less Idle/Gone. */
+    private fun hostPortUserFor(inlineState: ConnectionState): HostPortUser =
+        when (inlineState) {
+            is ConnectionState.Connecting -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Attaching -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Live -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Backgrounded -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Reattaching -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Reconnecting -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Idle,
+            is ConnectionState.Gone,
+            is ConnectionState.Unreachable -> {
+                val target = activeTarget ?: connectingTarget
+                if (target != null) {
+                    HostPortUser(target.host, target.port, target.user)
+                } else {
+                    HostPortUser("", 0, "")
+                }
+            }
+        }
+
+    /** Build the view [ConnectionStatus.Reconnecting], preserving the inline
+     *  reconnect payload (attempt/maxAttempts/retryDelayMs/reason) when the inline
+     *  state is itself a reconnect; otherwise (the approved recoverable-drop
+     *  divergence, where the inline state is `Unreachable`/`Live`) a calm default. */
+    private fun reconnectingStatusFor(
+        inlineState: ConnectionState,
+        hpu: HostPortUser,
+    ): ConnectionStatus.Reconnecting {
+        val inlineReconnect = inlineState as? ConnectionState.Reconnecting
+        val inlineReattach = inlineState as? ConnectionState.Reattaching
+        return ConnectionStatus.Reconnecting(
+            host = hpu.host,
+            port = hpu.port,
+            user = hpu.user,
+            attempt = inlineReconnect?.attempt ?: inlineReattach?.attempt ?: 1,
+            maxAttempts = inlineReconnect?.maxAttempts ?: inlineReattach?.maxAttempts
+                ?: ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
+            retryDelayMs = inlineReconnect?.retryDelayMs ?: inlineReattach?.retryDelayMs ?: 0L,
+            reason = inlineReconnect?.reason ?: inlineReattach?.reason ?: "Reconnecting…",
+        )
+    }
+
+    /** The failure message for a controller `Gone`/`Unreachable`, from the inline
+     *  state's curated message (never raw exception text). Falls back to a reconnect
+     *  reason or a calm prompt when the inline state is mid-recovery. */
+    private fun failedMessageFor(inlineState: ConnectionState): String =
+        when (inlineState) {
+            is ConnectionState.Gone -> inlineState.message
+            is ConnectionState.Unreachable -> inlineState.message
+            is ConnectionState.Reconnecting -> inlineState.reason
+            is ConnectionState.Reattaching -> inlineState.reason
+            else -> "Disconnected. Tap to reconnect."
         }
 
 }

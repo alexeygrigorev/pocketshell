@@ -91,19 +91,19 @@ class ConnectionControllerShadowEquivalenceTest {
         val cold = bridge(warm = false)
         cold.observeInlineTransition("Connecting", host, sessionA)
         assertEquals("Connecting", cold.shadowStatusName) // inline = "Connecting"
-        // Inline Live mirror alone does NOT promote (it only ensures targeting).
+        // EPIC #687 slice 1c-iv-a (THE FLIP): the inline Live mirror is now the
+        // AUTHORITATIVE reveal moment and promotes the controller to Live in lockstep
+        // (the VM only emits Live once the active pane is seeded + revealed). So the
+        // inline Live mirror alone reaches "Connected".
         cold.observeInlineTransition("Live", host, sessionA)
-        assertEquals(
-            "Connecting",
-            cold.shadowStatusName,
-        )
-        // REAL feedback lands Live.
-        cold.landLiveFromRealFeedback(sessionA)
         assertEquals(
             // PRESERVED: inline connectionStatusFor(Live) == "Connected".
             "Connected",
             cold.shadowStatusName,
         )
+        // The REAL feedback feeds remain idempotent — they keep the controller Live.
+        cold.landLiveFromRealFeedback(sessionA)
+        assertEquals("Connected", cold.shadowStatusName)
     }
 
     @Test
@@ -120,8 +120,10 @@ class ConnectionControllerShadowEquivalenceTest {
             warm.shadowStatusName,
         )
         warm.observeInlineTransition("Live", host, sessionA)
-        // Inline Live mirror alone does not promote — still Attaching/Switching.
-        assertEquals("Switching", warm.shadowStatusName)
+        // FLIP: the inline Live mirror (the authoritative reveal moment) promotes to
+        // Live → Connected in lockstep.
+        assertEquals("Connected", warm.shadowStatusName)
+        // Real feedback remains idempotent.
         warm.landLiveFromRealFeedback(sessionA)
         assertEquals("Connected", warm.shadowStatusName)
     }
@@ -339,28 +341,21 @@ class ConnectionControllerShadowEquivalenceTest {
     // --- REAL feedback: the controller reaches Live independently (1c-iv prereq) --
 
     /**
-     * The 1c-iv prerequisite this slice delivers: the shadow controller reaches
-     * [ConnectionState.Live] from REAL transport/seed FEEDBACK, NOT by mirroring
-     * the inline Live transition. The inline Live mirror on its own only ensures
-     * targeting — it must NOT promote to Live. Only the real
-     * [ConnectionControllerShadowBridge.observeTransportLive] +
-     * [ConnectionControllerShadowBridge.observeSeedLanded] feeds drive the promotion.
+     * The REAL transport/seed feedback path STILL reaches [ConnectionState.Live]
+     * independently — WITHOUT the inline Live mirror at all. EPIC #687 slice 1c-iv-a
+     * (THE FLIP) makes the inline reveal the authoritative status moment that also
+     * promotes to Live, but the genuine real-feedback promotion path the 1c-iv-prep
+     * slice established remains intact and idempotent: a lease going Connected
+     * (TransportLive: Connecting → Attaching) plus the active-pane capture landing
+     * (SeedLanded: Attaching → Live) reaches Live with no inline Live mirror.
      */
     @Test
-    fun reachesLive_onlyFromRealFeedback_notFromInlineMirror() {
+    fun reachesLive_fromRealFeedbackAlone_withoutInlineLiveMirror() {
         val cold = bridge(warm = false)
         cold.observeInlineTransition("Connecting", host, sessionA)
         assertEquals(true, cold.shadowState is ConnectionState.Connecting)
 
-        // The inline Live mirror ALONE does not promote — proves the controller no
-        // longer reaches Live by mirroring the inline transition.
-        cold.observeInlineTransition("Live", host, sessionA)
-        assertEquals(
-            "inline Live mirror must NOT promote — Live now comes from real feedback",
-            true,
-            cold.shadowState is ConnectionState.Connecting,
-        )
-
+        // NO inline Live mirror is fed here — only the real feedback drives the promotion.
         // REAL transport-live feedback promotes Connecting → Attaching.
         cold.observeTransportLive(host, sessionA)
         assertEquals(true, cold.shadowState is ConnectionState.Attaching)

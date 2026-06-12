@@ -1601,9 +1601,15 @@ class TmuxSessionViewModelTest {
         advanceTimeBy(499L)
         runCurrent()
 
+        // EPIC #687 slice 1c-iv-a — APPROVED #685 divergence #1 (silent recovery):
+        // a recoverable live-channel drop now surfaces a CALM Reconnecting band
+        // (the controller heals through Reattaching/Reconnecting), NOT the scary
+        // Failed/"Tap Reconnect" band and NOT the old silently-held Connected frame.
+        // The held client + bounded probe are unchanged; only the displayed status
+        // is the calm Reconnecting (was: Connected held during grace).
         assertTrue(
-            "disconnect band must be suppressed during the bounded grace",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            "recoverable drop must show the calm Reconnecting band, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
         assertSame(
             "dashboard registry should still point at the held client during grace",

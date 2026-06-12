@@ -262,11 +262,16 @@ class TmuxConnectingProgressOverlayTest {
     }
 
     @Test
-    fun failedWithoutReconnectExplainsHowToRecoverAndHidesReconnectAction() {
+    fun failedWithoutReconnectShowsCalmMessageAndHidesReconnectAction() {
+        // EPIC #687 #720: the honest-error band is now a CALM prompt — the curated
+        // message is shown as-is, NEVER appended with the old "Open the session again
+        // to reconnect." instruction. When there is genuinely nothing to reconnect to
+        // (`canReconnect = false`) the tappable action is hidden but the message stays
+        // calm and un-instructed.
         compose.setContent {
             PocketShellTheme {
                 FailedConnectionRow(
-                    message = "Disconnected.",
+                    message = "Disconnected. Tap to reconnect.",
                     onReconnect = {},
                     canReconnect = false,
                 )
@@ -274,8 +279,9 @@ class TmuxConnectingProgressOverlayTest {
         }
 
         compose.onNodeWithTag(TMUX_SESSION_ERROR_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Disconnected. Tap to reconnect.").assertIsDisplayed()
         compose.onNodeWithText("Disconnected. Open the session again to reconnect.")
-            .assertIsDisplayed()
+            .assertDoesNotExist()
         compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).assertDoesNotExist()
     }
 }

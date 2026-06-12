@@ -3414,26 +3414,34 @@ internal fun FailedConnectionRow(
     onReconnect: () -> Unit,
     canReconnect: Boolean,
 ) {
+    // EPIC #687 #720: the ONLY honest error (controller `Unreachable`) is a CALM,
+    // tappable "Tap to reconnect" affordance — never raw `TransportException`/SSH
+    // exception text, never the "Open the session again to reconnect" instruction.
+    // The whole band is tappable (taps run the existing reconnect action) and the
+    // text reads as a calm prompt, not a scary red failure. When there is genuinely
+    // nothing to reconnect to (`!canReconnect`, the VM never opened) the band is
+    // inert but still calm.
+    val rowModifier = Modifier
+        .fillMaxWidth()
+        .background(color = PocketShellColors.Surface)
+        .then(
+            if (canReconnect) {
+                Modifier.clickable(onClick = onReconnect)
+            } else {
+                Modifier
+            },
+        )
+        .padding(horizontal = 12.dp, vertical = 6.dp)
+        .testTag(TMUX_SESSION_ERROR_TAG)
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .testTag(TMUX_SESSION_ERROR_TAG),
+        modifier = rowModifier,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = if (canReconnect) {
-                message
-            } else {
-                "$message Open the session again to reconnect."
-            },
-            // Design-system error token (`docs/design-system.md` §1).
-            // The disconnect band is the canonical "error status"
-            // surface for the tmux route and so reaches for [Red]
-            // rather than the muted `TextSecondary` of the generic
-            // StatusLine.
-            color = PocketShellColors.Red,
+            text = message,
+            // #720: a calm, honest prompt — the muted secondary token, NOT the
+            // alarming [Red] error band. The state is recoverable with one tap.
+            color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
             modifier = Modifier.weight(1f),
         )
@@ -3442,7 +3450,7 @@ internal fun FailedConnectionRow(
                 onClick = onReconnect,
                 modifier = Modifier.testTag(TMUX_SESSION_RECONNECT_TAG),
             ) {
-                Text("Reconnect")
+                Text("Tap to reconnect")
             }
         }
     }

@@ -381,3 +381,69 @@ def sessions_resume(
     completed = subprocess.run(argv, check=False)
     if completed.returncode != 0:
         ctx.exit(completed.returncode)
+
+
+# ---------------------------------------------------------------------------
+# `sessions create` — capped, detached session create primitive (#726)
+# ---------------------------------------------------------------------------
+#
+# The host-side primitive PocketShell's app calls instead of building raw
+# `tmux new-session -d` strings. Delegates to `tmuxctl create-detached`
+# (tmuxctl >= 0.3.0), which wraps the session shell in a memory-capped
+# cgroup-v2 systemd `--user` scope under `robust.slice`, so sessions
+# PocketShell starts can never trigger the OOM-kill cascade that wiped the
+# agent team. `create-detached` is already idempotent (a no-op when the
+# session exists) — that contract is tmuxctl's, not re-implemented here.
+
+
+@sessions_group.command(
+    "create",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.argument("name")
+@click.option(
+    "--cwd",
+    "-c",
+    "cwd",
+    default=None,
+    help="Working directory for the new session (forwarded to `tmuxctl create-detached -c`).",
+)
+@click.option(
+    "--mem",
+    default=None,
+    help=(
+        "Memory cap for the session's tmuxctl scope, e.g. 24G. "
+        "DEFAULT: unset — tmuxctl resolves the per-project cap from the repo's "
+        "cgroups.toml (PocketShell's is 30G). Only pass this to override that policy."
+    ),
+)
+@click.pass_context
+def sessions_create(
+    ctx: click.Context,
+    name: str,
+    cwd: Optional[str],
+    mem: Optional[str],
+) -> None:
+    """Create a memory-capped, DETACHED tmux session (delegates to `tmuxctl create-detached`).
+
+    NAME is the tmux session name. The session is created inside tmuxctl's
+    cgroup-v2 systemd `--user` scope (capped under `robust.slice`) but NOT
+    attached — consumers attach over their own transport (PocketShell uses
+    tmux `-CC` control mode). The create is idempotent: a no-op if the session
+    already exists (tmuxctl's contract).
+
+    `--mem` is intentionally UNSET by default so tmuxctl resolves the
+    per-project cap from the repo's `cgroups.toml` (PocketShell's is 30G);
+    only pass `--mem` to override that committed policy.
+    """
+    tmuxctl_path = _resolve_tmuxctl_binary()
+    if tmuxctl_path is None:
+        click.echo(_tmuxctl_missing_message(), err=True)
+        ctx.exit(127)
+        return
+    argv = _resume.tmuxctl_create_argv(
+        name, tmuxctl_path=tmuxctl_path, cwd=cwd, mem=mem
+    )
+    completed = subprocess.run(argv, check=False)
+    if completed.returncode != 0:
+        ctx.exit(completed.returncode)

@@ -32,6 +32,54 @@ EOF
     exit 0
 fi
 
+# Issue #726: PocketShell creates sessions via the memory-capped
+# `create-detached` verb (probing support first with `create-detached --help`).
+# This fixture has no systemd-run/cgroup v2, so mirror tmuxctl's own uncapped
+# fallback: a plain detached `tmux new-session -A -d`, exiting 0 so the client
+# does NOT take its raw-tmux fallback path. Without this branch the catch-all
+# `exit 0` below would make the probe pass but the create a silent no-op.
+if [ "${1:-}" = "create-detached" ]; then
+    shift
+    case "${1:-}" in
+        --help | -h)
+            printf 'Usage: tmuxctl create-detached SESSION_NAME [COMMAND]... [--cwd DIR] [--mem CAP]\n'
+            exit 0
+            ;;
+    esac
+    session=""
+    cwd=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -c | --cwd)
+                cwd="${2:-}"
+                shift 2 || shift
+                ;;
+            --mem)
+                shift 2 || shift
+                ;;
+            -*)
+                shift
+                ;;
+            *)
+                if [ -z "${session}" ]; then
+                    session="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    if [ -z "${session}" ]; then
+        printf 'create-detached: session name required\n' >&2
+        exit 64
+    fi
+    if [ -n "${cwd}" ]; then
+        tmux new-session -A -d -s "${session}" -c "${cwd}"
+    else
+        tmux new-session -A -d -s "${session}"
+    fi
+    exit 0
+fi
+
 # Any other invocation (the picker only uses `list --by activity`) just
 # exits clean so we don't accidentally drive automated tooling.
 exit 0

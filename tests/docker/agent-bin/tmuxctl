@@ -8,6 +8,60 @@ if [ "${1:-}" = "list" ] || [ "${1:-}" = "ls" ] || [ "${1:-}" = "l" ]; then
   exit 0
 fi
 
+# Issue #726: PocketShell routes session creation through tmuxctl's
+# memory-capped `create-detached` verb. The client first probes support with
+# `tmuxctl create-detached --help` (must exit 0 when the verb exists), then runs
+# `tmuxctl create-detached <name> [cmd] -c <cwd>`. The real tmuxctl wraps the
+# session shell in a systemd-run --scope memory cap; the fixture has no cgroup
+# v2 / systemd-run, so it mirrors tmuxctl's own uncapped fallback: a plain
+# detached `tmux new-session -A -d`. It must exit 0 so the client does NOT fall
+# back to its raw-tmux path (which would mean create-detached is untested here).
+if [ "${1:-}" = "create-detached" ]; then
+  shift
+  # Support the side-effect-free capability probe the client runs first.
+  case "${1:-}" in
+    --help | -h)
+      printf 'Usage: tmuxctl create-detached SESSION_NAME [COMMAND]... [--cwd DIR] [--mem CAP]\n'
+      exit 0
+      ;;
+  esac
+  session=""
+  cwd=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c | --cwd)
+        cwd="${2:-}"
+        shift 2 || shift
+        ;;
+      --mem)
+        # Cap is meaningless without systemd-run in the fixture; accept + ignore.
+        shift 2 || shift
+        ;;
+      -*)
+        shift
+        ;;
+      *)
+        if [ -z "${session}" ]; then
+          session="$1"
+        fi
+        # Any trailing COMMAND words are accepted but not run here; the client
+        # launches the start command separately via `tmux send-keys`.
+        shift
+        ;;
+    esac
+  done
+  if [ -z "${session}" ]; then
+    printf 'create-detached: session name required\n' >&2
+    exit 64
+  fi
+  if [ -n "${cwd}" ]; then
+    tmux new-session -A -d -s "${session}" -c "${cwd}"
+  else
+    tmux new-session -A -d -s "${session}"
+  fi
+  exit 0
+fi
+
 case "${1:-}" in
   1|claude-main)
     printf 'Attached to session claude-main\n'

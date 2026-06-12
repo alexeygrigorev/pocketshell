@@ -544,6 +544,38 @@ def tmuxctl_resume_argv(
     ]
 
 
+def tmuxctl_create_argv(
+    name: str,
+    *,
+    tmuxctl_path: str,
+    cwd: Optional[str] = None,
+    mem: Optional[str] = None,
+) -> list[str]:
+    """Build the argv for a memory-capped, DETACHED session create.
+
+    Delegates to ``tmuxctl create-detached`` (tmuxctl >= 0.3.0), which wraps the
+    session shell in tmuxctl's cgroup-v2 systemd ``--user`` scope under
+    ``robust.slice`` and is idempotent (a no-op if the session already exists).
+    This is the host-side primitive PocketShell calls instead of building raw
+    ``tmux new-session -d`` strings, so sessions it starts can never trigger the
+    OOM-kill cascade that wipes the agent team.
+
+    Shape: ``<tmuxctl> create-detached <name> [-c <cwd>] [--mem <mem>]``.
+
+    ``--mem`` is **omitted by default** so tmuxctl resolves the per-project cap
+    from the repo's ``cgroups.toml`` (PocketShell's is 30G). Only when the caller
+    explicitly passes ``mem`` is it forwarded; hard-coding a cap here would
+    override the committed per-project policy. Unlike :func:`tmuxctl_resume_argv`,
+    this builder does NOT default ``--mem``.
+    """
+    argv = [tmuxctl_path, "create-detached", name]
+    if cwd is not None:
+        argv.extend(["-c", cwd])
+    if mem is not None:
+        argv.extend(["--mem", mem])
+    return argv
+
+
 # ---------------------------------------------------------------------------
 # live-pane dedupe
 # ---------------------------------------------------------------------------

@@ -258,3 +258,121 @@ def test_sessions_list_proxies_nonzero_exit_from_tmuxctl() -> None:
     # stderr from the subprocess must reach the user (otherwise
     # debugging a failing tmux probe would be opaque).
     assert "tmux server unavailable" in result.output
+
+
+# ----- sessions create (#726) ----------------------------------------
+
+
+def test_sessions_create_argv_omits_mem_by_default() -> None:
+    """CRITICAL (#726): no `--mem` unless the caller asked for one.
+
+    Omitting `--mem` lets tmuxctl resolve the per-project cap from
+    cgroups.toml (PocketShell's is 30G); a hard-coded 24G would override
+    that committed policy.
+    """
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ), patch(
+        "pocketshell.sessions.subprocess.run",
+        return_value=_fake_completed(),
+    ) as run:
+        result = runner.invoke(sessions_group, ["create", "work"])
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/tmuxctl", "create-detached", "work"]
+    assert "--mem" not in invoked
+    assert "24G" not in invoked
+
+
+def test_sessions_create_forwards_cwd() -> None:
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ), patch(
+        "pocketshell.sessions.subprocess.run",
+        return_value=_fake_completed(),
+    ) as run:
+        result = runner.invoke(
+            sessions_group, ["create", "work", "--cwd", "/home/me/proj"]
+        )
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == [
+        "/fake/tmuxctl", "create-detached", "work", "-c", "/home/me/proj",
+    ]
+    assert "--mem" not in invoked
+
+
+def test_sessions_create_passes_mem_through_when_given() -> None:
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ), patch(
+        "pocketshell.sessions.subprocess.run",
+        return_value=_fake_completed(),
+    ) as run:
+        result = runner.invoke(
+            sessions_group, ["create", "work", "--mem", "16G"]
+        )
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == [
+        "/fake/tmuxctl", "create-detached", "work", "--mem", "16G",
+    ]
+
+
+def test_sessions_create_forwards_cwd_and_mem_together() -> None:
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ), patch(
+        "pocketshell.sessions.subprocess.run",
+        return_value=_fake_completed(),
+    ) as run:
+        result = runner.invoke(
+            sessions_group,
+            ["create", "work", "-c", "/home/me/proj", "--mem", "16G"],
+        )
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == [
+        "/fake/tmuxctl", "create-detached", "work",
+        "-c", "/home/me/proj", "--mem", "16G",
+    ]
+
+
+def test_sessions_create_returns_127_when_tmuxctl_missing() -> None:
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value=None
+    ), patch("pocketshell.sessions.subprocess.run") as run:
+        result = runner.invoke(
+            sessions_group, ["create", "work"], catch_exceptions=False
+        )
+    assert result.exit_code == 127
+    assert "tmuxctl" in result.output.lower()
+    run.assert_not_called()
+
+
+def test_sessions_create_proxies_nonzero_exit_from_tmuxctl() -> None:
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ), patch(
+        "pocketshell.sessions.subprocess.run",
+        return_value=_fake_completed(returncode=5),
+    ):
+        result = runner.invoke(sessions_group, ["create", "work"])
+    assert result.exit_code == 5
+
+
+def test_sessions_help_lists_create_subcommand() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.sessions.subprocess.run") as run, patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ):
+        result = runner.invoke(sessions_group, ["--help"])
+    assert result.exit_code == 0, result.output
+    assert "create" in result.output
+    run.assert_not_called()

@@ -1021,48 +1021,101 @@ class SshFolderListGateway internal constructor(
         startCommand: String?,
     ): Result<String> {
         return withLeaseSession(host, keyPath, passphrase) { session ->
-            if (!remoteStartDirectoryExists(session, cwd)) {
-                throw RuntimeException(
-                    startDirectoryMissingMessage(
-                        sessionName = sessionName,
-                        startDirectory = cwd,
-                    ),
-                )
-            }
-            val quotedName = shellQuote(sessionName)
-            val quotedCwd = shellQuote(cwd)
-            // -A so an existing session with the same name attaches
-            //    rather than failing (idempotent for the user — they
-            //    can re-pick "Create" without seeing an error).
-            // -d so the session is detached on the server (the app
-            //    will attach via tmux -CC after navigation).
-            val createResult = session.exec(
-                pathAware("tmux new-session -A -d -s $quotedName -c $quotedCwd"),
+            createSessionOnSession(
+                session = session,
+                sessionName = sessionName,
+                cwd = cwd,
+                startCommand = startCommand,
             )
-            if (createResult.exitCode != 0 && createResult.stderr.isNotBlank()) {
-                throw RuntimeException(createResult.stderr.trim())
-            }
-            // Launch the start command via send-keys if requested. tmux's
-            // `send-keys ... Enter` sequence pipes the literal command
-            // followed by a carriage return — same shape used by the
-            // existing voice + planner paths.
-            //
-            // Issue #703: for agents the start command is now the SHORT
-            // server-side wrapper line `pocketshell agent <kind> --dir
-            // '<dir>' …`. The wrapper itself merges the folder's
-            // .env/.envrc (replacing the old `eval "$(pocketshell env
-            // export …)"` prelude — hard-cut, D22), strips the provider
-            // env vars for OpenCode, and suppresses each agent's first-run
-            // modal so the agent is immediately usable. The app just types
-            // the one short line verbatim.
-            if (startCommand != null) {
-                val quotedCommand = shellQuote(startCommand)
-                session.exec(
-                    pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
-                )
-            }
-            sessionName
         }
+    }
+
+    /**
+     * Issue #726: route session creation through tmuxctl's memory-capped
+     * `create-detached` verb so the session (and the agent the start command
+     * launches inside it) runs in a cgroup-v2 `systemd-run --user` scope under
+     * `robust.slice` with a per-session `MemoryMax`. A runaway agent is then
+     * OOM-killed inside its own scope instead of taking the shared tmux server
+     * (and the whole agent team) down — the cascade that motivated this issue.
+     *
+     * `create-detached` is detach-only (PocketShell attaches over its own
+     * `-CC` transport afterwards) and idempotent: if the named session already
+     * exists it is a no-op success, preserving the attach-or-create (`-A`)
+     * semantics the raw `new-session -A -d` provided. The per-session `--mem`
+     * is resolved by tmuxctl from config (`.robust-tmux` / `robust.toml`), so
+     * it is NOT hard-coded here — a repo can self-declare its budget.
+     *
+     * Two-layer graceful fallback (creation never fails on any host):
+     *  1. tmuxctl cannot run `create-detached` — the binary is absent OR an
+     *     older tmuxctl lacks the verb — the capped command's capability probe
+     *     exits with the [TMUXCTL_UNSUPPORTED_EXIT_CODE] sentinel, and we fall
+     *     back to the raw `tmux new-session -A -d` byte-identical to the
+     *     pre-#726 behaviour. A GENUINE create-detached runtime error (tmux or
+     *     systemd-run failing) returns its own non-zero code and is surfaced,
+     *     never swallowed as "missing".
+     *  2. tmuxctl present but the host lacks `systemd-run`/cgroup v2 — tmuxctl
+     *     itself creates an UNCAPPED `new-session -d` and exits 0 (handled
+     *     inside the verb, no client change needed).
+     *
+     * Exposed as `internal` so the create + both fallback layers are covered by
+     * JVM tests driving a fake [SshSession] (see FolderListGatewayFallbackTest).
+     */
+    internal suspend fun createSessionOnSession(
+        session: SshSession,
+        sessionName: String,
+        cwd: String,
+        startCommand: String?,
+    ): String {
+        if (!remoteStartDirectoryExists(session, cwd)) {
+            throw RuntimeException(
+                startDirectoryMissingMessage(
+                    sessionName = sessionName,
+                    startDirectory = cwd,
+                ),
+            )
+        }
+        val quotedName = shellQuote(sessionName)
+        val quotedCwd = shellQuote(cwd)
+        val createResult = session.exec(
+            pathAware(cappedCreateSessionCommand(quotedName, quotedCwd)),
+        )
+        if (createResult.exitCode == TMUXCTL_UNSUPPORTED_EXIT_CODE) {
+            // Layer 1: tmuxctl is absent OR too old to know `create-detached`.
+            // Fall back to the pre-#726 raw capped-less create so the user still
+            // gets a session (just without the memory cap).
+            val fallback = session.exec(
+                pathAware(fallbackCreateSessionCommand(quotedName, quotedCwd)),
+            )
+            if (fallback.exitCode != 0 && fallback.stderr.isNotBlank()) {
+                throw RuntimeException(fallback.stderr.trim())
+            }
+        } else if (createResult.exitCode != 0 && createResult.stderr.isNotBlank()) {
+            // tmuxctl ran the real `create-detached` verb and it genuinely
+            // failed (tmux/systemd-run runtime error). Surface it — do NOT
+            // silently fall back, or the user loses the memory cap without
+            // knowing why.
+            throw RuntimeException(createResult.stderr.trim())
+        }
+        // Launch the start command via send-keys if requested. tmux's
+        // `send-keys ... Enter` sequence pipes the literal command
+        // followed by a carriage return — same shape used by the
+        // existing voice + planner paths.
+        //
+        // Issue #703: for agents the start command is now the SHORT
+        // server-side wrapper line `pocketshell agent <kind> --dir
+        // '<dir>' …`. The wrapper itself merges the folder's
+        // .env/.envrc (replacing the old `eval "$(pocketshell env
+        // export …)"` prelude — hard-cut, D22), strips the provider
+        // env vars for OpenCode, and suppresses each agent's first-run
+        // modal so the agent is immediately usable. The app just types
+        // the one short line verbatim.
+        if (startCommand != null) {
+            val quotedCommand = shellQuote(startCommand)
+            session.exec(
+                pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
+            )
+        }
+        return sessionName
     }
 
     override suspend fun killSession(
@@ -1587,6 +1640,76 @@ class SshFolderListGateway internal constructor(
                 "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}" +
                 "$FIELD_SEP#{window_id}'"
+
+        /**
+         * Issue #726: sentinel exit code the [cappedCreateSessionCommand]
+         * capability probe emits when this host's tmuxctl CANNOT run
+         * `create-detached` — either because the binary is absent OR because an
+         * older (pre-#726) tmuxctl predates the verb. It is the single signal
+         * the create path uses to fall back to the raw uncapped
+         * `tmux new-session -A -d` (layer-1 fallback).
+         *
+         * It is deliberately a sentinel the probe assigns explicitly (not a
+         * value the real `create-detached` verb can produce), so a GENUINE
+         * runtime failure of `create-detached` — tmux or `systemd-run` erroring
+         * — returns its OWN non-zero code and is surfaced to the user rather
+         * than being mistaken for "tmuxctl missing" and silently downgraded to
+         * an uncapped session. `97` is outside the ranges tmux/systemd-run use
+         * and outside the 0–2/64/126/127 codes shells and typer emit for
+         * "missing binary"/"usage error"/"no such command".
+         */
+        const val TMUXCTL_UNSUPPORTED_EXIT_CODE: Int = 97
+
+        /**
+         * Issue #726: the memory-capped session-create command. Routes the
+         * detached create through tmuxctl's `create-detached <name> -c <cwd>`
+         * verb so the session shell is wrapped in a `systemd-run --user --scope`
+         * with a per-session `MemoryMax` under `robust.slice`. The per-session
+         * `--mem` is intentionally NOT passed here — tmuxctl resolves it from
+         * config (`.robust-tmux` in the cwd/git-root, then `robust.toml`,
+         * then its built-in default), so a repo can self-declare its budget
+         * without an app change.
+         *
+         * The command is a small POSIX-sh wrapper that first PROBES whether
+         * this host's tmuxctl can actually run `create-detached`, and only then
+         * invokes it:
+         *  - `command -v tmuxctl` fails -> binary absent -> exit the
+         *    [TMUXCTL_UNSUPPORTED_EXIT_CODE] sentinel so the client falls back.
+         *  - `tmuxctl create-detached --help` fails -> an OLDER tmuxctl that
+         *    lacks the verb (typer exits 2 for an unknown command; the old
+         *    fixture stub exited 64) -> same sentinel, fall back. `--help` is a
+         *    side-effect-free capability check.
+         *  - both succeed -> run the real `create-detached`; its exit code
+         *    (0 on success/idempotent no-op, non-zero on a genuine
+         *    tmux/systemd-run error) is what the client sees and acts on.
+         *
+         * This makes the "fall back" signal robust to BOTH binary-absent and
+         * verb-absent hosts while never swallowing a real create failure.
+         *
+         * [quotedName] and [quotedCwd] must already be shell-quoted by the
+         * caller (via [shellQuoteValue]).
+         */
+        internal fun cappedCreateSessionCommand(quotedName: String, quotedCwd: String): String =
+            "command -v tmuxctl >/dev/null 2>&1 || exit $TMUXCTL_UNSUPPORTED_EXIT_CODE; " +
+                "tmuxctl create-detached --help >/dev/null 2>&1 || " +
+                "exit $TMUXCTL_UNSUPPORTED_EXIT_CODE; " +
+                "tmuxctl create-detached $quotedName -c $quotedCwd"
+
+        /**
+         * Issue #726: the pre-#726 raw, uncapped fallback create — used only
+         * when this host's tmuxctl cannot run `create-detached`
+         * ([TMUXCTL_UNSUPPORTED_EXIT_CODE]). Byte-identical to the historical
+         * command:
+         *  - `-A` so an existing session with the same name attaches rather than
+         *    failing (idempotent for the user — re-picking "Create" never errors).
+         *  - `-d` so the session is detached on the server (the app attaches via
+         *    `tmux -CC` after navigation).
+         *
+         * [quotedName] and [quotedCwd] must already be shell-quoted by the
+         * caller (via [shellQuoteValue]).
+         */
+        internal fun fallbackCreateSessionCommand(quotedName: String, quotedCwd: String): String =
+            "tmux new-session -A -d -s $quotedName -c $quotedCwd"
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
         const val POCKETSHELL_PROJECT_HISTORY_COMMAND: String =

@@ -366,6 +366,51 @@ def test_tmuxctl_resume_argv_shape() -> None:
 
 
 # ---------------------------------------------------------------------------
+# capped detached-create builder (#726)
+# ---------------------------------------------------------------------------
+
+
+def test_tmuxctl_create_argv_omits_mem_by_default() -> None:
+    """CRITICAL (#726): with no explicit --mem, the argv must NOT carry one.
+
+    Omitting --mem lets tmuxctl resolve the per-project cap from the repo's
+    cgroups.toml (PocketShell's is 30G). A hard-coded 24G here would override
+    that committed policy — that's the bug this test guards against.
+    """
+    argv = resume.tmuxctl_create_argv("my-session", tmuxctl_path="/bin/tmuxctl")
+    assert argv == ["/bin/tmuxctl", "create-detached", "my-session"]
+    assert "--mem" not in argv
+    assert "24G" not in argv
+
+
+def test_tmuxctl_create_argv_with_cwd() -> None:
+    argv = resume.tmuxctl_create_argv(
+        "my-session", tmuxctl_path="/bin/tmuxctl", cwd="/home/me/proj"
+    )
+    assert argv == [
+        "/bin/tmuxctl", "create-detached", "my-session", "-c", "/home/me/proj",
+    ]
+    assert "--mem" not in argv
+
+
+def test_tmuxctl_create_argv_passes_mem_through_when_given() -> None:
+    argv = resume.tmuxctl_create_argv(
+        "my-session", tmuxctl_path="/bin/tmuxctl", mem="16G"
+    )
+    assert argv == ["/bin/tmuxctl", "create-detached", "my-session", "--mem", "16G"]
+
+
+def test_tmuxctl_create_argv_with_cwd_and_mem() -> None:
+    argv = resume.tmuxctl_create_argv(
+        "my-session", tmuxctl_path="/bin/tmuxctl", cwd="/home/me/proj", mem="16G"
+    )
+    assert argv == [
+        "/bin/tmuxctl", "create-detached", "my-session",
+        "-c", "/home/me/proj", "--mem", "16G",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # selector resolution
 # ---------------------------------------------------------------------------
 

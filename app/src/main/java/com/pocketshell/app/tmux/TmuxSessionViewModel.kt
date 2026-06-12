@@ -40,6 +40,7 @@ import com.pocketshell.app.session.markOptimisticFailed
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.connection.ConnectionControllerShadowBridge
+import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.app.tmux.connection.hostKeyFor
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.HostKey
@@ -10703,166 +10704,50 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun connectionStatusForController(
         controllerState: com.pocketshell.core.connection.ConnectionState,
         inlineState: ConnectionState,
-    ): ConnectionStatus {
-        // The controller drives the status ONLY while it is tracking a target. When
-        // the controller has no target yet (Idle) but the inline path has moved on,
-        // there is no controller state to project — this happens only for degenerate,
-        // target-less test seams (e.g. attachClientForTest, which fakes a Live with no
-        // ConnectionTarget so the bridge has nothing to track). Fall back to the inline
-        // projection there so those seams stay byte-identical. In every real open /
-        // switch / recovery path the VM has set a target, so the controller is tracking
-        // and is the single source.
-        if (controllerState is com.pocketshell.core.connection.ConnectionState.Idle &&
-            inlineState !is ConnectionState.Idle
-        ) {
-            return connectionStatusFor(inlineState)
-        }
-        val hpu = hostPortUserFor(inlineState)
-        return when (controllerState) {
-            is com.pocketshell.core.connection.ConnectionState.Idle ->
-                ConnectionStatus.Idle
-            // OPEN states: the cold-dial (`Connecting`, overlay) vs warm-switch
-            // (`Attaching`/`Switching`, no overlay) distinction is the INLINE open
-            // path's authoritative decision (#437), NOT one of the two approved #685
-            // divergences — which all live in the drop/foreground RECOVERY paths. The
-            // controller's own `isWarm` predicate can read a different cold/warm signal
-            // at the exact open instant (the lease may already be in liveLeaseKeys), so
-            // for the pre-reveal Connecting/Attaching pair we follow the inline open
-            // state. Everything from Live onward (and all recovery) is controller-driven.
-            is com.pocketshell.core.connection.ConnectionState.Connecting,
-            is com.pocketshell.core.connection.ConnectionState.Attaching ->
-                when (inlineState) {
-                    is ConnectionState.Connecting ->
-                        ConnectionStatus.Connecting(hpu.host, hpu.port, hpu.user)
-                    is ConnectionState.Attaching ->
-                        ConnectionStatus.Switching(hpu.host, hpu.port, hpu.user)
-                    // The inline state is past the open (e.g. a recovery transition the
-                    // controller is still walking to Live): honor the controller's
-                    // pre-reveal shape.
-                    else -> if (controllerState is com.pocketshell.core.connection.ConnectionState.Connecting) {
-                        ConnectionStatus.Connecting(hpu.host, hpu.port, hpu.user)
-                    } else {
-                        ConnectionStatus.Switching(hpu.host, hpu.port, hpu.user)
-                    }
-                }
-            is com.pocketshell.core.connection.ConnectionState.Live ->
-                ConnectionStatus.Connected(hpu.host, hpu.port, hpu.user)
-            // BACKGROUNDED: the displayed status while the app is not visible is the
-            // INLINE path's decision (keep the prior status, OR a paused
-            // auto-reconnect → the manual-retry Failed band). This is NOT one of the
-            // two approved #685 divergences (those are within-grace FOREGROUND and the
-            // live-channel drop), and the user cannot see the status while backgrounded
-            // anyway — so we follow the inline state to keep the backgrounded surface
-            // byte-identical. The controller's grace deadline still governs the next
-            // foreground reattach-vs-reconnect decision.
-            is com.pocketshell.core.connection.ConnectionState.Backgrounded ->
-                connectionStatusFor(inlineState)
-            // APPROVED #685 divergence #1 (silent recovery): a recoverable drop leaves
-            // the controller Reattaching/Reconnecting → a CALM Reconnecting band, NOT
-            // the scary Failed. The display payload (attempt/reason) is the inline
-            // reconnect bookkeeping.
-            is com.pocketshell.core.connection.ConnectionState.Reattaching ->
-                reconnectingStatusFor(inlineState, hpu)
-            is com.pocketshell.core.connection.ConnectionState.Reconnecting ->
-                reconnectingStatusFor(inlineState, hpu)
-            is com.pocketshell.core.connection.ConnectionState.Gone ->
-                terminalOrInlineStatus(inlineState, hpu)
-            is com.pocketshell.core.connection.ConnectionState.Unreachable ->
-                // #720: the ONLY honest error. The CAUSE message is preserved (it is
-                // already a curated, user-facing string — never raw
-                // `TransportException`/SSH text); the CALM, tappable "Tap to reconnect"
-                // affordance + the dropped "Open the session again" instruction live in
-                // the screen band ([FailedConnectionRow]) and the calm
-                // [ConnectionIndicator.Unreachable] indicator. "Failed only after retries
-                // truly exhaust" tracks the INLINE ladder (see [terminalOrInlineStatus]).
-                terminalOrInlineStatus(inlineState, hpu)
-        }
-    }
-
-    /**
-     * Project a controller TERMINAL state (Unreachable/Gone). The brief's approved
-     * #685 change is "Failed/Unreachable only AFTER retries truly exhaust". The
-     * authoritative "retries exhausted" signal is the INLINE reconnect ladder (the
-     * effect machinery 1c-iv-b owns) — the controller's own drop-ladder counter can
-     * over-exhaust because the bridge mirrors each inline reconnect transition as a
-     * drop. So: surface Failed ONLY when the inline state is ALSO terminal
-     * (Unreachable/Gone). While the inline ladder is still recovering
-     * (Reconnecting/Reattaching) OR back Live, follow the inline state — a calm
-     * Reconnecting band or Connected, never a premature scary Failed.
-     */
-    private fun terminalOrInlineStatus(
-        inlineState: ConnectionState,
-        hpu: HostPortUser,
     ): ConnectionStatus =
-        when (inlineState) {
-            is ConnectionState.Unreachable,
-            is ConnectionState.Gone ->
-                ConnectionStatus.Failed(failedMessageFor(inlineState))
-            is ConnectionState.Reconnecting,
-            is ConnectionState.Reattaching ->
-                reconnectingStatusFor(inlineState, hpu)
-            // Inline already recovered (Live) or is mid-open: the controller
-            // over-exhausted; follow the inline truth, not a premature Failed.
-            else -> connectionStatusFor(inlineState)
-        }
-
-    private data class HostPortUser(val host: String, val port: Int, val user: String)
+        // The view-facing projection is the PURE seam
+        // [ConnectionStatusProjection.project] (extracted for #728 and pinned by
+        // `ConnectionStatusProjectionTest`). The VM supplies the seam's two pure
+        // inputs that need VM context: the INLINE-projected display payload
+        // (`connectionStatusFor(inlineState)`, a 1:1 map of the inline transition)
+        // and the host/port/user the view renders (`hostPortUserFor`, which can fall
+        // back to the active/connecting target for a payload-less terminal/idle case).
+        // Everything else — the controller→status SHAPE truth-table and the two
+        // approved #685 divergences — lives in the seam, byte-identical to the old
+        // inline body.
+        ConnectionStatusProjection.project(
+            controllerState = controllerState,
+            inlineStatus = connectionStatusFor(inlineState),
+            hpu = hostPortUserFor(inlineState),
+        )
 
     /** Best-effort host/port/user for the view, from the inline transition payload
      *  (the controller's core state does not carry it). Falls back to the active /
      *  connecting target, then to blanks for a payload-less Idle/Gone. */
-    private fun hostPortUserFor(inlineState: ConnectionState): HostPortUser =
+    private fun hostPortUserFor(inlineState: ConnectionState): ConnectionStatusProjection.HostPortUser =
         when (inlineState) {
-            is ConnectionState.Connecting -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Attaching -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Live -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Backgrounded -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Reattaching -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Reconnecting -> HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Connecting ->
+                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Attaching ->
+                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Live ->
+                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Backgrounded ->
+                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Reattaching ->
+                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
+            is ConnectionState.Reconnecting ->
+                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
             is ConnectionState.Idle,
             is ConnectionState.Gone,
             is ConnectionState.Unreachable -> {
                 val target = activeTarget ?: connectingTarget
                 if (target != null) {
-                    HostPortUser(target.host, target.port, target.user)
+                    ConnectionStatusProjection.HostPortUser(target.host, target.port, target.user)
                 } else {
-                    HostPortUser("", 0, "")
+                    ConnectionStatusProjection.HostPortUser("", 0, "")
                 }
             }
-        }
-
-    /** Build the view [ConnectionStatus.Reconnecting], preserving the inline
-     *  reconnect payload (attempt/maxAttempts/retryDelayMs/reason) when the inline
-     *  state is itself a reconnect; otherwise (the approved recoverable-drop
-     *  divergence, where the inline state is `Unreachable`/`Live`) a calm default. */
-    private fun reconnectingStatusFor(
-        inlineState: ConnectionState,
-        hpu: HostPortUser,
-    ): ConnectionStatus.Reconnecting {
-        val inlineReconnect = inlineState as? ConnectionState.Reconnecting
-        val inlineReattach = inlineState as? ConnectionState.Reattaching
-        return ConnectionStatus.Reconnecting(
-            host = hpu.host,
-            port = hpu.port,
-            user = hpu.user,
-            attempt = inlineReconnect?.attempt ?: inlineReattach?.attempt ?: 1,
-            maxAttempts = inlineReconnect?.maxAttempts ?: inlineReattach?.maxAttempts
-                ?: ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
-            retryDelayMs = inlineReconnect?.retryDelayMs ?: inlineReattach?.retryDelayMs ?: 0L,
-            reason = inlineReconnect?.reason ?: inlineReattach?.reason ?: "Reconnecting…",
-        )
-    }
-
-    /** The failure message for a controller `Gone`/`Unreachable`, from the inline
-     *  state's curated message (never raw exception text). Falls back to a reconnect
-     *  reason or a calm prompt when the inline state is mid-recovery. */
-    private fun failedMessageFor(inlineState: ConnectionState): String =
-        when (inlineState) {
-            is ConnectionState.Gone -> inlineState.message
-            is ConnectionState.Unreachable -> inlineState.message
-            is ConnectionState.Reconnecting -> inlineState.reason
-            is ConnectionState.Reattaching -> inlineState.reason
-            else -> "Disconnected. Tap to reconnect."
         }
 
 }

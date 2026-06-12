@@ -1414,35 +1414,57 @@ public class TmuxSessionViewModel @Inject constructor(
         appActive = false
         foregroundRuntimeProbeJob?.cancel()
         foregroundRuntimeProbeJob = null
-        val reconnecting = _connectionStatus.value as? ConnectionStatus.Reconnecting
-        if (reconnecting != null) {
-            autoReconnectJob?.cancel()
-            autoReconnectJob = null
-            val target = activeTarget ?: connectingTarget
-            recordAutoReconnectDecision(
-                decision = "cancelled_due_to_background",
-                target = target,
-                trigger = latestConnectIntent?.trigger ?: TmuxConnectTrigger.AutoReconnect,
-                reason = reconnecting.reason,
-                cause = "app_background_lifecycle_pause",
-                "attempt" to reconnecting.attempt,
-                "maxAttempts" to reconnecting.maxAttempts,
-                "retryDelayMs" to reconnecting.retryDelayMs,
-            )
-            if (target != null) {
-                pausedAutoReconnect = PausedAutoReconnect(
-                    target = target,
-                    reason = reconnecting.reason,
-                )
-                activeTarget = target
-                connectingTarget = target
-                refreshReconnectAvailability()
-            }
-            _connectionStatus.value = ConnectionStatus.Failed(
-                "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
-            )
-            return
+        when (reduceConnection(ConnectionEvent.Background)) {
+            ConnectionDecision.PauseReconnectForBackground ->
+                pauseReconnectForBackground()
+            ConnectionDecision.DetachForBackground ->
+                detachForBackground()
+            else -> Unit
         }
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.PauseReconnectForBackground]
+     * body — formerly inline at the top of [onAppBackgrounded]. Unchanged
+     * behavior; only the decision moved to [reduceConnection].
+     */
+    private fun pauseReconnectForBackground() {
+        val reconnecting = _connectionStatus.value as? ConnectionStatus.Reconnecting ?: return
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
+        val target = activeTarget ?: connectingTarget
+        recordAutoReconnectDecision(
+            decision = "cancelled_due_to_background",
+            target = target,
+            trigger = latestConnectIntent?.trigger ?: TmuxConnectTrigger.AutoReconnect,
+            reason = reconnecting.reason,
+            cause = "app_background_lifecycle_pause",
+            "attempt" to reconnecting.attempt,
+            "maxAttempts" to reconnecting.maxAttempts,
+            "retryDelayMs" to reconnecting.retryDelayMs,
+        )
+        if (target != null) {
+            pausedAutoReconnect = PausedAutoReconnect(
+                target = target,
+                reason = reconnecting.reason,
+            )
+            activeTarget = target
+            connectingTarget = target
+            refreshReconnectAvailability()
+        }
+        _connectionStatus.value = ConnectionStatus.Failed(
+            "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
+        )
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.DetachForBackground] body —
+     * formerly the lower half of [onAppBackgrounded]. Unchanged behavior; the
+     * `target`/`clientRef||sessionRef` guards already passed in [reduceBackground]
+     * but are kept here so the side-effect body is self-contained and the field
+     * reads happen at the same point in time as before.
+     */
+    private fun detachForBackground() {
         val target = activeTarget ?: connectingTarget
         if (target == null) return
         if (clientRef == null && sessionRef == null) return
@@ -1534,25 +1556,31 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onAppForegrounded() {
         appActive = true
-        if (pendingReattach == null) {
-            val paused = pausedAutoReconnect
-            if (paused != null) {
-                resumePausedAutoReconnect(paused)
-                return
-            }
-            if (probeCurrentRuntimeOnForegroundIfNeeded()) {
-                return
-            }
-            latestConnectIntent?.let { intent ->
-                Log.i(
-                    ISSUE_235_LIFECYCLE_TAG,
-                    "tmux-reattach-on-foreground-skip reason=no-pending " +
-                        "generation=${intent.generation} trigger=${intent.trigger.logValue} " +
-                        targetLogFields(intent.target),
-                )
-            }
-            return
+        when (reduceConnection(ConnectionEvent.Foreground)) {
+            ConnectionDecision.ReplayPendingReattach ->
+                replayPendingReattach()
+            ConnectionDecision.ResumePausedReconnect ->
+                pausedAutoReconnect?.let { resumePausedAutoReconnect(it) }
+            ConnectionDecision.ProbeForeground ->
+                probeCurrentRuntimeOnForegroundIfNeeded()
+            else ->
+                latestConnectIntent?.let { intent ->
+                    Log.i(
+                        ISSUE_235_LIFECYCLE_TAG,
+                        "tmux-reattach-on-foreground-skip reason=no-pending " +
+                            "generation=${intent.generation} trigger=${intent.trigger.logValue} " +
+                            targetLogFields(intent.target),
+                    )
+                }
         }
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.ReplayPendingReattach] body —
+     * formerly the second half of [onAppForegrounded]. Unchanged behavior; only
+     * the entry decision moved to [reduceConnection].
+     */
+    private fun replayPendingReattach() {
         val detachJob = backgroundDetachJob
         viewModelScope.launch {
             // If the user backgrounds and immediately foregrounds the
@@ -2182,17 +2210,29 @@ public class TmuxSessionViewModel @Inject constructor(
      * waiting for sshj's reader to discover that the old TCP path died.
      */
     public fun onNetworkChanged(change: TerminalNetworkChange) {
-        if (!appActive) return
-        if (autoReconnectJob?.isActive == true) return
-        val current = _connectionStatus.value
-        if (current !is ConnectionStatus.Connected) return
-        val target = activeTarget ?: connectingTarget ?: return
-        if (clientRef == null && sessionRef == null) return
+        val target = activeTarget ?: connectingTarget
+        when (reduceConnection(ConnectionEvent.NetworkChanged(change))) {
+            ConnectionDecision.SuppressNetworkNotValidated ->
+                if (target != null) suppressNetworkNotValidated(change, target)
+            ConnectionDecision.SuppressNetworkCoalesced ->
+                if (target != null) suppressNetworkCoalesced(change, target)
+            ConnectionDecision.ScheduleNetworkReconnect ->
+                if (target != null) scheduleNetworkReconnect(change, target)
+            else -> Unit
+        }
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.SuppressNetworkNotValidated]
+     * body — formerly inline in [onNetworkChanged]. Unchanged behavior.
+     */
+    private fun suppressNetworkNotValidated(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
         val reason = change.reason
         val previousValidated = change.previousValidated
-        val realValidatedIdentityChange = previousValidated != null &&
-            !previousValidated.hasSameNetworkIdentityAs(change.current)
-        if (!realValidatedIdentityChange) {
+        run {
             Log.i(
                 ISSUE_548_NETWORK_TAG,
                 "tmux-network-proactive-reconnect-skip reason=$reason " +
@@ -2239,14 +2279,24 @@ public class TmuxSessionViewModel @Inject constructor(
                 "classification" to "network_identity_unchanged",
                 "deferredFromBackground" to change.deferredFromBackground,
             )
-            return
         }
-        val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
-        if (
-            lifecycleCoalesce != null &&
-            lifecycleCoalesce.generation == connectGeneration &&
-            sameSessionIdentity(lifecycleCoalesce.target, target)
-        ) {
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.SuppressNetworkCoalesced]
+     * body — formerly inline in [onNetworkChanged]. Unchanged behavior. The
+     * `realValidatedIdentityChange` flag is always `true` on this path (the
+     * reducer reached here only past the validated-handoff gate), preserved as a
+     * literal so the diagnostic field value is byte-identical.
+     */
+    private fun suppressNetworkCoalesced(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        val reason = change.reason
+        val realValidatedIdentityChange = true
+        val lifecycleCoalesce = lifecycleReattachNetworkCoalesce ?: return
+        run {
             lifecycleReattachNetworkCoalesce = null
             Log.i(
                 ISSUE_548_NETWORK_TAG,
@@ -2292,8 +2342,23 @@ public class TmuxSessionViewModel @Inject constructor(
                 "classification" to "lifecycle_network_replay",
                 "deferredFromBackground" to change.deferredFromBackground,
             )
-            return
         }
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.ScheduleNetworkReconnect]
+     * body — formerly the tail of [onNetworkChanged]. Unchanged behavior. The
+     * `realValidatedIdentityChange` flag is always `true` on this path (only a
+     * real validated handoff reaches here), preserved as a literal for the
+     * diagnostic field. `current` is re-read; the reducer guaranteed Connected.
+     */
+    private fun scheduleNetworkReconnect(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        val current = _connectionStatus.value as? ConnectionStatus.Connected ?: return
+        val reason = change.reason
+        val realValidatedIdentityChange = true
         lifecycleReattachNetworkCoalesce = null
         val reconnectReason = "Network changed; reconnecting ${current.user}@${current.host}:${current.port}."
         Log.i(
@@ -4367,51 +4432,73 @@ public class TmuxSessionViewModel @Inject constructor(
         client: TmuxClient,
         disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
     ) {
-        val current = _connectionStatus.value
-        if (current !is ConnectionStatus.Connected) return
-        // Only react if this is still THE active client. The `connect()`
-        // race-recovery path attaches a fresh [TmuxClient] and closes the
-        // old one inside the same VM; the old client's disconnected signal
-        // must not overwrite the new client's Connected status.
-        if (clientRef !== client) return
+        val current = _connectionStatus.value as? ConnectionStatus.Connected ?: return
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
-        if (target != null && !screenStartedForCleared) {
-            // Issue #630: skip the pause if the screen stopped for an in-app
-            // navigation to a different session rather than app backgrounding.
-            // An active connectJob or a latestConnectIntent targeting a
-            // different session means the user already navigated away to
-            // session B; pausing a reconnect for session A would just create
-            // a stale pausedAutoReconnect that races with session B's connect.
-            val navigatingToDifferentSession = connectJob?.isActive == true ||
-                latestConnectIntent?.let { it.target.sessionName != target.sessionName } == true
-            if (navigatingToDifferentSession) {
-                ReconnectCauseTrail.record(
-                    stage = "handlePassiveClientDisconnect",
-                    outcome = "skipped_pause_in_app_navigation",
-                    cause = "different_session_target",
-                    trigger = TmuxConnectTrigger.AutoReconnect.logValue,
-                    "pausedSession" to target.sessionName,
-                    "intentSession" to latestConnectIntent?.target?.sessionName,
-                    "hasActiveConnectJob" to (connectJob?.isActive == true),
-                )
-                return
-            }
-            passiveDisconnectGraceJob?.cancel()
-            passiveDisconnectGraceJob = null
-            pauseAutoReconnectUntilForeground(
-                target = target,
-                reason = reason,
-                trigger = TmuxConnectTrigger.AutoReconnect,
-                cause = "screen_stopped_passive_disconnect",
-                diagnosticFields = arrayOf(
-                    "disconnectReason" to disconnectEvent.reason.logValue,
-                    "disconnectSource" to disconnectEvent.source,
-                    "disconnectIntent" to disconnectEvent.intent,
-                ),
-            )
-            return
+        when (reduceConnection(ConnectionEvent.TransportDropped(client))) {
+            ConnectionDecision.SkipPassiveInAppNavigation ->
+                if (target != null) skipPassiveInAppNavigation(target)
+            ConnectionDecision.PausePassiveUntilForeground ->
+                if (target != null) pausePassiveUntilForeground(target, reason, disconnectEvent)
+            ConnectionDecision.SilentReattachWithinGrace ->
+                silentReattachWithinPassiveGrace(client, target, reason, disconnectEvent)
+            else -> Unit
         }
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.SkipPassiveInAppNavigation]
+     * body (#630) — formerly inline in [handlePassiveClientDisconnect].
+     * Unchanged behavior.
+     */
+    private fun skipPassiveInAppNavigation(target: ConnectionTarget) {
+        ReconnectCauseTrail.record(
+            stage = "handlePassiveClientDisconnect",
+            outcome = "skipped_pause_in_app_navigation",
+            cause = "different_session_target",
+            trigger = TmuxConnectTrigger.AutoReconnect.logValue,
+            "pausedSession" to target.sessionName,
+            "intentSession" to latestConnectIntent?.target?.sessionName,
+            "hasActiveConnectJob" to (connectJob?.isActive == true),
+        )
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.PausePassiveUntilForeground]
+     * body — formerly inline in [handlePassiveClientDisconnect]. Unchanged
+     * behavior.
+     */
+    private fun pausePassiveUntilForeground(
+        target: ConnectionTarget,
+        reason: String,
+        disconnectEvent: TmuxDisconnectEvent,
+    ) {
+        passiveDisconnectGraceJob?.cancel()
+        passiveDisconnectGraceJob = null
+        pauseAutoReconnectUntilForeground(
+            target = target,
+            reason = reason,
+            trigger = TmuxConnectTrigger.AutoReconnect,
+            cause = "screen_stopped_passive_disconnect",
+            diagnosticFields = arrayOf(
+                "disconnectReason" to disconnectEvent.reason.logValue,
+                "disconnectSource" to disconnectEvent.source,
+                "disconnectIntent" to disconnectEvent.intent,
+            ),
+        )
+    }
+
+    /**
+     * EPIC #687 slice 1a: the [ConnectionDecision.SilentReattachWithinGrace]
+     * body — formerly the grace-job tail of [handlePassiveClientDisconnect].
+     * Unchanged behavior.
+     */
+    private fun silentReattachWithinPassiveGrace(
+        client: TmuxClient,
+        target: ConnectionTarget?,
+        reason: String,
+        disconnectEvent: TmuxDisconnectEvent,
+    ) {
         passiveDisconnectGraceJob?.cancel()
         val graceJob = viewModelScope.launch {
             val recovered = target != null && silentlyReattachWithinPassiveGrace(
@@ -9843,6 +9930,184 @@ public class TmuxSessionViewModel @Inject constructor(
         override fun close() {
             queue.close()
         }
+    }
+
+    /**
+     * EPIC #687 slice 1a — VM-internal connection-lifecycle decision seam.
+     *
+     * The connection-lifecycle DECISIONS used to be inlined at the top of each
+     * lifecycle entry point ([onAppBackgrounded], [onAppForegrounded],
+     * [onNetworkChanged], [handlePassiveClientDisconnect], and the
+     * foreground-runtime-probe gate). This sealed event/decision pair plus the
+     * single [reduceConnection] classifier consolidate those branch decisions
+     * into ONE place. The vocabulary deliberately mirrors
+     * `:shared:core-connection`'s `ConnectionController` (an event-in /
+     * decision-out reducer) so slice 1c can swap the [reduceConnection] body for
+     * a real `ConnectionController` call WITHOUT rewriting the call sites.
+     *
+     * This is a PURE classifier: it reads the current VM state and returns the
+     * branch the caller must take. It does NOT mutate state, schedule jobs, or
+     * touch [_connectionStatus] — the side-effect bodies stay at the call sites
+     * (slice 1a reshapes control flow, it does not replace the mechanism). The
+     * existing generation counter, grace clocks, and named jobs continue to back
+     * those side effects; later slices delete them.
+     */
+    private sealed interface ConnectionEvent {
+        /** Application moved to the background (ProcessLifecycle ON_STOP). */
+        data object Background : ConnectionEvent
+
+        /** Application moved to the foreground (ProcessLifecycle ON_START). */
+        data object Foreground : ConnectionEvent
+
+        /** A network identity change was observed by the terminal observer. */
+        data class NetworkChanged(val change: TerminalNetworkChange) : ConnectionEvent
+
+        /**
+         * The active [TmuxClient.disconnected] latch flipped true — the control
+         * channel closed under us (clean EOF, sshj exception, or close()).
+         */
+        data class TransportDropped(val client: TmuxClient) : ConnectionEvent
+    }
+
+    /**
+     * The branch the lifecycle call site must take. Each variant names the
+     * existing side-effect path; the call site dispatches on it and runs the
+     * same code it ran inline before. (The richer `ConnectionState` surface that
+     * `:shared:core-connection` models — Reattaching/Reconnecting/Gone/etc — is
+     * mapped onto the existing [ConnectionStatus] writes inside those bodies,
+     * which slice 1a leaves byte-identical.)
+     */
+    private sealed interface ConnectionDecision {
+        /** No lifecycle action — the event is a no-op in the current state. */
+        data object Ignore : ConnectionDecision
+
+        // --- Background ---
+        /**
+         * A reconnect was in flight; pause it until foreground and surface the
+         * "paused while backgrounded" [ConnectionStatus.Failed] band.
+         */
+        data object PauseReconnectForBackground : ConnectionDecision
+
+        /** Detach the live `-CC` control client and stash a pending reattach. */
+        data object DetachForBackground : ConnectionDecision
+
+        // --- Foreground ---
+        /** Resume an auto-reconnect that was paused while backgrounded. */
+        data object ResumePausedReconnect : ConnectionDecision
+
+        /** No pending reattach but a live session — probe the runtime channel. */
+        data object ProbeForeground : ConnectionDecision
+
+        /** Replay the [pendingReattach] stashed when we backgrounded. */
+        data object ReplayPendingReattach : ConnectionDecision
+
+        // --- NetworkChanged ---
+        /** Schedule a proactive reconnect for a real validated network handoff. */
+        data object ScheduleNetworkReconnect : ConnectionDecision
+
+        /** Suppress: not a real validated handoff (#548). */
+        data object SuppressNetworkNotValidated : ConnectionDecision
+
+        /** Suppress: coalesced with an in-flight lifecycle reattach (#548). */
+        data object SuppressNetworkCoalesced : ConnectionDecision
+
+        // --- TransportDropped (passive disconnect) ---
+        /**
+         * The screen stopped for an in-app navigation to a DIFFERENT session
+         * (#630) — skip the pause entirely so it cannot race the new connect.
+         */
+        data object SkipPassiveInAppNavigation : ConnectionDecision
+
+        /**
+         * The screen stopped (app background / explicit leave) — pause the
+         * auto-reconnect until foreground rather than racing a grace reattach.
+         */
+        data object PausePassiveUntilForeground : ConnectionDecision
+
+        /** Foreground passive disconnect — race the within-grace silent reattach. */
+        data object SilentReattachWithinGrace : ConnectionDecision
+    }
+
+    /**
+     * EPIC #687 slice 1a — the single decision entry point. Pure: reads VM state,
+     * returns the branch. Slice 1c replaces the body with a `ConnectionController`
+     * reduce, keeping these return values as the contract the call sites consume.
+     */
+    private fun reduceConnection(event: ConnectionEvent): ConnectionDecision =
+        when (event) {
+            is ConnectionEvent.Background -> reduceBackground()
+            is ConnectionEvent.Foreground -> reduceForeground()
+            is ConnectionEvent.NetworkChanged -> reduceNetworkChanged(event.change)
+            is ConnectionEvent.TransportDropped -> reduceTransportDropped(event.client)
+        }
+
+    private fun reduceBackground(): ConnectionDecision {
+        if (_connectionStatus.value is ConnectionStatus.Reconnecting) {
+            return ConnectionDecision.PauseReconnectForBackground
+        }
+        if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
+        if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
+        return ConnectionDecision.DetachForBackground
+    }
+
+    private fun reduceForeground(): ConnectionDecision {
+        if (pendingReattach != null) return ConnectionDecision.ReplayPendingReattach
+        if (pausedAutoReconnect != null) return ConnectionDecision.ResumePausedReconnect
+        if (canProbeCurrentRuntimeOnForeground()) return ConnectionDecision.ProbeForeground
+        return ConnectionDecision.Ignore
+    }
+
+    /**
+     * The pure gate of [probeCurrentRuntimeOnForegroundIfNeeded]: are we in a
+     * state where a foreground runtime probe is warranted? Mirrors that
+     * function's early returns exactly so the probe behavior is unchanged — only
+     * the decision is hoisted into the reducer.
+     */
+    private fun canProbeCurrentRuntimeOnForeground(): Boolean {
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
+        if (activeTarget == null) return false
+        if (clientRef == null) return false
+        if (sessionRef == null) return false
+        return true
+    }
+
+    private fun reduceNetworkChanged(change: TerminalNetworkChange): ConnectionDecision {
+        if (!appActive) return ConnectionDecision.Ignore
+        if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
+        val target = activeTarget ?: connectingTarget ?: return ConnectionDecision.Ignore
+        if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
+        val previousValidated = change.previousValidated
+        val realValidatedIdentityChange = previousValidated != null &&
+            !previousValidated.hasSameNetworkIdentityAs(change.current)
+        if (!realValidatedIdentityChange) return ConnectionDecision.SuppressNetworkNotValidated
+        val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
+        if (
+            lifecycleCoalesce != null &&
+            lifecycleCoalesce.generation == connectGeneration &&
+            sameSessionIdentity(lifecycleCoalesce.target, target)
+        ) {
+            return ConnectionDecision.SuppressNetworkCoalesced
+        }
+        return ConnectionDecision.ScheduleNetworkReconnect
+    }
+
+    private fun reduceTransportDropped(client: TmuxClient): ConnectionDecision {
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
+        // Only react if this is still THE active client (a fresh connect may have
+        // swapped in a new client whose Connected status this drop must not stomp).
+        if (clientRef !== client) return ConnectionDecision.Ignore
+        val target = activeTarget ?: connectingTarget
+        if (target != null && !screenStartedForCleared) {
+            val navigatingToDifferentSession = connectJob?.isActive == true ||
+                latestConnectIntent?.let { it.target.sessionName != target.sessionName } == true
+            return if (navigatingToDifferentSession) {
+                ConnectionDecision.SkipPassiveInAppNavigation
+            } else {
+                ConnectionDecision.PausePassiveUntilForeground
+            }
+        }
+        return ConnectionDecision.SilentReattachWithinGrace
     }
 
     /** Coarse-grained connection state. Mirrors `SessionViewModel.ConnectionStatus`. */

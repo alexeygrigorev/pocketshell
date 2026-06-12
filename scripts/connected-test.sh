@@ -66,6 +66,12 @@ source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 # testing). Sourcing this makes pocketshell_release_all also release the claimed
 # agents port on exit, and provides pocketshell_claim_agents_port below.
 source "$ROOT_DIR/scripts/lib/agents-pool.sh"
+# Issue #730: per-invocation transient systemd --user scope so the heavy gradle
+# connected-test build is accounted in a SIBLING cgroup under robust.slice
+# (default MemoryMax 8G < the 12 GiB per-session cap), not in the calling tmux
+# session's cgroup. A runaway then OOMs only its own scope; the parent session
+# survives. Degrades to a bare invocation when user systemd is unavailable (CI).
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -252,14 +258,28 @@ INIT
   trap 'rm -f "$LANE_INIT_SCRIPT" 2>/dev/null || true; pocketshell_release_all' EXIT
 fi
 
+# Issue #730: the heavy gradle build runs inside its OWN transient systemd
+# --user scope (a SIBLING of the session's per-session scope under robust.slice,
+# NOT nested), so a runaway OOMs only its own scope and the parent tmux session
+# survives. The unit name is UNIQUE per invocation (suffix + serial + pid) so
+# parallel lanes get distinct sibling scopes that never collide. When user
+# systemd is unavailable (CI), pocketshell_scope_run runs gradle BARE — identical
+# to the legacy behaviour. Cap is env-tunable via POCKETSHELL_TEST_MEM (default
+# 8G < the 12 GiB session cap so several lanes coexist under robust.slice).
+SCOPE_TOKEN="${SUFFIX:-base}"
+SCOPE_SERIAL="${ANDROID_SERIAL:-noserial}"
+SCOPE_UNIT="pocketshell-test-${SCOPE_TOKEN//[^A-Za-z0-9._-]/_}-${SCOPE_SERIAL//[^A-Za-z0-9._-]/_}-$$"
+
 # Run gradle as a CHILD process, NOT via `exec`. `exec` would replace this shell
 # and prevent bash from firing its EXIT trap (pocketshell_release_all), which
 # orphans the backgrounded per-serial flock holder and keeps the pool claim held
 # forever (issue #674: AC2 release-on-exit). Running gradle as a child lets the
 # trap run on exit so the claimed pool serial + its flock holder are released.
 #
-# Forward SIGINT/SIGTERM to the gradle child so a Ctrl-C still tears it down;
-# the EXIT trap then fires on our way out and releases the claim too.
+# Forward SIGINT/SIGTERM to the child so a Ctrl-C still tears it down; the EXIT
+# trap then fires on our way out and releases the claim too. The child here is
+# the scope-run wrapper (systemd-run --scope), which propagates the signal to
+# the scoped gradle process tree.
 GRADLE_PID=""
 # Invoked indirectly via the INT/TERM traps below; shellcheck can't see that.
 # shellcheck disable=SC2317
@@ -272,7 +292,8 @@ forward_signal() {
 trap 'forward_signal INT' INT
 trap 'forward_signal TERM' TERM
 
-./gradlew --no-daemon :app:connectedDebugAndroidTest \
+pocketshell_scope_run "$SCOPE_UNIT" \
+  ./gradlew --no-daemon :app:connectedDebugAndroidTest \
   "${GRADLE_INIT_ARGS[@]}" \
   "${GRADLE_SUFFIX_ARGS[@]}" \
   "${GRADLE_ARGS[@]}" &

@@ -249,8 +249,11 @@ internal class HostTreeModel {
             } else {
                 existing.lastActivity = entry.lastActivity
                 existing.attached = entry.attached
-                existing.agentKind = entry.agentKind
-                existing.windows = entry.windows.map { it.toState() }
+                // Issue #716: agent-ness is STICKY. A known agent kind is only
+                // overwritten by another agent kind or a CONFIRMED Shell — an
+                // incoming Probing must NOT clobber a known agent.
+                existing.agentKind = mergeAgentKind(existing.agentKind, entry.agentKind)
+                existing.windows = mergeWindows(existing.windows, entry.windows.map { it.toState() })
                 // The probe confirmed this node — it is no longer optimistic.
                 existing.optimisticSince = null
             }
@@ -463,6 +466,60 @@ internal class HostTreeModel {
         val resolvedWatchedRootPaths: Map<String, String>,
     )
 
+    /**
+     * Issue #716: sticky agent-ness merge. Once a session/window is known to
+     * be an agent (Claude/Codex/OpenCode), it STAYS an agent across
+     * reconcile/reconnect/switch unless an EXPLICIT signal downgrades it:
+     *
+     *  - the incoming kind is itself an agent kind (an agent → agent change,
+     *    e.g. Claude → Codex, is honoured); OR
+     *  - the incoming kind is a CONFIRMED [SessionAgentKind.Shell] — the
+     *    affirmative-shell verdict the gateway only emits for a positively
+     *    seen interactive-shell pane (#716 gateway change). That is the one
+     *    explicit "this is now a shell" event that downgrades.
+     *
+     * An incoming [SessionAgentKind.Probing] ("presumed-agent / still
+     * detecting") NEVER clobbers a known agent — a slow/incomplete re-probe
+     * must not flip a confirmed agent back to uncertain. When the held kind is
+     * not yet an agent (Probing/Shell/Exited), the incoming kind wins, so a
+     * Probing session can still be UPGRADED to a detected agent.
+     */
+    private fun mergeAgentKind(held: SessionAgentKind, incoming: SessionAgentKind): SessionAgentKind {
+        if (!held.isAgent) return incoming
+        // Held is a known agent: keep it unless the probe explicitly says
+        // another agent or a CONFIRMED shell.
+        return when {
+            incoming.isAgent -> incoming
+            incoming == SessionAgentKind.Shell -> incoming
+            else -> held // incoming Probing/Exited does not downgrade a known agent
+        }
+    }
+
+    /**
+     * Issue #716: apply the sticky [mergeAgentKind] guard per window, matching
+     * incoming windows to held windows by [WindowState.windowId] (stable tmux
+     * id) and falling back to [WindowState.index]. A held window's agent kind
+     * is preserved against an incoming Probing; everything else on the window
+     * (name/active/command/id) is taken from the fresh probe.
+     */
+    private fun mergeWindows(held: List<WindowState>, incoming: List<WindowState>): List<WindowState> {
+        if (held.isEmpty()) return incoming
+        return incoming.map { incomingWindow ->
+            val match = held.firstOrNull { heldWindow ->
+                val byId = incomingWindow.windowId != null &&
+                    heldWindow.windowId == incomingWindow.windowId
+                val byIndex = incomingWindow.windowId == null &&
+                    heldWindow.windowId == null &&
+                    incomingWindow.index != null &&
+                    heldWindow.index == incomingWindow.index
+                byId || byIndex
+            } ?: return@map incomingWindow
+            incomingWindow.copy(
+                agentKind = mergeAgentKind(match.agentKind, incomingWindow.agentKind),
+            )
+        }
+    }
+
     private fun FolderSessionEntry.toNode(optimisticSince: Long?): SessionNode =
         SessionNode(
             lastActivity = lastActivity,
@@ -500,6 +557,18 @@ internal class HostTreeModel {
             agentKind = agentKind,
             windowId = windowId,
         )
+
+    /**
+     * Issue #716: a CONCRETE known-agent kind for the sticky-merge guard.
+     * Only the three detected agent runtimes count — [SessionAgentKind.Probing]
+     * (presumed/detecting) and [SessionAgentKind.Exited] are deliberately NOT
+     * "known agents" so they can still be upgraded by an incoming detected
+     * agent kind on the next reconcile.
+     */
+    private val SessionAgentKind.isAgent: Boolean
+        get() = this == SessionAgentKind.Claude ||
+            this == SessionAgentKind.Codex ||
+            this == SessionAgentKind.OpenCode
 
     companion object {
         /**

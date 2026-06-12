@@ -1,7 +1,10 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -194,5 +197,46 @@ class FolderListGatewayParserTest {
         // sessA's only pane is inactive (pane_active=0) → skipped.
         // sessB has only 2 fields → fails the 8-field size check → skipped.
         assertEquals(0, map.size)
+    }
+
+    // --- #716: default-optimistic agent fallback -------------------------
+
+    @Test
+    fun undetectedShellCommandResolvesToAffirmativeShell() {
+        // A completed probe whose pane foreground command is an interactive
+        // shell with no agent match is an AFFIRMATIVE shell verdict.
+        for (shell in listOf("bash", "zsh", "fish", "sh", "/usr/bin/zsh", "-bash", "FISH")) {
+            assertEquals(
+                "interactive shell '$shell' → Shell",
+                SessionAgentKind.Shell,
+                SshFolderListGateway.resolveUndetectedKind(shell),
+            )
+            assertTrue("'$shell' is an affirmative shell", SshFolderListGateway.isAffirmativeShellCommand(shell))
+        }
+    }
+
+    @Test
+    fun undetectedNonShellCommandResolvesToProbingNotShell() {
+        // No agent match + a NON-interactive-shell command (e.g. the probe
+        // saw `node`/`python`, or the command is unknown) is presumed-agent.
+        for (cmd in listOf("node", "python", "vim", "git", "claude")) {
+            assertEquals(
+                "non-shell '$cmd' → Probing (never default-Shell on absence)",
+                SessionAgentKind.Probing,
+                SshFolderListGateway.resolveUndetectedKind(cmd),
+            )
+            assertFalse("'$cmd' is not an affirmative shell", SshFolderListGateway.isAffirmativeShellCommand(cmd))
+        }
+    }
+
+    @Test
+    fun undetectedNullOrBlankCommandResolvesToProbingNotShell() {
+        // The probe could not read a command yet → presumed-agent, NOT Shell.
+        // This is the #716 #1 risk: never downgrade a real agent on absence.
+        assertEquals(SessionAgentKind.Probing, SshFolderListGateway.resolveUndetectedKind(null))
+        assertEquals(SessionAgentKind.Probing, SshFolderListGateway.resolveUndetectedKind(""))
+        assertEquals(SessionAgentKind.Probing, SshFolderListGateway.resolveUndetectedKind("   "))
+        assertFalse(SshFolderListGateway.isAffirmativeShellCommand(null))
+        assertFalse(SshFolderListGateway.isAffirmativeShellCommand(""))
     }
 }

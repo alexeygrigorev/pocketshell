@@ -133,6 +133,132 @@ class HostTreeModelTest {
         assertEquals(listOf("a", "b", "c"), order2)
     }
 
+    // --- Sticky agent-ness (#716) ----------------------------------------
+
+    @Test
+    fun reconcileKeepsKnownAgentWhenProbeReReportsProbing() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        // First probe: alpha is a confirmed Claude agent.
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.Claude))),
+            now = 100L,
+        )
+        assertEquals(
+            SessionAgentKind.Claude,
+            tree.sessionEntries().first { it.sessionName == "alpha" }.agentKind,
+        )
+        // A later (slow/incomplete) probe re-reports it as Probing — sticky:
+        // the known agent must NOT be clobbered back to uncertain.
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.Probing))),
+            now = 200L,
+        )
+        assertEquals(
+            "an incoming Probing must not downgrade a known agent",
+            SessionAgentKind.Claude,
+            tree.sessionEntries().first { it.sessionName == "alpha" }.agentKind,
+        )
+    }
+
+    @Test
+    fun reconcileDowngradesKnownAgentOnlyOnConfirmedShell() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.Claude))),
+            now = 100L,
+        )
+        // A CONFIRMED Shell verdict (affirmative interactive-shell pane) is the
+        // one explicit signal that downgrades a known agent.
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.Shell))),
+            now = 200L,
+        )
+        assertEquals(
+            "a confirmed Shell downgrades a known agent",
+            SessionAgentKind.Shell,
+            tree.sessionEntries().first { it.sessionName == "alpha" }.agentKind,
+        )
+    }
+
+    @Test
+    fun reconcileUpgradesProbingSessionToDetectedAgent() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        // alpha starts presumed-agent / detecting.
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.Probing))),
+            now = 100L,
+        )
+        // Detection completes: it IS a Codex agent — Probing must upgrade.
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.Codex))),
+            now = 200L,
+        )
+        assertEquals(
+            "a Probing session upgrades to a detected agent",
+            SessionAgentKind.Codex,
+            tree.sessionEntries().first { it.sessionName == "alpha" }.agentKind,
+        )
+    }
+
+    @Test
+    fun reconcileHonoursAgentToAgentChange() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.Claude))),
+            now = 100L,
+        )
+        tree.reconcile(
+            snapshot(listOf(session("alpha", agentKind = SessionAgentKind.OpenCode))),
+            now = 200L,
+        )
+        assertEquals(
+            "an agent→agent change is honoured",
+            SessionAgentKind.OpenCode,
+            tree.sessionEntries().first { it.sessionName == "alpha" }.agentKind,
+        )
+    }
+
+    @Test
+    fun reconcileKeepsKnownWindowAgentWhenProbeReReportsProbing() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "alpha",
+                        agentKind = SessionAgentKind.Claude,
+                        windows = listOf(window(0, "@1", agentKind = SessionAgentKind.Claude)),
+                    ),
+                ),
+            ),
+            now = 100L,
+        )
+        // The window re-reports Probing — the held agent window stays sticky.
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "alpha",
+                        agentKind = SessionAgentKind.Probing,
+                        windows = listOf(window(0, "@1", agentKind = SessionAgentKind.Probing)),
+                    ),
+                ),
+            ),
+            now = 200L,
+        )
+        val win = tree.sessionEntries().first { it.sessionName == "alpha" }.windows.first()
+        assertEquals(
+            "a known agent WINDOW is not clobbered by an incoming Probing",
+            SessionAgentKind.Claude,
+            win.agentKind,
+        )
+    }
+
     // --- By-id optimistic mutations (#653/#678) --------------------------
 
     @Test

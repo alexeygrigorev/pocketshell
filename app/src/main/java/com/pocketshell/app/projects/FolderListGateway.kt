@@ -57,9 +57,20 @@ import javax.inject.Inject
  * list kept a forked candidate-enumeration heuristic that predated
  * #183/#186/#236 and so labelled live Claude Code / Codex / OpenCode
  * sessions `Shell`) WITHOUT the ~2N sequential round-trips a per-session
- * `detectForPane` loop would cost on a multi-session list. Sessions
- * without a detection match render as [SessionAgentKind.Shell] — the
- * locked default for plain tmux panes.
+ * `detectForPane` loop would cost on a multi-session list.
+ *
+ * Issue #716 (default-optimistic + sticky agent-ness): a missing agent
+ * detection is NO LONGER assumed to mean "plain shell" — detection is
+ * sometimes slow or wrong right after attach/switch, and most sessions
+ * are agents. The fallback is now [SessionAgentKind.Probing]
+ * ("presumed-agent / detecting") so the composer stays available during
+ * the uncertain window. [SessionAgentKind.Shell] is reserved for an
+ * AFFIRMATIVE shell verdict ONLY: a completed probe whose pane foreground
+ * command is an interactive shell (`bash`/`zsh`/`fish`/`sh`) with no agent
+ * match (see [isAffirmativeShellCommand]). A "no agent match because the
+ * probe has not finished / saw no interactive-shell command" maps to
+ * `Probing`, never `Shell` — so a real agent is never downgraded by an
+ * incomplete probe.
  */
 data class FolderSessionRow(
     val sessionName: String,
@@ -1164,8 +1175,16 @@ class SshFolderListGateway internal constructor(
      * over [session] and fold the result onto [rows]. Shared by the native
      * lease path and the live-client + watched-root path so the agent chips
      * are identical regardless of whether a `-CC` control client enumerated
-     * the rows. A detection failure degrades every row to
-     * [SessionAgentKind.Shell] rather than failing the list.
+     * the rows.
+     *
+     * Issue #716: when the detector produces NO match for a window, the
+     * fallback is the AFFIRMATIVE-shell-aware [resolveUndetectedKind] — an
+     * interactive-shell foreground command (`bash`/`zsh`/…) resolves to
+     * [SessionAgentKind.Shell] (a confirmed shell), anything else resolves
+     * to [SessionAgentKind.Probing] (presumed-agent / still detecting). A
+     * detection failure (the whole probe threw) therefore degrades every
+     * row to `Probing`, not `Shell`, so a transient detector error never
+     * mislabels a real agent as a plain shell.
      */
     private suspend fun annotateAgentKinds(
         session: SshSession,
@@ -1177,14 +1196,22 @@ class SshFolderListGateway internal constructor(
         return rows.map { row ->
             val windows = row.windows.map { window ->
                 val key = WindowProbeKey(row.sessionName, window.index)
-                window.copy(agentKind = agentKinds.windowKinds[key] ?: SessionAgentKind.Shell)
+                window.copy(
+                    agentKind = agentKinds.windowKinds[key]
+                        ?: resolveUndetectedKind(window.command),
+                )
             }
+            val sessionKind = agentKinds.sessionKinds[row.sessionName]
+                ?: resolveUndetectedKind(
+                    (windows.firstOrNull { it.active } ?: windows.firstOrNull())?.command,
+                )
             row.copy(
-                agentKind = agentKinds.sessionKinds[row.sessionName] ?: SessionAgentKind.Shell,
+                agentKind = sessionKind,
                 windows = windows,
             )
         }
     }
+
 
     /**
      * Classify every session window's active pane by delegating to the
@@ -1218,20 +1245,29 @@ class SshFolderListGateway internal constructor(
             session = session,
             panes = probes,
         )
+        // `detectForPanes` only returns matched panes, so `windowKinds` only
+        // ever holds an AGENT kind (Claude/Codex/OpenCode), never Shell.
         val windowKinds = detections.mapNotNull { (probeKey, detection) ->
             val key = probeKeys[probeKey] ?: return@mapNotNull null
             key to detection.agent.toSessionAgentKind()
         }.toMap()
-        val sessionKinds = rows.associate { row ->
+        // Issue #716: only publish a session kind when an agent was actually
+        // detected (active window wins, else any window's agent). A session
+        // with NO agent match is intentionally LEFT OUT of the map so
+        // `annotateAgentKinds` falls through to `resolveUndetectedKind` —
+        // affirmative-shell → Shell, otherwise → Probing. We must NOT default
+        // an undetected session to Shell here (the #716 sticky/optimistic fix).
+        val sessionKinds = rows.mapNotNull { row ->
             val activeWindowKind = row.windows
                 .firstOrNull { it.active }
                 ?.let { windowKinds[WindowProbeKey(row.sessionName, it.index)] }
             val anyAgentKind = row.windows
                 .asSequence()
                 .mapNotNull { windowKinds[WindowProbeKey(row.sessionName, it.index)] }
-                .firstOrNull { it != SessionAgentKind.Shell }
-            row.sessionName to (activeWindowKind ?: anyAgentKind ?: SessionAgentKind.Shell)
-        }
+                .firstOrNull()
+            val detected = activeWindowKind ?: anyAgentKind ?: return@mapNotNull null
+            row.sessionName to detected
+        }.toMap()
         return FolderAgentDetection(
             sessionKinds = sessionKinds,
             windowKinds = windowKinds,
@@ -1244,6 +1280,7 @@ class SshFolderListGateway internal constructor(
             AgentKind.Codex -> SessionAgentKind.Codex
             AgentKind.OpenCode -> SessionAgentKind.OpenCode
         }
+
 
     private data class FolderAgentDetection(
         val sessionKinds: Map<String, SessionAgentKind> = emptyMap(),
@@ -1321,10 +1358,25 @@ class SshFolderListGateway internal constructor(
 
                     baseRows.map { row ->
                         val pane = paneRows[row.sessionName]
+                        val windows = windowsBySession[row.sessionName].orEmpty().map { window ->
+                            // Issue #716: the live-client path runs NO detector
+                            // (the control channel can't host the ps/candidate
+                            // scan), so resolve the raw kind affirmative-shell-
+                            // aware — an interactive-shell pane is a confirmed
+                            // Shell, anything else is presumed-agent Probing.
+                            // NEVER emit a raw `Shell` for an undetected window:
+                            // when watched roots are empty this path returns
+                            // WITHOUT annotation and feeds the maintained tree
+                            // directly, where a false `Shell` would downgrade a
+                            // sticky agent (#716).
+                            window.copy(agentKind = resolveUndetectedKind(window.command))
+                        }
                         row.copy(
                             cwd = pane?.cwd ?: row.cwd,
-                            agentKind = SessionAgentKind.Shell,
-                            windows = windowsBySession[row.sessionName].orEmpty(),
+                            agentKind = resolveUndetectedKind(
+                                (windows.firstOrNull { it.active } ?: windows.firstOrNull())?.command,
+                            ),
+                            windows = windows,
                         )
                     }
                 }
@@ -1381,6 +1433,49 @@ class SshFolderListGateway internal constructor(
          * `ConnectError` instead of hanging.
          */
         const val PROBE_LOG_TAG: String = "PsFolderProbe"
+
+        /**
+         * Issue #716: interactive-shell foreground commands that, when seen as
+         * a pane's `#{pane_current_command}` with no agent match, constitute an
+         * AFFIRMATIVE shell verdict ([isAffirmativeShellCommand]). Anything not
+         * in this set (including a null/blank command) is treated as presumed-
+         * agent / still-detecting (`Probing`), never downgraded to `Shell`.
+         */
+        val INTERACTIVE_SHELL_COMMANDS: Set<String> =
+            setOf("bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh")
+
+        /**
+         * Issue #716: an AFFIRMATIVE interactive-shell verdict. The pane's
+         * `#{pane_current_command}` foreground command is one of the known
+         * interactive shells, so the detector's "no agent match" is a confirmed
+         * shell rather than an unfinished probe. This is the ONLY signal allowed
+         * to downgrade a session to [SessionAgentKind.Shell]; a null/blank or
+         * otherwise-unrecognised command is NOT affirmative (it stays Probing).
+         * Matched on the command's basename, case-insensitively, with any
+         * leading `-` (login-shell marker, e.g. `-bash`) stripped.
+         */
+        fun isAffirmativeShellCommand(command: String?): Boolean {
+            val token = command?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+            val basename = token.substringAfterLast('/').removePrefix("-")
+            return basename.lowercase() in INTERACTIVE_SHELL_COMMANDS
+        }
+
+        /**
+         * Issue #716: resolve the agent kind for a pane/window the detector did
+         * NOT match. An interactive-shell foreground command is an AFFIRMATIVE
+         * shell verdict ([SessionAgentKind.Shell]); everything else — including
+         * a null/blank command (the probe could not read it yet) or a non-shell
+         * command we have simply not classified as an agent — is the presumed-
+         * agent [SessionAgentKind.Probing]. NEVER downgrade to `Shell` on
+         * absence of evidence: only a positively-seen interactive shell
+         * confirms shell.
+         */
+        fun resolveUndetectedKind(command: String?): SessionAgentKind =
+            if (isAffirmativeShellCommand(command)) {
+                SessionAgentKind.Shell
+            } else {
+                SessionAgentKind.Probing
+            }
 
         /**
          * Upper bound on a single session-enumeration SSH-exec probe read

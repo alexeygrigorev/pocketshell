@@ -74,7 +74,20 @@ class FolderListGatewayLiveClientTest {
         val rows = (result as FolderListResult.Sessions).rows
         assertEquals(listOf("git-cable-world", "git-cable-world-map"), rows.map { it.sessionName })
         assertEquals(listOf("/home/testuser/git/cable-world/app", "/tmp/cable-world-map"), rows.map { it.cwd })
-        assertEquals(listOf(SessionAgentKind.Shell, SessionAgentKind.Shell), rows.map { it.agentKind })
+        // Issue #716: the live-client path runs no detector, so each session's
+        // kind falls back to the AFFIRMATIVE-shell-aware resolution of its
+        // active pane's foreground command. `git-cable-world`'s active window
+        // (index 1) runs `claude` → presumed-agent Probing (NOT a raw Shell
+        // that would falsely downgrade a real agent in the maintained tree);
+        // `git-cable-world-map`'s active window runs `bash` → confirmed Shell.
+        assertEquals(listOf(SessionAgentKind.Probing, SessionAgentKind.Shell), rows.map { it.agentKind })
+        // The per-window kinds follow the same affirmative-shell rule: the
+        // `sh`/`bash` panes are confirmed Shell; the `claude` pane is Probing.
+        assertEquals(
+            listOf(SessionAgentKind.Shell, SessionAgentKind.Probing),
+            rows[0].windows.map { it.agentKind },
+        )
+        assertEquals(listOf(SessionAgentKind.Shell), rows[1].windows.map { it.agentKind })
         assertEquals(listOf(0, 1), rows[0].windows.map { it.index })
         assertEquals(listOf("shell", "claude"), rows[0].windows.map { it.name })
         assertEquals(listOf(false, true), rows[0].windows.map { it.active })

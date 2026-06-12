@@ -9595,10 +9595,11 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun rebuildUnifiedPanes() {
         val activePanes = _panes.value
-        val hostId = activeTarget?.hostId ?: run {
+        val active = activeTarget ?: run {
             _unifiedPanes.value = activePanes
             return
         }
+        val hostId = active.hostId
         val cached = runtimeCache.cachedRuntimesForHost(hostId)
         if (cached.isEmpty()) {
             _unifiedPanes.value = activePanes
@@ -9607,10 +9608,36 @@ public class TmuxSessionViewModel @Inject constructor(
         // Build the unified list: active session first, then cached sessions
         // in cache-insertion order (most recent last, which matches the LRU
         // order of the LinkedHashMap backing the cache).
+        //
+        // Issue #681: dedup defensively. Two failure modes produced a phantom
+        // extra pager page that, when settled on, mis-routed to a random
+        // session:
+        //  1. A key-DRIFTED twin of the ACTIVE session survives in the cache
+        //     (activate() removes only the exact TmuxRuntimeKey match, while
+        //     this session was parked under a slightly different key). Its
+        //     panes are the SAME session the user is already on, so appending
+        //     them creates a duplicate page. Exclude any cached runtime that
+        //     resolves to the active session's identity (hostId + sessionName),
+        //     not by full key — that is precisely what lets the twin slip past.
+        //  2. The same paneId appearing in more than one cached runtime (or in
+        //     both the active list and a cached one) — dedup by paneId so each
+        //     real window/pane contributes exactly one page.
+        val activeSessionName = active.sessionName
+        val seenPaneIds = mutableSetOf<String>()
         val allPanes = mutableListOf<TmuxPaneState>()
-        allPanes.addAll(activePanes)
+        for (pane in activePanes) {
+            if (seenPaneIds.add(pane.paneId)) {
+                allPanes.add(pane)
+            }
+        }
         for (runtime in cached) {
-            allPanes.addAll(runtime.panes)
+            // Skip the drifted twin of the session we're already showing.
+            if (runtime.key.sessionName == activeSessionName) continue
+            for (pane in runtime.panes) {
+                if (seenPaneIds.add(pane.paneId)) {
+                    allPanes.add(pane)
+                }
+            }
         }
         _unifiedPanes.value = allPanes
     }
@@ -9635,8 +9662,16 @@ public class TmuxSessionViewModel @Inject constructor(
      * Look up the session name of a cached runtime that owns the given pane.
      */
     private fun cachedSessionNameForPane(pane: TmuxPaneState): String? {
-        val hostId = activeTarget?.hostId ?: return null
-        return runtimeCache.cachedRuntimesForHost(hostId)
+        val active = activeTarget ?: return null
+        val activeSessionName = active.sessionName
+        return runtimeCache.cachedRuntimesForHost(active.hostId)
+            // Issue #681: never resolve a pane to a key-drifted TWIN of the
+            // ACTIVE session — that would emit a sessionSwitchRequest for a
+            // session the user is already on (and, paired with the phantom
+            // page, route to a foreign session). The active session's panes
+            // are already handled by [sessionNameForUnifiedPane] before this
+            // is reached; here we only resolve genuinely cached OTHER sessions.
+            .filterNot { it.key.sessionName == activeSessionName }
             .firstOrNull { it.panes.any { p -> p.paneId == pane.paneId } }
             ?.key?.sessionName
     }

@@ -55,16 +55,48 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         val now = nowMs()
         val evicted = mutableListOf<CachedTmuxRuntime>()
         evicted += evictExpiredLocked(now)
+        // Issue #681: prune any pre-existing entry for the SAME session
+        // (same host + same tmux session name) before parking the fresh one,
+        // even if its other key fields (keyPath/hostname/port/username)
+        // drifted. Without this, a drifted twin of a session accumulates as a
+        // second cache entry and shows up as a phantom pager page that routes
+        // to a foreign session on settle. A session has exactly one live
+        // runtime; the most recent put wins.
+        evicted += pruneSameSessionTwinsLocked(runtime.key)
         runtimes.put(runtime.key, CacheEntry(runtime, now))?.let { evicted += it.runtime }
         evicted += evictHostOverflowLocked(runtime.key.hostId)
         evicted
     }
 
+    private fun pruneSameSessionTwinsLocked(key: TmuxRuntimeKey): List<CachedTmuxRuntime> {
+        val removed = mutableListOf<CachedTmuxRuntime>()
+        val iterator = runtimes.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key != key &&
+                entry.key.hostId == key.hostId &&
+                entry.key.sessionName == key.sessionName
+            ) {
+                iterator.remove()
+                removed += entry.value.runtime
+            }
+        }
+        return removed
+    }
+
     internal fun activate(key: TmuxRuntimeKey): CacheActivation = synchronized(this) {
         val now = nowMs()
-        val evicted = evictExpiredLocked(now)
+        val evicted = mutableListOf<CachedTmuxRuntime>()
+        evicted += evictExpiredLocked(now)
+        val runtime = runtimes.remove(key)?.runtime
+        // Issue #681: when a session becomes active, drop any key-drifted TWIN
+        // of that same session still parked under a different key. Otherwise
+        // the active session ends up with a duplicate cache entry that surfaces
+        // as a phantom pager page and mis-routes on settle. activate() removing
+        // only the exact key is exactly what let the twin survive.
+        evicted += pruneSameSessionTwinsLocked(key)
         CacheActivation(
-            runtime = runtimes.remove(key)?.runtime,
+            runtime = runtime,
             evicted = evicted,
         )
     }

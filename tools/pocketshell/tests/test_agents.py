@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import click
 import pytest
@@ -427,3 +426,90 @@ def test_cli_agent_missing_dir_exits_two(monkeypatch):
 def test_cli_agent_help_lists_all_three_kinds():
     rc = main(["agent", "--help"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# `--profile` resolution (#718): name → config_dir via discovery
+# ---------------------------------------------------------------------------
+
+
+def _seed_zlaude_home(tmp_path, monkeypatch):
+    """Build a fake HOME with ~/.claude + ~/.zlaude and point HOME at it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    for name in (".claude", ".zlaude"):
+        d = home / name
+        d.mkdir()
+        (d / "settings.json").write_text("{}", encoding="utf-8")
+        (d / ".claude.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    return home
+
+
+def test_cli_agent_profile_resolves_to_claude_config_dir(tmp_path, monkeypatch):
+    home = _seed_zlaude_home(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    captured = {}
+    monkeypatch.setattr(
+        agents.os, "execvpe", lambda f, a, e: captured.update(env=e)
+    )
+    rc = main(
+        [
+            "agent",
+            "claude",
+            "--dir",
+            str(workdir),
+            "--profile",
+            "Claude (Z.AI)",
+        ]
+    )
+    assert rc == 0
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(home / ".zlaude")
+
+
+def test_cli_agent_default_profile_leaves_config_dir_unset(tmp_path, monkeypatch):
+    _seed_zlaude_home(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    captured = {}
+    monkeypatch.setattr(
+        agents.os, "execvpe", lambda f, a, e: captured.update(env=e)
+    )
+    rc = main(
+        ["agent", "claude", "--dir", str(workdir), "--profile", "Claude"]
+    )
+    assert rc == 0
+    assert "CLAUDE_CONFIG_DIR" not in captured["env"]
+
+
+def test_cli_agent_unknown_profile_errors(tmp_path, monkeypatch):
+    _seed_zlaude_home(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.setattr(agents.os, "execvpe", lambda *a: None)
+    rc = main(
+        ["agent", "claude", "--dir", str(workdir), "--profile", "Nope"]
+    )
+    assert rc == 2
+
+
+def test_cli_agent_profile_and_config_dir_mutually_exclusive(tmp_path, monkeypatch):
+    _seed_zlaude_home(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.setattr(agents.os, "execvpe", lambda *a: None)
+    rc = main(
+        [
+            "agent",
+            "claude",
+            "--dir",
+            str(workdir),
+            "--profile",
+            "Claude",
+            "--config-dir",
+            "/whatever",
+        ]
+    )
+    assert rc == 2

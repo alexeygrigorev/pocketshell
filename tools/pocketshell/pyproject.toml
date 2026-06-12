@@ -38,6 +38,10 @@ dependencies = [
     # lazily and fail-soft — a host without it (or without a Firebase
     # credential) simply no-ops the send, so the lower bound is advisory.
     "google-auth>=2.0.0",
+    # YAML serialization for `pocketshell profiles list` (#718) — the host's
+    # human/agent-readable default output format (#714). The Android client
+    # consumes the `--json` flag instead; the host-facing default is YAML.
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]

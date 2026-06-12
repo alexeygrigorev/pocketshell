@@ -367,6 +367,47 @@ def launch_agent(
     execvpe(argv[0], argv, env)
 
 
+def _resolve_config_dir(
+    ctx: click.Context,
+    kind: str,
+    config_dir: Optional[str],
+    profile: Optional[str],
+) -> Optional[str]:
+    """Resolve the effective config dir from ``--config-dir`` / ``--profile``.
+
+    ``--config-dir`` and ``--profile`` are mutually exclusive (passing both
+    is an error). When ``--profile`` is given, it resolves the named host
+    profile (via :func:`pocketshell.profiles.resolve_profile`) to its
+    ``config_dir`` — an unknown profile is a clear error. A default profile
+    resolves to ``None`` (the engine's built-in location), the same as
+    omitting both flags.
+    """
+    if config_dir is not None and profile is not None:
+        click.echo(
+            "pocketshell agent: --config-dir and --profile are mutually "
+            "exclusive",
+            err=True,
+        )
+        ctx.exit(2)
+    if profile is None:
+        return config_dir
+
+    # Lazy import keeps the agent launch path from importing yaml unless a
+    # profile is actually requested.
+    from pocketshell.profiles import resolve_profile
+
+    try:
+        resolved = resolve_profile(profile, kind)
+    except KeyError:
+        click.echo(
+            f"pocketshell agent: unknown {kind} profile: {profile!r} "
+            f"(see `pocketshell profiles list --engine {kind}`)",
+            err=True,
+        )
+        ctx.exit(2)
+    return resolved.config_dir
+
+
 def _make_agent_command(kind: str):
     """Build the Click command for one agent kind."""
 
@@ -398,7 +439,18 @@ def _make_agent_command(kind: str):
         type=str,
         help=(
             "Profile config dir: CODEX_HOME (codex) / CLAUDE_CONFIG_DIR "
-            "(claude). Ignored for opencode."
+            "(claude). Ignored for opencode. Mutually exclusive with "
+            "--profile."
+        ),
+    )
+    @click.option(
+        "--profile",
+        "profile",
+        default=None,
+        type=str,
+        help=(
+            "Named host profile (see `pocketshell profiles list`); resolves "
+            "to its config dir. Mutually exclusive with --config-dir."
         ),
     )
     @click.pass_context
@@ -407,7 +459,9 @@ def _make_agent_command(kind: str):
         directory: str,
         skip_permissions: bool,
         config_dir: Optional[str],
+        profile: Optional[str],
     ) -> None:
+        config_dir = _resolve_config_dir(ctx, kind, config_dir, profile)
         launch_agent(
             ctx,
             kind,

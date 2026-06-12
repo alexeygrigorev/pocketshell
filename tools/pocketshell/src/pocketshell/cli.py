@@ -29,6 +29,7 @@ from pocketshell.github import github_group
 from pocketshell.hooks import hooks_group
 from pocketshell.jobs import jobs_group
 from pocketshell.logs import logs_group
+from pocketshell.profiles import profiles_group
 from pocketshell.prune_attachments import prune_attachments_command
 from pocketshell.push import push_group
 from pocketshell.qr_share import qr_share_command
@@ -54,6 +55,7 @@ def cli() -> None:
 
 cli.add_command(usage_command, name="usage")
 cli.add_command(agent_group, name="agent")
+cli.add_command(profiles_group, name="profiles")
 cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")
 cli.add_command(agent_log_command, name="agent-log")

@@ -71,3 +71,6 @@ keystore.properties
 
 # Scratch dir for fast-render PNGs (scripts/render.sh output, viewed via PocketShell)
 .tmp/
+
+# Firebase config (per-machine, not committed — #690)
+app/google-services.json

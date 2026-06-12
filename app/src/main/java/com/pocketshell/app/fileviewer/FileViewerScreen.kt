@@ -1,10 +1,14 @@
 package com.pocketshell.app.fileviewer
 
-import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -65,8 +69,11 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -484,8 +491,9 @@ private fun FileViewerAppBar(
     // clipboard). They appear only once there is something to act on (a
     // previewable state with a cached file or text content).
     //
-    // Issue #623: Save action added — downloads the file to the Android
-    // Downloads directory via DownloadManager.
+    // Issue #623: Save action added — writes the file to the Android Downloads
+    // directory. Issue #719: via MediaStore.Downloads (scoped storage), since
+    // DownloadManager.addCompletedDownload crashes on Android 13+.
     val context = LocalContext.current
     ScreenHeader(
         title = displayPath.substringAfterLast('/').ifEmpty { "File" },
@@ -717,41 +725,113 @@ private fun copyTextToClipboard(context: Context, content: String) {
     Toast.makeText(context, "Copied text to clipboard", Toast.LENGTH_SHORT).show()
 }
 
+/** Background scope for the (fire-and-forget) Save IO — survives the click site. */
+private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
 /**
- * Issue #623 — save the viewed file to the Android Downloads directory via
- * [DownloadManager]. The file is registered as a completed download in the
- * public Downloads folder so the user can access it from any app (Files, file
- * managers, etc.). A Toast confirms the save location. The call is
- * fire-and-forget; [DownloadManager.addCompletedDownload] registers the file
- * with the media scanner and shows a system notification, so the viewer is
- * never blocked.
+ * Issue #623 / #719 — save the viewed file to the public Downloads directory
+ * via [MediaStore.Downloads] (scoped storage; no `WRITE_EXTERNAL_STORAGE`).
  *
- * For [Shareable.FileBacked] the already-cached preview file is registered
- * directly. For [Shareable.Text] the in-memory text is materialised to a
- * temp file first and then registered.
+ * The previous implementation used `DownloadManager.addCompletedDownload`,
+ * which is deprecated since API 29 and **throws** on modern Android (the
+ * internal MediaProvider insert rejects the legacy visibility value with
+ * `SecurityException: Invalid value for visibility: 2`). It is removed
+ * entirely (hard-cut, D22).
+ *
+ * The file content is already in memory: [Shareable.Text] carries the decoded
+ * text, [Shareable.FileBacked] points at the already-cached preview file. We
+ * reuse it — there is no re-fetch over SSH. The IO runs off the main thread on
+ * [saveScope]; the success/failure toast is posted back on the main thread.
+ *
+ * On Q+ (API 29+) we insert into `MediaStore.Downloads.EXTERNAL_CONTENT_URI`
+ * with `IS_PENDING=1`, stream the bytes to the returned URI, then clear
+ * `IS_PENDING`. minSdk is 26, so a legacy
+ * `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` path
+ * covers pre-Q devices (no scoped storage there).
  */
 private fun saveFileToLocal(context: Context, shareable: Shareable) {
-    val file = shareable.resolveFile(context)
-    if (file == null || !file.exists()) {
-        Toast.makeText(context, "Nothing to save", Toast.LENGTH_SHORT).show()
-        return
-    }
     val fileName = downloadFileName(shareable.displayPath)
-    val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
-    if (dm == null) {
-        Toast.makeText(context, "Download manager unavailable", Toast.LENGTH_SHORT).show()
-        return
+    val mimeType = shareable.mimeType
+    val appContext = context.applicationContext
+    saveScope.launch {
+        val ok = runCatching {
+            val bytes = shareable.readBytes()
+                ?: error("nothing to save")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                saveViaMediaStore(appContext, fileName, mimeType, bytes)
+            } else {
+                saveToPublicDownloads(fileName, bytes)
+            }
+        }.isSuccess
+        withContext(Dispatchers.Main) {
+            val message =
+                if (ok) "Saved to Downloads/$fileName" else "Couldn't save $fileName"
+            Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
+        }
     }
-    dm.addCompletedDownload(
-        fileName,
-        "Saved from PocketShell",
-        true,
-        shareable.mimeType,
-        file.absolutePath,
-        file.length(),
-        false,
-    )
-    Toast.makeText(context, "Saved to Downloads/$fileName", Toast.LENGTH_SHORT).show()
+}
+
+/**
+ * Q+ scoped-storage save: insert a pending Downloads entry, stream the bytes to
+ * it, then mark it complete so it becomes visible to other apps. Throws on any
+ * failure (a null insert URI, an unwritable stream) so the caller surfaces a
+ * failure toast; the half-written pending row is cleaned up first.
+ */
+internal fun saveViaMediaStore(
+    context: Context,
+    fileName: String,
+    mimeType: String,
+    bytes: ByteArray,
+): Uri {
+    val resolver = context.contentResolver
+    val values = downloadContentValues(fileName, mimeType, pending = true)
+    val uri: Uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+        ?: error("MediaStore insert returned null")
+    try {
+        resolver.openOutputStream(uri)?.use { it.write(bytes) }
+            ?: error("openOutputStream returned null for $uri")
+        resolver.update(uri, clearPendingValues(), null, null)
+    } catch (t: Throwable) {
+        runCatching { resolver.delete(uri, null, null) }
+        throw t
+    }
+    return uri
+}
+
+/**
+ * Pre-Q legacy save: write straight to the public Downloads directory. minSdk
+ * is 26, so this branch only ever runs on API 26–28 where scoped storage does
+ * not exist and the app holds `WRITE_EXTERNAL_STORAGE`.
+ */
+@Suppress("DEPRECATION")
+private fun saveToPublicDownloads(fileName: String, bytes: ByteArray) {
+    val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        .apply { mkdirs() }
+    File(dir, fileName).writeBytes(bytes)
+}
+
+/**
+ * The MediaStore [ContentValues] for a Downloads insert. Pure (no Android
+ * runtime) so it is unit-tested: the display name, MIME type, relative
+ * Downloads path, and the pending flag. `MIME_TYPE` is omitted for the
+ * octet-stream fallback so MediaStore can infer a type from the extension.
+ */
+internal fun downloadContentValues(
+    fileName: String,
+    mimeType: String,
+    pending: Boolean,
+): ContentValues = ContentValues().apply {
+    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+    if (mimeType.isNotBlank() && mimeType != "application/octet-stream") {
+        put(MediaStore.Downloads.MIME_TYPE, mimeType)
+    }
+    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+    put(MediaStore.Downloads.IS_PENDING, if (pending) 1 else 0)
+}
+
+/** The `IS_PENDING=0` update that publishes a finished Downloads entry. */
+internal fun clearPendingValues(): ContentValues = ContentValues().apply {
+    put(MediaStore.Downloads.IS_PENDING, 0)
 }
 
 /**
@@ -769,10 +849,22 @@ internal fun downloadFileName(displayPath: String): String {
  * The local [File] backing a [Shareable]: the already-cached preview file for
  * image/PDF/audio, or a freshly-materialised cache file for text. Returns null
  * only if a text file fails to write (rare; surfaced as a toast by the caller).
+ * Used by Share / Copy, which need a `File` to hand to the FileProvider.
  */
 private fun Shareable.resolveFile(context: Context): File? = when (this) {
     is Shareable.FileBacked -> cacheFile.takeIf { it.exists() }
     is Shareable.Text -> runCatching { materialize(context) }.getOrNull()
+}
+
+/**
+ * The bytes to save for a [Shareable]: the already-cached preview file's
+ * contents for image/PDF/audio, or the in-memory text encoded as UTF-8 for a
+ * text file (no re-fetch over SSH). Returns null only when the cache file is
+ * missing (surfaced as a failure toast by the caller).
+ */
+private fun Shareable.readBytes(): ByteArray? = when (this) {
+    is Shareable.FileBacked -> cacheFile.takeIf { it.exists() }?.readBytes()
+    is Shareable.Text -> content.toByteArray(Charsets.UTF_8)
 }
 
 @Composable
@@ -1269,9 +1361,9 @@ internal fun formatAudioTime(positionMs: Int): String {
 /**
  * Download-only panel for unsupported file types (binary, archives, etc.) —
  * issue #623. Shows the file name, size, and a prominent Download button that
- * saves the cached file to the Android Downloads directory via
- * [DownloadManager]. This is shown instead of the "Can't preview" message when
- * the file was successfully downloaded but can't be previewed (binary type).
+ * saves the cached file to the Android Downloads directory (via
+ * [saveFileToLocal] / MediaStore). This is shown instead of the "Can't preview"
+ * message when the file was downloaded but can't be previewed (binary type).
  */
 @Composable
 private fun DownloadOnlyPanel(

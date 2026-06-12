@@ -252,6 +252,16 @@ dependencies {
     // resolves on the same classpath.
     implementation(project(":shared:core-tmux"))
 
+    // EPIC #687 (Phase-2, slice 1c): the pure-JVM connection-lifecycle state
+    // machine (`ConnectionController` + the `Clock`/`TransportPort`/`TmuxPort`
+    // ports + the `ConnectionState`→indicator projection). The VM mints the
+    // controller from its existing `SshLeaseManager` + `TmuxClient`
+    // collaborators via the production adapters in
+    // `com.pocketshell.app.tmux.connection`. core-connection is pure Kotlin
+    // (coroutines only, no `android.*`), so there is no transitive surface to
+    // manage.
+    implementation(project(":shared:core-connection"))
+
     // Issue #24: usage panel parses normalized server-side usage JSON.
     // The app never stores provider credentials; it only renders records
     // returned by SSH-executed commands such as `heru usage --json`.

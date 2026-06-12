@@ -28,6 +28,8 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.uikit.model.KeyBinding
+import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
@@ -4580,6 +4582,54 @@ class TmuxSessionViewModelTest {
             ),
             sent,
         )
+    }
+
+    @Test
+    fun ctrlBKeyBarKeySendsRawCtrlBByteAndDoubleTapSendsItTwice() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Issue #677: the `^B` key-bar key sends the raw Ctrl-B byte (0x02)
+        // through the same `send-keys -H` overlay path the `^C`/`^D` keys
+        // use ([TmuxSessionScreen]'s `onKey` lambda calls this public method
+        // directly so the terminal VM does not need a new `when` arm). The
+        // constant is asserted here so a future refactor cannot silently
+        // change the wire byte.
+        assertEquals(0x02, TmuxCtrlBByte)
+
+        // Two rapid `^B` taps (Claude Code's "ctrl-b ctrl-b to background"):
+        // each tap is an independent send, so the pane receives `02` twice
+        // with no de-dup or throttle swallowing the second press.
+        vm.sendControlInputToPane("%0", TmuxCtrlBByte)
+        vm.sendControlInputToPane("%0", TmuxCtrlBByte)
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf(
+                "send-keys -H -t %0 02",
+                "send-keys -H -t %0 02",
+            ),
+            sent,
+        )
+    }
+
+    @Test
+    fun ctrlBKeyExposedOnExpandedTmuxKeyBarLayout() {
+        // Issue #677: the `^B` key lives on the expanded (long-tail) row next
+        // to the other control keys, surfaced one `⋯` tap away. The compact
+        // row stays as-is so it does not clip on a phone.
+        val ctrlB = KeyBinding(label = "^B", kind = KeyKind.Regular)
+        assertTrue(
+            "expanded layout should expose the ^B key",
+            tmuxKeyBarLayout(expanded = true).contains(ctrlB),
+        )
+        assertFalse(
+            "compact layout should not include ^B (long tail only)",
+            tmuxKeyBarLayout(expanded = false).contains(ctrlB),
+        )
+        assertEquals("^B", TmuxKeyBarCtrlBLabel)
     }
 
     @Test

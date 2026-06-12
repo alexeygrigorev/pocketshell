@@ -148,6 +148,52 @@ class DesignRenders {
         }
     }
 
+    /**
+     * Issue #677: the EXPANDED tmux key bar row (one `⋯` tap from the compact
+     * row) now carries `^B` (Ctrl-B, raw 0x02) next to the other control keys.
+     * Primary use is Claude Code's "ctrl-b ctrl-b to run in background" — the
+     * key is tappable twice in succession to send `C-b C-b` — plus a
+     * nested-tmux prefix passthrough. This render mirrors the app-side
+     * `TmuxKeyBarLayoutExpanded` so the new key reads at a glance; the
+     * emulator/real-agent run is the acceptance.
+     */
+    @Test
+    fun tmuxKeyBarExpandedWithCtrlB() = render("tmux-keybar-expanded-ctrl-b") {
+        Spacer(modifier = Modifier.height(420.dp))
+        Surface(color = PocketShellColors.Surface) {
+            KeyBar(
+                keys = listOf(
+                    KeyBinding("Esc", KeyKind.Regular),
+                    KeyBinding("Ctrl", KeyKind.Modifier),
+                    KeyBinding("⏎", KeyKind.Regular),
+                    KeyBinding("^B", KeyKind.Regular),
+                    KeyBinding("^Z", KeyKind.Regular),
+                    KeyBinding("^O", KeyKind.Regular),
+                    KeyBinding("^X", KeyKind.Regular),
+                    KeyBinding("‹", KeyKind.Arrow),
+                    KeyBinding("⌃", KeyKind.Arrow),
+                    KeyBinding("⌄", KeyKind.Arrow),
+                    KeyBinding("›", KeyKind.Arrow),
+                    KeyBinding("×", KeyKind.Arrow),
+                ),
+                onKey = {},
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(260.dp)
+                .background(Color(0xFF202124)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "soft keyboard (system IME)",
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+            )
+        }
+    }
+
     /** Host-list header (`ScreenHeader`) with a trailing status pill. */
     @Test
     fun screenHeader() = render("screen-header") {

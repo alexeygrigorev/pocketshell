@@ -1457,7 +1457,21 @@ public fun TmuxSessionScreen(
                     isAgentPane = isAgentPane,
                     keyBarExpanded = keyBarExpanded,
                     onKeyBarExpandedChange = { keyBarExpanded = it },
-                    onKey = { binding -> viewModel.onKeyBarKey(pane.paneId, binding.label) },
+                    onKey = { binding ->
+                        // Issue #677: the `^B` key sends the raw Ctrl-B byte
+                        // (0x02) straight through [sendControlInputToPane] —
+                        // the same public send path the `^C`/`^D` keys use —
+                        // rather than routing through `onKeyBarKey`, so the
+                        // terminal VM (being rewritten by #687) does not need
+                        // a new `when (label)` arm. Each tap is an independent
+                        // send, so a rapid double-tap sends `0x02 0x02` (Claude
+                        // Code's "ctrl-b ctrl-b to background") with no throttle.
+                        if (binding.label == TmuxKeyBarCtrlBLabel) {
+                            viewModel.sendControlInputToPane(pane.paneId, TmuxCtrlBByte)
+                        } else {
+                            viewModel.onKeyBarKey(pane.paneId, binding.label)
+                        }
+                    },
                     modifierStates = mapOf(TmuxCtrlModifierLabel to ctrlModifierState),
                     onModifierStateChange = { binding, state ->
                         viewModel.onKeyBarModifierState(binding.label, state)
@@ -5569,12 +5583,35 @@ internal const val TmuxAgentCommandsKeyLabel: String = "/"
  * then any letter key, and it is sent as `0x01`..`0x1A`.
  *
  * Tapping `⋯` expands the bar ([tmuxKeyBarLayout] with `expanded = true`) to
- * surface the long tail — `^Z` suspend, `^O` / `^X` and the four arrow keys,
- * plus the `Ctrl` modifier — with `×` to collapse back. Both rows stay within
- * a single non-scrolling row width on a phone so nothing clips.
+ * surface the long tail — `^B` (issue #677: Claude Code's "ctrl-b ctrl-b to
+ * background" / nested-tmux prefix), `^Z` suspend, `^O` / `^X` and the four
+ * arrow keys, plus the `Ctrl` modifier — with `×` to collapse back. Both rows
+ * stay within a single non-scrolling row width on a phone so nothing clips.
  */
 internal const val TmuxKeyBarEnterLabel: String = "⏎"
 internal const val TMUX_KEY_BAR_TAG: String = "tmux:keybar"
+
+/**
+ * Issue #677: the `^B` (Ctrl-B, raw byte `0x02`) key. Two use cases drive it:
+ * Claude Code's "ctrl-b ctrl-b to run in background" gesture (so the key must
+ * be tappable TWICE in quick succession, each tap sending one `0x02`), and a
+ * nested-tmux prefix passthrough. PocketShell runs tmux in `-CC` control mode,
+ * so `C-b` is NOT consumed as an outer-tmux prefix — the literal `0x02` byte
+ * reaches the focused pane, which is exactly what Claude Code wants.
+ *
+ * Each tap routes through [TmuxSessionViewModel.sendControlInputToPane] (the
+ * same `send-keys -H` overlay path `^C`/`^D` use), and each tap is an
+ * independent send, so two rapid taps enqueue two independent `0x02` bytes
+ * with no de-dup or throttle that could swallow the second press.
+ *
+ * The byte is wired from the screen's `onKey` lambda rather than from
+ * `TmuxSessionViewModel.onKeyBarKey`'s `when (label)` block so the terminal
+ * VM does not have to change — `sendControlInputToPane` is already a public
+ * module-level entry point the screen calls directly (e.g. the agent-command
+ * sheet's `Ctrl-C ×2` / `Ctrl-D ×2` controls).
+ */
+internal const val TmuxKeyBarCtrlBLabel: String = "^B"
+internal const val TmuxCtrlBByte: Int = 0x02
 
 internal val TmuxKeyBarLayoutCompact: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
@@ -5590,6 +5627,7 @@ internal val TmuxKeyBarLayoutExpanded: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
     KeyBinding(label = TmuxCtrlModifierLabel, kind = KeyKind.Modifier),
     KeyBinding(label = TmuxKeyBarEnterLabel, kind = KeyKind.Regular),
+    KeyBinding(label = "^B", kind = KeyKind.Regular),
     KeyBinding(label = "^Z", kind = KeyKind.Regular),
     KeyBinding(label = "^O", kind = KeyKind.Regular),
     KeyBinding(label = "^X", kind = KeyKind.Regular),

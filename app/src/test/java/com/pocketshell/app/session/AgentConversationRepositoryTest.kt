@@ -357,8 +357,19 @@ class AgentConversationRepositoryTest {
         // LINEAR time. The old nested `byId.entries.firstOrNull` scan ran
         // O(window^2) here — doubling the input quadrupled the time. We
         // assert the larger input is well under the quadratic projection of
-        // the smaller one (with generous slack for JIT/GC noise), which the
-        // old implementation would blow past.
+        // the smaller one, which the old implementation would blow past.
+        //
+        // Issue #715: the assertion is on the RELATIVE RATIO of the two
+        // sizes, measured as the MINIMUM over several samples — NOT an
+        // absolute wall-clock threshold. An absolute "should take < X ns"
+        // ceiling is inherently flaky on the contended dev box: heavy box
+        // load inflates the absolute time past the ceiling even though the
+        // algorithm is still linear. Taking the MIN of several samples is
+        // contention-immune in the way that matters here: contention can
+        // only ever make a sample SLOWER, so the fastest sample for each
+        // size reflects its least-contended run, and the ratio of those two
+        // best-case timings is stable under load while still being ~4x for
+        // a linear reconcile and ~16x for the old quadratic one.
         fun userHeavyBurst(count: Int): List<ConversationEvent> = buildList {
             repeat(count) { index ->
                 add(
@@ -376,29 +387,43 @@ class AgentConversationRepositoryTest {
         val large = userHeavyBurst(4_000)
 
         // Warm up so JIT compilation isn't charged to the timed runs.
-        repeat(3) {
+        repeat(5) {
             reconcileAgentEvents(small, maxEvents = 10_000)
             reconcileAgentEvents(large, maxEvents = 10_000)
         }
 
-        val smallNanos = measureNanoTime { reconcileAgentEvents(small, maxEvents = 10_000) }
-            .coerceAtLeast(1)
-        val largeNanos = measureNanoTime { reconcileAgentEvents(large, maxEvents = 10_000) }
+        // Take the MIN over several samples per size. Contention only makes
+        // a sample slower, so the best (fastest) sample per size is the one
+        // least disturbed by box load; comparing two best-case timings keeps
+        // the ratio stable under contention.
+        fun bestNanos(burst: List<ConversationEvent>): Long {
+            var best = Long.MAX_VALUE
+            repeat(7) {
+                val nanos = measureNanoTime { reconcileAgentEvents(burst, maxEvents = 10_000) }
+                if (nanos < best) best = nanos
+            }
+            return best.coerceAtLeast(1)
+        }
+
+        val smallNanos = bestNanos(small)
+        val largeNanos = bestNanos(large)
+        val ratio = largeNanos.toDouble() / smallNanos
 
         println(
-            "[#576 reconcile linearity] small(1000)=${smallNanos / 1000}us " +
-                "large(4000)=${largeNanos / 1000}us ratio=${"%.2f".format(largeNanos.toDouble() / smallNanos)} " +
-                "(linear~4x, quadratic~16x)",
+            "[#576/#715 reconcile linearity] small(1000)=${smallNanos / 1000}us " +
+                "large(4000)=${largeNanos / 1000}us ratio=${"%.2f".format(ratio)} " +
+                "(linear~4x, quadratic~16x; min-of-samples, contention-immune)",
         )
 
         // 4x the input. Linear => ~4x the time. Quadratic => ~16x. Assert
-        // we are far below quadratic: allow up to 9x (well under 16x) to
-        // tolerate measurement noise while still failing the old O(n^2)
-        // implementation, which would be ~16x.
+        // the best-case RATIO is far below quadratic: allow up to 9x (well
+        // under 16x) to tolerate per-run JIT/GC noise while still failing the
+        // old O(n^2) implementation, which would be ~16x. This is a relative
+        // ratio, never an absolute ns ceiling, so it does not trip under load.
         assertTrue(
             "reconcile time grew super-linearly: small=${smallNanos}ns large=${largeNanos}ns " +
-                "ratio=${largeNanos.toDouble() / smallNanos}",
-            largeNanos <= smallNanos * 9,
+                "ratio=$ratio (best-of-samples; expected ~4x linear, ~16x quadratic)",
+            ratio <= 9.0,
         )
     }
 

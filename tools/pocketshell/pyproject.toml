@@ -42,6 +42,15 @@ dependencies = [
     # human/agent-readable default output format (#714). The Android client
     # consumes the `--json` flag instead; the host-facing default is YAML.
     "pyyaml>=6.0",
+    # Session create/resume delegates to the `tmuxctl` binary (see
+    # `pocketshell/resume.py`: `tmuxctl create-detached` / `create-or-attach`),
+    # so installing pocketshell pulls a tmuxctl that has the server-cgroup fix.
+    # >=0.3.3 is required: earlier tmuxctl started the shared tmux server inside
+    # the SSH login's `session-*.scope`, so a logout (or a per-session OOM) tore
+    # down every session at once; 0.3.3 starts the server in its own
+    # login-independent unit under robust.slice (tmuxctl#4). 0.3.0 first shipped
+    # the `create-detached` verb this CLI calls.
+    "tmuxctl>=0.3.3",
 ]
 
 [project.scripts]

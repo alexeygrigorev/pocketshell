@@ -150,7 +150,22 @@ private data class ConversationScanText(
                     while (text.getOrNull(afterIndent) == ' ' || text.getOrNull(afterIndent) == '\t') {
                         afterIndent += 1
                     }
-                    if (afterIndent > next) {
+                    // (a) A line break followed by continuation indentation joins
+                    //     the wrapped fragment (the original #557/#558 case).
+                    // (b) Issue #753: a line break with NO surrounding whitespace
+                    //     that falls at a path *connector* (`/`, `-`, `_`) with a
+                    //     path char continuing on the next line is a hard
+                    //     mid-token wrap — join it so a path wrapped across the
+                    //     edge becomes one logical token. Connectors are used here
+                    //     deliberately: a sentence word never ends in `/`/`-`/`_`,
+                    //     so a genuine paragraph break (`...out.png\nand ...`) is
+                    //     left intact while a real wrap (`.../repo/\nfile.png`,
+                    //     `host-pocketshell-\nc/x.png`) joins.
+                    val joinIndented = afterIndent > next
+                    val joinMidToken = afterIndent == next &&
+                        isPathConnectorChar(compacted.lastOrNull()) &&
+                        isPathBreakChar(text.getOrNull(next))
+                    if (joinIndented || joinMidToken) {
                         changed = true
                         index = afterIndent
                         continue
@@ -162,6 +177,24 @@ private data class ConversationScanText(
             }
             return if (changed) ConversationScanText(compacted.toString(), offsets.toIntArray()) else null
         }
+
+        /**
+         * Characters that can sit on the continuation side of a hard mid-token
+         * line wrap inside a file path: the path-segment set (`[\w.-]`) plus the
+         * `/` separator and `~` root.
+         */
+        private fun isPathBreakChar(ch: Char?): Boolean = ch != null &&
+            (ch.isLetterOrDigit() || ch == '_' || ch == '.' || ch == '-' || ch == '/' || ch == '~')
+
+        /**
+         * Connector characters that, when they sit immediately before a line
+         * break, signal a mid-path wrap rather than a sentence end. A prose word
+         * never ends in `/`, `-`, or `_`, so gating the no-indent join on these
+         * keeps a genuine paragraph break (`out.png\nand …`) intact while still
+         * rejoining a path the renderer split at a segment/hyphen boundary.
+         */
+        private fun isPathConnectorChar(ch: Char?): Boolean =
+            ch == '/' || ch == '-' || ch == '_'
     }
 }
 

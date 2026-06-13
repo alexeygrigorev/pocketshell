@@ -112,6 +112,95 @@ class ConversationLinkDetectionTest {
         assertEquals(line.length, out[0].endExclusive)
     }
 
+    @Test
+    fun detectsAbsolutePathWrappedMidTokenAcrossLineBreakAsOneFileLink() {
+        // Issue #753: a long absolute path that the renderer wrapped mid-token
+        // across a line break (no indentation on the continuation) must be ONE
+        // tap target spanning both visual fragments, opening the FULL path.
+        val full = "/home/alexey/inbox/pocketshell/screenshot-20260613-091500.png"
+        val splitAt = full.indexOf("screenshot")
+        val line = "Attached files:\n${full.take(splitAt)}\n${full.drop(splitAt)}"
+
+        val out = links(line)
+
+        assertEquals(1, out.size)
+        assertEquals(full, out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+        // The tap target spans both fragments: from the first char of the path
+        // to the end of the continuation.
+        assertEquals(line.indexOf("/home/alexey"), out[0].start)
+        assertEquals(line.length, out[0].endExclusive)
+    }
+
+    @Test
+    fun detectsTildePathWrappedMidTokenAcrossLineBreakAsOneFileLink() {
+        // Issue #753: same as above for a `~/`-rooted attachment-style path that
+        // is NOT under `~/.pocketshell/attachments/` (the existing special case).
+        val full = "~/inbox/pocketshell/reports/very-long-report-name-file.log"
+        val splitAt = full.indexOf("very-long")
+        val line = "see ${full.take(splitAt)}\n${full.drop(splitAt)} now"
+
+        val out = links(line)
+
+        assertEquals(1, out.size)
+        assertEquals(full, out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
+    @Test
+    fun midTokenWrapDoesNotJoinAcrossWordBoundary() {
+        // A real space-separated paragraph break (path complete on first line,
+        // prose on the next) must NOT be glued into a single token.
+        val out = links("see /tmp/out.png\nand then continue reading")
+
+        assertEquals(1, out.size)
+        assertEquals("/tmp/out.png", out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
+    // --- Whitespace paths ---------------------------------------------------
+
+    @Test
+    fun detectsDoubleQuotedPathWithSpacesAsFileLink() {
+        // Issue #753: a path with spaces is unambiguous when quoted.
+        val out = links("""open "/home/alexey/My Documents/report final.pdf" please""")
+        assertEquals(1, out.size)
+        assertEquals("/home/alexey/My Documents/report final.pdf", out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
+    @Test
+    fun detectsSingleQuotedPathWithSpacesAsFileLink() {
+        val out = links("wrote '/var/log/My App/output log.txt' to disk")
+        assertEquals(1, out.size)
+        assertEquals("/var/log/My App/output log.txt", out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
+    @Test
+    fun detectsQuotedTildePathWithSpaces() {
+        val out = links("""saved to "~/My Screenshots/capture one.png"""")
+        assertEquals(1, out.size)
+        assertEquals("~/My Screenshots/capture one.png", out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
+    @Test
+    fun quotedNonPathStringIsNotAFileLink() {
+        // A quoted prose string that is not a rooted path with a known
+        // extension must NOT become a file link.
+        assertTrue(links("""he said "hello there friend" loudly""").isEmpty())
+    }
+
+    @Test
+    fun quotedPathWithoutKnownExtensionIsNotAFileLink() {
+        // Quoting alone is not enough; the quoted target must look like a file.
+        assertTrue(
+            links("""run "/usr/bin/some command" now""")
+                .none { it.kind == ConversationLinkKind.FILE },
+        )
+    }
+
     // --- Directories --------------------------------------------------------
 
     @Test

@@ -339,4 +339,105 @@ class FilePathScannerTest {
         // extension on a real path still matches.
         assertEquals(listOf("out/Report.PNG"), paths("file out/Report.PNG here"))
     }
+
+    // --- Issue #753: quoted paths containing whitespace ---------------------
+
+    @Test
+    fun detectsDoubleQuotedAbsolutePathWithSpaces() {
+        assertEquals(
+            listOf("/home/alexey/My Documents/report final.pdf"),
+            paths("""open "/home/alexey/My Documents/report final.pdf" please"""),
+        )
+    }
+
+    @Test
+    fun detectsSingleQuotedAbsolutePathWithSpaces() {
+        assertEquals(
+            listOf("/var/log/My App/output log.txt"),
+            paths("wrote '/var/log/My App/output log.txt' to disk"),
+        )
+    }
+
+    @Test
+    fun detectsQuotedTildePathWithSpaces() {
+        assertEquals(
+            listOf("~/My Screenshots/capture one.png"),
+            paths("""saved to "~/My Screenshots/capture one.png""""),
+        )
+    }
+
+    @Test
+    fun quotedPathSpanIncludesTheQuotes() {
+        val line = """open "/a b/c.png" now"""
+        val detected = detectFilePathsInLine(line)
+        assertEquals(1, detected.size)
+        assertEquals("/a b/c.png", detected[0].path)
+        assertEquals(line.indexOf('"'), detected[0].start)
+        assertEquals(line.indexOf('"') + "\"/a b/c.png\"".length, detected[0].endExclusive)
+    }
+
+    @Test
+    fun quotedInnerPathIsNotReSurfacedPiecewise() {
+        // The unquoted matcher must not also emit the inner `/path` of a quoted
+        // whitespace path — exactly one link spanning the quotes.
+        assertEquals(1, detectFilePathsInLine("""x "/a b/c.png" y""").size)
+    }
+
+    @Test
+    fun quotedProseStringIsNotAFilePath() {
+        assertTrue(paths("""he said "hello there friend" loudly""").isEmpty())
+    }
+
+    @Test
+    fun quotedNonFileTargetWithSpacesIsNotAFilePath() {
+        // Quoting alone is not enough; the quoted token must look like a file
+        // (rooted + known extension).
+        assertTrue(paths("""run "/usr/bin/some command" now""").isEmpty())
+    }
+
+    @Test
+    fun quotedRelativePathWithoutRootIsNotAFilePath() {
+        // A quoted token must be explicitly rooted to claim its spaces.
+        assertTrue(paths("""title is "my report.pdf draft" here""").isEmpty())
+    }
+
+    // --- Issue #753: terminal-grid parity -----------------------------------
+
+    @Test
+    fun terminalGridWrappedGeneralPathReassemblesToOnePathPerRow() {
+        // A non-attachment absolute path the emulator wrapped across two rows
+        // (the wrap flag is set) is detected as ONE path, surfaced on each row
+        // fragment so any tapped fragment opens the full file (#558/#753).
+        val full = "/home/alexey/inbox/pocketshell/screenshot-20260613-091500.png"
+        val splitAt = full.indexOf("screenshot")
+        val regions = filePathRegionsForRows(
+            visualRows = listOf(
+                VisualRow(row = 3, text = full.take(splitAt), wrapsToNext = true),
+                VisualRow(row = 4, text = full.drop(splitAt), wrapsToNext = false),
+            ),
+            columns = 80,
+        )
+
+        assertEquals(listOf(full, full), regions.map { it.path })
+        assertEquals(listOf(3, 4), regions.map { it.row })
+    }
+
+    @Test
+    fun terminalGridQuotedWhitespacePathIsDetected() {
+        val regions = filePathRegionsForRows(
+            visualRows = listOf(
+                VisualRow(
+                    row = 2,
+                    text = """saved "/home/alexey/My Docs/report final.pdf" ok""",
+                    wrapsToNext = false,
+                ),
+            ),
+            columns = 80,
+        )
+
+        assertEquals(
+            listOf("/home/alexey/My Docs/report final.pdf"),
+            regions.map { it.path },
+        )
+    }
 }

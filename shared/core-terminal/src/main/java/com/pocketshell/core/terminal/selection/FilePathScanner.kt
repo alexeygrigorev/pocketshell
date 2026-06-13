@@ -191,7 +191,16 @@ public fun detectFilePathsInLine(
     if (line.isEmpty()) return emptyList()
     val out = mutableListOf<DetectedFilePath>()
 
+    // Issue #753: quoted paths that contain whitespace
+    // (`"/home/me/My Docs/report.pdf"`). Claimed first so the inner `/path` is
+    // never re-surfaced piecewise by the unquoted matcher below. The span
+    // includes the surrounding quotes; the emitted path is the inner text.
+    for (detected in detectQuotedWhitespacePathsInLine(line, excludedRanges)) {
+        out += detected
+    }
+
     for (detected in detectLocalFileUrisInLine(line, excludedRanges)) {
+        if (out.any { detected.start < it.endExclusive && it.start < detected.endExclusive }) continue
         out += detected
     }
 
@@ -224,6 +233,72 @@ public fun detectFilePathsInLine(
         )
     }
     return out
+}
+
+/**
+ * Detect rooted file paths that contain whitespace and were quoted to make them
+ * unambiguous (issue #753): `"/home/me/My Docs/report final.pdf"` or
+ * `'~/My Screenshots/a b.png'`. Unquoted paths cannot carry spaces (the boundary
+ * is ambiguous in prose), so quoting is the only signal that the spaces belong
+ * to the path. Only a quoted token that is explicitly rooted (`/`, `~/`, `./`,
+ * `../`) and ends in a known file extension is surfaced — arbitrary quoted prose
+ * (`"hello there"`) and quoted non-file targets (`"/usr/bin/some command"`) are
+ * left alone, matching the conservative bar of the unquoted detector.
+ *
+ * The match span includes the surrounding quotes (so the whole quoted token is
+ * the tap/affordance region), while [DetectedFilePath.path] is the inner path
+ * verbatim with surrounding whitespace trimmed.
+ */
+private fun detectQuotedWhitespacePathsInLine(
+    line: String,
+    excludedRanges: List<IntRange>,
+): List<DetectedFilePath> {
+    val out = mutableListOf<DetectedFilePath>()
+    var index = 0
+    while (index < line.length) {
+        val quote = line[index]
+        if (quote != '"' && quote != '\'') {
+            index += 1
+            continue
+        }
+        val close = line.indexOf(quote, startIndex = index + 1)
+        if (close <= index + 1) {
+            index += 1
+            continue
+        }
+        val candidate = line.substring(index + 1, close).trim()
+        if (
+            candidate.contains(' ') &&
+            isRootedKnownExtensionPath(candidate) &&
+            excludedRanges.none { index in it }
+        ) {
+            out += DetectedFilePath(
+                path = candidate,
+                start = index,
+                endExclusive = close + 1,
+            )
+        }
+        index = close + 1
+    }
+    return out
+}
+
+/**
+ * A quoted token is treated as a tappable file path only when it is explicitly
+ * rooted and ends in a known file extension — the same conservative bar the
+ * unquoted detector applies, so a quoted prose string never becomes a link.
+ */
+private fun isRootedKnownExtensionPath(candidate: String): Boolean {
+    val rooted = candidate.startsWith("/") ||
+        candidate.startsWith("~/") ||
+        candidate.startsWith("./") ||
+        candidate.startsWith("../")
+    if (!rooted) return false
+    val dot = candidate.lastIndexOf('.')
+    if (dot < 0 || dot == candidate.length - 1) return false
+    val slash = candidate.lastIndexOf('/')
+    if (dot < slash) return false // extension dot must be in the leaf segment
+    return candidate.substring(dot + 1).lowercase() in FILE_PATH_EXTENSIONS
 }
 
 /**

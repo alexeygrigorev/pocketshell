@@ -100,6 +100,53 @@ class MarkdownTextLinkTest {
     }
 
     @Test
+    fun lineWrappedGeneralPathBulletBecomesOneClickableFileLink() {
+        // Issue #753: a non-attachment absolute path wrapped across a bullet's
+        // line break (the renderer split it at a `/` segment boundary) is ONE
+        // clickable link whose tap opens the FULL path — even though the bullet
+        // parser strips the continuation indentation before joining.
+        val full = "/home/alexey/inbox/pocketshell/screenshot-20260613-091500.png"
+        val bullet = parseMarkdownBlocks(
+            """
+            - /home/alexey/inbox/pocketshell/
+              screenshot-20260613-091500.png
+            """.trimIndent(),
+        ).single() as MarkdownBlock.Bullet
+        val tapped = mutableListOf<ConversationLink>()
+
+        val rendered = renderInline(bullet.text) { tapped += it }
+        val links = clickableLinks(rendered)
+        assertEquals(1, links.size)
+
+        links[0].linkInteractionListener?.onClick(links[0])
+        assertEquals(1, tapped.size)
+        assertEquals(ConversationLinkKind.FILE, tapped[0].kind)
+        assertEquals(full, tapped[0].text)
+    }
+
+    @Test
+    fun quotedWhitespacePathBecomesOneClickableFileLink() {
+        // Issue #753: a quoted path that contains spaces is one clickable link
+        // whose tap opens the full (unquoted) path.
+        val tapped = mutableListOf<ConversationLink>()
+        val rendered =
+            renderInline("""saved to "/home/alexey/My Docs/report final.pdf" ok""") {
+                tapped += it
+            }
+        val links = clickableLinks(rendered)
+        assertEquals(1, links.size)
+        assertEquals(
+            TextDecoration.Underline,
+            links[0].styles?.style?.textDecoration,
+        )
+
+        links[0].linkInteractionListener?.onClick(links[0])
+        assertEquals(1, tapped.size)
+        assertEquals(ConversationLinkKind.FILE, tapped[0].kind)
+        assertEquals("/home/alexey/My Docs/report final.pdf", tapped[0].text)
+    }
+
+    @Test
     fun noLinkTapHandlerLeavesTextWithoutClickableLinks() {
         val rendered = renderInline("Wrote out/report.png to disk")
         assertTrue(clickableLinks(rendered).isEmpty())

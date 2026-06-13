@@ -22,7 +22,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
@@ -51,8 +50,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
@@ -221,7 +222,7 @@ private fun EnvLoadingPanel() {
         modifier = Modifier.fillMaxSize().testTag(ENV_LOADING_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        CircularProgressIndicator(color = PocketShellColors.Accent)
+        LoadingIndicator.Spinner(size = SpinnerSize.Medium)
     }
 }
 
@@ -319,11 +320,7 @@ private fun EnvKeyCard(row: EnvKeyUiRow, onReveal: (String) -> Unit, onHide: (St
         trailing = {
             FileTag(file = row.file)
             if (row.revealing) {
-                CircularProgressIndicator(
-                    color = PocketShellColors.Accent,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(16.dp),
-                )
+                LoadingIndicator.Spinner(size = SpinnerSize.Small)
             } else {
                 EnvKeyMenu(row = row, onReveal = onReveal, onHide = onHide)
             }
@@ -502,7 +499,7 @@ private fun CopyFromFolderSheet(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        CircularProgressIndicator(color = PocketShellColors.Accent, modifier = Modifier.size(24.dp))
+                        LoadingIndicator.Spinner(size = SpinnerSize.Medium)
                     }
                     is EnvCopySourceKeys.Failed -> Text(
                         text = ks.message,

@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -34,7 +33,9 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -327,9 +328,8 @@ private fun InstallingContent(hostName: String) {
                 StatusDot(status = ConnectionStatus.Connecting)
             },
             trailing = {
-                CircularProgressIndicator(
-                    color = PocketShellColors.Accent,
-                    strokeWidth = 2.dp,
+                LoadingIndicator.Spinner(
+                    size = SpinnerSize.Small,
                     modifier = Modifier.testTag(HOST_BOOTSTRAP_INSTALLING_TAG),
                 )
             },

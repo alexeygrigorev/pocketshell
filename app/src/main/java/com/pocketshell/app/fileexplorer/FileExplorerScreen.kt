@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -47,8 +46,10 @@ import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -440,11 +441,7 @@ private fun TransferBanner(
         horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
         if (showSpinner) {
-            CircularProgressIndicator(
-                color = PocketShellColors.Accent,
-                strokeWidth = 2.dp,
-                modifier = Modifier.size(18.dp),
-            )
+            LoadingIndicator.Spinner(size = SpinnerSize.Small)
         }
         Text(
             text = text,
@@ -592,11 +589,7 @@ private fun LoadingPanel() {
                 title = "Loading folder",
                 subtitle = "Fetching remote entries",
                 leading = {
-                    CircularProgressIndicator(
-                        color = PocketShellColors.Accent,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    LoadingIndicator.Spinner(size = SpinnerSize.Small)
                 },
             )
         }

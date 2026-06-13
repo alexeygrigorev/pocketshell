@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,8 +37,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -261,7 +262,7 @@ private fun LoadingPanel() {
             .testTag(REPO_BROWSER_LOADING_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        CircularProgressIndicator(color = PocketShellColors.Accent)
+        LoadingIndicator.Spinner(size = SpinnerSize.Medium)
     }
 }
 
@@ -404,12 +405,9 @@ private fun RepoCard(
         onClick = onClick.takeIf { !anyPending },
         trailing = {
             when {
-                pending -> CircularProgressIndicator(
-                    color = PocketShellColors.Accent,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .testTag(repoCardPendingTestTag(repo.fullName)),
+                pending -> LoadingIndicator.Spinner(
+                    size = SpinnerSize.Small,
+                    modifier = Modifier.testTag(repoCardPendingTestTag(repo.fullName)),
                 )
                 repo.cloned -> ActionPill(
                     label = "Open",

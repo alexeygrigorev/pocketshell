@@ -55,9 +55,11 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -632,11 +634,7 @@ private fun LoadingPanel() {
                 title = "Loading history",
                 subtitle = "Reading git log",
                 leading = {
-                    CircularProgressIndicator(
-                        color = PocketShellColors.Accent,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    LoadingIndicator.Spinner(size = SpinnerSize.Small)
                 },
             )
         }

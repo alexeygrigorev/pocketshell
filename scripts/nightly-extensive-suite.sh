@@ -61,8 +61,8 @@ SUMMARY="$ARTIFACT_DIR/summary.md"
 
 GRADLEW="$REPO_ROOT/gradlew"
 
-# The seven NetworkFaultProofBase subclasses (toxiproxy proofs). Keep this list
-# in sync with `grep -rl NetworkFaultProofBase app/src/androidTest/.../proof/`.
+# The NetworkFaultProofBase subclasses (toxiproxy proofs). Keep this list in
+# sync with `grep -rl NetworkFaultProofBase app/src/androidTest/.../proof/`.
 FQCN_PREFIX="com.pocketshell.app.proof"
 NETWORK_FAULT_CLASSES=(
   "$FQCN_PREFIX.RideThroughInterruptionE2eTest"
@@ -72,6 +72,12 @@ NETWORK_FAULT_CLASSES=(
   "$FQCN_PREFIX.DisconnectBlackholeE2eTest"
   "$FQCN_PREFIX.NetworkLatencyModelE2eTest"
   "$FQCN_PREFIX.PacketLossNetworkFaultE2eTest"
+  # Issue #741 (#657 Gap B): connects a real SshSession through the toxiproxy
+  # forward, blackholes the link, and asserts keep-alive surfaces the dead peer
+  # (isConnected flips false) within the 60s configured window instead of
+  # hanging indefinitely. Reuses network-fault-proxy:2228 + toxiproxy API:8474
+  # (no new fixture).
+  "$FQCN_PREFIX.KeepAliveDeadPeerDetectionE2eTest"
 )
 
 # The bootstrap setup-scenario class (opt-in via pocketshellBootstrapScenarios).

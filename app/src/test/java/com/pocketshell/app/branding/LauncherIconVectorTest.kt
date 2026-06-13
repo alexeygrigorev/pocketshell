@@ -10,11 +10,23 @@ class LauncherIconVectorTest {
 
     @Test
     fun foregroundArtworkStaysInsideCircularMaskSafeArea() {
+        assertArtworkStaysInsideSafeArea(launcherForegroundFile(), "launcher foreground")
+    }
+
+    @Test
+    fun monochromeArtworkStaysInsideCircularMaskSafeArea() {
+        // Issue #612: the Android 13+ themed-icon <monochrome> silhouette must
+        // honour the same safe box as the foreground so it never clips under
+        // OEM masks when the system tints it.
+        assertArtworkStaysInsideSafeArea(launcherMonochromeFile(), "launcher monochrome")
+    }
+
+    private fun assertArtworkStaysInsideSafeArea(file: File, label: String) {
         val document = DocumentBuilderFactory.newInstance()
             .newDocumentBuilder()
-            .parse(launcherForegroundFile())
+            .parse(file)
         val paths = document.getElementsByTagName("path")
-        assertTrue("launcher foreground should contain vector paths", paths.length > 0)
+        assertTrue("$label should contain vector paths", paths.length > 0)
 
         for (index in 0 until paths.length) {
             val path = paths.item(index) as Element
@@ -27,24 +39,28 @@ class LauncherIconVectorTest {
             val inkBottom = bounds.bottom + strokeInset
 
             assertTrue(
-                "launcher foreground path $index should stay within x=32..76 after stroke; " +
+                "$label path $index should stay within x=32..76 after stroke; " +
                     "bounds=$bounds strokeInset=$strokeInset",
                 inkLeft >= 32f && inkRight <= 76f,
             )
             assertTrue(
-                "launcher foreground path $index should stay within y=30..80 after stroke; " +
+                "$label path $index should stay within y=30..80 after stroke; " +
                     "bounds=$bounds strokeInset=$strokeInset",
                 inkTop >= 30f && inkBottom <= 80f,
             )
         }
     }
 
-    private fun launcherForegroundFile(): File {
+    private fun launcherForegroundFile(): File = locateRes("ic_launcher_foreground.xml")
+
+    private fun launcherMonochromeFile(): File = locateRes("ic_launcher_monochrome.xml")
+
+    private fun locateRes(name: String): File {
         return listOf(
-            File("app/src/main/res/drawable/ic_launcher_foreground.xml"),
-            File("src/main/res/drawable/ic_launcher_foreground.xml"),
+            File("app/src/main/res/drawable/$name"),
+            File("src/main/res/drawable/$name"),
         ).firstOrNull { it.isFile }
-            ?: error("Could not locate ic_launcher_foreground.xml from ${File(".").absolutePath}")
+            ?: error("Could not locate $name from ${File(".").absolutePath}")
     }
 
     private fun pathDataBounds(pathData: String): Bounds {

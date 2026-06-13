@@ -6,10 +6,25 @@
   `#0B0F14` fill) and `drawable/ic_launcher_foreground.xml` (the "C1"
   mark: a bold cyan prompt chevron `>` plus a cursor block `_` on a dark
   rounded "pocket" plate).
+- Themed-icon silhouette: `drawable/ic_launcher_monochrome.xml` (the same
+  `>_` mark as a flat single-color silhouette; the plate is dropped because
+  the system supplies its own themed backdrop).
 - Adaptive icon entries: `mipmap-anydpi-v26/ic_launcher.xml` and
-  `mipmap-anydpi-v26/ic_launcher_round.xml`.
+  `mipmap-anydpi-v26/ic_launcher_round.xml`. Both reference the background,
+  foreground, AND the `<monochrome>` layer.
 - Manifest `<application>` references `@mipmap/ic_launcher` and
   `@mipmap/ic_launcher_round`.
+
+## Android 13+ themed icons (`<monochrome>`)
+
+Both adaptive entries declare a `<monochrome>` layer pointing at
+`drawable/ic_launcher_monochrome.xml` (issue #612). Without it, Android 13+
+"Themed icons" (Material You wallpaper tinting) fall back to a generic
+system silhouette. The monochrome layer is the brand `>_` mark drawn as a
+single solid color (`#FFFFFF`); the platform replaces that color with the
+user's themed tint at draw time, so only the silhouette geometry matters.
+It is kept inside the same `32..76 / 30..80` safe box and verified by
+`LauncherIconVectorTest.monochromeArtworkStaysInsideCircularMaskSafeArea`.
 
 ## Why no `mipmap-mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi` PNG fallbacks?
 

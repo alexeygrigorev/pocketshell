@@ -41,6 +41,10 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathBuilder
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Banner
@@ -1617,6 +1621,177 @@ class DesignRenders {
      * Renders [content] wrapped in the real [PocketShellTheme] on the app's dark
      * background and snapshots the composition to `build/renders/<name>.png`.
      */
+    /**
+     * Issue #612: the brand-aligned composer launcher glyph. The app's real
+     * `ComposerLauncherIcon` (in `:app` `VoiceSessionSurface.kt`) can't be
+     * imported here, so this mirrors its exact `>_` geometry + button styling
+     * (enabled + disabled) so the maintainer can judge the glyph direction in
+     * a fast JVM render. The on-emulator launcher is the acceptance check.
+     */
+    @Test
+    fun composerLauncherBrandGlyph() = render("composer-launcher-brand-glyph") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Enabled state — cyan accent glyph in an elevated rounded button.
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+                    .border(1.dp, PocketShellColors.AccentDim, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = composerLauncherBrandIcon,
+                    contentDescription = null,
+                    tint = PocketShellColors.Accent,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            // Disabled state.
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+                    .border(1.dp, PocketShellColors.Border, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = composerLauncherBrandIcon,
+                    contentDescription = null,
+                    tint = PocketShellColors.TextSecondary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            // Large reference so the >_ motif is unambiguous at inspection size.
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(18.dp))
+                    .border(1.dp, PocketShellColors.AccentDim, RoundedCornerShape(18.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = composerLauncherBrandIcon,
+                    contentDescription = null,
+                    tint = PocketShellColors.Accent,
+                    modifier = Modifier.size(44.dp),
+                )
+            }
+        }
+        Text(
+            text = "Composer launcher: enabled · disabled · large reference",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(horizontal = 18.dp),
+        )
+    }
+
+    /**
+     * Issue #612: a fast preview of the Android 13+ themed-icon silhouette. The
+     * real silhouette is `drawable/ic_launcher_monochrome.xml` (the `>_` mark);
+     * here it is the same geometry tinted to simulate Material You wallpaper
+     * tinting (the system supplies the circular backdrop + tint at draw time).
+     * This is a JVM approximation; the launcher themed render is the real check.
+     */
+    @Test
+    fun themedIconSilhouettePreview() = render("themed-icon-silhouette") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Simulated Material You themed tiles: tinted circle backdrop +
+            // tinted >_ silhouette. Two example wallpaper tints.
+            listOf(
+                Color(0xFF1C2B33) to PocketShellColors.Accent,
+                Color(0xFF2A2433) to Color(0xFFCBB6F0),
+            ).forEach { (backdrop, tint) ->
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(backdrop, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = launcherMonochromeIcon,
+                        contentDescription = null,
+                        tint = tint,
+                        modifier = Modifier.size(48.dp),
+                    )
+                }
+            }
+        }
+        Text(
+            text = "Themed-icon silhouette (Material You) — simulated tints",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(horizontal = 18.dp),
+        )
+    }
+
+    private val launcherMonochromeIcon: ImageVector by lazy {
+        // Mirror of drawable/ic_launcher_monochrome.xml (#612), remapped from
+        // the 108-viewport launcher coords into a 24-viewport icon. Chevron `>`
+        // + cursor `_`, the brand silhouette the themed icon tints.
+        val builder = PathBuilder()
+        // Chevron `>` (108-coords M43,43 L50,43 L63,57 L50,71 L43,71 L56,57 Z
+        // scaled by 24/108 ~= 0.222, recentred).
+        builder.moveTo(6.5f, 6.5f)
+        builder.lineTo(9.5f, 6.5f)
+        builder.lineTo(15f, 12f)
+        builder.lineTo(9.5f, 17.5f)
+        builder.lineTo(6.5f, 17.5f)
+        builder.lineTo(12f, 12f)
+        builder.close()
+        // Cursor `_`.
+        builder.moveTo(11.5f, 15f)
+        builder.lineTo(17.5f, 15f)
+        builder.lineTo(17.5f, 17.5f)
+        builder.lineTo(11.5f, 17.5f)
+        builder.close()
+        ImageVector.Builder(
+            name = "LauncherMonochrome",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f,
+        ).apply { addPath(pathData = builder.nodes, fill = SolidColor(Color.White)) }.build()
+    }
+
+    private val composerLauncherBrandIcon: ImageVector by lazy {
+        // Mirror of app `ComposerLauncherIcon` (#612) — the `>_` brand motif.
+        val builder = PathBuilder()
+        // Prompt chevron `>`.
+        builder.moveTo(6f, 6.5f)
+        builder.lineTo(8.6f, 6.5f)
+        builder.lineTo(13.6f, 12f)
+        builder.lineTo(8.6f, 17.5f)
+        builder.lineTo(6f, 17.5f)
+        builder.lineTo(11f, 12f)
+        builder.close()
+        // Cursor block `_`.
+        builder.moveTo(13.5f, 15.5f)
+        builder.lineTo(18.5f, 15.5f)
+        builder.lineTo(18.5f, 17.5f)
+        builder.lineTo(13.5f, 17.5f)
+        builder.close()
+        ImageVector.Builder(
+            name = "ComposerLauncher",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f,
+        ).apply { addPath(pathData = builder.nodes, fill = SolidColor(Color.White)) }.build()
+    }
+
     private fun render(name: String, content: @Composable () -> Unit) {
         captureRoboImage("build/renders/$name.png") {
             PocketShellTheme {

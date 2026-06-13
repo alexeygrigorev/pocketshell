@@ -874,20 +874,26 @@ internal const val SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION: String = "Open
 internal const val SESSION_MIC_FAB_TAG: String = SESSION_COMPOSER_LAUNCHER_TAG
 
 /**
- * Issue #610: the bottom composer-launcher glyph. Tapping this control opens
- * the full Prompt Composer (text + voice + attachments), so the icon must read
- * as "compose / write a prompt", NOT as a dictation-only microphone.
+ * Issue #612: the bottom composer-launcher glyph. Tapping this control opens
+ * the full Prompt Composer (text + voice + attachments). Per the maintainer's
+ * explicit "use a **D-derived** composer/prompt-helper variant, not a
+ * microphone" instruction, this glyph is now **brand-aligned with the app
+ * icon**: it reuses the same `>_` shell-prompt motif (a bold chevron `>` plus
+ * a cursor block `_`) that the launcher icon ("C1" mark) uses, so the composer
+ * entry visibly rhymes with the brand mark.
  *
- * Earlier rounds tried a pocket-terminal-with-chevron mark, but at the small
- * toolbar size its busy interior was hard to parse and still didn't clearly
- * say "compose". This is now the familiar Material **edit / compose pencil**
- * silhouette: a diagonal pencil writing on a short underline. A pencil is the
- * universal "write / compose" affordance, instantly distinct from a mic.
- * Microphone glyphs ([DictateDotIcon]) stay reserved for real recording
- * controls inside the composer.
+ * A short earlier round used a generic edit/compose pencil for legibility, but
+ * that diverged from the chosen "Pocket Terminal" direction; this replaces it
+ * outright (hard cut, D22 — the pencil is removed, not kept as an option).
+ * The `>_` reads as "open a prompt at a terminal", which is exactly what the
+ * composer is. Microphone glyphs ([DictateDotIcon]) stay reserved for real
+ * recording controls inside the composer.
  *
- * The path stays inside roughly 5.5..18.5 of the 24dp viewport so the circular
- * button mask and dense toolbar previews leave visible breathing room.
+ * Drawn for the small toolbar size: the chevron and cursor are kept bold,
+ * widely spaced, and stroke-free (filled polygons) so they stay distinct and
+ * never thin out when scaled down inside the launcher button. The artwork sits
+ * inside roughly x=5.5..18.5 / y=5.5..18.5 of the 24dp viewport so the rounded
+ * button leaves visible breathing room on all sides.
  */
 internal val ComposerLauncherIcon: ImageVector = ImageVector.Builder(
     name = "ComposerLauncher",
@@ -902,32 +908,24 @@ internal val ComposerLauncherIcon: ImageVector = ImageVector.Builder(
 private fun ImageVector.Builder.addComposerLauncherPath(fill: SolidColor): ImageVector.Builder {
     val builder = PathBuilder()
 
-    // Pencil shaft — a diagonal bar running from lower-left to upper-right,
-    // built as a closed quad so it renders solidly at 24dp without stroking.
-    builder.moveTo(7f, 14.4f)
-    builder.lineTo(13.8f, 7.6f)
-    builder.lineTo(16.4f, 10.2f)
-    builder.lineTo(9.6f, 17f)
+    // Prompt chevron `>` — the same bold filled polygon as the app icon's
+    // "C1" mark, scaled into the toolbar viewport. Left-weighted so the
+    // cursor block has room on the right.
+    builder.moveTo(6f, 6.5f)
+    builder.lineTo(8.6f, 6.5f)
+    builder.lineTo(13.6f, 12f)
+    builder.lineTo(8.6f, 17.5f)
+    builder.lineTo(6f, 17.5f)
+    builder.lineTo(11f, 12f)
     builder.close()
 
-    // Pencil tip — a small triangle at the writing (lower-left) end.
-    builder.moveTo(6.4f, 15f)
-    builder.lineTo(9f, 17.6f)
-    builder.lineTo(5.6f, 18.4f)
-    builder.close()
-
-    // Eraser / ferrule cap — a stub at the upper-right end of the shaft.
-    builder.moveTo(14.4f, 7f)
-    builder.lineTo(15.6f, 5.8f)
-    builder.lineTo(18.2f, 8.4f)
-    builder.lineTo(17f, 9.6f)
-    builder.close()
-
-    // Underline — a short baseline so the mark reads as "writing on a line".
-    builder.moveTo(5.6f, 19.4f)
-    builder.lineToRelative(12.8f, 0f)
-    builder.lineToRelative(0f, 1.4f)
-    builder.lineToRelative(-12.8f, 0f)
+    // Cursor block `_` — a short, thick baseline bar at the lower-right,
+    // echoing the launcher icon's cursor underscore so the mark reads as a
+    // live shell prompt rather than a static arrow.
+    builder.moveTo(13.5f, 15.5f)
+    builder.lineTo(18.5f, 15.5f)
+    builder.lineTo(18.5f, 17.5f)
+    builder.lineTo(13.5f, 17.5f)
     builder.close()
 
     addPath(pathData = builder.nodes, fill = fill)

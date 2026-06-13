@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
@@ -11,8 +12,18 @@ import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
 import com.pocketshell.core.connection.TransportUpDown
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
+import com.pocketshell.core.ssh.ExecResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -21,6 +32,8 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.io.InputStream
 
 /**
  * EPIC #687 Phase-2, slice 1c-iv-b-A — characterization pin for the INERT,
@@ -259,6 +272,164 @@ class ConnectionEffectDriverTest {
         // Reaching here without an AssertionError from a fake port IS the proof:
         // the driver collected/logged every signal and called zero port IO.
         assertTrue(h.driver.observations.value.isNotEmpty())
+        scope.cancel()
+    }
+
+    // --- slice 1c-iv-b-A2 (#739): the driver observes over the REAL adapters -----
+    //
+    // The tests above prove the inert contract through hand-rolled inert ports. The
+    // tests below prove the WIRING this slice ships: the driver is constructed over
+    // the SAME real adapters production uses — the real [SshLeaseTransportPort] over
+    // a real [SshLeaseManager], and the real [CurrentClientTmuxPort] over a real
+    // [com.pocketshell.core.tmux.TmuxClient] — and the controller it observes is the
+    // bridge's real [ConnectionController] fed by those real signals (no stub
+    // `emptyFlow`). The driver still calls ZERO IO; it only OBSERVES.
+
+    private val leaseKey = SshLeaseKey(host = "example.com", port = 22, user = "alice", credentialId = "7:key")
+
+    /** A minimal connected [SshSession] so a real [SshLeaseManager.acquire] emits a
+     *  real `Connected` lease state — the genuine signal `SshLeaseTransportPort`
+     *  maps to a [TransportUpDown.Up] edge for the driver to observe. */
+    private class FakeConnectedSession : SshSession {
+        override val isConnected: Boolean = true
+        override suspend fun exec(command: String): ExecResult =
+            ExecResult(stdout = "", stderr = "", exitCode = 0)
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("not used")
+        override fun startShell(): SshShell = error("not used")
+        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
+        override suspend fun uploadStream(
+            input: InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("not used")
+        override fun close() = Unit
+    }
+
+    private fun realLeaseManager() =
+        SshLeaseManager(
+            connector = SshLeaseConnector { Result.success<SshSession>(FakeConnectedSession()) },
+            idleTtlMillis = 0L,
+        )
+
+    private fun leaseTarget() =
+        SshLeaseTarget(leaseKey = leaseKey, key = SshKey.Pem("unused"))
+
+    /**
+     * The driver, wired EXACTLY as production wires it (slice 1c-iv-b-A2): over the
+     * bridge's real [ConnectionController], the real [SshLeaseTransportPort], and the
+     * real [CurrentClientTmuxPort]. Observing the real controller fed real-feedback
+     * events through the bridge, the driver SEES the enter / live / switch / live
+     * transition sequence — from REAL signals, not stub flows.
+     */
+    @Test
+    fun observesRealControllerTransitionsOverRealAdapters() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val transportPort = SshLeaseTransportPort(realLeaseManager(), leaseKeyFor = { leaseTarget() })
+        transportPort.warmSnapshot = { true } // warm host → open routes to Attaching
+        val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
+        val bridge = ConnectionControllerShadowBridge(transport = transportPort)
+        val recorded = mutableListOf<String>()
+        val driver = ConnectionEffectDriver(
+            controller = bridge.connectionController,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            sink = { recorded += it },
+        ).also { it.start() }
+
+        // Drive the bridge through the real enter → live → switch → live sequence
+        // (the same observe* calls the VM fires). The controller reaches Live from
+        // the bridge's REAL transport-live / seed-landed feeds.
+        bridge.observeInlineTransition("Attaching", host, sessionA)
+        bridge.observeTransportLive(host, sessionA)
+        bridge.observeSeedLanded(host, sessionA, paneId = "%0")
+        bridge.observeInlineTransition("Attaching", host, sessionB)
+        bridge.observeSeedLanded(host, sessionB, paneId = "%0")
+
+        val states = driver.observations.value
+            .filterIsInstance<ConnectionEffectDriver.Observation.StateTransition>()
+            .map { ConnectionEffectDriver.Observation.nameOf(it.to) }
+        assertEquals(listOf("Idle", "Attaching", "Live", "Attaching", "Live"), states)
+        assertTrue(recorded.any { it.contains("Attaching -> Live") })
+        scope.cancel()
+    }
+
+    /**
+     * The driver SEES the REAL lease-up edge: a genuine [SshLeaseManager.acquire]
+     * emits a real `Connected` lease state, which [SshLeaseTransportPort.transportEvents]
+     * maps to [TransportUpDown.Up] — and the driver records it. NOT a stub `emptyFlow`.
+     */
+    @Test
+    fun observesRealLeaseUpEdgeFromRealTransportPort() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val leaseManager = realLeaseManager()
+        val transportPort = SshLeaseTransportPort(leaseManager, leaseKeyFor = { leaseTarget() })
+        val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
+        val bridge = ConnectionControllerShadowBridge(transport = transportPort)
+        val driver = ConnectionEffectDriver(
+            controller = bridge.connectionController,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+        ).also { it.start() }
+
+        // A real dial → a real `Connected` state event → a real Up edge.
+        leaseManager.acquire(leaseTarget()).getOrThrow()
+
+        val edges = driver.observations.value
+            .filterIsInstance<ConnectionEffectDriver.Observation.TransportEdge>()
+        assertTrue(
+            "driver must observe the REAL lease-up edge from the real transport port",
+            edges.any { it.edge is TransportUpDown.Up },
+        )
+        scope.cancel()
+    }
+
+    /**
+     * The driver SEES the REAL tmux disconnect oracle through the real
+     * [CurrentClientTmuxPort]: pointing the port at a real client and flipping its
+     * `disconnected` StateFlow surfaces the transport-drop signal the driver records.
+     * A client swap re-points the oracle (the `flatMapLatest` seam) — the driver
+     * never resubscribes, and never calls any IO method.
+     */
+    @Test
+    fun observesRealTmuxDisconnectOracleAndClientSwapOverRealPort() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val transportPort = SshLeaseTransportPort(realLeaseManager(), leaseKeyFor = { leaseTarget() })
+        val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
+        val bridge = ConnectionControllerShadowBridge(transport = transportPort)
+        val driver = ConnectionEffectDriver(
+            controller = bridge.connectionController,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+        ).also { it.start() }
+
+        val clientA = FakeTmuxClient()
+        tmuxPort.setClient(clientA)
+        clientA.disconnectedSignal.value = true // real transport drop on client A
+
+        assertTrue(
+            "driver must observe the REAL disconnect oracle for the attached client",
+            driver.observations.value.any {
+                it is ConnectionEffectDriver.Observation.Disconnected && it.isDisconnected
+            },
+        )
+
+        // Swap to a fresh connected client B (a reconnect/switch): the flatMapLatest
+        // seam re-points the oracle to B's `disconnected` without the driver
+        // resubscribing.
+        val clientB = FakeTmuxClient()
+        tmuxPort.setClient(clientB)
+        clientB.disconnectedSignal.value = true
+
+        val disconnects = driver.observations.value
+            .filterIsInstance<ConnectionEffectDriver.Observation.Disconnected>()
+            .count { it.isDisconnected }
+        assertTrue("driver must keep observing after a client swap", disconnects >= 2)
         scope.cancel()
     }
 }

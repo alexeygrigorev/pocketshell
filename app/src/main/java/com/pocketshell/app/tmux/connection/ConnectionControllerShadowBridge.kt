@@ -61,20 +61,47 @@ import kotlinx.coroutines.flow.emptyFlow
  * [observeSeedLanded] feedback. This is the final 1c-iv prerequisite: the shadow
  * controller reaches Live independently, from genuine signals.
  *
- * The single [ShadowTransportPort.isWarm] snapshot the controller consults
- * synchronously is supplied by the VM's existing live-lease-key set; no transport
- * IO is performed by the shadow controller (the bridge feeds explicit events).
+ * The single [TransportPort.isWarm] snapshot the controller consults synchronously
+ * is supplied by the VM's existing live-lease-key set (via the real
+ * [SshLeaseTransportPort.warmSnapshot] in production — slice 1c-iv-b-A2 #739); no
+ * transport IO is performed by the shadow controller (the bridge feeds explicit
+ * events).
  */
 class ConnectionControllerShadowBridge(
     clock: Clock = SystemElapsedClock,
-    /** Non-suspending warm-lease snapshot — the VM's `liveLeaseKeys`-backed read.
-     *  Defaults to "warm" so a within-grace foreground in tests rides the lease;
-     *  the VM injects its real snapshot. */
-    warmSnapshot: (HostKey) -> Boolean = { true },
+    /** The transport the shadow [ConnectionController] consults synchronously for
+     *  its warm-lease grace predicate ([TransportPort.isWarm]) AND whose
+     *  [TransportPort.transportEvents] the effect driver observes. In PRODUCTION
+     *  this is the REAL [SshLeaseTransportPort] over the VM's `SshLeaseManager`
+     *  (slice 1c-iv-b-A2 #739 — one source of truth, no stub `emptyFlow`); the
+     *  controller still reaches Live from the bridge's explicit real-feedback
+     *  feeds, so no transport IO is performed by the controller. */
+    val transport: TransportPort,
 ) {
-    private val transport = ShadowTransportPort(warmSnapshot)
-
     private val controller = ConnectionController(clock = clock, transport = transport)
+
+    /**
+     * The real `:shared:core-connection` reducer the bridge runs in shadow.
+     * Exposed READ-ONLY so the VM can wire the [ConnectionEffectDriver] to observe
+     * its [ConnectionController.state] transitions (slice 1c-iv-b-A2 #739). The VM
+     * NEVER [ConnectionController.submit]s through this accessor — every event still
+     * flows through the bridge's `observe*` methods — and the driver only READS
+     * [ConnectionController.state]. Pure observation; drives nothing.
+     */
+    val connectionController: ConnectionController
+        get() = controller
+
+    /**
+     * Test/convenience constructor. Builds an inert [TransportPort] whose only live
+     * behavior is the injected non-suspending [warmSnapshot] the controller's grace
+     * predicate consults; its [TransportPort.transportEvents] is empty and its
+     * suspend IO methods are never invoked by the reducer (the bridge feeds every
+     * transport EVENT explicitly). This is a TEST DOUBLE for the equivalence suite,
+     * not a production stub — production always injects the real
+     * [SshLeaseTransportPort] via the primary [transport] constructor above.
+     */
+    constructor(clock: Clock = SystemElapsedClock, warmSnapshot: (HostKey) -> Boolean = { true }) :
+        this(clock = clock, transport = WarmSnapshotTransportPort(warmSnapshot))
 
     /** The shadow controller's current state — read-only diagnostic; drives nothing. */
     val shadowState: ConnectionState
@@ -285,12 +312,14 @@ class ConnectionControllerShadowBridge(
     }
 
     /**
-     * A minimal observe-only [TransportPort]. The shadow controller only consults
-     * [isWarm] synchronously from its reducer; the bridge feeds every transport
-     * EVENT explicitly, so [transportEvents] is empty and the suspend IO methods
-     * are inert (never invoked by the reducer). No real lease IO ever runs.
+     * A minimal TEST-DOUBLE [TransportPort] for the equivalence suite. The shadow
+     * controller only consults [isWarm] synchronously from its reducer; the bridge
+     * feeds every transport EVENT explicitly, so [transportEvents] is empty and the
+     * suspend IO methods are inert (never invoked by the reducer). No real lease IO
+     * ever runs. PRODUCTION never uses this — the VM injects the real
+     * [SshLeaseTransportPort] (slice 1c-iv-b-A2 #739).
      */
-    private class ShadowTransportPort(
+    private class WarmSnapshotTransportPort(
         private val warmSnapshot: (HostKey) -> Boolean,
     ) : TransportPort {
         override suspend fun ensureLease(host: HostKey): LeaseHandle =

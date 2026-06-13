@@ -45,7 +45,10 @@ import com.pocketshell.app.session.markOptimisticFailed
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.connection.ConnectionControllerShadowBridge
+import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
+import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
+import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.hostKeyFor
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.HostKey
@@ -394,12 +397,68 @@ public class TmuxSessionViewModel @Inject constructor(
      * controller's within-grace predicate reads the same warm signal the inline
      * fast-switch path already consults — without performing any transport IO.
      */
-    private val connectionControllerShadow: ConnectionControllerShadowBridge =
-        ConnectionControllerShadowBridge(
+    /**
+     * EPIC #687 slice 1c-iv-b-A2 (#739): the REAL [SshLeaseTransportPort] over the
+     * VM's existing [sshLeaseManager]. This is the controller's `isWarm` source AND
+     * the [ConnectionEffectDriver]'s real [TransportPort.transportEvents] input — NO
+     * stub `emptyFlow`/fake-`isWarm` fork for the driver's inputs (D22). The
+     * controller still reaches Live from the bridge's explicit real-feedback feeds,
+     * so it performs no transport IO; `ensureLease`/`evictStale` are never invoked
+     * in this observe-only slice (the inline `runConnect` remains the sole live IO).
+     *
+     * [leaseKeyFor] resolves a controller [HostKey] back to the lease target ONLY
+     * for the suspend IO methods (unused here); it maps from the active/connecting
+     * target, the same one [hostKeyFor] minted the [HostKey] from.
+     */
+    private val connectionTransportPort: SshLeaseTransportPort =
+        SshLeaseTransportPort(
+            leaseManager = sshLeaseManager,
+            leaseKeyFor = { hostKey ->
+                val target = (activeTarget ?: connectingTarget)
+                    ?.takeIf { hostKeyFor(it.toSshLeaseTarget().leaseKey) == hostKey }
+                    ?: error("no lease target for $hostKey (observe-only slice)")
+                target.toSshLeaseTarget()
+            },
+        ).apply {
             warmSnapshot = { hostKey ->
                 liveLeaseKeys.any { leaseKey -> hostKeyFor(leaseKey) == hostKey }
-            },
+            }
+        }
+
+    /**
+     * EPIC #687 slice 1c-iv-b-A2 (#739): the REAL [TmuxPort] over the VM's current
+     * control client (swapped on every attach via [attachClient] →
+     * [CurrentClientTmuxPort.setClient]). Its [TmuxPort.disconnected] oracle is the
+     * [ConnectionEffectDriver]'s real transport-drop input — not a stub. Observe-only:
+     * the driver collects [TmuxPort.disconnected] and never calls its IO methods.
+     */
+    private val connectionTmuxPort: CurrentClientTmuxPort =
+        CurrentClientTmuxPort(
+            activePaneIdFor = { sessionId -> sessionId.value },
+            scrollbackLines = SEED_SCROLLBACK_LINES,
         )
+
+    private val connectionControllerShadow: ConnectionControllerShadowBridge =
+        ConnectionControllerShadowBridge(transport = connectionTransportPort)
+
+    /**
+     * EPIC #687 slice 1c-iv-b-A2 (#739): the OBSERVE-ONLY [ConnectionEffectDriver],
+     * now wired over the REAL adapters — it observes the shadow
+     * [ConnectionController]'s [ConnectionController.state] transitions, the real
+     * [SshLeaseTransportPort.transportEvents] lease edges, and the real
+     * [CurrentClientTmuxPort.disconnected] transport-drop oracle. It performs ZERO
+     * IO and ZERO cutover: the inline `runConnect`/`backgroundDetachJob` remain the
+     * sole live IO and are untouched. The driver only LOGS the transitions it sees
+     * (logcat tag [ConnectionEffectDriver.TAG]) so a later sub-slice can let it ACT
+     * against this verified seam. Started once, here, in [viewModelScope].
+     */
+    private val connectionEffectDriver: ConnectionEffectDriver =
+        ConnectionEffectDriver(
+            controller = connectionControllerShadow.connectionController,
+            tmuxPort = connectionTmuxPort,
+            transportPort = connectionTransportPort,
+            scope = viewModelScope,
+        ).also { it.start() }
 
     /**
      * The opaque [HostKey] / [SessionId] the shadow bridge keys on, derived from
@@ -4707,6 +4766,11 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun attachClient(client: TmuxClient) {
         resetControlClientSizeForAttach()
         clientRef = client
+        // EPIC #687 slice 1c-iv-b-A2 (#739): re-point the observe-only effect
+        // driver's real TmuxPort at the freshly attached client so its
+        // `disconnected` oracle follows the live channel. Observe-only — this only
+        // updates the flow the driver collects; it triggers no IO and no cutover.
+        connectionTmuxPort.setClient(client)
         bindClientObservers(client)
     }
 
@@ -9758,6 +9822,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 "backgroundDetachActive=${backgroundDetachJob?.isActive == true}",
         )
         cancelTmuxSessionPrewarm()
+        // EPIC #687 slice 1c-iv-b-A2 (#739): stop the observe-only effect driver's
+        // collectors. Idempotent; viewModelScope also cancels them, but stopping
+        // explicitly keeps the inert driver tidy. No IO, no cutover.
+        connectionEffectDriver.stop()
+        connectionTmuxPort.setClient(null)
         connectJob?.cancel()
         connectJob = null
         assistant.dismiss()

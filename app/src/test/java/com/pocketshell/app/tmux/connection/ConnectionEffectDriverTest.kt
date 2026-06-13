@@ -391,17 +391,20 @@ class ConnectionEffectDriverTest {
         SshLeaseTarget(leaseKey = leaseKey, key = SshKey.Pem("unused"))
 
     /**
-     * The driver, wired EXACTLY as production wires it (slice 1c-iv-b-A2): over the
-     * bridge's real [ConnectionController], the real [SshLeaseTransportPort], and the
-     * real [CurrentClientTmuxPort]. Observing the real controller fed real-feedback
-     * events through the bridge, the driver SEES the enter / live / switch / live
-     * transition sequence — from REAL signals, not stub flows.
+     * Slice 1c-iv-b-B2 (#742): the driver now SUBMITS TransportLive from the REAL
+     * lease-`Up` edge, wired EXACTLY as production wires it: over the bridge's real
+     * [ConnectionController], the real [SshLeaseTransportPort], and the real
+     * [CurrentClientTmuxPort]. A genuine [SshLeaseManager.acquire] emits a real
+     * `Connected` lease state → a real [TransportUpDown.Up] for the lease's host →
+     * the driver submits [ConnectionEvent.TransportLive], promoting the controller.
+     * No bridge mirror feed is used — the transport input ORIGINATES from the driver.
      */
     @Test
-    fun observesRealControllerTransitionsOverRealAdapters() = runTest {
+    fun submitsTransportLive_fromRealLeaseUpEdge_overRealAdapters() = runTest {
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
-        val transportPort = SshLeaseTransportPort(realLeaseManager(), leaseKeyFor = { leaseTarget() })
-        transportPort.warmSnapshot = { true } // warm host → open routes to Attaching
+        val leaseManager = realLeaseManager()
+        val transportPort = SshLeaseTransportPort(leaseManager, leaseKeyFor = { leaseTarget() })
+        transportPort.warmSnapshot = { false } // cold open → Connecting (so Up promotes it)
         val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
         val bridge = ConnectionControllerShadowBridge(transport = transportPort)
         val recorded = mutableListOf<String>()
@@ -413,19 +416,21 @@ class ConnectionEffectDriverTest {
             sink = { recorded += it },
         ).also { it.start() }
 
-        // Drive the bridge through the real enter → live → switch → live sequence
-        // (the same observe* calls the VM fires). The controller reaches Live from
-        // the bridge's REAL transport-live / seed-landed feeds.
-        bridge.observeInlineTransition("Attaching", host, sessionA)
-        bridge.observeTransportLive(host, sessionA)
-        bridge.observeSeedLanded(host, sessionA, paneId = "%0")
-        bridge.observeInlineTransition("Attaching", host, sessionB)
-        bridge.observeSeedLanded(host, sessionB, paneId = "%0")
+        // The controller's host MUST be the lease's hostKeyFor (the production
+        // alignment) so the driver's host filter accepts the real Up edge.
+        val leaseHost = hostKeyFor(leaseKey)
+        bridge.observeInlineTransition("Connecting", leaseHost, sessionA)
+
+        // A real dial → a real `Connected` state event → a real Up edge → the driver
+        // SUBMITS TransportLive, promoting Connecting → Attaching.
+        leaseManager.acquire(leaseTarget()).getOrThrow()
+        // The active-pane seed landing (still bridge-fed intent) promotes to Live.
+        bridge.observeSeedLanded(leaseHost, sessionA, paneId = "%0")
 
         val states = driver.observations.value
             .filterIsInstance<ConnectionEffectDriver.Observation.StateTransition>()
             .map { ConnectionEffectDriver.Observation.nameOf(it.to) }
-        assertEquals(listOf("Idle", "Attaching", "Live", "Attaching", "Live"), states)
+        assertEquals(listOf("Idle", "Connecting", "Attaching", "Live"), states)
         assertTrue(recorded.any { it.contains("Attaching -> Live") })
         scope.cancel()
     }

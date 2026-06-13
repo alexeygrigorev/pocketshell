@@ -380,18 +380,15 @@ public class TmuxSessionViewModel @Inject constructor(
     private var _connectionState: ConnectionState = ConnectionState.Idle
 
     /**
-     * EPIC #687 slice 1c-iii: the OBSERVE-ONLY EQUIVALENCE BRIDGE. A real
-     * `:shared:core-connection` `ConnectionController` runs in SHADOW. It is fed
-     * the same lifecycle inputs the inline `reduceConnection` path dispatches
-     * ([observeBackground]/[observeForeground]/[observeNetworkChanged]/
-     * [observeTransportDropped]) PLUS every inline connection transition mirrored
-     * from the single [setConnectionState] choke point. The controller computes
-     * its `ConnectionState` in SHADOW, but its state DRIVES NOTHING — it is NOT
-     * projected to [_connectionStatus], NOT used to gate any effect/job, NOT read
-     * by the indicator. Pure observation. Its sole purpose is the slice-1c-iii
-     * equivalence tests (which read [connectionControllerShadow]'s shadow status
-     * via the test-only accessor) that prove the controller produces the right
-     * state from real events BEFORE 1c-iv lets it drive.
+     * EPIC #687: the `:shared:core-connection` `ConnectionController` the VM runs.
+     * It is fed the lifecycle inputs the inline path dispatches
+     * ([observeBackground]/[observeForeground]/[observeNetworkChanged]) PLUS every
+     * inline connection transition mirrored from the single [setConnectionState]
+     * choke point. Slice 1c-iv-a flipped the STATUS: the controller's state now
+     * DRIVES [_connectionStatus] (the single status source, projected by
+     * [projectStatusFromController]). Slice 1c-iv-b-B2 (#742) moved the controller's
+     * TRANSPORT inputs (TransportLive / TransportDropped) onto the
+     * [ConnectionEffectDriver]'s real port flows, deleting the inline mirror feeds.
      *
      * The warm-lease snapshot is the VM's existing [liveLeaseKeys] set, so the
      * controller's within-grace predicate reads the same warm signal the inline
@@ -464,6 +461,11 @@ public class TmuxSessionViewModel @Inject constructor(
             transportPort = connectionTransportPort,
             scope = viewModelScope,
             backgroundedEffect = { launchBackgroundDetachTeardown() },
+            // Slice 1c-iv-b-B2 (#742): after the driver submits a TransportLive /
+            // TransportDropped from the real flows, re-project _connectionStatus from
+            // the controller's (now real-flow-driven) state — the controller is the
+            // single status source, exactly as the deleted mirror feeds re-projected.
+            onControllerTransition = { projectStatusFromController() },
         ).also { it.start() }
 
     /**
@@ -836,38 +838,16 @@ public class TmuxSessionViewModel @Inject constructor(
                     com.pocketshell.core.ssh.SshLeaseConnectionState.Closed,
                     -> liveLeaseKeys.remove(event.key)
                 }
-                // EPIC #687 slice 1c-iv-prep: feed the shadow controller the REAL
-                // "transport became live" signal at the EXISTING point a lease goes
-                // Connected — a FIRE-AND-OBSERVE emit placed AFTER the liveLeaseKeys
-                // write above, so it adds no write-path control flow. The shadow
-                // controller now reaches Live from this real feedback (plus the real
-                // seed landing) rather than mirroring the inline Live transition.
-                if (event.state == com.pocketshell.core.ssh.SshLeaseConnectionState.Connected) {
-                    observeTransportLiveInShadow(event.key)
-                }
+                // EPIC #687 slice 1c-iv-b-B2 (#742): the controller's TransportLive
+                // input is now driver-fed from the REAL [SshLeaseTransportPort.
+                // transportEvents] `Up` edge (the same lease-`Connected` signal), so the
+                // inline `observeTransportLiveInShadow` mirror feed is DELETED (D22
+                // hard-cut). This collector retains ONLY its [liveLeaseKeys] warm-snapshot
+                // bookkeeping above — it no longer feeds the controller.
             }
         }
     }
 
-    /**
-     * EPIC #687 slice 1c-iv-prep: feed the shadow controller a REAL
-     * [com.pocketshell.core.connection.ConnectionEvent.TransportLive] when the
-     * lease for the active/connecting target goes `Connected`. Observe-only —
-     * never mutates VM state, never reads the shadow state back. Only fired for the
-     * target the shadow is currently tracking (active or connecting) so a lease
-     * event for an unrelated host does not spuriously promote the shadow.
-     */
-    private fun observeTransportLiveInShadow(leaseKey: SshLeaseKey) {
-        val target = activeTarget ?: connectingTarget ?: return
-        if (target.toSshLeaseTarget().leaseKey != leaseKey) return
-        connectionControllerShadow.observeTransportLive(
-            shadowHostKey(target),
-            shadowSessionId(target),
-        )
-        // A real transport-live may have promoted Connecting → Attaching or
-        // Reattaching/Reconnecting → Live; re-project the displayed status.
-        projectStatusFromController()
-    }
     private var clientRef: TmuxClient? = null
     private var clientRegistration: ActiveTmuxClients.Registration? = null
     private var registeredHostId: Long? = null
@@ -4923,11 +4903,13 @@ public class TmuxSessionViewModel @Inject constructor(
         val current = inlineConnectionStatus as? ConnectionStatus.Connected ?: return
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
-        // EPIC #687 slice 1c-iii: observe-only — feed the shadow controller the
-        // passive transport drop. On a live channel it heals silently through
-        // Reattaching (the approved divergence — inline shows a band, the
-        // controller stays calm). It drives nothing.
-        connectionControllerShadow.observeTransportDropped(reason)
+        // EPIC #687 slice 1c-iv-b-B2 (#742): the controller's TransportDropped input
+        // is now driver-fed from the REAL [CurrentClientTmuxPort.disconnected] oracle
+        // (the SAME `TmuxClient.disconnected` true-edge this passive-disconnect path
+        // observes), so the inline `observeTransportDropped` mirror feed is DELETED
+        // (D22 hard-cut). The inline effect machinery below is UNCHANGED — it still
+        // owns the actual silent-reattach / reconnect IO until a later slice; only the
+        // controller-feed moved to the driver.
         when (reduceConnection(ConnectionEvent.TransportDropped(client))) {
             ConnectionDecision.SkipPassiveInAppNavigation ->
                 if (target != null) skipPassiveInAppNavigation(target)

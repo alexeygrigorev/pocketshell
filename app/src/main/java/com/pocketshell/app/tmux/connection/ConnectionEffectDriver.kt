@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux.connection
 
 import android.util.Log
 import com.pocketshell.core.connection.ConnectionController
+import com.pocketshell.core.connection.ConnectionEvent
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
@@ -33,16 +34,39 @@ import kotlinx.coroutines.launch
  * under `NonCancellable`). The inline `backgroundDetachJob` *trigger* is deleted
  * (D22 hard-cut — no fallback); the driver is the sole detach trigger.
  *
+ * Slice 1c-iv-b-B2 (#742) takes the controller's TRANSPORT INPUTS off the shadow
+ * mirror: the driver now SUBMITS [ConnectionEvent.TransportLive] /
+ * [ConnectionEvent.TransportDropped] to the controller from the REAL port flows it
+ * already collects, REPLACING the bridge's `observeTransportLive` /
+ * `observeTransportDropped` mirror feeds (deleted — D22 hard-cut). This is a faithful
+ * 1:1 substitution that preserves behavior:
+ *  - [TransportPort.transportEvents] `Up(host)` for the controller's CURRENT host →
+ *    [ConnectionEvent.TransportLive]. The lease going `Connected` for the active host
+ *    is the SAME signal the deleted `observeTransportLiveInShadow` mirrored (the host
+ *    filter reproduces its per-target gate — both encode the lease key via `hostKeyFor`).
+ *  - [TmuxPort.disconnected] true-edge → [ConnectionEvent.TransportDropped]. The
+ *    control-channel drop oracle is the SAME `TmuxClient.disconnected` source the
+ *    deleted inline `handlePassiveClientDisconnect` mirror fed from; the controller's
+ *    own [ConnectionController] reducer self-gates a drop to a live-ish state (no-op
+ *    from Idle/Backgrounded/Gone/Unreachable), reproducing the old `Connected` gate.
+ * After this slice the controller's transport inputs are driver-fed FROM REALITY — the
+ * prerequisite for the driver ACTING in slice C. The lease `Down` edge is NOT yet
+ * submitted (the reconnect-loop ownership that consumes it is slice C/D); B2 replaces
+ * exactly the two mirror feeds and nothing more.
+ *
+ * After each driver-submitted transport event the driver fires the VM-supplied
+ * [onControllerTransition] callback so the VM re-projects `_connectionStatus` from the
+ * controller's (now real-flow-driven) state — exactly as the deleted mirror feeds did
+ * via `projectStatusFromController()`.
+ *
  * ## What is STILL observe-only (this slice)
  * Every OTHER effect remains inline. The driver calls **ZERO port IO** — it never
  * invokes [TransportPort.ensureLease], [TransportPort.evictStale], [TmuxPort.attach],
- * [TmuxPort.selectWindow], [TmuxPort.seedActivePane], or [TmuxPort.detachCleanly],
- * and it does not submit any [com.pocketshell.core.connection.ConnectionEvent] back
- * into the controller. The OPEN path (`runConnect`/`connectJob`) and the cold/warm
- * projection read stay inline (deferred to a later slice). The detach effect is
- * routed through the VM-supplied [backgroundedEffect] callback — which calls the
- * VM's own full teardown — so no behavior moves into the driver itself; only the
- * *trigger* moves.
+ * [TmuxPort.selectWindow], [TmuxPort.seedActivePane], or [TmuxPort.detachCleanly]. The
+ * OPEN path (`runConnect`/`connectJob`), the switch path, the generation counter, and
+ * the cold/warm projection read stay inline (deferred to a later slice). The only
+ * controller submissions are the two transport events above; the detach effect is
+ * routed through the VM-supplied [backgroundedEffect] callback.
  *
  * ## Backgrounded-effect timing (the bg→fg-within-grace invariant)
  * The state collector fires [backgroundedEffect] SYNCHRONOUSLY in the same collector
@@ -63,18 +87,23 @@ import kotlinx.coroutines.launch
  * unit test (no Robolectric, no logcat) — this is the lever that makes the whole
  * effect-driver cut PR-testable (`ConnectionEffectDriverTest`).
  *
- * @param controller the pure connection-core reducer whose [state] transitions
- *   the driver observes (read-only — never [ConnectionController.submit]ted to).
- * @param tmuxPort the tmux control-mode port. Only its [TmuxPort.disconnected]
- *   flow is collected; no IO method is ever called.
- * @param transportPort the SSH-lease transport port. Only its
- *   [TransportPort.transportEvents] flow is collected; no IO method is ever called.
+ * @param controller the connection-core reducer whose [state] transitions the driver
+ *   observes AND (slice B2) the controller it SUBMITs the two transport events to.
+ * @param tmuxPort the tmux control-mode port. Its [TmuxPort.disconnected] true-edge is
+ *   submitted as [ConnectionEvent.TransportDropped]; no IO method is ever called.
+ * @param transportPort the SSH-lease transport port. Its [TransportPort.transportEvents]
+ *   `Up` edge for the current host is submitted as [ConnectionEvent.TransportLive]; no
+ *   IO method is ever called.
  * @param scope the scope the three collectors run in (the VM supplies its
  *   `viewModelScope`; tests supply a `TestScope`'s scope).
  * @param backgroundedEffect fired SYNCHRONOUSLY when the controller transitions INTO
  *   [ConnectionState.Backgrounded]. The VM supplies the clean-detach body (its full
  *   `closeCurrentConnectionAndJoin` teardown). Defaults to a no-op so the
  *   observe-only test harness keeps its inert contract.
+ * @param onControllerTransition fired AFTER each driver-submitted transport event so
+ *   the VM re-projects `_connectionStatus` from the controller's state (the controller
+ *   is the single status source). Defaults to a no-op (tests read [observations]/
+ *   [ConnectionController.state] directly).
  * @param sink where every observed transition is recorded. Defaults to logcat.
  */
 class ConnectionEffectDriver(
@@ -83,6 +112,7 @@ class ConnectionEffectDriver(
     private val transportPort: TransportPort,
     private val scope: CoroutineScope,
     private val backgroundedEffect: () -> Unit = {},
+    private val onControllerTransition: () -> Unit = {},
     private val sink: (String) -> Unit = { line -> Log.i(TAG, line) },
 ) {
     private val jobs = mutableListOf<Job>()
@@ -100,11 +130,13 @@ class ConnectionEffectDriver(
     private var started = false
 
     /**
-     * Begin observing. Launches three inert collectors in [scope]:
-     *  - [ConnectionController.state] transitions (the lifecycle the effect bodies
-     *    will eventually fire off),
-     *  - [TmuxPort.disconnected] — the transport-drop oracle,
-     *  - [TransportPort.transportEvents] — the lease up/down edge stream.
+     * Begin observing. Launches three collectors in [scope]:
+     *  - [ConnectionController.state] transitions (fires [backgroundedEffect] on the
+     *    Backgrounded entry — slice B1),
+     *  - [TmuxPort.disconnected] — the transport-drop oracle; its true-edge is
+     *    submitted as [ConnectionEvent.TransportDropped] (slice B2),
+     *  - [TransportPort.transportEvents] — the lease up/down edge stream; an `Up` for
+     *    the current host is submitted as [ConnectionEvent.TransportLive] (slice B2).
      * Idempotent: a second [start] is a no-op.
      */
     fun start() {
@@ -143,13 +175,44 @@ class ConnectionEffectDriver(
     private suspend fun collectTransportDrops(disconnected: Flow<Boolean>) {
         disconnected.collect { isDisconnected ->
             record(Observation.Disconnected(isDisconnected))
+            // Slice 1c-iv-b-B2 (#742): the control-channel drop oracle is the SAME
+            // `TmuxClient.disconnected` source the deleted inline
+            // `handlePassiveClientDisconnect` mirror fed `observeTransportDropped` from.
+            // Submit it to the controller on the true-edge only; the reducer self-gates
+            // a drop to a live-ish state (no-op from Idle/Backgrounded/Gone/Unreachable),
+            // reproducing the old `Connected` gate without re-reading inline VM state.
+            if (isDisconnected) {
+                submitTransport(ConnectionEvent.TransportDropped(reason = "control_channel_disconnected"))
+            }
         }
     }
 
     private suspend fun collectTransportEvents(events: Flow<TransportUpDown>) {
         events.collect { edge ->
             record(Observation.TransportEdge(edge))
+            // Slice 1c-iv-b-B2 (#742): the lease going `Connected` for the controller's
+            // CURRENT host is the SAME signal the deleted `observeTransportLiveInShadow`
+            // mirror fed `observeTransportLive` from. The host filter reproduces its
+            // per-target gate (both encode the lease key via `hostKeyFor`, so a live
+            // signal for an unrelated host never spuriously promotes the controller).
+            // The lease `Down` edge is NOT submitted in B2 — its consumer (the
+            // reconnect loop) is a later slice; `TransportDropped` here comes from the
+            // control-channel oracle above, matching the old mirror feed exactly.
+            if (edge is TransportUpDown.Up && edge.host == controller.state.value.hostOrNull()) {
+                submitTransport(ConnectionEvent.TransportLive)
+            }
         }
+    }
+
+    /**
+     * Submit a transport event to the controller and re-project the displayed status.
+     * The driver is now the controller's transport input (B2 #742); after each submit
+     * the VM-supplied [onControllerTransition] re-projects `_connectionStatus` from the
+     * controller's state — exactly as the deleted mirror feeds did.
+     */
+    private fun submitTransport(event: ConnectionEvent) {
+        controller.submit(event)
+        onControllerTransition()
     }
 
     private fun record(observation: Observation) {

@@ -16,56 +16,42 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 
 /**
- * EPIC #687 Phase-2, slice 1c-iv-prep — the OBSERVE-ONLY EQUIVALENCE BRIDGE,
- * now driven by REAL transport/seed feedback.
+ * EPIC #687 Phase-2 — the bridge that adapts the VM's inline lifecycle to the real
+ * `:shared:core-connection` [ConnectionController].
  *
- * A real `:shared:core-connection` [ConnectionController] runs in SHADOW: the VM
- * feeds it the same lifecycle inputs (Background / Foreground / NetworkChanged /
- * TransportDropped) the inline `reduceConnection` path already dispatches, PLUS
- * the open/switch INTENT mirrored from the single 1b `setConnectionState` choke
- * point ([observeInlineTransition] → Enter/Switch/TargetGone/drop-ladder). The
- * controller then reaches [ConnectionState.Live] from **REAL feedback**, not by
- * mirroring the inline Live transition:
- *  - [observeTransportLive] is fed at the EXISTING point a lease goes
- *    `Connected` (the VM's `SshLeaseManager.stateEvents` collector) — the real
- *    "transport became live" signal.
- *  - [observeSeedLanded] is fed at the EXISTING point a `capture-pane` lands for
- *    the active pane (the VM's `seedPaneFromCaptureOnce` success) — the real
- *    "seed/capture landed" signal.
- * The controller computes its [ConnectionState] from those events — but its
- * state **DRIVES NOTHING**.
+ * A real [ConnectionController] runs behind this bridge: the VM feeds it the
+ * lifecycle inputs the inline path dispatches (Background / Foreground /
+ * NetworkChanged) PLUS the open/switch/reveal INTENT mirrored from the single 1b
+ * `setConnectionState` choke point ([observeInlineTransition] → Enter/Switch/
+ * Live-reveal/TargetGone/drop-ladder), and the real seed-landing feedback
+ * ([observeSeedLanded] at the existing `capture-pane` success point).
  *
- * ## Observe-only contract (hard rule)
- * - The bridge NEVER calls back into the VM and NEVER mutates VM state.
- * - The real-feedback feeds ([observeTransportLive]/[observeSeedLanded]) are
- *   FIRE-AND-OBSERVE emits placed AFTER the existing write-path side effect they
- *   observe (the `liveLeaseKeys.add` / `panesSeededThisAttach.add` line). They
- *   add NO new control flow, NO new IO, and do not change the attach/seed timing
- *   or ordering — the write-path stays byte-identical. Observation cannot leak
- *   into behavior.
- * - The controller's [shadowState] / [shadowStatusName] / [shadowIndicator] are
- *   read-only diagnostics. Nothing in the VM reads them to gate an effect, a job,
- *   `_connectionStatus`, or the header indicator. They exist ONLY so the
- *   equivalence tests can prove the controller produces the right state from the
- *   real event stream BEFORE 1c-iv lets it drive.
+ * ## Status source (slice 1c-iv-a — the FLIP)
+ * The controller's [ConnectionState] now DRIVES the view-facing `_connectionStatus`
+ * (the VM's `projectStatusFromController`): the controller is the single status
+ * source. The [shadowState] / [shadowStatusName] / [shadowIndicator] accessors
+ * remain for the equivalence suite to compare against the pinned inline status names.
  *
- * ## Why the inline mirror still feeds the INTENT (Enter/Switch)
+ * ## Transport inputs (slice 1c-iv-b-B2 #742 — driver-fed from reality)
+ * The controller's `TransportLive` / `TransportDropped` inputs are SUBMITTED by the
+ * [ConnectionEffectDriver] from the REAL port flows — the lease-`Up` edge of
+ * [SshLeaseTransportPort.transportEvents] and the [CurrentClientTmuxPort.disconnected]
+ * oracle — so the bridge's former `observeTransportLive` / `observeTransportDropped`
+ * mirror feeds are DELETED (D22 hard-cut). The Live PROMOTION still flows through
+ * the inline reveal ([observeInlineTransition] `Live` → `promoteToLive`, the
+ * authoritative "user is connected" moment) and the real [observeSeedLanded]
+ * feedback (idempotent); the driver's real-flow TransportLive keeps the controller
+ * Live across lease re-`Connected` events.
+ *
+ * ## Why the inline mirror still feeds the INTENT (Enter/Switch/reveal)
  * The controller must know WHICH host/target it is connecting/switching to before
- * the real `TransportLive`/`SeedLanded` can promote it. The inline transition is
- * the cheapest place to read that intent (the VM already knows the
- * active/connecting target there), and mirroring Enter/Switch changes no
- * write-path behavior. What is NO LONGER synthesised from the inline mirror is
- * the Live promotion itself: [observeInlineTransition] for an inline `Live` only
- * ensures the controller is targeting the right id; the actual promotion to
- * [ConnectionState.Live] now comes from the REAL [observeTransportLive] +
- * [observeSeedLanded] feedback. This is the final 1c-iv prerequisite: the shadow
- * controller reaches Live independently, from genuine signals.
+ * a `TransportLive`/`SeedLanded` can promote it. The inline transition is the
+ * cheapest place to read that intent (the VM already knows the active/connecting
+ * target there), and mirroring Enter/Switch changes no write-path behavior.
  *
  * The single [TransportPort.isWarm] snapshot the controller consults synchronously
  * is supplied by the VM's existing live-lease-key set (via the real
- * [SshLeaseTransportPort.warmSnapshot] in production — slice 1c-iv-b-A2 #739); no
- * transport IO is performed by the shadow controller (the bridge feeds explicit
- * events).
+ * [SshLeaseTransportPort.warmSnapshot] in production — slice 1c-iv-b-A2 #739).
  */
 class ConnectionControllerShadowBridge(
     clock: Clock = SystemElapsedClock,
@@ -218,34 +204,18 @@ class ConnectionControllerShadowBridge(
         controller.submit(ConnectionEvent.NetworkChanged(validatedHandoff))
     }
 
-    /** Observe a passive transport drop (the inline `handlePassiveClientDisconnect`
-     *  dispatch point). On a live channel the controller heals through
-     *  [ConnectionState.Reattaching] silently — the approved divergence. */
-    fun observeTransportDropped(reason: String) {
-        controller.submit(ConnectionEvent.TransportDropped(reason))
-    }
-
     /**
-     * Observe the REAL "transport became live" signal — fed at the EXISTING point
-     * a lease transitions to `Connected` (the VM's `SshLeaseManager.stateEvents`
-     * collector). Submits the real [ConnectionEvent.TransportLive]. On a cold dial
-     * this promotes `Connecting → Attaching`; on a reattach/reconnect it lands
-     * `Live`. [TransportLive] carries no target id, so the controller applies it to
-     * its CURRENT target — the inline intent mirror (Enter/Switch) already
-     * established that target, so no re-targeting is done here (re-targeting from a
-     * feedback emit could wrongly Switch on a stale signal).
-     *
-     * @param host the host the lease came live for (diagnostic; the controller's
-     *   current state already carries the host).
-     * FIRE-AND-OBSERVE: the caller emits this AFTER the existing `liveLeaseKeys`
-     * write, so it adds no write-path control flow — pure observation.
+     * EPIC #687 slice 1c-iv-b-B2 (#742): the controller's transport inputs
+     * (`TransportLive` / `TransportDropped`) are now SUBMITTED by the
+     * [ConnectionEffectDriver] from the REAL port flows
+     * ([com.pocketshell.app.tmux.connection.SshLeaseTransportPort.transportEvents]
+     * `Up` edge → `TransportLive`; [com.pocketshell.app.tmux.connection.CurrentClientTmuxPort.disconnected]
+     * true-edge → `TransportDropped`), so the bridge's `observeTransportLive` /
+     * `observeTransportDropped` mirror feeds are DELETED (D22 hard-cut — the driver
+     * is the sole transport-event source, no fallback). The remaining `observe*`
+     * methods feed the INTENT (Enter/Switch via [observeInlineTransition]) and the
+     * lifecycle (background/foreground/network) until later slices move those too.
      */
-    fun observeTransportLive(
-        @Suppress("UNUSED_PARAMETER") host: HostKey,
-        @Suppress("UNUSED_PARAMETER") targetId: SessionId,
-    ) {
-        controller.submit(ConnectionEvent.TransportLive)
-    }
 
     /**
      * Observe the REAL "seed/capture landed" signal — fed at the EXISTING point a
@@ -256,9 +226,10 @@ class ConnectionControllerShadowBridge(
      * for a SUPERSEDED target, so a late capture from a session the user already
      * switched away from never promotes the wrong target. A landing for the current
      * target while attaching/reattaching/reconnecting promotes to
-     * [ConnectionState.Live] — this is how the shadow controller reaches Live from
-     * REAL feedback, independently of the inline transition. No re-targeting is
-     * done here for the same stale-signal reason as [observeTransportLive].
+     * [ConnectionState.Live] — this is how the controller reaches Live from REAL
+     * feedback, independently of the inline transition. No re-targeting is done here:
+     * a SeedLanded carries its own [targetId] and the reducer drops it by id, so a
+     * stale signal can never wrongly Switch the controller.
      *
      * @param host the host the seed came from (diagnostic).
      * FIRE-AND-OBSERVE: the caller emits this AFTER the existing seed side effect,

@@ -247,6 +247,10 @@ class FolderListGatewayFallbackTest {
         val session = CreateSessionFake(
             results = listOf(
                 CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                // Issue #759: agent launches first pre-flight `pocketshell agent
+                // --help`. A current host answers 0 (help text), so the launch
+                // proceeds to send-keys.
+                CreateSessionFake.Rule(match = "pocketshell agent --help", result = ok()),
                 CreateSessionFake.Rule(match = "send-keys", result = ok()),
             ),
         )
@@ -270,6 +274,149 @@ class FolderListGatewayFallbackTest {
         )
         // The capped create still ran before send-keys.
         assertTrue(session.execCommands.any { it.contains("create-detached") })
+    }
+
+    // --- Issue #759: graceful agent-launch version-mismatch guard ---
+
+    @Test
+    fun outdatedHostAgentLaunchSurfacesUpdateHintNotRawClickError() = runTest {
+        // Simulate the maintainer's v0.3.34 dogfood: the host's pocketshell is
+        // OUTDATED (0.3.33), so the `agent` subcommand probe answers with the
+        // raw Click "No such command 'agent'" error. The launch must abort with
+        // the actionable update hint, and must NOT type the doomed agent line
+        // into the pane (no send-keys).
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(
+                    match = "pocketshell agent --help",
+                    result = ExecResult(
+                        stdout = "",
+                        stderr = "Error: No such command 'agent'. " +
+                            "(Did you mean one of: 'agent-log', 'usage'?)",
+                        exitCode = 2,
+                    ),
+                ),
+                CreateSessionFake.Rule(
+                    match = "pocketshell --version",
+                    result = ExecResult(
+                        stdout = "pocketshell, version 0.3.33",
+                        stderr = "",
+                        exitCode = 0,
+                    ),
+                ),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val ex = runCatching {
+            gateway.createSessionOnSession(
+                session = session,
+                sessionName = SESSION_NAME,
+                cwd = CWD,
+                startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
+            )
+        }.exceptionOrNull()
+
+        assertTrue("expected a surfaced RuntimeException, got $ex", ex is RuntimeException)
+        val message = ex?.message.orEmpty()
+        // The friendly hint: names the concrete installed version, the required
+        // minimum, and a copyable update command.
+        assertTrue("hint must name installed version: $message", message.contains("0.3.33"))
+        assertTrue(
+            "hint must name required minimum: $message",
+            message.contains(AgentLaunchVersionCheck.MIN_AGENT_POCKETSHELL_VERSION),
+        )
+        assertTrue(
+            "hint must give a copyable update command: $message",
+            message.contains(AgentLaunchVersionCheck.UPDATE_COMMAND),
+        )
+        // The raw Click jargon must NOT leak to the user.
+        assertFalse("raw Click error must not leak: $message", message.contains("No such command"))
+        // The doomed agent line must NOT be typed into the pane.
+        assertFalse(
+            "must not send-keys a launch that will fail",
+            session.execCommands.any { it.contains("send-keys") },
+        )
+    }
+
+    @Test
+    fun outdatedHostHintStaysGenericWhenVersionProbeFails() = runTest {
+        // The `--help` probe shows the mismatch but the version probe itself
+        // errors out: the hint still fires, just with generic "too old"
+        // phrasing instead of a concrete version, and never blocks on the
+        // failed version fetch.
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(
+                    match = "pocketshell agent --help",
+                    result = ExecResult(
+                        stdout = "",
+                        stderr = "Error: No such command 'agent'.",
+                        exitCode = 2,
+                    ),
+                ),
+                CreateSessionFake.Rule(
+                    match = "pocketshell --version",
+                    result = ExecResult(stdout = "", stderr = "boom", exitCode = 1),
+                ),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val ex = runCatching {
+            gateway.createSessionOnSession(
+                session = session,
+                sessionName = SESSION_NAME,
+                cwd = CWD,
+                startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
+            )
+        }.exceptionOrNull()
+
+        assertTrue("expected a surfaced RuntimeException, got $ex", ex is RuntimeException)
+        val message = ex?.message.orEmpty()
+        assertTrue("hint must fall back to generic phrasing: $message", message.contains("too old"))
+        assertTrue(
+            "hint must still name required minimum: $message",
+            message.contains(AgentLaunchVersionCheck.MIN_AGENT_POCKETSHELL_VERSION),
+        )
+        assertTrue(
+            "hint must still give a copyable command: $message",
+            message.contains(AgentLaunchVersionCheck.UPDATE_COMMAND),
+        )
+        assertFalse(
+            "must not send-keys a launch that will fail",
+            session.execCommands.any { it.contains("send-keys") },
+        )
+    }
+
+    @Test
+    fun shellSessionSkipsTheAgentVersionPreflight() = runTest {
+        // A plain SHELL session (startCommand is not a `pocketshell agent` line)
+        // must never run the agent --help pre-flight probe.
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = "htop",
+        )
+
+        assertFalse(
+            "a shell session must not probe `pocketshell agent --help`",
+            session.execCommands.any { it.contains("pocketshell agent --help") },
+        )
+        assertTrue(session.execCommands.any { it.contains("send-keys") })
     }
 
     /**

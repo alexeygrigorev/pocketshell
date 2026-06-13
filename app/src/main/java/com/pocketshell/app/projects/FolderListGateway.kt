@@ -1135,12 +1135,67 @@ class SshFolderListGateway internal constructor(
         // modal so the agent is immediately usable. The app just types
         // the one short line verbatim.
         if (startCommand != null) {
+            // Issue #759: an agent launch types the SHORT server-side wrapper
+            // line `pocketshell agent <kind> --dir …`. The `agent` subcommand
+            // only exists in pocketshell >= 0.3.34; on an OUTDATED host Click
+            // answers `No such command 'agent'`. Because the line is typed into
+            // a DETACHED pane via send-keys, that raw Click error would scroll
+            // past inside the pane and the user would just see a dead session
+            // with no idea why. So for agent launches we PRE-FLIGHT the same
+            // warm lease session (D21 — no new connection) with
+            // `pocketshell agent --help`: if the subcommand is missing we throw
+            // the actionable update hint, which surfaces through the normal
+            // createSession failure path instead of the cryptic Click error.
+            if (AgentLaunchVersionCheck.isAgentLaunchCommand(startCommand)) {
+                ensureAgentSubcommandAvailable(session)
+            }
             val quotedCommand = shellQuote(startCommand)
             session.exec(
                 pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
             )
         }
         return sessionName
+    }
+
+    /**
+     * Issue #759: pre-flight version guard for an agent launch. Probes the host
+     * (over the already-warm lease [session]) for the `pocketshell agent`
+     * subcommand; if it is missing — the host's `pocketshell` predates 0.3.34 —
+     * throws the actionable "update pocketshell on the host" hint instead of
+     * letting the cryptic `No such command 'agent'` Click error scroll past
+     * inside the detached pane.
+     *
+     * When the probe succeeds (current host) this is a no-op. The version is
+     * fetched best-effort only when the probe shows a mismatch, so the hint can
+     * name the concrete installed version; a probe/version failure to fetch
+     * never blocks a healthy launch.
+     */
+    private suspend fun ensureAgentSubcommandAvailable(session: SshSession) {
+        val probe = session.exec(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
+        if (!AgentLaunchVersionCheck.isAgentSubcommandMissing(
+                stdout = probe.stdout,
+                stderr = probe.stderr,
+                exitCode = probe.exitCode,
+            )
+        ) {
+            return
+        }
+        // Outdated host: best-effort fetch of the installed version so the hint
+        // can be concrete ("this host's pocketshell is 0.3.33").
+        val installedVersion = runCatching {
+            val version = session.exec(pathAware(AgentLaunchVersionCheck.VERSION_PROBE_COMMAND))
+            AgentLaunchVersionCheck.parseReportedVersion(
+                version.stdout.ifBlank { version.stderr },
+            )
+        }.getOrNull()
+        throw RuntimeException(
+            AgentLaunchVersionCheck.mapLaunchFailureToHint(
+                stdout = probe.stdout,
+                stderr = probe.stderr,
+                exitCode = probe.exitCode,
+                installedVersion = installedVersion,
+            ) ?: AgentLaunchVersionCheck.outdatedHint(installedVersion),
+        )
     }
 
     override suspend fun killSession(

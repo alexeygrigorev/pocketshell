@@ -17,6 +17,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
@@ -25,7 +26,6 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -132,13 +132,31 @@ class PromptComposerImeSquishProofTest {
                     "Wrote 23 lines to issue.md\nMake the tiles compact",
             )
 
-        val imeShown = waitForInputMethodVisible(
-            scenario = compose.activityRule.scenario,
-            expected = true,
-            timeoutMs = 30_000L,
-        )
-        assumeTrue(
-            "IME not available on this emulator; cannot validate issue #567 geometry",
+        // Raise the soft IME DETERMINISTICALLY. `performTextInput` alone proved
+        // non-deterministic per-emulator (it relies on the focused-field IME
+        // auto-show, which a fresh swiftshader AVD — e.g. CI, or local `test-2` —
+        // does not reliably honour, so the test silently `assumeTrue`-SKIPPED and
+        // the gate went green with ZERO squish protection — the exact #736 review
+        // blocker). We instead REQUEST the IME explicitly via
+        // `WindowInsetsControllerCompat.show(ime())` against the activity window
+        // (the same call TmuxKeyBarImeReachabilityTest / RootProjectAddSheet use),
+        // re-issuing it on each poll iteration until the framework propagates the
+        // ime() inset or the bounded deadline elapses. Re-issuing matters: a
+        // single show() can be dropped while the window is still settling after
+        // focus, so we keep nudging within the bound.
+        val imeShown = raiseSoftImeDeterministically(timeoutMs = 30_000L)
+        // A can't-show is a HARD FAILURE, never a silent skip. This gate's whole
+        // purpose (#736, per #638/#657) is to catch the keyboard-up squish at PR
+        // time; an `assumeTrue` skip here would let the per-PR job report green
+        // without ever checking the squish — zero protection — which is exactly
+        // what the #736 review rejected. If the IME genuinely cannot be raised
+        // after the robust bounded attempt above, fail LOUD (red) so the gate can
+        // NEVER silently pass.
+        assertTrue(
+            "IME could not be raised within 30s after focus + repeated " +
+                "WindowInsetsControllerCompat.show(ime()); cannot validate the " +
+                "issue #567 keyboard-up squish geometry. A no-IME emulator must " +
+                "FAIL this gate, not silently skip it (#736).",
             imeShown,
         )
 
@@ -241,6 +259,74 @@ class PromptComposerImeSquishProofTest {
                 "gapBelowControlsDp=$gapBelowControlsDp",
             gapBelowControlsDp <= 64f,
         )
+    }
+
+    /**
+     * Raise the soft IME deterministically and return whether it became
+     * visible within [timeoutMs].
+     *
+     * Why not just poll [waitForInputMethodVisible]: that only WAITS for the
+     * inset; it does not REQUEST the keyboard. On a fresh swiftshader AVD the
+     * focused-field auto-show is unreliable (observed: local `test-2` and a
+     * fresh CI AVD never raise the keyboard from `performTextInput` alone), so a
+     * pure wait times out and the test used to silently skip. Here we actively
+     * call [WindowInsetsControllerCompat.show] for `ime()` on the activity
+     * window on EVERY poll iteration — re-issuing because a single show() can be
+     * dropped while the window is still settling after focus — until the
+     * framework propagates the `ime()` inset or the bound elapses. This is the
+     * same explicit-request approach TmuxKeyBarImeReachabilityTest and
+     * RootProjectAddSheetKeyboardLayoutTest use to force the real keyboard up.
+     */
+    private fun raiseSoftImeDeterministically(timeoutMs: Long): Boolean {
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            // Re-tap the Compose draft field on each iteration so it holds focus
+            // and its InputConnection is (re)established before we ask for the
+            // keyboard. On a fresh swiftshader AVD the focus/InputConnection can
+            // be lost while the window settles, leaving no "served" editor — which
+            // is why the bare inset-API request gets rejected at
+            // PHASE_CLIENT_REQUEST_IME_SHOW. Re-clicking re-arms it.
+            compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+                .performClick()
+            compose.waitForIdle()
+
+            compose.activity.runOnUiThread {
+                val window = compose.activity.window
+                val imm = compose.activity.getSystemService(
+                    android.content.Context.INPUT_METHOD_SERVICE,
+                ) as? android.view.inputmethod.InputMethodManager
+                // (a) View-level request against the ACTUAL focused view. In a
+                //     Compose test the editor is the AndroidComposeView that owns
+                //     the active InputConnection, NOT window.currentFocus (which is
+                //     null for Compose), so we resolve it via decorView.findFocus().
+                //     Driving InputMethodManager.showSoftInput on that served view
+                //     forces a show that does not depend on the inset-API
+                //     served-view gate that fails on a fresh AVD.
+                val focused = window.decorView.findFocus()
+                if (focused != null && imm != null) {
+                    imm.showSoftInput(
+                        focused,
+                        android.view.inputmethod.InputMethodManager.SHOW_FORCED,
+                    )
+                }
+                // (b) Window-level inset request. On a healthy AVD this raises the
+                //     keyboard outright; together with (a) it covers both paths.
+                WindowInsetsControllerCompat(window, window.decorView)
+                    .show(WindowInsetsCompat.Type.ime())
+            }
+            // Give this show() request up to ~3s to land before re-issuing, so a
+            // slow CI AVD's IME ack is not pre-empted by an immediate re-request.
+            val shown = waitForInputMethodVisible(
+                scenario = compose.activityRule.scenario,
+                expected = true,
+                timeoutMs = minOf(
+                    3_000L,
+                    (deadline - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L),
+                ),
+            )
+            if (shown) return true
+        }
+        return false
     }
 
     @Composable

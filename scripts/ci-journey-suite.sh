@@ -64,6 +64,24 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
+# Make the soft IME deterministic on the booted journey AVD (issue #736).
+#
+# PromptComposerImeSquishProofTest must RAISE the soft keyboard to validate the
+# keyboard-up squish. On a fresh swiftshader AVD the soft IME can refuse to show
+# when a hardware keyboard is assumed present, so we enable the IME-with-hard-
+# keyboard secure setting on every connected device before running the suite.
+# This is the device-side half of the determinism fix; the test itself also
+# explicitly re-issues WindowInsetsControllerCompat.show(ime()) and HARD-FAILS
+# (no silent skip) if the keyboard still cannot be raised. `adb` is on PATH and
+# the emulator is already booted inside the android-emulator-runner `script:`
+# step, so this runs against the live AVD. Best-effort: never abort the suite if
+# a device momentarily rejects the setting (the test's own hard-fail guard is
+# the real backstop).
+for _serial in $(adb devices | awk 'NR>1 && $2=="device"{print $1}'); do
+  adb -s "$_serial" shell settings put secure show_ime_with_hard_keyboard 1 \
+    >/dev/null 2>&1 || true
+done
+
 ARTIFACT_DIR="$REPO_ROOT/artifacts/ci-journey"
 mkdir -p "$ARTIFACT_DIR"
 SUMMARY="$ARTIFACT_DIR/summary.md"
@@ -127,6 +145,27 @@ JOURNEY_CLASSES=(
   # lives under com.pocketshell.app.projects, not the com.pocketshell.app.proof
   # prefix, so it carries its fully-qualified name directly.
   "com.pocketshell.app.projects.ProfileDiscoveryPickerDockerTest"
+  # PROMOTED (#736, follow-up to the #567 review): the composer keyboard-up
+  # SQUISH regression proof. The maintainer's #1 process complaint area is the
+  # composer being crushed when the soft keyboard is up (draft collapsed to one
+  # line, header clipped off the top, controls jammed at the keyboard). This
+  # proof reproduces that exact state (multi-line draft + 2 staged attachment
+  # tiles, IME raised) and asserts the body is NOT squished. It ran only in the
+  # unfiltered full connected suite before; per the "load-bearing journeys run
+  # at PR time" principle (#638/#657) it must run per-push so the squish can't
+  # silently regress. It uses NO Docker fixture (pure Compose-rule UI test, no
+  # SSH/tmux). The IME is raised DETERMINISTICALLY (the test re-issues
+  # WindowInsetsControllerCompat.show(ime()), and this script sets
+  # `show_ime_with_hard_keyboard 1` on the booted AVD near the top) so the
+  # keyboard reliably appears on the CI swiftshader pixel_7 AVD; if it still cannot be
+  # raised after the bounded attempt the test FAILS LOUD (no silent assumeTrue
+  # skip — that was the #736 review blocker: a skip would let this gate go green
+  # with zero squish protection). Its geometry assertions are framed relative to
+  # the measured room above the keyboard (body-fits-room, send/attach-above-IME),
+  # so they hold on the CI pixel_7 AVD (the same profile the journey AVD uses).
+  # It lives under com.pocketshell.app.composer, not the proof prefix, so it
+  # carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.PromptComposerImeSquishProofTest"
 )
 
 echo "=========================================================="

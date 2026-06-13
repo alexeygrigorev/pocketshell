@@ -571,14 +571,25 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #211: emit a [SendRequest] for the current draft and clear
-     * the draft so the next composer open is a fresh slate. No-op when
-     * the draft is empty — the FSM-Idle case where the user has nothing
-     * to send, which the UI normally already gates via the Send button's
-     * `enabled` predicate. Tests can still call this directly; the empty
-     * guard means a hostile caller cannot fire a blank send.
+     * Issue #211 / #745: emit a [SendRequest] for the current draft and
+     * mark the send IN-FLIGHT — the draft and any staged attachments are
+     * deliberately NOT cleared here. The composer keeps the typed text
+     * visible (with Send disabled + a "Sending…" affordance) until the
+     * host confirms delivery via [markSendDelivered] or reports failure via
+     * [restoreFailedSend]. This eliminates the pre-#745 clear-then-restore
+     * flicker where the field emptied optimistically and only refilled
+     * (async) once a degraded-connection send failed, leaving the user
+     * staring at a blank composer with no idea anything was wrong.
+     *
+     * No-op when the composed text is empty — the FSM-Idle case where the
+     * user has nothing to send, which the UI normally already gates via the
+     * Send button's `enabled` predicate. Tests can still call this directly;
+     * the empty guard means a hostile caller cannot fire a blank send. Also
+     * a no-op when a send is already in flight so a double-tap can't queue a
+     * second request while the first is still resolving.
      */
     private fun dispatchSendNow(withEnter: Boolean) {
+        if (_uiState.value.sendInFlight) return
         val draft = _uiState.value.draft
         val attachments = _uiState.value.attachments
         val uploadInFlight = attachmentJob?.isActive == true
@@ -598,46 +609,69 @@ public class PromptComposerViewModel @Inject constructor(
             "uploadInFlight" to uploadInFlight,
             "withEnter" to withEnter,
         )
-        // Clear the draft via the same code path the user's typing
-        // takes so [SavedStateHandle] is mirrored. Order matters: we
-        // emit the SendRequest BEFORE clearing the draft so a slow
-        // collector that re-reads `state.draft` still sees the text
-        // that produced the send.
-        //
-        // Issue #254: a `Channel.trySend` buffers the item until a
-        // collector consumes it, so a send dispatched while the sheet's
-        // collector is mid-recreate (dismiss → re-open) is delivered to
-        // the next collector instead of being dropped.
-        _sendRequests.trySend(SendRequest(text = text, withEnter = withEnter))
-        // Issue #544/#566: clear the staged tiles now that they've been folded
-        // into the dispatched prompt, so the next composer open is a clean
-        // slate with no stale attachments.
-        //
         // Issue #570: if the user sends while an attachment upload is still
         // stuck, treat that send as a text-only send and stop the unfinished
-        // upload from writing a late error/result back into the now-sent
+        // upload from writing a late error/result back into the in-flight
         // composer state.
         if (uploadInFlight) {
             attachmentJob?.cancel()
             attachmentJob = null
         }
-        if (attachments.isNotEmpty() || uploadInFlight) {
-            _uiState.update {
-                it.copy(
-                    attachments = emptyList(),
-                    attachmentUpload = AttachmentUploadState.Idle,
-                )
-            }
+        // Issue #745: flip the composer into the IN-FLIGHT state and clear
+        // any stale "Not sent" banner BEFORE emitting the request. The draft
+        // and staged attachment TILES stay on screen (cleared only on
+        // confirmed delivery). The upload-PROGRESS banner is reset to Idle
+        // here when we cancelled a stuck upload above, since its owning
+        // coroutine was cancelled and will never clear it itself (#570). The
+        // send button reads `sendInFlight` to disable itself + show the
+        // "Sending…" spinner for immediate feedback the moment Send is tapped.
+        _uiState.update {
+            it.copy(
+                sendInFlight = true,
+                error = null,
+                attachmentUpload = if (uploadInFlight) {
+                    AttachmentUploadState.Idle
+                } else {
+                    it.attachmentUpload
+                },
+            )
+        }
+        // Issue #254: a `Channel.trySend` buffers the item until a
+        // collector consumes it, so a send dispatched while the sheet's
+        // collector is mid-recreate (dismiss → re-open) is delivered to
+        // the next collector instead of being dropped.
+        _sendRequests.trySend(SendRequest(text = text, withEnter = withEnter))
+    }
+
+    /**
+     * Issue #745: the host confirmed the send was delivered. Now — and only
+     * now — clear the draft, drop the staged attachment tiles, and leave the
+     * in-flight state. The sheet's `sendRequests` collector calls this on the
+     * SUCCESS branch right before it dismisses the composer, so the next
+     * composer open is a fresh slate. Splitting the clear out of
+     * [dispatchSendNow] is what removes the optimistic-empty flicker: the
+     * field never empties until the bytes are actually delivered.
+     */
+    public fun markSendDelivered() {
+        _uiState.update {
+            it.copy(
+                sendInFlight = false,
+                attachments = emptyList(),
+                attachmentUpload = AttachmentUploadState.Idle,
+            )
         }
         onDraftChange("")
     }
 
     /**
-     * Issue #390: the sheet only clears/dismisses optimistically while it
-     * hands a SendRequest to the host. If the host reports that the target
-     * is disconnected or the write failed, put the exact payload back in
-     * the draft and keep a visible status message so the user can retry
-     * after reconnecting or discard it intentionally.
+     * Issue #390 / #745: the host reported the target is disconnected or the
+     * write failed (including a bounded-timeout hang — see the sheet's
+     * `withTimeoutOrNull` wrap). Put the exact payload back in the draft,
+     * leave the in-flight state, and keep a visible status message so the
+     * user can retry after reconnecting or discard it intentionally. Because
+     * [dispatchSendNow] no longer clears the draft optimistically, the field
+     * never visibly emptied — this just stamps the "Not sent" banner and
+     * folds the attachment paths into the restored text.
      */
     public fun restoreFailedSend(
         request: SendRequest,
@@ -652,8 +686,28 @@ public class PromptComposerViewModel @Inject constructor(
                 recording = RecordingState.Idle,
                 amplitude = 0f,
                 recordingLocked = false,
+                sendInFlight = false,
+                // The attachment paths are now folded into the restored draft
+                // text, so drop the duplicate tiles to avoid double-appending
+                // them on the resend.
+                attachments = emptyList(),
+                attachmentUpload = AttachmentUploadState.Idle,
             )
         }
+    }
+
+    /**
+     * Issue #745: the host screen pushes the live connection liveness in here
+     * whenever it changes. When the SSH/tmux control channel is known
+     * degraded/lost, the composer surfaces a connection-lost indicator
+     * IMMEDIATELY (in/near the Send row) instead of letting the user tap Send
+     * and wait blind. The flag is advisory: Send is still allowed (the host's
+     * send path connects-on-action, #548), but the user now knows the link is
+     * down before they commit.
+     */
+    public fun setConnectionDegraded(degraded: Boolean) {
+        if (_uiState.value.connectionDegraded == degraded) return
+        _uiState.update { it.copy(connectionDegraded = degraded) }
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -2064,6 +2118,23 @@ public class PromptComposerViewModel @Inject constructor(
          * retry resolves (success, failure, or drop).
          */
         val retryingIds: Set<String> = emptySet(),
+        /**
+         * Issue #745: true from the instant the user taps Send until the
+         * host confirms delivery ([markSendDelivered]) or reports failure
+         * ([restoreFailedSend], including a bounded timeout). The Send row
+         * reads this to disable Send and render a "Sending…" spinner so the
+         * user gets immediate in-flight feedback instead of an apparently
+         * inert tap on a degraded connection.
+         */
+        val sendInFlight: Boolean = false,
+        /**
+         * Issue #745: true when the host screen has reported the live SSH/tmux
+         * connection is degraded/lost. The composer surfaces a connection-lost
+         * indicator near the Send row IMMEDIATELY (before the user taps Send)
+         * so a send into a dead link is never a silent blind wait. Pushed in
+         * via [setConnectionDegraded].
+         */
+        val connectionDegraded: Boolean = false,
     )
 
     /**
@@ -2306,6 +2377,20 @@ public class PromptComposerViewModel @Inject constructor(
          * banner and disabled attachment actions stuck forever.
          */
         public const val ATTACHMENT_UPLOAD_TIMEOUT_MS: Long = 90_000L
+
+        /**
+         * Issue #745: a send must resolve to success or failure within a
+         * BOUNDED time so the composer never hangs in the in-flight state.
+         * The host's send path is a connect-on-action call (#548) that can
+         * legitimately kick a reconnect and wait for the live client; this
+         * cap is generous enough to cover a normal reconnect attempt yet
+         * short enough that a truly dead link surfaces the "Not sent" banner
+         * promptly instead of leaving the user waiting blind. The sheet's
+         * `sendRequests` collector wraps the host `onSend` in
+         * `withTimeoutOrNull(SEND_TIMEOUT_MS)`; a null/timeout result is
+         * treated as a failed send.
+         */
+        public const val SEND_TIMEOUT_MS: Long = 12_000L
 
         /**
          * Issue #169 Part 2: [SavedStateHandle] key for the current

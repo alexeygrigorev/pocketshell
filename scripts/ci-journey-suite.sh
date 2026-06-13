@@ -193,6 +193,22 @@ JOURNEY_CLASSES=(
   # It lives under com.pocketshell.app.composer, not the proof prefix, so it
   # carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerImeSquishProofTest"
+
+  # Issue #745: composer Send feedback on a DEGRADED connection. The maintainer
+  # dogfooded a blind send: tapping Send cleared the draft and showed nothing —
+  # no "Sending…" indicator, no connection-lost banner, and the "Not sent"
+  # result surfaced only after a long blind wait. This regression covers the
+  # four feedback states: (a) immediate in-flight "Sending…" spinner + disabled
+  # Send, (b) the draft is RETAINED through the failure (no optimistic empty),
+  # (c) the failure resolves within a BOUNDED time, (d) the connection-lost
+  # indicator is visible up front. It is a load-bearing dogfood report, so per
+  # the "load-bearing journeys run at PR time" principle (#638/#691) it must run
+  # per-push. It uses NO Docker fixture (pure Compose-rule UI test driving the
+  # real PromptComposerViewModel send wiring), so it slots in next to the IME
+  # squish proof. The in-flight assertion is held open deterministically (the
+  # collector parks on a test-controlled CompletableDeferred), so it does not
+  # race a wall-clock timeout. It carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.PromptComposerDegradedSendE2eTest"
 )
 
 echo "=========================================================="

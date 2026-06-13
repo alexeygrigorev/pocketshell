@@ -45,6 +45,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.DataObject
 import androidx.compose.material.icons.outlined.Lock
@@ -126,6 +127,7 @@ import com.pocketshell.uikit.theme.PocketShellType
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 
 /**
@@ -177,6 +179,12 @@ public fun PromptComposerSheet(
     onSend: suspend (text: String, withEnter: Boolean) -> Boolean,
     modifier: Modifier = Modifier,
     hostId: Long? = null,
+    // Issue #745: live SSH/tmux connection liveness pushed from the host
+    // screen. When true the composer surfaces a connection-lost indicator
+    // near the Send row IMMEDIATELY, so a send into a degraded link is never
+    // a silent blind wait. Defaults to false (connected) for previews / tests
+    // that don't wire a host connection.
+    connectionLost: Boolean = false,
     onStageAttachments: (suspend (List<Uri>) -> Result<List<String>>)? = null,
     viewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #234: the composer is partial-expand by default so the terminal
@@ -279,17 +287,34 @@ public fun PromptComposerSheet(
     val currentOnDismiss by rememberUpdatedState(onDismiss)
     LaunchedEffect(viewModel) {
         viewModel.sendRequests.collect { request ->
-            if (currentOnSend(request.text, request.withEnter)) {
-                // Dismiss the sheet so the user lands back on the terminal
-                // with the bytes already flying. Historic behaviour from
-                // pre-#211; the dismiss + draft-clear now lives on the
-                // ViewModel side of the surface so the sheet's role is just
-                // to forward the request.
+            // Issue #745: bound the send so the in-flight state can never hang.
+            // The host `onSend` is a connect-on-action call (#548) that may kick
+            // a reconnect and await the live client; cap it at [SEND_TIMEOUT_MS]
+            // so a truly dead link resolves to the "Not sent" banner promptly
+            // instead of leaving the composer stuck on "Sending…". A null
+            // (timeout) is treated exactly like a `false` (failed) send.
+            val delivered = withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
+                currentOnSend(request.text, request.withEnter)
+            } == true
+            if (delivered) {
+                // Issue #745: only NOW clear the draft + staged attachments —
+                // the bytes are confirmed delivered, so there is no flicker of
+                // an optimistically-emptied field. Then dismiss the sheet so
+                // the user lands back on the terminal.
+                viewModel.markSendDelivered()
                 currentOnDismiss()
             } else {
                 viewModel.restoreFailedSend(request)
             }
         }
+    }
+
+    // Issue #745: keep the ViewModel's connection-degraded flag in sync with
+    // the host screen's live liveness so the composer can show the
+    // connection-lost indicator the moment the link drops — including while
+    // the sheet is already open and the user is mid-compose.
+    LaunchedEffect(viewModel, connectionLost) {
+        viewModel.setConnectionDegraded(connectionLost)
     }
 
     // Issue #511 / #509: dismissing the composer (× button, scrim tap,
@@ -851,6 +876,38 @@ internal fun SheetContent(
             }
         }
 
+        // Issue #745: connection-lost indicator. Sits OUTSIDE the scrollable
+        // upper region so it is part of the sticky bottom chrome and stays
+        // visible directly above the Send row even when the soft keyboard is
+        // up. Surfaced the moment the host reports the SSH/tmux link is
+        // degraded/lost, BEFORE the user taps Send, so a send into a dead link
+        // is never a silent blind wait.
+        if (state.connectionDegraded) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(PocketShellColors.AccentSoft, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag(COMPOSER_CONNECTION_LOST_TAG),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.CloudOff,
+                    contentDescription = null,
+                    tint = PocketShellColors.Accent,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    text = "Connection lost — Send will retry once reconnected.",
+                    color = PocketShellColors.Accent,
+                    fontSize = 12.sp,
+                )
+            }
+        }
+
         // Issue #453 / #508: the single decluttered controls row at the
         // bottom of the composer, matching all four mockup states:
         //  - Left: 📎 attach (paperclip) + `{}` snippets — always present.
@@ -937,10 +994,15 @@ internal fun SheetContent(
                     // the live text into the ViewModel before dispatching, so
                     // the tap always delivers.
                     val sendEnabled =
-                        draftFieldValue.text.isNotEmpty() || state.attachments.isNotEmpty()
+                        (draftFieldValue.text.isNotEmpty() || state.attachments.isNotEmpty()) &&
+                            // Issue #745: while a send is in flight the button is
+                            // disabled and shows "Sending…" — a second tap can't
+                            // queue another request on top of the one resolving.
+                            !state.sendInFlight
                     SendButton(
                         onClick = commitAndSend,
                         enabled = sendEnabled,
+                        sending = state.sendInFlight,
                         modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -1221,31 +1283,55 @@ private fun SendButton(
     onClick: () -> Unit,
     enabled: Boolean,
     modifier: Modifier = Modifier,
+    // Issue #745: while true the button reads "Sending…" with an inline
+    // spinner instead of the send arrow, and is non-interactive. This is the
+    // immediate in-flight feedback the moment the user taps Send.
+    sending: Boolean = false,
 ) {
-    val containerColor = if (enabled) PocketShellColors.Accent else PocketShellColors.SurfaceElev
-    val contentColor = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted
+    // While sending the pill keeps the accent fill (it is an active commit in
+    // progress, not a disabled empty-draft state) but is non-interactive.
+    val containerColor = when {
+        sending -> PocketShellColors.Accent
+        enabled -> PocketShellColors.Accent
+        else -> PocketShellColors.SurfaceElev
+    }
+    val contentColor = when {
+        sending -> PocketShellColors.OnAccent
+        enabled -> PocketShellColors.OnAccent
+        else -> PocketShellColors.TextMuted
+    }
     Row(
         modifier = modifier
             .height(44.dp)
             .clip(RoundedCornerShape(22.dp))
             .background(color = containerColor, shape = RoundedCornerShape(22.dp))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .clickable(enabled = enabled && !sending, role = Role.Button, onClick = onClick)
             .padding(horizontal = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         Text(
-            text = "Send",
+            text = if (sending) "Sending…" else "Send",
             color = contentColor,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.Send,
-            contentDescription = null,
-            tint = contentColor,
-            modifier = Modifier.size(16.dp),
-        )
+        if (sending) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .size(16.dp)
+                    .testTag(COMPOSER_SEND_IN_FLIGHT_TAG),
+                color = contentColor,
+                strokeWidth = 2.dp,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.Send,
+                contentDescription = null,
+                tint = contentColor,
+                modifier = Modifier.size(16.dp),
+            )
+        }
     }
 }
 
@@ -2328,6 +2414,20 @@ internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
  * that locate the Send affordance keep resolving the same node.
  */
 internal const val COMPOSER_SEND_ENTER_TAG = "prompt-composer-send-enter"
+
+/**
+ * Issue #745: the inline spinner shown inside the Send button while a send is
+ * in flight. Its presence is the immediate "Sending…" feedback the moment the
+ * user taps Send; it disappears once the send resolves (delivered or failed).
+ */
+internal const val COMPOSER_SEND_IN_FLIGHT_TAG = "prompt-composer-send-in-flight"
+
+/**
+ * Issue #745: the connection-lost indicator above the Send row, shown whenever
+ * the host reports the SSH/tmux link is degraded/lost so a send into a dead
+ * link is never a silent blind wait.
+ */
+internal const val COMPOSER_CONNECTION_LOST_TAG = "prompt-composer-connection-lost"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"

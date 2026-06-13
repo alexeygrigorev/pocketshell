@@ -1137,6 +1137,11 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf(PromptComposerViewModel.SendRequest("Please summarize this", true)), sends)
+        // Issue #745: the queued voice send dispatches with the draft RETAINED
+        // and in-flight; it clears only when the host confirms delivery.
+        assertEquals("Please summarize this", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
         assertNull(vm.uiState.value.error)
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
@@ -1247,6 +1252,10 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf(PromptComposerViewModel.SendRequest("Please summarize this", true)), sends)
+        // Issue #745: draft retained in-flight until delivery is confirmed.
+        assertEquals("Please summarize this", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
         job.cancelAndJoin()
@@ -2785,7 +2794,12 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun requestSendInIdleDispatchesDraftImmediatelyAndClearsDraft() = runTest {
+    fun requestSendInIdleDispatchesDraftAndKeepsItInFlightUntilDelivered() = runTest {
+        // Issue #745: tapping Send dispatches the draft AND flips the composer
+        // into the in-flight state — the typed text is NOT cleared
+        // optimistically. The draft only clears once the host confirms
+        // delivery via [markSendDelivered]. This is the no-flicker contract:
+        // the field never empties before the bytes are actually sent.
         val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
         val sent = collectSendRequests(vm)
         vm.onDraftChange("hello shell")
@@ -2796,9 +2810,32 @@ class PromptComposerViewModelTest {
         assertEquals(1, sent.size)
         assertEquals("hello shell", sent[0].text)
         assertEquals(false, sent[0].withEnter)
-        // After dispatch the draft is cleared so the next composer open
-        // starts blank.
+        // In-flight: the draft is RETAINED and `sendInFlight` is true so the
+        // Send button shows "Sending…".
+        assertEquals("hello shell", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
+
+        // Host confirms delivery: now the draft clears and in-flight ends.
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
+        assertFalse(vm.uiState.value.sendInFlight)
+    }
+
+    @Test
+    fun requestSendWhileInFlightDoesNotQueueASecondRequest() = runTest {
+        // Issue #745: a second Send tap while the first is still resolving is a
+        // no-op (the button is already disabled in the UI, but the VM also
+        // guards so a stray double-tap can't dispatch twice).
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val sent = collectSendRequests(vm)
+        vm.onDraftChange("hello shell")
+
+        vm.requestSend(withEnter = false)
+        advanceUntilIdle()
+        vm.requestSend(withEnter = false)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
     }
 
     @Test
@@ -2842,9 +2879,15 @@ class PromptComposerViewModelTest {
             sent[0].text,
         )
         assertEquals(true, sent[0].withEnter)
-        // After send the draft is cleared and the chips are gone.
+        // Issue #745: in-flight — draft + chips are RETAINED until the host
+        // confirms delivery, then cleared by [markSendDelivered].
+        assertEquals("Review these", vm.uiState.value.draft)
+        assertEquals(2, vm.uiState.value.attachments.size)
+        assertTrue(vm.uiState.value.sendInFlight)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertFalse(vm.uiState.value.sendInFlight)
     }
 
     @Test
@@ -2873,6 +2916,10 @@ class PromptComposerViewModelTest {
             """.trimIndent(),
             sent[0].text,
         )
+        // Issue #745: in-flight — the chip is retained until delivery is
+        // confirmed, then cleared.
+        assertEquals(1, vm.uiState.value.attachments.size)
+        vm.markSendDelivered()
         assertTrue(vm.uiState.value.attachments.isEmpty())
     }
 
@@ -2913,8 +2960,11 @@ class PromptComposerViewModelTest {
         assertEquals(1, sent.size)
         assertEquals("send this now", sent[0].text)
         assertEquals(true, sent[0].withEnter)
-        assertEquals("", vm.uiState.value.draft)
+        // Issue #745: in-flight — the typed draft is retained (no flicker).
+        assertEquals("send this now", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
         assertTrue(vm.uiState.value.attachments.isEmpty())
+        // The stuck upload was cancelled, so its progress banner is reset.
         assertEquals(
             PromptComposerViewModel.AttachmentUploadState.Idle,
             vm.uiState.value.attachmentUpload,
@@ -2981,13 +3031,17 @@ class PromptComposerViewModelTest {
         // The composed prompt carries both files.
         assertTrue(composed.text.contains("20260611-120000-01-report.txt"))
         assertTrue(composed.text.contains("20260611-120000-02-data.csv"))
-        // The optimistic clear already emptied the draft + chips.
-        assertEquals("", vm.uiState.value.draft)
-        assertTrue(vm.uiState.value.attachments.isEmpty())
+        // Issue #745: in-flight — the clean draft + chips are RETAINED (no
+        // optimistic empty); `sendInFlight` is true while awaiting the host.
+        assertEquals("Review these", vm.uiState.value.draft)
+        assertEquals(2, vm.uiState.value.attachments.size)
+        assertTrue(vm.uiState.value.sendInFlight)
 
         // The host reports the write failed (degraded connection). The sheet
-        // routes the exact request back into [restoreFailedSend].
+        // routes the exact request back into [restoreFailedSend], which folds
+        // the attachment paths into the restored draft and clears in-flight.
         vm.restoreFailedSend(composed)
+        assertFalse(vm.uiState.value.sendInFlight)
 
         // The restored draft carries the attachment paths verbatim, so the
         // user sees their prompt + files and can retry after reconnect.
@@ -3079,11 +3133,18 @@ class PromptComposerViewModelTest {
             advanceUntilIdle()
             job.cancelAndJoin()
 
-            // Each send dispatches exactly one request and leaves the draft
-            // empty, so the success path has nothing stale to re-render.
+            // Issue #745: each send dispatches exactly one request and parks
+            // the composer in-flight with the draft retained. The success path
+            // (host confirmed) then clears it via [markSendDelivered], leaving
+            // a clean slate so the NEXT iteration's send is allowed (the
+            // in-flight guard would otherwise drop a back-to-back send).
             assertEquals(1, sent.size)
             assertEquals("message $i", sent[0].text)
+            assertEquals("message $i", vm.uiState.value.draft)
+            assertTrue(vm.uiState.value.sendInFlight)
+            vm.markSendDelivered()
             assertEquals("", vm.uiState.value.draft)
+            assertFalse(vm.uiState.value.sendInFlight)
             assertNull(vm.uiState.value.error)
         }
     }
@@ -3107,13 +3168,15 @@ class PromptComposerViewModelTest {
         job.cancelAndJoin()
 
         assertEquals(1, sent.size)
-        // Optimistic clear already emptied the draft (the sheet had not yet
-        // learned the send failed).
-        assertEquals("", vm.uiState.value.draft)
+        // Issue #745: no optimistic clear — the draft stays visible while the
+        // send is in flight (no flicker), so the user keeps seeing their text.
+        assertEquals("ship it", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
 
-        // Host reports failure → restore. The draft comes back with the exact
-        // text + an actionable banner; the sheet stays open on this state.
+        // Host reports failure → restore. The draft stays, in-flight ends, and
+        // an actionable banner appears; the sheet stays open on this state.
         vm.restoreFailedSend(sent[0])
+        assertFalse(vm.uiState.value.sendInFlight)
         assertEquals("ship it", vm.uiState.value.draft)
         assertEquals(
             "Not sent. Reconnect, then send again or discard the draft.",
@@ -3193,9 +3256,13 @@ class PromptComposerViewModelTest {
         // Mic was stopped by the queued-send path, not by a separate
         // mic-tap.
         assertEquals(1, mic.stopCount)
-        // FSM lands back at Idle with the draft cleared (the SendRequest
-        // is the official transfer of the text out of the composer).
+        // FSM lands back at Idle. Issue #745: the dispatched send parks the
+        // composer in-flight with the combined draft retained until delivery
+        // is confirmed; it clears only via [markSendDelivered].
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("Tell me from dictation", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }
 
@@ -3242,6 +3309,10 @@ class PromptComposerViewModelTest {
         assertEquals("queued result", sent[0].text)
         assertEquals(false, sent[0].withEnter)
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        // Issue #745: in-flight until delivery confirmed.
+        assertEquals("queued result", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }
 
@@ -3493,6 +3564,9 @@ class PromptComposerViewModelTest {
         assertEquals(1, sent.size)
         assertEquals("deploy the app", sent[0].text)
         assertEquals(true, sent[0].withEnter)
+        // Issue #745: in-flight until delivery confirmed.
+        assertEquals("deploy the app", vm.uiState.value.draft)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }
 
@@ -3515,6 +3589,9 @@ class PromptComposerViewModelTest {
 
         assertEquals(1, sent.size)
         assertEquals("deploy the app", sent[0].text)
+        // Issue #745: in-flight until delivery confirmed.
+        assertEquals("deploy the app", vm.uiState.value.draft)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }
 
@@ -3558,6 +3635,9 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
         assertEquals(1, sent.size)
         assertEquals("send from transcribing", sent[0].text)
+        // Issue #745: in-flight until delivery confirmed.
+        assertEquals("send from transcribing", vm.uiState.value.draft)
+        vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }
 

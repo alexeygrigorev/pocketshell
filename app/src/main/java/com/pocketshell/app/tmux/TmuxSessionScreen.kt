@@ -1930,6 +1930,10 @@ public fun TmuxSessionScreen(
         PromptComposerSheet(
             viewModel = promptComposerViewModel,
             onDismiss = { showMicSheet = false },
+            // Issue #745: surface the live connection state in the composer so a
+            // send while the SSH/tmux link is degraded shows a connection-lost
+            // indicator immediately rather than leaving the user waiting blind.
+            connectionLost = !sessionLive,
             onSend = { text, withEnter ->
                 // Issue #548: send is a connect-on-action path. If the
                 // control channel dropped while the composer was open, let

@@ -701,6 +701,128 @@ class DesignRenders {
     }
 
     /**
+     * Issue #678: the `+ window` shell-vs-agent picker. It reuses the exact
+     * same [com.pocketshell.app.projects.SessionTypePickerSheet] as the new
+     * SESSION flow — the only visible difference is the heading ("New window"
+     * instead of "New session") and that the start folder is pre-filled with
+     * the active pane's cwd. This fixture proves the window-flavoured heading
+     * reads correctly under the same design-system primitives. (The app-level
+     * sheet itself cannot be imported into this ui-kit harness, so the body is
+     * reconstructed from the same primitives, matching [sessionTypePicker].)
+     */
+    @Test
+    fun newWindowTypePicker() = render("new-window-type-picker") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "New window",
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "in /home/alexey/git/pocketshell",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Start folder")
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+                        .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = "/home/alexey/git/pocketshell",
+                        color = PocketShellColors.Text,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Session type")
+                SegmentedToggle(
+                    labels = listOf("Shell", "Agent"),
+                    selectedIndex = 1,
+                    onSelected = {},
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    fillSegments = true,
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Agent CLI")
+                SegmentedToggle(
+                    labels = listOf("claude", "codex", "opencode"),
+                    selectedIndex = 0,
+                    onSelected = {},
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    fillSegments = true,
+                )
+                Text(
+                    text = "The CLI will auto-start in the new pane.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                ListRow(
+                    title = "Skip permissions",
+                    subtitle = "No per-action approval prompts.",
+                    leading = {
+                        Checkbox(
+                            checked = true,
+                            onCheckedChange = {},
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = PocketShellColors.Accent,
+                                uncheckedColor = PocketShellColors.TextSecondary,
+                            ),
+                        )
+                    },
+                    onClick = {},
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, PocketShellColors.BorderSoft)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = {}) {
+                    Text("Cancel", color = PocketShellColors.TextSecondary)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = {},
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PocketShellColors.Accent,
+                        contentColor = PocketShellColors.OnAccent,
+                    ),
+                ) {
+                    Text("Create")
+                }
+            }
+        }
+    }
+
+    /**
      * Chat-style message block: role header + body content.
      * Mirrors the .msg / .msg-head / .msg-body structure from conversation.html.
      */

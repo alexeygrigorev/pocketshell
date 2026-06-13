@@ -118,6 +118,7 @@ import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
 import com.pocketshell.app.layout.rememberHostImeBottomPx
 import com.pocketshell.app.portfwd.ForwardingGlyph
+import com.pocketshell.app.projects.SessionTypePickerSheet
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.ConversationLinkAction
@@ -383,6 +384,14 @@ public fun TmuxSessionScreen(
     val startDirectoryAutocompleteController =
         rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     val agentConversations by viewModel.agentConversations.collectAsState()
+    // Issue #678: host-discovered agent profiles for the new-WINDOW
+    // shell-vs-agent picker (same data the new-SESSION picker uses).
+    val newWindowClaudeProfiles by viewModel.claudeProfiles.collectAsState()
+    val newWindowCodexProfiles by viewModel.codexProfiles.collectAsState()
+    // Issue #678: when non-null, the new-window shell-vs-agent picker is open,
+    // pre-filled with the active pane's cwd. Choosing 'shell' makes a plain
+    // window; choosing an agent makes the window AND launches the agent in it.
+    var newWindowPicker by remember { mutableStateOf<NewWindowPickerRequest?>(null) }
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     // Issue #463: the in-session project switcher's sibling list, sourced
     // from the warm live `-CC` client only (no SSH handshake) so tapping the
@@ -737,6 +746,16 @@ public fun TmuxSessionScreen(
         }
     }
 
+    // Issue #678: every `+ window` entry point now opens the same shell-vs-agent
+    // picker the new-SESSION flow uses, pre-filled with the active pane's cwd.
+    // Trigger a profile fetch so the picker's per-engine selectors populate.
+    fun openNewWindowPicker() {
+        val cwd = currentPane?.cwd?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_TMUX_START_DIRECTORY
+        viewModel.loadAgentProfiles()
+        newWindowPicker = NewWindowPickerRequest(startDirectory = cwd)
+    }
+
     var consumedInitialWindowTarget by remember(sessionName, initialWindowIndex) { mutableStateOf(false) }
     LaunchedEffect(unifiedPanes, initialWindowIndex, consumedInitialWindowTarget) {
         val requestedIndex = initialWindowIndex ?: return@LaunchedEffect
@@ -959,7 +978,7 @@ public fun TmuxSessionScreen(
             },
             onNewWindow = {
                 moreExpanded = false
-                viewModel.newWindow()
+                openNewWindowPicker()
             },
             onRenameWindow = {
                 moreExpanded = false
@@ -1142,7 +1161,7 @@ public fun TmuxSessionScreen(
                                     onKillWindow = { window ->
                                         dialogMode = TmuxDialogMode.StopWindowFor(window.windowId)
                                     },
-                                    onNewWindow = { viewModel.newWindow() },
+                                    onNewWindow = { openNewWindowPicker() },
                                 )
                             }
                         }
@@ -2008,7 +2027,44 @@ public fun TmuxSessionScreen(
             },
         )
     }
+
+    // Issue #678: the `+ window` shell-vs-agent picker. Reuses the exact
+    // SessionTypePickerSheet the new-SESSION flow uses, retargeted to create a
+    // new WINDOW in the current session. Choosing 'shell' makes a plain window
+    // (`new-window -c '<cwd>'`); choosing an agent makes the window AND launches
+    // the agent CLI in it via the same short `pocketshell agent …` wrapper line
+    // (issue #703), sent into the new window after creation.
+    newWindowPicker?.let { request ->
+        SessionTypePickerSheet(
+            folderPath = request.startDirectory,
+            folderLabel = request.startDirectory,
+            title = "New window",
+            onDismiss = { newWindowPicker = null },
+            suggestStartDirectories = suggestStartDirectories,
+            claudeProfiles = newWindowClaudeProfiles,
+            codexProfiles = newWindowCodexProfiles,
+            onCreate = { choice ->
+                newWindowPicker = null
+                viewModel.newWindow(
+                    startDirectory = choice.startDirectory,
+                    startCommand = choice.startCommand(
+                        newWindowClaudeProfiles,
+                        newWindowCodexProfiles,
+                    ),
+                )
+            },
+        )
+    }
 }
+
+/**
+ * Issue #678: the open-state of the `+ window` shell-vs-agent picker. Carries
+ * the cwd to pre-fill the picker's start-folder field with (the active pane's
+ * working directory, or the conventional default when unknown).
+ */
+internal data class NewWindowPickerRequest(
+    val startDirectory: String,
+)
 
 internal data class PortForwardNavigationTarget(
     val remotePort: Int,

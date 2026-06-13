@@ -28,7 +28,12 @@ import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.projects.ClaudeProfile
+import com.pocketshell.app.projects.CodexProfile
 import com.pocketshell.app.projects.FolderListGateway
+import com.pocketshell.app.projects.ProfilesGateway
+import com.pocketshell.app.projects.ProfilesResult
+import com.pocketshell.app.projects.RemoteProfile
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationSyncStatus
@@ -200,6 +205,11 @@ public class TmuxSessionViewModel @Inject constructor(
     // injectable so a burst-ingest test can wire a repository whose tail
     // drain runs on the test scheduler (deterministic batch coalescing).
     private val agentRepository: AgentConversationRepository = AgentConversationRepository(),
+    // Issue #678: host-discovered agent profiles (issue #718) for the new-WINDOW
+    // shell-vs-agent picker. Nullable default keeps existing unit-test
+    // constructors working without the singleton; when absent the picker simply
+    // shows no profile selector (the safe default-only behaviour).
+    private val profilesGateway: ProfilesGateway? = null,
 ) : ViewModel() {
 
     /**
@@ -601,6 +611,74 @@ public class TmuxSessionViewModel @Inject constructor(
         MutableSharedFlow(extraBufferCapacity = 4)
     public val windowSwitchRequest: SharedFlow<String> =
         _windowSwitchRequest.asSharedFlow()
+
+    /**
+     * Issue #678: host-discovered Claude / Codex agent profiles (issue #718)
+     * for the new-WINDOW shell-vs-agent picker. The screen surfaces the per
+     * engine profile selector only when a list has more than one entry, so an
+     * empty list (no gateway, CLI missing, fetch failure) safely renders the
+     * default-only picker. Mirrors
+     * [com.pocketshell.app.projects.FolderListViewModel.claudeProfiles].
+     */
+    private val _claudeProfiles: MutableStateFlow<List<ClaudeProfile>> =
+        MutableStateFlow(emptyList())
+    public val claudeProfiles: StateFlow<List<ClaudeProfile>> =
+        _claudeProfiles.asStateFlow()
+
+    private val _codexProfiles: MutableStateFlow<List<CodexProfile>> =
+        MutableStateFlow(emptyList())
+    public val codexProfiles: StateFlow<List<CodexProfile>> =
+        _codexProfiles.asStateFlow()
+
+    /**
+     * Issue #678: fetch the host-discovered agent profiles for the new-WINDOW
+     * picker, the same way
+     * [com.pocketshell.app.projects.FolderListViewModel.fetchProfiles] does for
+     * the new-SESSION picker. Called by the screen when the user taps `+ window`
+     * so the picker's per-engine profile selectors are populated. Any non
+     * success result (no gateway in tests, CLI missing, connect/parse failure)
+     * leaves the flows empty so the picker shows the default-only behaviour.
+     */
+    public fun loadAgentProfiles() {
+        val gw = profilesGateway ?: run {
+            _claudeProfiles.value = emptyList()
+            _codexProfiles.value = emptyList()
+            return
+        }
+        val target = activeTarget ?: connectingTarget ?: return
+        val dao = hostDao ?: return
+        viewModelScope.launch {
+            val host = withContext(Dispatchers.IO) { dao.getById(target.hostId) }
+                ?: return@launch
+            val result = withContext(Dispatchers.IO) {
+                gw.listProfiles(
+                    host = host,
+                    keyPath = target.keyPath,
+                    passphrase = target.passphrase,
+                )
+            }
+            // Ignore a stale result if the host changed while fetching.
+            if ((activeTarget ?: connectingTarget)?.hostId != target.hostId) {
+                return@launch
+            }
+            when (result) {
+                is ProfilesResult.Profiles -> applyAgentProfiles(result.profiles)
+                else -> {
+                    _claudeProfiles.value = emptyList()
+                    _codexProfiles.value = emptyList()
+                }
+            }
+        }
+    }
+
+    private fun applyAgentProfiles(profiles: List<RemoteProfile>) {
+        _claudeProfiles.value = profiles
+            .filter { it.engine == RemoteProfile.ENGINE_CLAUDE }
+            .map { ClaudeProfile(name = it.name, default = it.default) }
+        _codexProfiles.value = profiles
+            .filter { it.engine == RemoteProfile.ENGINE_CODEX }
+            .map { CodexProfile(name = it.name, default = it.default) }
+    }
 
     /**
      * Issue #458: sticky state of the key bar's `Ctrl` modifier. When armed
@@ -9202,9 +9280,30 @@ public class TmuxSessionViewModel @Inject constructor(
      * fallback timeout ensures the UI is never permanently wedged if
      * tmux never emits the event.
      */
-    public fun newWindow() {
+    /**
+     * Issue #678: create a new window, optionally rooted at [startDirectory]
+     * and optionally launching an agent (or any) command in it via the same
+     * shell-vs-agent picker the new-SESSION flow uses.
+     *
+     * - [startDirectory]: when non-blank, the window is created with
+     *   `new-window -c '<dir>'` so the new pane's shell starts there. When
+     *   null/blank the command keeps the original `new-window -t '<session>'`
+     *   shape (a plain window in tmux's default cwd) — the unchanged shell
+     *   pick and the bare overflow/long-press default.
+     * - [startCommand]: when non-null, after the `%window-add` event lands we
+     *   `send-keys` it into the freshly created window (targeted by its `@N`
+     *   window ID so it can never race the previously-active window). For an
+     *   agent pick this is the SHORT `pocketshell agent <kind> --dir '<dir>'
+     *   …` wrapper line (issue #703) — identical to the create-session path in
+     *   [com.pocketshell.app.projects.FolderListGateway.createSession].
+     */
+    public fun newWindow(
+        startDirectory: String? = null,
+        startCommand: String? = null,
+    ) {
         val target = activeTarget?.sessionName ?: return
         val client = clientRef ?: return
+        val cwd = startDirectory?.trim()?.takeIf { it.isNotBlank() }
         bridgeScope.launch {
             // Capture the WindowAdd event's window ID. Subscribe BEFORE
             // sending the command so we never miss the %window-add
@@ -9219,8 +9318,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 capturedWindowId.complete(event?.windowId)
             }
 
+            val newWindowCommand = buildString {
+                append("new-window -t '${escapeSingleQuoted(target)}'")
+                if (cwd != null) {
+                    append(" -c '${escapeSingleQuoted(cwd)}'")
+                }
+            }
             val sendResult = runCatching {
-                client.sendCommand("new-window -t '${escapeSingleQuoted(target)}'")
+                client.sendCommand(newWindowCommand)
             }
             if (sendResult.isFailure) {
                 eventJob.cancel()
@@ -9235,11 +9340,26 @@ public class TmuxSessionViewModel @Inject constructor(
             // Wait up to NEW_WINDOW_EVENT_WAIT_MS for tmux's
             // %window-add notification.
             eventJob.join()
-            reconcilePanes()
 
             // The reconciled pane list now includes the new window.
             // Emit a switch request so the Screen can scroll the pager.
             val addedWindowId = capturedWindowId.await()
+
+            // Issue #678: launch the agent (or shell start) command in the new
+            // window. Target the specific @N window ID so the keys land in the
+            // window we just made, not whatever the user is currently viewing.
+            // Mirror the create-session send-keys shape (issue #703).
+            if (startCommand != null && addedWindowId != null) {
+                runCatching {
+                    client.sendCommand(
+                        "send-keys -t $addedWindowId " +
+                            "'${escapeSingleQuoted(startCommand)}' Enter",
+                    )
+                }
+            }
+
+            reconcilePanes()
+
             if (addedWindowId != null) {
                 _windowSwitchRequest.emit(addedWindowId)
             }

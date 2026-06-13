@@ -7950,6 +7950,148 @@ class TmuxSessionViewModelTest {
         collectJob.cancel()
     }
 
+    // ─── Issue #678: new-window shell-vs-agent (cwd + start command) ───
+
+    @Test
+    fun newWindowWithStartDirectoryRootsTheNewWindowAtThatCwd() = runTest(scheduler) {
+        // Picking "shell" with an explicit cwd creates the window rooted there
+        // via `new-window -c '<cwd>'`. No send-keys is issued (shell start
+        // command is null).
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tbash\t0"),
+                isError = false,
+            ),
+        )
+        client.responses.addLast(
+            CommandResponse(number = 2L, output = emptyList(), isError = false),
+        )
+        client.responses.addLast(
+            CommandResponse(
+                number = 3L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tbash\t0",
+                    "%1\t@1\t\$0\twork\tbash\t0",
+                ),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.newWindow(startDirectory = "/home/alex/proj")
+        runCurrent()
+
+        assertTrue(
+            "expected cwd-rooted new-window on the wire",
+            client.sentCommands.any { it == "new-window -t 'work' -c '/home/alex/proj'" },
+        )
+
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@1", name = ""),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "shell pick must not send any keys into the window",
+            client.sentCommands.none { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
+    fun newWindowWithAgentStartCommandLaunchesAgentInTheNewWindow() = runTest(scheduler) {
+        // Picking an agent creates the window AND types the start command into
+        // the freshly created window (targeted by its @N id) after %window-add.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tbash\t0"),
+                isError = false,
+            ),
+        )
+        client.responses.addLast(
+            CommandResponse(number = 2L, output = emptyList(), isError = false),
+        )
+        // The send-keys agent-launch command response.
+        client.responses.addLast(
+            CommandResponse(number = 3L, output = emptyList(), isError = false),
+        )
+        client.responses.addLast(
+            CommandResponse(
+                number = 4L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tbash\t0",
+                    "%1\t@1\t\$0\twork\tclaude\t0",
+                ),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        val switchRequests = mutableListOf<String>()
+        val collectJob = launch {
+            vm.windowSwitchRequest.collect { switchRequests += it }
+        }
+
+        val startCommand = "pocketshell agent claude --dir '/home/alex/proj'"
+        vm.newWindow(
+            startDirectory = "/home/alex/proj",
+            startCommand = startCommand,
+        )
+        runCurrent()
+
+        // No send-keys before the %window-add arrives (we don't yet know @N).
+        assertTrue(
+            "no send-keys before %window-add",
+            client.sentCommands.none { it.startsWith("send-keys") },
+        )
+
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@1", name = ""),
+        )
+        advanceUntilIdle()
+
+        // The agent command is typed into the NEW window (@1), not the session
+        // or the active window. The command is single-quote-wrapped for tmux,
+        // so the inner single quotes (around --dir) are escaped via '\''.
+        val escapedCommand = startCommand.replace("'", "'\\''")
+        assertTrue(
+            "expected agent launch send-keys targeting @1",
+            client.sentCommands.any {
+                it == "send-keys -t @1 '$escapedCommand' Enter"
+            },
+        )
+        assertEquals(
+            "expected exactly one switch request for @1",
+            listOf("@1"),
+            switchRequests,
+        )
+
+        collectJob.cancel()
+    }
+
     /**
      * Test double that throws on a chosen command — exercises the
      * "sendCommand throws" branch of [TmuxSessionViewModel.killWindow]

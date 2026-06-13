@@ -70,6 +70,12 @@ fun SessionTypePickerSheet(
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
+    // Issue #678: the same picker also drives the in-session `+ window` flow,
+    // which creates a new WINDOW rather than a new session. The only visible
+    // difference is the heading, so the title is parameterised; everything else
+    // (shell-vs-agent toggle, agent CLI sub-picker, profiles, skip-permissions)
+    // is reused verbatim. Defaults to "New session" for the folder flow.
+    title: String = "New session",
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val autocompleteController = rememberStartDirectoryAutocompleteController(suggestStartDirectories)
@@ -87,6 +93,7 @@ fun SessionTypePickerSheet(
             autocompleteController = autocompleteController,
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
+            title = title,
         )
     }
 }
@@ -105,6 +112,7 @@ internal fun SessionTypePickerContent(
     autocompleteController: StartDirectoryAutocompleteController? = null,
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
+    title: String = "New session",
 ) {
     var sessionType by remember { mutableStateOf(SessionType.Agent) }
     var agentKind by remember { mutableStateOf(AgentCli.Claude) }
@@ -136,7 +144,7 @@ internal fun SessionTypePickerContent(
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
             Text(
-                text = "New session",
+                text = title,
                 color = PocketShellColors.Text,
                 style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,

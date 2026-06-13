@@ -31,7 +31,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -322,27 +322,21 @@ public fun PromptComposerSheet(
         //
         // #615 reworked this into a fully-expanded sheet + a host-window IME
         // inset read + an explicit `padding(bottom = hostImeBottomPx)` on the
-        // sheet body. That combination over-sized the sheet (`fillMaxHeight(1f)`
-        // when the IME was up) AND, because the IME padding was applied to the
-        // BODY rather than positioning the sheet, it grew the content height by
-        // the keyboard height — pushing the controls up to the top of the screen
-        // (the jump-to-top + cut-off) and opening a keyboard-height empty void
-        // BELOW them. It also force-expanded the sheet on focus.
+        // sheet body. That over-sized the sheet and grew the content height by the
+        // keyboard height — pushing the controls up to the top of the screen (the
+        // jump-to-top + cut-off) and opening a keyboard-height empty void.
         //
-        // The fix (two parts, both in `SheetContent`):
-        //  - Keep the sheet's `contentWindowInsets` to the TOP + horizontal
-        //    safe area only, so the sheet content area is bottom-anchored to the
-        //    screen and the IME inset is still AVAILABLE to the content (M3 does
-        //    not reliably reposition a bottom sheet for the IME on its own).
-        //  - In `SheetContent`, lift the wrap-content body above the keyboard
-        //    with `imePadding()` AND cap the scrollable upper region to the space
-        //    that fits above the keyboard. Because the body is content-height and
-        //    capped (not full-screen), `imePadding()` floats it directly above
-        //    the IME with NO void / NO jump-to-top, and the cap keeps the sticky
-        //    Send row on-screen even with a long draft + attachment tiles (the
-        //    long-content cut-off). This is the opposite of #615, which applied
-        //    the IME padding to a FULL-HEIGHT body and so grew the content by the
-        //    keyboard height instead of lifting a compact one.
+        // Reserve only the TOP + horizontal safe area here. That keeps the status
+        // bar / cutout clear at the top while letting the sheet's own dialog
+        // window resize for the soft keyboard: when the IME shows, the window
+        // (and so `BoxWithConstraints.maxHeight` inside `SheetContent`) shrinks by
+        // the keyboard height and the sheet sits directly above the keyboard.
+        //
+        // Issue #567: `SheetContent` therefore caps the body to that ALREADY
+        // IME-resized `maxHeight` and does NOT additionally `imePadding()` or
+        // subtract `WindowInsets.ime` — doing either double-counted the keyboard
+        // height and crushed the composer into a thin strip. See the long note in
+        // `SheetContent`.
         contentWindowInsets = {
             WindowInsets.safeDrawing.only(
                 WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
@@ -585,37 +579,61 @@ internal fun SheetContent(
     )
     var micBoundsInControlsRow by remember { mutableStateOf<Rect?>(null) }
 
-    // Issue #682: bound the composer body to the space ABOVE the keyboard and
-    // lift it there.
+    // Issue #682 / #567: bound the composer body to the room ABOVE the keyboard.
     //
-    // `BoxWithConstraints.maxHeight` here is the sheet content area height
-    // (screen minus the status bar the `contentWindowInsets` reserved). We then
-    // subtract the live IME inset so `availableAboveKeyboard` is exactly the
-    // room left above the soft keyboard. The body:
-    //   - is `imePadding()`-lifted so it floats directly above the keyboard
-    //     (compact, no void — it works precisely because the body is bounded and
-    //     not full-height, unlike #615);
-    //   - is `heightIn(max = availableAboveKeyboard)` so a long draft + a stack
-    //     of attachment tiles can never grow the body past the keyboard top; the
-    //     scrollable upper region then absorbs the overflow and the sticky Send
-    //     row always stays on-screen above the IME (the long-content cut-off
-    //     symptom of #682).
+    // KEY FACT (measured on-device, issue #567): the `ModalBottomSheet`'s dialog
+    // window does NOT reposition itself above the soft keyboard, and `imePadding()`
+    // does NOT lift content inside this sheet's window. The sheet content stays
+    // top-anchored in a window whose bottom sits at the screen bottom (partly
+    // behind the keyboard). So the only reliable lever is a height CAP that clips
+    // the body to the room left above the keyboard — see the `availableAboveKeyboard`
+    // note below. The scrollable upper region then absorbs a long draft / a stack
+    // of attachment tiles + banners so the sticky Send row always stays on-screen
+    // above the keyboard (the #682 long-content cut-off).
+    //
+    // History (issue #567 squish): the prior code applied BOTH `heightIn(max =
+    // maxHeight - ime)` AND `imePadding()` on the SAME Column. `.heightIn().
+    // imePadding()` on one element makes the IME padding eat INTO the cap, so the
+    // usable content area collapsed to `maxHeight - 2*ime`, crushing the 96dp
+    // draft to ~36dp, clipping the "Prompt Composer" header, and pushing the
+    // attachment tiles off-screen. Removing `imePadding()` and capping to exactly
+    // the room above the keyboard subtracts the keyboard height once, so the
+    // composer renders full-size above the keyboard.
     val density = LocalDensity.current
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        // Room above the keyboard, measured (issue #567):
+        //  - `maxHeight` is the sheet content area; it shrinks when the IME shows
+        //    but its window bottom sits at the screen bottom MINUS the nav bar.
+        //  - `WindowInsets.ime` reports the full keyboard height from the screen
+        //    bottom, INCLUDING the nav-bar strip the window already excluded.
+        // So the keyboard only intrudes into this window by `ime - navBars`, and
+        // the room left above it is `maxHeight - (ime - navBars)`. Subtracting the
+        // raw `ime` would over-subtract by the nav-bar height (and combined with
+        // the old `imePadding()` it double-subtracted the keyboard, crushing the
+        // 96dp draft to ~36dp — the squish). Capping at exactly this room (and NO
+        // `imePadding()`, which does not lift content inside this sheet's window)
+        // keeps the body full-size with the sticky Send row above the keyboard.
         val imeBottomDp = with(density) { WindowInsets.ime.getBottom(this).toDp() }
-        val availableAboveKeyboard = (maxHeight - imeBottomDp).coerceAtLeast(0.dp)
+        val navBarsBottomDp = with(density) {
+            WindowInsets.navigationBars.getBottom(this).toDp()
+        }
+        val keyboardIntrusionDp = (imeBottomDp - navBarsBottomDp).coerceAtLeast(0.dp)
+        val availableAboveKeyboard = (maxHeight - keyboardIntrusionDp).coerceAtLeast(0.dp)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // The nav-bar clearance only matters when the keyboard is DOWN
+                // (the keyboard covers the nav bar when up); it contributes 0
+                // under the IME.
+                .navigationBarsPadding()
+                // Cap to the room above the keyboard (see note above). The sheet
+                // content is top-anchored within its window and the window extends
+                // behind the keyboard, so clipping the body to this room is what
+                // keeps the sticky Send row above the keyboard. The scrollable
+                // upper region absorbs a long draft / a stack of attachment tiles +
+                // banners (the #682 long-content cut-off).
                 .heightIn(max = availableAboveKeyboard)
                 .background(PocketShellColors.Surface)
-                // Lift the whole (bounded, content-height) body above the soft
-                // keyboard, and clear the system navigation bar when the keyboard
-                // is down. `imePadding()` here lifts a COMPACT body — it does not
-                // grow a full-height one (the #615 void), because the body is
-                // capped to `availableAboveKeyboard` above.
-                .imePadding()
-                .navigationBarsPadding()
                 .padding(horizontal = 18.dp)
                 .padding(bottom = 26.dp),
         ) {
@@ -987,7 +1005,7 @@ internal fun SheetContent(
                 }
             }
         }
-    }
+        }
     }
 }
 

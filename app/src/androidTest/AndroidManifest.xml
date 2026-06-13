@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+          Issue #731: a test-only ContentProvider that serves a single composer
+          attachment whose query reports NO size, forcing
+          PromptAttachmentStager down the unknown-size `uploadFile` branch (the
+          #581 data-loss path under guard). Registered ONLY in the androidTest
+          manifest, so it never ships in the app. The authority is tied to
+          ${applicationId} so it stays unique under the per-worktree
+          applicationIdSuffix (`com.pocketshell.app.i731.test`) and never
+          collides with a sibling install on the shared emulator.
+
+          Exported because the stager runs in the TARGET app process
+          (`com.pocketshell.app.i731`, a different UID from the test APK), so it
+          must be allowed to open this test-APK provider across the UID
+          boundary. Test-only manifest, so this never ships in the app.
+        -->
+        <provider
+            android:name="com.pocketshell.app.composer.Issue731AttachmentProvider"
+            android:authorities="${applicationId}.issue731attachments"
+            android:exported="true"
+            android:grantUriPermissions="true" />
+    </application>
+
+</manifest>

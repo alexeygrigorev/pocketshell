@@ -17,6 +17,16 @@
 #      long-running + real-agent gate classes are also excluded (they need
 #      their own env/args and belong to the release gate, not this run).
 #
+#      Because this phase runs the FULL connected suite (only `notClass`
+#      exclusions), any new `*DockerTest` under `app/src/androidTest` is picked
+#      up here automatically — e.g. `AttachmentStagerRealUploadDockerTest`
+#      (issue #731), which stages a composer attachment through the production
+#      `PromptAttachmentStager.uploadFile` path against `agents:2222` and reads
+#      the bytes back to guard the #581 data-loss path. It is NOT in the
+#      per-push allowlist (`scripts/ci-journey-suite.sh`), so it stays
+#      nightly-only as that issue requires, and it reuses the `agents` fixture
+#      this workflow already starts (no new fixture).
+#
 #   2) NETWORK-FAULT proofs — ONLY the NetworkFaultProofBase subclasses, run
 #      WITHOUT `pocketshellCi=true` (so `isRunningOnCi()` is false and the
 #      `assumeFalse(isRunningOnCi())` guard passes) and WITH

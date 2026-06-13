@@ -494,6 +494,81 @@ class SshLeaseManagerTest {
     }
 
     @Test
+    fun `evict idle leaves a transport a second active holder still owns`() = runTest {
+        // Issue #758 (back -> open-another-session reconnect): the FolderList
+        // picker poll and an active TmuxSessionViewModel ride the SAME lease key.
+        // When the picker poll sees a stale-channel symptom it must NOT close the
+        // transport the session VM still holds. Model both consumers: the session
+        // VM keeps its lease (refCount stays 1 after the picker releases), so the
+        // picker's poison-eviction must be a no-op and the shared transport must
+        // survive for the next session open to reuse warm.
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val manager = leaseManager(
+            connector = connector,
+            idleTtlMillis = 60_000,
+        )
+
+        // Session VM holds the lease (the live -CC channel) the whole time.
+        val sessionHold = manager.acquire(TARGET).getOrThrow()
+        // Picker poll acquires the SAME pooled transport (reuse, no new connect)...
+        val pickerHold = manager.acquire(TARGET).getOrThrow()
+        assertEquals(1, connector.connectCount)
+        assertSame(session, pickerHold.session)
+
+        // ...sees a stale-channel symptom, releases its own ref, then evicts.
+        pickerHold.release()
+        assertFalse(
+            "evictIdle must be a no-op while the session VM still holds the lease",
+            manager.evictIdle(TARGET.leaseKey),
+        )
+        assertFalse("the session's transport must NOT be closed", session.closed)
+
+        // Opening another session reuses the WARM transport (no fresh handshake).
+        val reuse = manager.acquire(TARGET).getOrThrow()
+        assertEquals(
+            "warm reuse — no fresh SSH handshake after the picker poison-evict",
+            1,
+            connector.connectCount,
+        )
+        assertSame(session, reuse.session)
+        assertFalse(reuse.isNewConnection)
+
+        sessionHold.release()
+        reuse.release()
+    }
+
+    @Test
+    fun `evict idle releases the transport once no consumer holds it`() = runTest {
+        // The other half of #758: a genuinely idle (zero-refcount) poisoned
+        // transport — one NO active session holds — is still cleared so the next
+        // poll/open dials a fresh, healthy connection.
+        val stale = FakeSshSession()
+        val fresh = FakeSshSession()
+        val connector = QueueLeaseConnector(stale, fresh)
+        val manager = leaseManager(
+            connector = connector,
+            idleTtlMillis = 60_000,
+        )
+
+        // Only the picker poll held it; after release the refcount is 0.
+        manager.acquire(TARGET).getOrThrow().release()
+        assertFalse(stale.closed)
+
+        assertTrue(
+            "evictIdle must clear an idle corpse no consumer holds",
+            manager.evictIdle(TARGET.leaseKey),
+        )
+        assertTrue(stale.closed)
+
+        val replacement = manager.acquire(TARGET).getOrThrow()
+        assertEquals(2, connector.connectCount)
+        assertSame(fresh, replacement.session)
+        assertTrue(replacement.isNewConnection)
+        replacement.release()
+    }
+
+    @Test
     fun `state events include idle expiry and lifecycle close reasons`() = runTest {
         val first = FakeSshSession()
         val second = FakeSshSession()

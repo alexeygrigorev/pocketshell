@@ -605,24 +605,49 @@ class SshFolderListGateway internal constructor(
         }
         var poisonedTransport = false
         return try {
+            // Issue #758 (test-only, inert in production — forcedStaleChannelSymptoms
+            // defaults to 0): deterministically simulate one transient poll-time
+            // stale-channel symptom over the shared lease so the eviction path
+            // below runs against a lease an active session VM holds. The thrown
+            // message matches [isChannelOpenFailure] so it is treated identically
+            // to a real stale channel.
+            if (forcedStaleChannelSymptoms.get() > 0 &&
+                forcedStaleChannelSymptoms.getAndDecrement() > 0
+            ) {
+                throw IllegalStateException(
+                    "open failed: injected stale-channel symptom (issue #758 test hook)",
+                )
+            }
             Result.success(block(lease.session))
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             // Issue #465/#665/#680: an "open failed" / dead-transport / "SSH
-            // session is not connected" probe failure must EVICT the pooled
-            // lease, not just release it back. A transport stuck refusing
-            // channels (or one whose `isConnected` lies) still gets handed back
-            // by the pool, so without eviction every folder-tree poll would
-            // re-surface the same dead-end. Evicting it makes the heal retry /
-            // next poll open a fresh transport that recovers the tree.
+            // session is not connected" probe failure should EVICT a *genuinely
+            // idle* pooled lease, not just release it back. A transport stuck
+            // refusing channels (or one whose `isConnected` lies) still gets
+            // handed back by the pool, so without eviction every folder-tree
+            // poll would re-surface the same dead-end. Evicting it makes the
+            // heal retry / next poll open a fresh transport that recovers the
+            // tree.
             poisonedTransport = isStaleChannelSymptom(t)
             Result.failure(t)
         } finally {
             withContext(NonCancellable) {
                 lease.release()
                 if (poisonedTransport) {
-                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                    // Issue #758: refcount-aware eviction. The picker poll
+                    // shares the SAME `SshLeaseKey` an active TmuxSessionViewModel
+                    // rides. An unconditional `disconnect` here force-closed that
+                    // shared transport out from under the live session, so opening
+                    // a different session after backing out to the picker fell to
+                    // the COLD path (Connecting overlay + fresh handshake). After
+                    // our own `lease.release()` above, `evictIdle` is a NO-OP while
+                    // the session VM still holds the lease (refCount > 0) and only
+                    // closes a transport NO live consumer holds. A transport an
+                    // active session still owns is healed by the VM's own
+                    // stale-lease path on its next attach, never torn down here.
+                    runCatching { sshLeaseManager.evictIdle(leaseTarget.leaseKey) }
                 }
             }
         }
@@ -1486,6 +1511,27 @@ class SshFolderListGateway internal constructor(
          * `ConnectError` instead of hanging.
          */
         const val PROBE_LOG_TAG: String = "PsFolderProbe"
+
+        /**
+         * Issue #758 — DETERMINISTIC test injection of a poll-time stale-channel
+         * symptom. The back→open-B reconnect bug only reproduces when the picker
+         * poll over the shared SSH lease hits a transient stale-channel/EOF
+         * symptom and the gateway evicts the lease the active session VM holds.
+         * On a healthy `agents:2222` link that symptom is timing-dependent, so a
+         * per-PR CI journey test can't rely on poll luck (the research's risk #2).
+         * This counter lets the test ARM exactly N forced symptoms: while > 0,
+         * the NEXT lease-path enumeration [runLeaseAttempt] throws ONE
+         * stale-channel symptom (decrementing the counter) so the production
+         * eviction path runs against the shared lease — exactly the bug.
+         *
+         * Production default is 0 → completely inert (no behaviour change). Only
+         * the #758 androidTest arms it. Kept as an [AtomicInteger] so the test's
+         * instrumentation thread and the gateway's poll coroutine see a coherent
+         * value without extra synchronisation.
+         */
+        @JvmField
+        val forcedStaleChannelSymptoms: java.util.concurrent.atomic.AtomicInteger =
+            java.util.concurrent.atomic.AtomicInteger(0)
 
         /**
          * Issue #716: interactive-shell foreground commands that, when seen as

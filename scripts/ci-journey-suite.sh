@@ -118,6 +118,20 @@ JOURNEY_CLASSES=(
   # RE-ADDED (#710): the CI-AVD wedge was the unbounded VM-clear park teardown,
   # now bounded at SYNC_DETACH_TIMEOUT_MS. See the block comment above.
   "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"
+  # ADDED (#758): the maintainer's priority-#1 back→open-another-session
+  # reconnect. Opens session A, taps BACK to the picker, triggers a discovery
+  # reconcile over the shared SSH lease (with ONE deterministically-injected
+  # poll-time stale-channel symptom via the inert
+  # SshFolderListGateway.forcedStaleChannelSymptoms test hook — production
+  # default 0), then opens session B and asserts the VISIBLE warm-reuse
+  # invariants: ZERO fresh SSH_HANDSHAKE_ATTEMPTS delta, NO full-screen
+  # Connecting overlay, NO Disconnected band. Uses ONLY the deterministic
+  # agents:2222 fixture (no toxiproxy), so it belongs in this per-push subset.
+  # Pre-fix this would go RED (the gateway's unconditional `disconnect` tore down
+  # the lease A held → cold re-dial); the #758 refcount-aware `evictIdle`
+  # (no-op while the session VM holds the lease) makes it GREEN. Does NOT
+  # self-skip on CI.
+  "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"

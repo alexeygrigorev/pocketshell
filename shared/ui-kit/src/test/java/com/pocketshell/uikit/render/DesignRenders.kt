@@ -274,9 +274,10 @@ class DesignRenders {
      * composes ([ScreenHeader], [SectionHeader] for the root header pattern,
      * [ListRow] + [StatusDot], and the subtle accent `+`). It puts an active
      * root group next to the inactive-root callout so the maintainer can compare
-     * their chrome weight: the inactive callout now reads as ONE dense project
-     * row (muted dot + count title + muted-mono context subtitle + a single
-     * trailing accent `+`), no longer a heavier divergent "+ Review/Add" pill.
+     * their chrome weight: the inactive callout now reads as ONE dense,
+     * SINGLE-LINE project row (muted idle dot + count title + a single trailing
+     * accent `+`), no longer a heavier divergent "+ Review/Add" pill and no
+     * longer carrying the truncated "Tap to …" mono subtitle (#603 / #679 D).
      */
     @Test
     fun hostDetailInactiveFolders() = render("host-detail-inactive-folders") {
@@ -302,10 +303,12 @@ class DesignRenders {
             )
 
             // Inactive-root callout — has scanned candidate folders ("Review").
+            // Single-line: the title names the state, the muted idle dot signals
+            // inactive, and the trailing `+` is the affordance — no truncated
+            // instructional subtitle (#603 / #679 Child D).
             TreeRootHeader(label = "archive", count = "3 projects")
             ListRow(
                 title = "3 inactive folders",
-                subtitle = "Tap to review folders under this root.",
                 leading = { StatusDot(status = ConnectionStatus.Idle) },
                 trailing = { SubtleAccentPlus() },
                 onClick = {},
@@ -321,7 +324,6 @@ class DesignRenders {
             TreeRootHeader(label = "labs", count = "0 projects")
             ListRow(
                 title = "No folders yet",
-                subtitle = "Tap to add a folder under this root.",
                 leading = { StatusDot(status = ConnectionStatus.Idle) },
                 trailing = { SubtleAccentPlus() },
                 onClick = {},

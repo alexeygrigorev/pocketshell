@@ -622,7 +622,7 @@ class FolderListScreenE2eTest {
             .assertIsDisplayed()
             .assertHasClickAction()
         // The trailing affordance carries the action verb in its content
-        // description (the row title/subtitle carry the user-facing copy).
+        // description; the single visible line is the count title (#603/#679 D).
         compose.onNodeWithTag(folderTreeRootEmptyHintActionPlusTestTag("~/archive"))
             .assertIsDisplayed()
             .assertHasClickAction()
@@ -1469,7 +1469,7 @@ class FolderListScreenE2eTest {
                 .assertHasClickAction()
             // #603: with inactive candidates the callout's trailing `+` carries
             // the "Review inactive project folders" verb in its content
-            // description; the user-facing copy lives in the row title/subtitle.
+            // description; the single visible line is the count title.
             compose.onNodeWithContentDescription("Review inactive project folders").assertIsDisplayed()
             compose.onNodeWithTag(folderTreeRootEmptyHintActionPlusTestTag(longRootPath))
                 .assertIsDisplayed()
@@ -1746,12 +1746,13 @@ class FolderListScreenE2eTest {
             folderTreeRootEmptyHintActionPlusTestTag(rootPath),
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
-        // #603: the callout is now a two-line dense ListRow (count title + muted
-        // context subtitle) carrying a 48dp tap-target accent `+`, so it lands
-        // at ~64dp — the SAME compact weight as an active project row. The cap
-        // guards against a regression back to a bulky multi-line card (100dp+),
-        // not against the consistent dense row.
-        val maxCompactHeightPx = 72f * density
+        // #603 / #679 Child D: the callout is now a SINGLE-LINE dense ListRow
+        // (count title only — the redundant, truncated "Tap to …" mono subtitle
+        // is gone) carrying a 48dp tap-target accent `+`, so it lands at the
+        // 48dp tap-target floor — lighter than (and never heavier than) an
+        // active two-line project row. The cap guards against a regression back
+        // to a bulky multi-line card; the single-line row clears it comfortably.
+        val maxCompactHeightPx = 64f * density
 
         assertTrue(
             "inactive watched-root hint should render as one compact dense row: height=${rowBounds.height}px",

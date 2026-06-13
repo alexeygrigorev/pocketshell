@@ -1656,16 +1656,27 @@ internal fun rootCountSubtitle(root: FolderTreeRoot): String {
 /**
  * Inactive / empty watched-root callout (#603).
  *
- * Redesigned to read as ONE dense project-tree row — visually
+ * Redesigned to read as ONE dense, SINGLE-LINE project-tree row — visually
  * indistinguishable in chrome weight from an active project row
- * ([FolderHeader]): a muted (idle) [StatusDot] leads, the title carries the
- * inactive count (`N inactive folders` / `No folders yet`) with a muted-mono
- * context subtitle, and the row's single trailing affordance is the SAME subtle
- * accent `+` ([SubtleAddButton]) the active root/folder rows use. `+` means the
- * same thing at every level — add here — so the inactive callout stops looking
- * like a heavier, divergent "+ Review / + Add" pill inside the dense tree
- * (maintainer feedback 2026-06-07). The whole row is clickable; the trailing `+`
- * is the explicit visible target.
+ * ([FolderHeader]) and, if anything, lighter: a muted (idle) [StatusDot] leads,
+ * the title carries the inactive count (`N inactive folders` / `No folders
+ * yet`), and the row's single trailing affordance is the SAME subtle accent `+`
+ * ([SubtleAddButton]) the active root/folder rows use. `+` means the same thing
+ * at every level — add here — so the inactive callout stops looking like a
+ * heavier, divergent "+ Review / + Add" pill inside the dense tree (maintainer
+ * feedback 2026-06-07).
+ *
+ * The earlier redesign carried a second instructional subtitle line ("Tap to
+ * review folders under this root.") that ellipsised to truncated mono prose on a
+ * phone width (`…under this r…`) — it read like a clipped bug, not a design, and
+ * made the callout a two-line block heavier than the dense tree wants (#603
+ * design sign-off, #679 Child D). That instructional line is redundant: the
+ * title already names the state, the muted idle dot signals "inactive", and the
+ * visible `+` is the affordance. So the callout is now a clean single-line row.
+ * The action verb (`Review inactive project folders` / `Add project folder`)
+ * lives only in the `+`'s content description for a11y/instrumentation, never as
+ * a competing visible text line. The whole row is clickable; the trailing `+` is
+ * the explicit visible target.
  */
 @Composable
 private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () -> Unit) {
@@ -1673,11 +1684,6 @@ private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () ->
         candidateCount.countLabel("inactive folder")
     } else {
         "No folders yet"
-    }
-    val subtitle = if (candidateCount > 0) {
-        "Tap to review folders under this root."
-    } else {
-        "Tap to add a folder under this root."
     }
     val actionDescription = if (candidateCount > 0) {
         "Review inactive project folders"
@@ -1692,7 +1698,6 @@ private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () ->
     ) {
         ListRow(
             title = title,
-            subtitle = subtitle,
             leading = {
                 StatusDot(active = false)
             },
@@ -1700,8 +1705,8 @@ private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () ->
                 // One subtle accent `+` — identical chrome to the active root and
                 // folder rows (#603). The plus glyph is tagged so the same
                 // instrumentation that located the retired "+ Review/Add" pill
-                // keeps resolving the affordance; the action verb now lives only
-                // in the content description (and the row title/subtitle copy).
+                // keeps resolving the affordance; the action verb lives only in
+                // the content description (the visible row carries just the title).
                 SubtleAddButton(
                     contentDescription = actionDescription,
                     onClick = onCreate,

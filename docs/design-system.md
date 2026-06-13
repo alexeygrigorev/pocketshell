@@ -419,7 +419,7 @@ things:
 | Affordance | When | API |
 |------------|------|-----|
 | `LoadingIndicator.Bar()` | Indeterminate, **in-flight strip** — first-connect, reconnecting, refresh. The standard top/inline progress bar. | One height + accent fill on a muted track. No height knob. |
-| `LoadingIndicator.Spinner(size, label?)` | Indeterminate, **"something is happening"** — full-screen/section loaders, inline row reveals, pending items. | Diameter + stroke come from the enumerated `SpinnerSize` (`Small` inline, `Medium` centered). Optional `label` ("Attaching…", "waiting for tmux panes…") renders below. **Never** a raw spinner `dp`. |
+| `LoadingIndicator.Spinner(size, label?, onAccent?)` | Indeterminate, **"something is happening"** — full-screen/section loaders, inline row reveals, pending items, in-button submit progress. | Diameter + stroke come from the enumerated `SpinnerSize` (`Small` inline, `Medium` centered). Optional `label` ("Attaching…", "waiting for tmux panes…") renders below. Set `onAccent = true` for a spinner shown ON an accent-filled surface (e.g. a primary CTA mid-submit) so the arc inverts to the on-accent content colour and stays visible. **Never** a raw spinner `dp`. |
 | `ProgressBar(progress, kind)` | **Determinate** — percentage is known (usage quota, download). | The existing `Float` API; the percentage-known sibling. |
 
 Rules:
@@ -429,7 +429,10 @@ Rules:
   passing a raw value at the call site — that is what stops the 8-diameter
   drift from coming back.
 - Colour comes from `LocalPocketShellSemantic` (accent fill / muted track), so
-  no call site reintroduces a raw Material default or per-screen hex.
+  no call site reintroduces a raw Material default or per-screen hex. The one
+  exception is `Spinner(onAccent = true)`, which paints the canonical on-accent
+  content colour (same as an accent button's label) for spinners drawn ON an
+  accent fill — use it ONLY inside an accent-coloured container.
 - `LoadingIndicator` is decorative + label only (no `onClick`). Any
   cancel/retry lives in a button or row beside it.
 

@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
+import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -113,17 +114,30 @@ object LoadingIndicator {
      * renders below the spinner in [PocketShellType.bodyDense] muted text
      * ("Attaching…", "waiting for tmux panes…").
      *
+     * For a spinner shown ON an accent-filled surface (e.g. the in-button
+     * progress on a primary CTA while it submits), set [onAccent] = true: the
+     * arc then paints with the canonical on-accent content colour
+     * ([PocketShellColors.Background]) — the same colour an accent button uses
+     * for its label — so the spinner is visible against the accent fill instead
+     * of the accent-on-accent invisibility the default would produce. Use this
+     * only inside an accent-coloured container; the default accent arc remains
+     * the affordance for ordinary (background-coloured) surfaces.
+     *
      * @param size which enumerated rung to paint ([SpinnerSize.Small] inline,
      *   [SpinnerSize.Medium] centered/full-area).
      * @param label optional caption rendered below the spinner.
+     * @param onAccent paint the inverted on-accent colour for spinners shown on
+     *   an accent-filled button/surface (default `false` = accent arc).
      */
     @Composable
     fun Spinner(
         modifier: Modifier = Modifier,
         size: SpinnerSize = SpinnerSize.Medium,
         label: String? = null,
+        onAccent: Boolean = false,
     ) {
         val semantic = LocalPocketShellSemantic.current
+        val arcColor = if (onAccent) PocketShellColors.Background else semantic.accent
         val diameter: Dp = when (size) {
             SpinnerSize.Small -> 18.dp
             SpinnerSize.Medium -> 28.dp
@@ -134,10 +148,11 @@ object LoadingIndicator {
         }
 
         if (label == null) {
-            // Bare spinner — caller positions it (inline, trailing cell, etc.).
+            // Bare spinner — caller positions it (inline, trailing cell,
+            // in-button on an accent CTA when onAccent = true, etc.).
             CircularProgressIndicator(
                 modifier = modifier.size(diameter),
-                color = semantic.accent,
+                color = arcColor,
                 strokeWidth = stroke,
             )
         } else {
@@ -149,7 +164,7 @@ object LoadingIndicator {
             ) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(diameter),
-                    color = semantic.accent,
+                    color = arcColor,
                     strokeWidth = stroke,
                 )
                 Text(

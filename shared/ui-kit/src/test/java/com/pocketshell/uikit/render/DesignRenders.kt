@@ -72,6 +72,7 @@ import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
 import org.junit.Test
@@ -237,7 +238,10 @@ class DesignRenders {
      *  - the [LoadingIndicator.Spinner] at both enumerated rungs
      *    ([SpinnerSize.Small] inline, [SpinnerSize.Medium] centered), and
      *  - the labelled medium spinner ("Attaching…") — the centered
-     *    "whole area is loading" affordance.
+     *    "whole area is loading" affordance, and
+     *  - the [onAccent][LoadingIndicator.Spinner] small spinner shown ON an
+     *    accent-filled CTA (the inverted on-accent arc that stays visible
+     *    against the accent fill — e.g. a primary submit button mid-flight).
      *
      * Each is labelled in-render so a reviewer can eyeball that the bar height,
      * spinner diameters/strokes, and accent colour are consistent and
@@ -278,6 +282,16 @@ class DesignRenders {
                     size = SpinnerSize.Medium,
                     label = "Attaching…",
                 )
+            }
+
+            LoadingLabel("Spinner — Small, onAccent (on an accent-filled CTA)")
+            Box(
+                modifier = Modifier
+                    .background(PocketShellColors.Accent, PocketShellShapes.small)
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                LoadingIndicator.Spinner(size = SpinnerSize.Small, onAccent = true)
             }
 
             LoadingLabel("ProgressBar — determinate sibling (usage quota)")

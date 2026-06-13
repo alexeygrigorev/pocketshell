@@ -25,7 +25,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -829,11 +828,7 @@ private fun CreateIssueSheet(
                         .testTag(GIT_CREATE_ISSUE_SUBMIT_TAG),
                 ) {
                     if (submitting) {
-                        CircularProgressIndicator(
-                            color = PocketShellColors.Background,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(18.dp),
-                        )
+                        LoadingIndicator.Spinner(size = SpinnerSize.Small, onAccent = true)
                     } else {
                         Text("Create issue", style = PocketShellType.bodyDense)
                     }

@@ -104,10 +104,10 @@ import javax.inject.Inject
  * - [AppDestination.AddHost] / [AppDestination.EditHost] — host form.
  * - [AppDestination.TmuxSession] — live tmux session for a selected host.
  *
- * The Phase 0 `ProofOfLifeScreen` is kept on disk (the
- * `ProofPipelineTest` still imports its helper functions) but is no
- * longer the launcher entry. The host picker landed here in #18 owns
- * that role now.
+ * The host picker landed here in #18 owns the launcher-entry role. (The
+ * Phase 0 `ProofOfLifeScreen` proof-of-life composable that historically
+ * predated it was deleted as dead code in #735; its still-live test-key
+ * helper moved to `TerminalLabActivity`.)
  */
 @AndroidEntryPoint
 class MainActivity : FragmentActivity() {
@@ -697,7 +697,6 @@ private fun AppNavigator(
         AppDestination.HostList -> HostListScreen(
             onAddHost = { navigate(AppDestination.AddHost) },
             onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
-            onOpenCrashReports = { navigate(AppDestination.CrashReports) },
             onOpenSettings = { navigate(AppDestination.Settings) },
             // Issue #116 (usage-panel Fix B): wire the cross-host usage
             // strip's tap target to the same Usage destination the

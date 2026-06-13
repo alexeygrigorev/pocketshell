@@ -45,9 +45,8 @@ internal class RealSshShell(
         // contract comes from `AutoCloseable`, and several call sites
         // (`TmuxClient.close()` invoked from
         // `TmuxSessionViewModel.closeCurrentConnection()` under
-        // `onCleared()`, Compose `onDispose` in
-        // `app/.../proof/ProofOfLifeScreen.kt`,
-        // `TerminalLabActivity`) reach this from the Android Main thread.
+        // `onCleared()`, and `TerminalLabActivity` shell teardown) reach
+        // this from the Android Main thread.
         // Without the IO dispatch below, StrictMode
         // detectNetwork()/`BlockGuard$Policy.onNetwork()` would fire
         // `NetworkOnMainThreadException` on the channel-close write.

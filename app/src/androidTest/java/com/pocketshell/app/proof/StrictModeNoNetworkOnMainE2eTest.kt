@@ -28,7 +28,6 @@ import java.util.concurrent.atomic.AtomicReference
  * [com.pocketshell.core.ssh.RealSshSession.close] is reached from the
  * Android Main thread on several call sites:
  *
- *  - `ProofOfLifeScreen.kt` Compose `onDispose { sessionRef?.close() }`
  *  - `TmuxSessionViewModel.onCleared()` -> `closeCurrentConnection()` ->
  *    `clientRef?.close()` (which transitively calls
  *    `RealSshShell.close()`) and `sessionRef?.close()`

@@ -867,9 +867,7 @@ internal fun parseStatType(statType: String): RemoteEntry.Type = when (statType.
  *
  * Issue #106: kept as an `internal const` so the unit test in
  * `RealSshSessionPtyAllocationTest` can pin the value and so the chosen
- * terminfo entry is grep-able from both SSH-shell entry points (the second
- * one lives in `app/src/main/java/com/pocketshell/app/proof/ProofOfLifeScreen.kt`
- * as `INTERACTIVE_PTY_TERM` per #102). Update both call sites in lock-step.
+ * terminfo entry is grep-able from the SSH-shell entry point per #102.
  */
 internal const val INTERACTIVE_PTY_TERM: String = "xterm-256color"
 

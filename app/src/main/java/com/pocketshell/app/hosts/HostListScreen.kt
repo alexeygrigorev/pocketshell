@@ -119,11 +119,6 @@ import kotlin.math.sin
 fun HostListScreen(
     onAddHost: () -> Unit,
     onEditHost: (Long) -> Unit,
-    // Issue #112: Crashes affordance was moved off the top bar and now
-    // lives under Settings → Diagnostics. The activity-level wiring still
-    // passes this callback so the navigator can re-introduce a direct
-    // entry point later (e.g. a deep link) without re-threading state.
-    @Suppress("UNUSED_PARAMETER") onOpenCrashReports: () -> Unit,
     onOpenSettings: () -> Unit = {},
     /**
      * Issue #171: navigate to the per-host folder list — the default

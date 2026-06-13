@@ -25,7 +25,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -52,6 +51,7 @@ import com.pocketshell.core.terminal.ui.openUrlWithFallback
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
@@ -332,19 +332,64 @@ private fun PanelHeader(
     )
 }
 
+/** Test tag for the #751 prominent Auto-forward On/Off control. */
+const val AUTO_FORWARD_TOGGLE_TEST_TAG = "port_forward_auto_forward_toggle"
+
+/**
+ * Issue #751: the Auto-forward control was an inconspicuous `Switch` in a dense
+ * row whose grey subtitle ("Off; discovery rows do not open loca…") read like
+ * inert disabled text — the maintainer couldn't tell it was port-forwarding or
+ * that the control was tappable. It is now a prominent, obviously-actionable
+ * control: a strong "Auto-forward" label sitting on the elevated surface with a
+ * cyan-active On/Off [SegmentedToggle] (the canonical "pick one of N" control,
+ * #479) so the active state and the tap affordance are unmistakable, plus a
+ * legible status line on the secondary text token instead of the muted token.
+ */
 @Composable
 private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
-    ListRow(
-        title = "Auto-forward",
-        subtitle = if (enabled) {
-            "Foreground service keeps tunnels alive while active"
-        } else {
-            "Off; discovery rows do not open local tunnels"
-        },
-        trailing = {
-            Switch(checked = enabled, onCheckedChange = onEnabledChange)
-        },
-    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev)
+            .border(1.dp, PocketShellColors.BorderSoft)
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellSpacing.sm,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Auto-forward ports",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = if (enabled) {
+                    "On — tunnels open automatically and stay alive"
+                } else {
+                    "Off — tap a port row below to forward it"
+                },
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(PocketShellSpacing.md))
+        SegmentedToggle(
+            labels = listOf("Off", "On"),
+            selectedIndex = if (enabled) 1 else 0,
+            onSelected = { onEnabledChange(it == 1) },
+            modifier = Modifier.testTag(AUTO_FORWARD_TOGGLE_TEST_TAG),
+            segmentTag = { index ->
+                if (index == 1) "${AUTO_FORWARD_TOGGLE_TEST_TAG}_on"
+                else "${AUTO_FORWARD_TOGGLE_TEST_TAG}_off"
+            },
+        )
+    }
 }
 
 /**

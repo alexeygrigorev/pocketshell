@@ -16,20 +16,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -98,20 +94,24 @@ class TmuxConsolidatedChromeScreenshotTest {
             }
         }
         compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
-        assertTrue(
-            "forwarding chrome button must be hidden when no forwarding is active",
-            compose.onAllNodesWithTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
-                .fetchSemanticsNodes()
-                .isEmpty(),
-        )
         compose.waitForIdle()
         SystemClock.sleep(200)
         captureFullDevice(File(artifactDir(), "consolidated-chrome-single-window-no-agent.png"))
     }
 
+    /**
+     * Issue #601: regression guard. The maintainer's #601 feedback (the
+     * cyan-circled "/" forwarding chip in the header) is that the active
+     * port-forwarding status must NOT live in the session header row — it
+     * stole terminal chrome/content space. Active forwarding is surfaced ONLY
+     * via the kebab menu's "Port forwarding" status row (covered by
+     * [TmuxMoreMenuPortForwardingTest]); the header NEVER renders a forwarding
+     * chip, even when forwarding is active. This asserts the header carries no
+     * forwarding chip and that the terminal pane sits right under the bare
+     * header, reclaiming the rows the chip used to need.
+     */
     @Test
-    fun activeForwardingRendersInChromeAndOpensPanel() {
-        var openPortForwardingClicks = 0
+    fun activeForwardingDoesNotRenderInHeaderChrome() {
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -123,11 +123,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                 ) {
                     ConsolidatedTopChrome(
                         sessionName = "scratch",
-                        forwardingState = SessionForwardingIndicatorState(
-                            active = true,
-                            tunnelCount = 2,
-                        ),
-                        onOpenPortForwarding = { openPortForwardingClicks++ },
                         onBack = {},
                         onMore = {},
                     )
@@ -136,16 +131,19 @@ class TmuxConsolidatedChromeScreenshotTest {
             }
         }
 
-        compose.onNodeWithTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
-            .assertIsDisplayed()
-        compose.onNodeWithContentDescription("2 ports forwarding active for this host")
-            .assertIsDisplayed()
-        captureFullDevice(File(artifactDir(), "consolidated-chrome-active-forwarding.png"))
-
-        compose.onNodeWithTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
-            .performClick()
+        compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
+        // The header row must expose its kebab (forwarding status moved inside
+        // it) but must NOT carry a standalone forwarding status chip.
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG).assertIsDisplayed()
+        assertTrue(
+            "active port-forwarding status must NOT render as a header chrome chip (#601)",
+            compose.onAllNodesWithContentDescription(
+                "2 ports forwarding active for this host",
+            ).fetchSemanticsNodes().isEmpty(),
+        )
         compose.waitForIdle()
-        assertEquals(1, openPortForwardingClicks)
+        SystemClock.sleep(200)
+        captureFullDevice(File(artifactDir(), "consolidated-chrome-active-forwarding-no-header-chip.png"))
     }
 
     @Test

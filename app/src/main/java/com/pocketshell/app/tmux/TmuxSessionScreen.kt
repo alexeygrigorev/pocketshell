@@ -117,7 +117,6 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
 import com.pocketshell.app.layout.rememberHostImeBottomPx
-import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.projects.SessionTypePickerSheet
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
@@ -1136,8 +1135,6 @@ public fun TmuxSessionScreen(
                                     )
                                 },
                                 connectionStatus = status.toUiStatus(),
-                                forwardingState = sessionForwardingState,
-                                onOpenPortForwarding = onOpenPortForwarding,
                                 // Issue #628: long-press on session name toggles
                                 // to the previous session.
                                 onTogglePreviousSession = previousSessionName?.let {
@@ -1185,8 +1182,6 @@ public fun TmuxSessionScreen(
                             onMore = { moreExpanded = true },
                             moreMenu = { AnchoredTmuxMoreMenu() },
                             connectionStatus = status.toUiStatus(),
-                            forwardingState = sessionForwardingState,
-                            onOpenPortForwarding = onOpenPortForwarding,
                             // Issue #628: long-press on compact session name
                             // toggles to the previous session.
                             onTogglePreviousSession = previousSessionName?.let {
@@ -3011,10 +3006,6 @@ internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG =
 // assert the previous affordance is gone from the header edge.
 internal const val TMUX_COMMAND_PALETTE_BUTTON_TAG = "tmux:chrome:command-palette"
 
-// Issue #601/#603 design slice: active port-forwarding state is surfaced as
-// compact session chrome, not as terminal content or a terminal-row overlay.
-internal const val TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG = "tmux:chrome:forwarding"
-
 // Issue #463: the tappable project/folder crumb in the session header that
 // opens the in-session project-scoped session switcher dropdown, and the
 // dropdown's per-session rows.
@@ -4675,8 +4666,9 @@ private fun DropdownMenuSectionHeader(text: String) {
  *   remaining width.
  * - optional inline Terminal/Conversation pill when an agent or locked
  *   conversation is available.
- * - optional active port-forwarding status.
- * - 48dp more affordance (kebab), which owns the dropdown anchor.
+ * - 48dp more affordance (kebab), which owns the dropdown anchor. Active
+ *   port-forwarding status lives INSIDE that kebab menu (issue #601), not in
+ *   the header row, so it never steals terminal chrome/content space.
  *
  * The host segment is intentionally not surfaced — the host name is
  * already visible on the host list, the pre-session status line, and on
@@ -4718,13 +4710,6 @@ internal fun ConsolidatedTopChrome(
     // steady-state breadcrumb.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
-    // Issue #601: active forwarding belongs in the session chrome. The
-    // default hidden state keeps standalone screenshot harnesses source
-    // compatible while production wires the per-host state from
-    // [SessionForwardingIndicatorViewModel].
-    forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
-        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
-    onOpenPortForwarding: () -> Unit = {},
     // Issue #628: long-press on session name toggles to the previous session
     // (IME-up fallback when the chip row is hidden). Null when no previous
     // session exists.
@@ -4846,11 +4831,6 @@ internal fun ConsolidatedTopChrome(
                     )
                 }
             }
-
-            SessionForwardingChromeButton(
-                state = forwardingState,
-                onClick = onOpenPortForwarding,
-            )
 
             Box(modifier = Modifier.size(48.dp)) {
                 KebabTrigger(
@@ -5119,9 +5099,6 @@ internal fun CompactBreadcrumb(
     // be able to tell the session is not live before they dictate into it.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
-    forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
-        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
-    onOpenPortForwarding: () -> Unit = {},
     // Issue #628: long-press on session name toggles to the previous session
     // (IME-up fallback when the chip row is hidden).
     onTogglePreviousSession: (() -> Unit)? = null,
@@ -5177,10 +5154,6 @@ internal fun CompactBreadcrumb(
         )
         ConnectionStatusPill(connectionStatus)
         Spacer(modifier = Modifier.width(4.dp))
-        SessionForwardingChromeButton(
-            state = forwardingState,
-            onClick = onOpenPortForwarding,
-        )
         Box(
             modifier = Modifier
                 .width(48.dp)
@@ -5193,61 +5166,6 @@ internal fun CompactBreadcrumb(
                 triggerSize = 48.dp,
             )
             moreMenu()
-        }
-    }
-}
-
-/**
- * Issue #601: compact active-port-forwarding affordance for tmux session
- * chrome. It renders only while THIS host has forwarding active, so the
- * terminal viewport and bottom key/composer rows never lose space to a
- * persistent status chip. Tapping opens the existing per-host port-forward
- * panel; the kebab menu keeps the more verbose status row.
- */
-@Composable
-private fun SessionForwardingChromeButton(
-    state: com.pocketshell.app.portfwd.SessionForwardingIndicatorState,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    if (!state.visible) return
-    val color = if (state.restoring) PocketShellColors.Amber else PocketShellColors.Accent
-    Row(
-        // Issue #637: spacing to its siblings is owned by the trailing-cluster
-        // Row in [ConsolidatedTopChrome] (Arrangement.spacedBy), so this chip
-        // no longer carries its own leading inset.
-        modifier = modifier
-            .height(36.dp)
-            .defaultMinSize(minWidth = 40.dp)
-            .background(
-                color = color.copy(alpha = 0.14f),
-                shape = PocketShellShapes.extraSmall,
-            )
-            .border(
-                width = 1.dp,
-                color = color.copy(alpha = 0.45f),
-                shape = PocketShellShapes.extraSmall,
-            )
-            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
-            .semantics { contentDescription = state.contentDescription }
-            .testTag(TMUX_SESSION_FORWARDING_CHROME_BUTTON_TAG)
-            .padding(horizontal = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        ForwardingGlyph(
-            modifier = Modifier.size(14.dp),
-            color = color,
-        )
-        if (state.label.isNotBlank()) {
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = state.label,
-                color = color,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-            )
         }
     }
 }

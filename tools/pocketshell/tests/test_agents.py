@@ -133,6 +133,72 @@ def test_no_config_dir_leaves_profile_vars_unset():
 
 
 # ---------------------------------------------------------------------------
+# Profile `env:` block (issue #732): applied at launch, under the #703 strip
+# ---------------------------------------------------------------------------
+
+
+def test_profile_extra_env_applied():
+    # A profile's env: block reaches the launched agent's environment.
+    env = agents.build_env(
+        "claude", {"PATH": "/usr/bin"}, {}, extra_env={"ANTHROPIC_BASE_URL_X": "https://z.ai"}
+    )
+    assert env["ANTHROPIC_BASE_URL_X"] == "https://z.ai"
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_profile_extra_env_overrides_base_and_folder_for_nonprovider():
+    # A non-provider var in extra_env wins over base + folder layers.
+    env = agents.build_env(
+        "codex",
+        {"MY_VAR": "from-base"},
+        {"MY_VAR": "from-folder"},
+        extra_env={"MY_VAR": "from-profile"},
+    )
+    assert env["MY_VAR"] == "from-profile"
+
+
+@pytest.mark.parametrize("kind", agents.AGENT_KINDS)
+def test_profile_extra_env_cannot_reinject_stripped_provider_var(kind):
+    # #703 must NOT be regressed: even if a profile's env: tries to set a
+    # provider API key, the strip still wins so it never reaches the agent.
+    env = agents.build_env(
+        kind,
+        {},
+        {},
+        extra_env={"ANTHROPIC_API_KEY": "sneaky", "OPENAI_API_KEY": "also-sneaky"},
+    )
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+
+
+def test_profile_extra_env_empty_is_noop():
+    env = agents.build_env("codex", {"PATH": "/usr/bin"}, {}, extra_env={})
+    assert env == agents.build_env("codex", {"PATH": "/usr/bin"}, {})
+
+
+def test_launch_agent_applies_profile_extra_env(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_execvpe(file, argv, env):
+        captured["env"] = env
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "live-key")
+    agents.launch_agent(
+        _FakeCtx(),
+        "claude",
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        extra_env={"PROFILE_VAR": "yes", "ANTHROPIC_API_KEY": "sneaky"},
+        execvpe=fake_execvpe,
+    )
+    # The profile env reaches the child.
+    assert captured["env"]["PROFILE_VAR"] == "yes"
+    # ...but the #703 strip still wins over a provider key the profile sets.
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+
+
+# ---------------------------------------------------------------------------
 # argv: prompt-suppression + skip-permissions flags
 # ---------------------------------------------------------------------------
 
@@ -513,3 +579,52 @@ def test_cli_agent_profile_and_config_dir_mutually_exclusive(tmp_path, monkeypat
         ]
     )
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# `--profile` carries the profile's env: block end-to-end (issue #732)
+# ---------------------------------------------------------------------------
+
+
+def _seed_profiles_yaml_with_env(tmp_path, monkeypatch):
+    """HOME with ~/.zlaude + a profiles.yaml whose entry has an env: block."""
+    home = _seed_zlaude_home(tmp_path, monkeypatch)
+    xdg = tmp_path / "xdg"
+    cfg = xdg / "pocketshell"
+    cfg.mkdir(parents=True)
+    # ANTHROPIC_BASE_URL is intentionally a provider var in
+    # PROVIDER_ENV_UNSET_VARS, so use a NON-provider var (ZAI_ROUTE) to prove
+    # the env: block reaches the child, plus a provider key (ANTHROPIC_API_KEY)
+    # to prove the #703 strip still wins over the profile env.
+    (cfg / "profiles.yaml").write_text(
+        "profiles:\n"
+        "  - name: ZAI Claude\n"
+        "    engine: claude\n"
+        f"    config_dir: {home / '.zlaude'}\n"
+        "    env:\n"
+        "      ZAI_ROUTE: https://api.z.ai/anthropic\n"
+        "      ANTHROPIC_API_KEY: should-be-stripped\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    return home
+
+
+def test_cli_agent_profile_env_block_reaches_child(tmp_path, monkeypatch):
+    home = _seed_profiles_yaml_with_env(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    captured = {}
+    monkeypatch.setattr(
+        agents.os, "execvpe", lambda f, a, e: captured.update(env=e)
+    )
+    rc = main(
+        ["agent", "claude", "--dir", str(workdir), "--profile", "ZAI Claude"]
+    )
+    assert rc == 0
+    # The config_dir from the profile is applied (#718) ...
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(home / ".zlaude")
+    # ... AND the profile's env: block reaches the child (#732) ...
+    assert captured["env"]["ZAI_ROUTE"] == "https://api.z.ai/anthropic"
+    # ... but a provider API key in the env: block is still stripped (#703).
+    assert "ANTHROPIC_API_KEY" not in captured["env"]

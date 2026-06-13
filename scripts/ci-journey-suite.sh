@@ -114,6 +114,19 @@ JOURNEY_CLASSES=(
   # they carry their fully-qualified names directly.
   "com.pocketshell.app.share.ShareTargetE2eTest"
   "com.pocketshell.app.share.SharePassphraseDialogE2eTest"
+  # PROMOTED (#732, Finding B): the host server-PROFILE discovery journey. The
+  # picker false-greens on ToolUnavailable if the host `pocketshell profiles
+  # list --json` branch or the seeded `~/.zlaude` profile silently regresses, so
+  # this discovery proof must run at PR time, not only in the release gate. It
+  # drives ONLY the default deterministic `agents` fixture (DEFAULT_HOST /
+  # DEFAULT_PORT / DEFAULT_USER -> 10.0.2.2:2222, or the pool-allocated port
+  # under `--pool`) — the same fixture every class above uses — so no new Docker
+  # service/port is needed. The emulator-journey workflow brings up `agents`
+  # with `up -d --build` (tests.yml), so CI gets the new `profiles list` branch
+  # + seed, not a stale cached image. It does NOT self-skip on CI. This class
+  # lives under com.pocketshell.app.projects, not the com.pocketshell.app.proof
+  # prefix, so it carries its fully-qualified name directly.
+  "com.pocketshell.app.projects.ProfileDiscoveryPickerDockerTest"
 )
 
 echo "=========================================================="

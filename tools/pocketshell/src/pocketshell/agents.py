@@ -190,16 +190,22 @@ def build_env(
     folder_exports: dict[str, str],
     *,
     config_dir: Optional[str] = None,
+    extra_env: Optional[dict[str, str]] = None,
 ) -> dict[str, str]:
     """Return the environment to exec the agent with.
 
     Starts from ``base_env`` (normally ``os.environ``), layers the
-    folder's merged ``.env`` / ``.envrc`` exports on top, then:
+    folder's merged ``.env`` / ``.envrc`` exports on top, then the profile's
+    ``extra_env`` (from ``profiles.yaml``'s ``env:`` block, issue #718/#732),
+    then:
 
     - For **every agent kind** (codex / claude / opencode), removes every
       var in :data:`PROVIDER_ENV_UNSET_VARS` so the agent uses its
       subscription auth instead of a per-token env API key (maintainer
-      decision, issue #703 — subscription billing across the board).
+      decision, issue #703 — subscription billing across the board). This
+      strip runs **last** among the env layers, so even a provider key that
+      a profile's ``extra_env`` tries to inject is still stripped — the
+      #703 subscription-billing guarantee always wins over profile env.
     - When ``config_dir`` is given, sets the agent's config-dir env var
       (``CODEX_HOME`` for codex, ``CLAUDE_CONFIG_DIR`` for claude). Ignored
       for opencode (no profile env var).
@@ -207,9 +213,17 @@ def build_env(
     env = dict(base_env)
     env.update(folder_exports)
 
+    # A profile's `env:` block (profiles.yaml) layers on top of the folder
+    # exports (issue #732). It is applied BEFORE the provider strip below so
+    # the strip still wins for provider keys — a profile can set arbitrary
+    # non-provider vars, but cannot re-inject a stripped API key.
+    if extra_env:
+        env.update(extra_env)
+
     # Strip the provider API-key vars for EVERY agent kind so each falls
     # back to its subscription auth (maintainer decision, issue #703 —
     # subscription billing across the board for codex / claude / opencode).
+    # Runs last so it overrides any provider key from base/folder/profile env.
     for name in PROVIDER_ENV_UNSET_VARS:
         env.pop(name, None)
 
@@ -331,9 +345,14 @@ def launch_agent(
     *,
     skip_permissions: bool,
     config_dir: Optional[str],
+    extra_env: Optional[dict[str, str]] = None,
     execvpe=None,
 ) -> None:
     """Resolve the dir, build env+argv, suppress prompts, exec the agent.
+
+    ``extra_env`` carries the selected profile's ``env:`` block (issue
+    #732); it layers onto the launch environment under the #703 provider
+    strip (see :func:`build_env`).
 
     ``execvpe`` is injected so tests can assert the exact call without
     actually replacing the process. When ``None`` (production) it resolves
@@ -354,6 +373,7 @@ def launch_agent(
         dict(os.environ),
         folder_exports,
         config_dir=config_dir,
+        extra_env=extra_env,
     )
     argv = build_argv(kind, skip_permissions=skip_permissions)
 
@@ -372,15 +392,17 @@ def _resolve_config_dir(
     kind: str,
     config_dir: Optional[str],
     profile: Optional[str],
-) -> Optional[str]:
-    """Resolve the effective config dir from ``--config-dir`` / ``--profile``.
+) -> tuple[Optional[str], dict[str, str]]:
+    """Resolve config dir + extra env from ``--config-dir`` / ``--profile``.
 
-    ``--config-dir`` and ``--profile`` are mutually exclusive (passing both
-    is an error). When ``--profile`` is given, it resolves the named host
-    profile (via :func:`pocketshell.profiles.resolve_profile`) to its
-    ``config_dir`` — an unknown profile is a clear error. A default profile
-    resolves to ``None`` (the engine's built-in location), the same as
-    omitting both flags.
+    Returns ``(config_dir, extra_env)``. ``--config-dir`` and ``--profile``
+    are mutually exclusive (passing both is an error). When ``--profile`` is
+    given, it resolves the named host profile (via
+    :func:`pocketshell.profiles.resolve_profile`) to its ``config_dir`` AND
+    its ``env:`` block (issue #732) — an unknown profile is a clear error. A
+    default profile resolves to ``None`` config dir (the engine's built-in
+    location); ``--config-dir`` carries no profile env. Omitting both flags
+    returns ``(None, {})``.
     """
     if config_dir is not None and profile is not None:
         click.echo(
@@ -390,7 +412,7 @@ def _resolve_config_dir(
         )
         ctx.exit(2)
     if profile is None:
-        return config_dir
+        return config_dir, {}
 
     # Lazy import keeps the agent launch path from importing yaml unless a
     # profile is actually requested.
@@ -405,7 +427,7 @@ def _resolve_config_dir(
             err=True,
         )
         ctx.exit(2)
-    return resolved.config_dir
+    return resolved.config_dir, dict(resolved.env)
 
 
 def _make_agent_command(kind: str):
@@ -461,13 +483,16 @@ def _make_agent_command(kind: str):
         config_dir: Optional[str],
         profile: Optional[str],
     ) -> None:
-        config_dir = _resolve_config_dir(ctx, kind, config_dir, profile)
+        config_dir, extra_env = _resolve_config_dir(
+            ctx, kind, config_dir, profile
+        )
         launch_agent(
             ctx,
             kind,
             directory,
             skip_permissions=skip_permissions,
             config_dir=config_dir,
+            extra_env=extra_env,
         )
 
     return _cmd

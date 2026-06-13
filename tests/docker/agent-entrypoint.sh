@@ -8,6 +8,22 @@ install -d -o testuser -g testuser "/home/testuser/.claude/projects/${encoded_cw
 install -d -o testuser -g testuser "/home/testuser/.codex/sessions/2026/05/22"
 install -d -o testuser -g testuser "/home/testuser/.local/share/opencode"
 
+# Seed discoverable agent profiles (#718 / #732) so a real `pocketshell
+# profiles list --json` discovery journey finds something to select. The
+# default ~/.claude dir → the "Claude" default profile; a sibling ~/.zlaude
+# dir (the maintainer's Z.AI-routed Claude) → the "Claude (Z.AI)" profile.
+# Each needs a real marker file (.claude.json / settings.json) so the
+# fixture's profiles branch (mirroring profiles.py's conservative discovery)
+# treats the dir as a true config dir rather than a phantom.
+for marker_dir in .claude .zlaude; do
+  install -d -o testuser -g testuser "/home/testuser/${marker_dir}"
+  : > "/home/testuser/${marker_dir}/.claude.json"
+  : > "/home/testuser/${marker_dir}/settings.json"
+  chown testuser:testuser \
+    "/home/testuser/${marker_dir}/.claude.json" \
+    "/home/testuser/${marker_dir}/settings.json"
+done
+
 cp "${fixture_dir}/claude-session.jsonl" "/home/testuser/.claude/projects/${encoded_cwd}/pocketshell-claude.jsonl"
 cp "${fixture_dir}/codex-session.jsonl" "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl"
 cp "${fixture_dir}/opencode-rows.jsonl" "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl"

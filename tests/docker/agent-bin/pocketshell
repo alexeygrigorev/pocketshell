@@ -109,6 +109,96 @@ case "${1:-}" in
         ;;
     esac
     ;;
+  profiles)
+    # Issue #718 / #732: the Android picker fetches host-defined agent
+    # profiles with `pocketshell profiles list [--engine <e>] --json`, so a
+    # real discovery journey can list + select a host profile instead of
+    # false-greening on ToolUnavailable. This branch mirrors the real CLI's
+    # conservative auto-discovery (profiles.py): the seeded ~/.claude default
+    # dir → the "Claude" default profile (config_dir=null), and the sibling
+    # ~/.zlaude dir → the non-default "Claude (Z.AI)" profile pointing at its
+    # absolute config_dir. Both dirs are seeded with a real marker file in
+    # the entrypoint, so they reflect genuine on-host discovery, not a canned
+    # blob. Output shape matches SshProfilesGateway.parseProfiles:
+    #   {"profiles":[{"name","engine","config_dir","default"}, …]}.
+    shift
+    if [ "${1:-}" != "list" ]; then
+      printf 'pocketshell profiles fixture supports: list [--engine claude|codex] [--json]\n' >&2
+      exit 64
+    fi
+    shift
+    profiles_engine=""
+    profiles_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --engine)
+          profiles_engine="${2:-}"
+          shift 2
+          ;;
+        --json)
+          profiles_json=1
+          shift
+          ;;
+        *)
+          printf 'pocketshell profiles fixture: unknown argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+      esac
+    done
+
+    home_dir="${HOME:-/home/testuser}"
+
+    # Build the discovered claude profile rows from the seeded dirs. A dir
+    # only counts when it carries a real claude marker file, exactly like
+    # profiles.py's _has_marker (conservative — no phantom profiles).
+    has_claude_marker() {
+      [ -d "$1" ] && { [ -f "$1/.claude.json" ] || [ -f "$1/settings.json" ]; }
+    }
+
+    # name<TAB>engine<TAB>config_dir(empty=default)<TAB>default(true/false)
+    rows=""
+    if has_claude_marker "${home_dir}/.claude"; then
+      rows="${rows}Claude	claude		true
+"
+    fi
+    if has_claude_marker "${home_dir}/.zlaude"; then
+      rows="${rows}Claude (Z.AI)	claude	${home_dir}/.zlaude	false
+"
+    fi
+    # codex has no seeded profile dir in this fixture, so nothing to add.
+
+    if [ -n "$profiles_engine" ]; then
+      rows="$(printf '%s' "$rows" | awk -F '\t' -v e="$profiles_engine" 'NF && $2==e')"
+    else
+      rows="$(printf '%s' "$rows" | awk -F '\t' 'NF')"
+    fi
+
+    if [ "$profiles_json" -eq 1 ]; then
+      printf '%s\n' "$rows" | awk -F '\t' '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        BEGIN { printf "{\n  \"profiles\": [" }
+        NF {
+          if (n++ > 0) printf ","
+          cd = ($3 == "" ? "null" : "\"" esc($3) "\"")
+          printf "\n    {\"name\": \"%s\", \"engine\": \"%s\", \"config_dir\": %s, \"default\": %s}", esc($1), esc($2), cd, $4
+        }
+        END { if (n > 0) printf "\n  "; printf "]\n}\n" }
+      '
+      exit 0
+    fi
+
+    # YAML fallback (the real CLI default; the client always passes --json).
+    printf 'profiles:\n'
+    printf '%s\n' "$rows" | awk -F '\t' '
+      NF {
+        printf "  - name: %s\n", $1
+        printf "    engine: %s\n", $2
+        if ($3 == "") printf "    config_dir: null\n"; else printf "    config_dir: %s\n", $3
+        printf "    default: %s\n", $4
+      }
+    '
+    exit 0
+    ;;
   usage)
     shift
     if [ "${1:-}" = "--json" ]; then
@@ -227,5 +317,5 @@ case "${1:-}" in
     ;;
 esac
 
-printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log\n' >&2
+printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list\n' >&2
 exit 64

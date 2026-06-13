@@ -13,7 +13,15 @@ plugins {
 // (the SDK is on the classpath), it just won't actually receive pushes until
 // the maintainer creates a Firebase project and drops in google-services.json.
 // See the issue #690 status comment for the one-time setup step.
-if (file("google-services.json").exists()) {
+//
+// It is also skipped for per-worktree isolation builds (issue #737): when
+// `pocketshellAppIdSuffix` is set (the #672 scheme), the applicationId becomes
+// `com.pocketshell.app.<suffix>`, which can never match the single
+// `package_name` ("com.pocketshell.app") in google-services.json, so
+// processGoogleServices would fail configuration. Isolation builds don't need
+// real FCM, so we just don't apply the plugin for them.
+if (file("google-services.json").exists() &&
+    project.findProperty("pocketshellAppIdSuffix") == null) {
     apply(plugin = libs.plugins.google.services.get().pluginId)
 }
 

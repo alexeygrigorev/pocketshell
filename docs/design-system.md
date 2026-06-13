@@ -65,7 +65,8 @@ The current reusable catalog lives under
 | `Breadcrumb` | Host/session/window/pane path chrome. | Terminal chrome should converge here or document why it needs a local variant. |
 | `KeyBar` / `CommandChip` | Terminal input controls. | Shared surface for #454 and #459; no new command-chip styling. |
 | `MicButton` / `MicIcon` | Composer dictation FAB and icon. | Shared surface for #453; no second mic glyph or text-only dictate chip. |
-| `ProgressBar` | Usage/progress fill. | Use for usage, bootstrap, sync, and long-running operations. |
+| `LoadingIndicator` | Canonical **indeterminate** loading affordance: `Bar` (linear "in flight" strip) + `Spinner` (circular "something is happening", `SpinnerSize.Small`/`Medium`, optional label). | Use for ANY "busy, no known percentage" state. Replaces all raw Material `LinearProgressIndicator`/`CircularProgressIndicator`. Do not hand-pick a spinner diameter or bar height. |
+| `ProgressBar` | Usage/progress fill (**determinate**, `progress: Float`). | Use only when the percentage is KNOWN (usage quota, download). For unknown-duration work use `LoadingIndicator` instead. |
 
 ### Implementation Drift Themes
 
@@ -355,12 +356,45 @@ States should occupy the same structural area as the eventual content.
 
 | State | Pattern |
 |-------|---------|
-| Loading | Screen header remains, content area shows a compact spinner row or progress row |
+| Loading | Screen header remains, content area shows the canonical `LoadingIndicator` (see below) |
 | Empty | One neutral message row plus one primary action if useful |
 | Error | Red status/badge, concise message, retry action |
 | Permission/setup needed | Amber attention badge/row plus direct action |
 
 Do not use full-page explanation cards unless the screen has no other content.
+
+#### Loading: the canonical `LoadingIndicator` (#756)
+
+Loading is the maintainer's #1 consistency complaint — "sometimes a bar,
+sometimes a spinning thing". The cause was structural: the only ui-kit progress
+component (`ProgressBar`) was determinate-only, so every "busy, no known
+percentage" site fell back to a raw Material 3 indicator hand-configured with
+its own size, stroke, colour, and track (the audit found ~21 sites at 8
+different spinner diameters and 3+ bar heights). The fix is one shared
+component, [`LoadingIndicator`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/components/LoadingIndicator.kt),
+with two indeterminate variants. The progress vocabulary is now exactly three
+things:
+
+| Affordance | When | API |
+|------------|------|-----|
+| `LoadingIndicator.Bar()` | Indeterminate, **in-flight strip** — first-connect, reconnecting, refresh. The standard top/inline progress bar. | One height + accent fill on a muted track. No height knob. |
+| `LoadingIndicator.Spinner(size, label?)` | Indeterminate, **"something is happening"** — full-screen/section loaders, inline row reveals, pending items. | Diameter + stroke come from the enumerated `SpinnerSize` (`Small` inline, `Medium` centered). Optional `label` ("Attaching…", "waiting for tmux panes…") renders below. **Never** a raw spinner `dp`. |
+| `ProgressBar(progress, kind)` | **Determinate** — percentage is known (usage quota, download). | The existing `Float` API; the percentage-known sibling. |
+
+Rules:
+
+- Pick a `SpinnerSize` rung, never a free `dp`. If a genuinely new geometry is
+  needed, add a rung to the `SpinnerSize` enum (and justify it) rather than
+  passing a raw value at the call site — that is what stops the 8-diameter
+  drift from coming back.
+- Colour comes from `LocalPocketShellSemantic` (accent fill / muted track), so
+  no call site reintroduces a raw Material default or per-screen hex.
+- `LoadingIndicator` is decorative + label only (no `onClick`). Any
+  cancel/retry lives in a button or row beside it.
+
+Migrating the ~21 existing raw indicators onto this component is tracked as
+follow-up slices (non-tmux spinners/bars first; the tmux loading bars are gated
+behind the Connection Manager work).
 
 ## Screen And Sheet Inventory
 

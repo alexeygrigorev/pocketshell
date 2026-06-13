@@ -53,6 +53,8 @@ import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.ProgressBar
 import com.pocketshell.uikit.components.ScreenHeader
@@ -219,6 +221,74 @@ class DesignRenders {
             leading = { StatusDot(status = ConnectionStatus.Connected) },
             trailing = { Badge(label = "Claude", role = BadgeRole.Agent) },
             onClick = {},
+        )
+    }
+
+    /**
+     * Issue #756: the canonical indeterminate [LoadingIndicator] — the single
+     * shared loading affordance the maintainer's "sometimes a bar, sometimes a
+     * spinning thing" complaint converges onto.
+     *
+     * This fixture renders all variants together so they read as ONE vocabulary:
+     *  - the indeterminate [LoadingIndicator.Bar] (the "in flight" strip),
+     *  - the [LoadingIndicator.Spinner] at both enumerated rungs
+     *    ([SpinnerSize.Small] inline, [SpinnerSize.Medium] centered), and
+     *  - the labelled medium spinner ("Attaching…") — the centered
+     *    "whole area is loading" affordance.
+     *
+     * Each is labelled in-render so a reviewer can eyeball that the bar height,
+     * spinner diameters/strokes, and accent colour are consistent and
+     * token-driven (no raw hex, no free spinner dp). The determinate
+     * [ProgressBar] (usage quota) stays the percentage-known sibling and is
+     * shown last for contrast.
+     */
+    @Test
+    fun loadingIndicators() = render("loading-indicators") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            LoadingLabel("Bar — indeterminate linear (in flight)")
+            LoadingIndicator.Bar()
+
+            LoadingLabel("Spinner — Small (inline / on-row)")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LoadingIndicator.Spinner(size = SpinnerSize.Small)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Transcribing…",
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyDense,
+                )
+            }
+
+            LoadingLabel("Spinner — Medium (centered, no label)")
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LoadingIndicator.Spinner(size = SpinnerSize.Medium)
+            }
+
+            LoadingLabel("Spinner — Medium + label (whole-area loading)")
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LoadingIndicator.Spinner(
+                    size = SpinnerSize.Medium,
+                    label = "Attaching…",
+                )
+            }
+
+            LoadingLabel("ProgressBar — determinate sibling (usage quota)")
+            ProgressBar(progress = 0.62f, kind = ProgressKind.Default)
+        }
+    }
+
+    /** Small muted caption used to label each loading variant in [loadingIndicators]. */
+    @Composable
+    private fun LoadingLabel(text: String) {
+        Text(
+            text = text,
+            color = PocketShellColors.TextMuted,
+            style = PocketShellType.labelMono,
         )
     }
 

@@ -851,10 +851,13 @@ public class PromptComposerViewModel @Inject constructor(
      * Amplitude / silence-watchdog loop. Runs in `viewModelScope` on the
      * sampler dispatcher. Polls [AudioRecorder.currentAmplitude] every
      * [SAMPLE_INTERVAL_MS] and triggers auto-stop if [SILENCE_WINDOW_MS]
-     * elapse without the amplitude exceeding [SILENCE_AMPLITUDE_THRESHOLD].
+     * elapse without the amplitude exceeding
+     * [SILENCE_RESET_AMPLITUDE_THRESHOLD].
      *
-     * The silence clock resets every time we see amplitude above the
-     * threshold, so a brief pause mid-sentence doesn't cut the user off.
+     * The silence clock resets every time we see amplitude above the reset
+     * floor, so a brief pause mid-sentence — or soft / far-mic speech below
+     * the LISTENING->CAPTURING cue bar [SILENCE_AMPLITUDE_THRESHOLD] —
+     * doesn't cut the user off (issue #587).
      * It is *not* reset by user interactions (typing, scrolling) — only
      * by the audio level itself, per the auto-stop contract: the timer
      * resets on amplitude change above a threshold.
@@ -887,6 +890,18 @@ public class PromptComposerViewModel @Inject constructor(
             // is 50ms, so the user-visible transition is well inside the
             // 200ms responsiveness budget called out in the issue.
             val crossedThresholdNow = amp >= SILENCE_AMPLITUDE_THRESHOLD
+            // Issue #587: the silence-clock reset uses a LOWER floor than the
+            // LISTENING -> CAPTURING UI cue. `currentAmplitude()` is a PEAK
+            // reading; a user dictating softly / far from the mic can produce
+            // peaks in `[0.015, 0.04)` whose RMS is still well above the audio
+            // guard's speech floor. Resetting the auto-stop clock only on the
+            // high `0.04` capture bar treated that real speech as silence and
+            // auto-stopped mid-utterance, so the captured WAV failed
+            // `hasSpeechEnergy` and the user saw a false "No speech detected".
+            // Keep recording while soft-but-real signal is present; pure
+            // silence / mic noise (below the reset floor) still auto-stops, so
+            // the #452 hallucination guard is untouched.
+            val hasLiveSignalNow = amp >= SILENCE_RESET_AMPLITUDE_THRESHOLD
             // Issue #453: publish the elapsed mm:ss timer each tick. The
             // value is derived from [clock] so a fixed test clock yields a
             // deterministic timer.
@@ -899,7 +914,7 @@ public class PromptComposerViewModel @Inject constructor(
                 }
             }
 
-            if (crossedThresholdNow) {
+            if (hasLiveSignalNow) {
                 lastLoudAtMs = clock()
             } else if (clock() - lastLoudAtMs >= silenceWindowMs) {
                 // Drop out of the loop *before* triggering the transcribe;
@@ -2236,8 +2251,35 @@ public class PromptComposerViewModel @Inject constructor(
         public const val SILENCE_AMPLITUDE_THRESHOLD: Float = 0.04f
 
         /**
+         * Issue #587: the floor at which the silence watchdog resets its
+         * auto-stop clock — i.e. the level it treats as "the user is still
+         * speaking, keep recording".
+         *
+         * This is deliberately LOWER than [SILENCE_AMPLITUDE_THRESHOLD]. The
+         * `0.04` capture bar is tuned to flip the LISTENING -> CAPTURING UI
+         * cue ([UiState.hasDetectedSpeech]) on confident, near-mic speech and
+         * to feel snappy. But using that same high bar to decide *when to keep
+         * recording* meant a user dictating softly / far from the mic — whose
+         * `currentAmplitude()` (a PEAK reading, see
+         * [com.pocketshell.core.voice.PcmCapturePump.peakAmplitude]) sits in
+         * `[~0.015, 0.04)` — was treated as silence and auto-stopped
+         * mid-utterance. The captured WAV then failed
+         * [SpeechAudioGuard.hasSpeechEnergy] (which accepts RMS down to
+         * `MIN_RMS_AMPLITUDE = 0.006f`) and the user saw a false
+         * "No speech detected".
+         *
+         * `0.015` peak reconciles the watchdog with the audio guard: it sits
+         * above the silence / mic-self-noise floor (a quiet room peaks around
+         * `0.002-0.006` on the noise-suppressed `VOICE_RECOGNITION` source)
+         * but below the `0.04` capture bar, so soft-but-real speech keeps the
+         * recording alive while pure silence still auto-stops — keeping the
+         * #452 silence-hallucination guard intact.
+         */
+        public const val SILENCE_RESET_AMPLITUDE_THRESHOLD: Float = 0.015f
+
+        /**
          * Fallback silence window — once this much time passes without
-         * amplitude crossing [SILENCE_AMPLITUDE_THRESHOLD], the recording
+         * amplitude crossing [SILENCE_RESET_AMPLITUDE_THRESHOLD], the recording
          * is auto-stopped.
          *
          * Issue #125 made the window user-configurable from Settings →

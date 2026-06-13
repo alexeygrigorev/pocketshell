@@ -852,6 +852,99 @@ class PromptComposerViewModelTest {
         }
     }
 
+    @Test
+    fun softSpeechBelowCaptureBarDoesNotTriggerPrematureAutoStop() = runTest {
+        // Regression for #587 (units/threshold mismatch). A user dictating
+        // softly / far from the mic produces frames whose PEAK amplitude
+        // (`currentAmplitude()` is peak per `PcmCapturePump.peakAmplitude`)
+        // sits BELOW the capture-confirmation bar
+        // `SILENCE_AMPLITUDE_THRESHOLD = 0.04f` but well ABOVE the silence
+        // floor — e.g. ~0.02 peak (RMS ~0.014, comfortably over the audio
+        // guard's `MIN_RMS_AMPLITUDE = 0.006f`). Before the fix the watchdog
+        // reset its silence clock ONLY on `>= 0.04f`, so this real speech
+        // was treated as silence and auto-stopped mid-utterance — the
+        // captured WAV then failed `hasSpeechEnergy` and the user saw a
+        // false "No speech detected". The watchdog must keep recording while
+        // soft-but-real signal (>= SILENCE_RESET_AMPLITUDE_THRESHOLD) is
+        // present.
+        val softPeak = 0.02f
+        assertTrue(
+            "test fixture must be below the capture bar",
+            softPeak < PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD,
+        )
+        assertTrue(
+            "test fixture must be above the silence-reset floor",
+            softPeak >= PromptComposerViewModel.SILENCE_RESET_AMPLITUDE_THRESHOLD,
+        )
+        // A continuous stream of soft speech for far longer than the silence
+        // window. If the watchdog only resets on >= 0.04, it auto-stops; with
+        // the reconciled reset floor it keeps recording.
+        val mic = FakeMicCapture(amplitudes = List(2_000) { softPeak })
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("soft speech") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        try {
+            vm.onMicTap()
+            runCurrent()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+            // Advance well past the silence window. Soft-but-continuous
+            // speech must NOT auto-stop.
+            advanceTimeBy(PromptComposerViewModel.SILENCE_WINDOW_MS + 5_000L)
+            runCurrent()
+
+            assertEquals(
+                "soft real speech below the 0.04 capture bar but above the " +
+                    "silence-reset floor must keep recording, not auto-stop",
+                RecordingState.Recording,
+                vm.uiState.value.recording,
+            )
+            assertEquals(0, mic.stopCount)
+        } finally {
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun pureSilenceStillAutoStopsAfterWindow() = runTest {
+        // Counter-bound for the fix above (#452 must not regress). True
+        // near-silence (peak below the silence-reset floor — room hum / mic
+        // self-noise) must STILL auto-stop after the window. If the reset
+        // floor were dropped too far this would hang recording forever.
+        val nearSilencePeak = 0.003f
+        assertTrue(
+            "near-silence fixture must be below the silence-reset floor",
+            nearSilencePeak < PromptComposerViewModel.SILENCE_RESET_AMPLITUDE_THRESHOLD,
+        )
+        val mic = FakeMicCapture(
+            amplitudes = List(2_000) { nearSilencePeak },
+            // Audio the guard rejects as silence so we land on the no-speech
+            // path, not a transcription.
+            audio = SpeechAudioGuard.silentWavForTesting(),
+        )
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("should not run") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        advanceTimeBy(PromptComposerViewModel.SILENCE_WINDOW_MS + 1_000L)
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(1, mic.stopCount)
+    }
+
     // -- Whisper failure surfaced as error -----------------------------------
 
     @Test

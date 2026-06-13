@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -55,7 +56,9 @@ import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.SpinnerSize
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Pill
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ProgressBar
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
@@ -279,6 +282,76 @@ class DesignRenders {
 
             LoadingLabel("ProgressBar — determinate sibling (usage quota)")
             ProgressBar(progress = 0.62f, kind = ProgressKind.Default)
+        }
+    }
+
+    /**
+     * Issue #756: the canonical [PocketShellButton] — the single shared button
+     * the ~142 raw Material `Button`/`TextButton` call sites (and the 9 files
+     * that hand-re-declared the same accent `ButtonDefaults.buttonColors` block)
+     * converge onto.
+     *
+     * This fixture renders all four [ButtonVariant]s in both states (enabled +
+     * disabled) so a reviewer can eyeball that:
+     *  - **Primary** is the filled accent CTA (`OnAccent` SemiBold label),
+     *  - **Secondary** is the outlined accent action (accent label + accentDim
+     *    border, no fill),
+     *  - **Text** is the muted chrome-less action (Cancel/Retry),
+     *  - **Destructive** is the red-TEXT confirm (NOT a filled red slab), and
+     *  - every disabled state collapses to the SAME muted treatment.
+     *
+     * Each variant sits next to its disabled twin; the bottom row shows the
+     * canonical dialog action pairing (`Text` Cancel + `Primary` confirm) the
+     * call sites should adopt.
+     */
+    @Test
+    fun pocketShellButtons() = render("pocketshell-buttons") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            ButtonRowLabelled("Primary — filled accent CTA") {
+                PocketShellButton(text = "Add host", onClick = {}, variant = ButtonVariant.Primary)
+                PocketShellButton(text = "Add host", onClick = {}, variant = ButtonVariant.Primary, enabled = false)
+            }
+            ButtonRowLabelled("Secondary — outlined accent") {
+                PocketShellButton(text = "Browse", onClick = {}, variant = ButtonVariant.Secondary)
+                PocketShellButton(text = "Browse", onClick = {}, variant = ButtonVariant.Secondary, enabled = false)
+            }
+            ButtonRowLabelled("Text — muted Cancel/Retry") {
+                PocketShellButton(text = "Cancel", onClick = {}, variant = ButtonVariant.Text)
+                PocketShellButton(text = "Cancel", onClick = {}, variant = ButtonVariant.Text, enabled = false)
+            }
+            ButtonRowLabelled("Destructive — red-text confirm") {
+                PocketShellButton(text = "Delete key", onClick = {}, variant = ButtonVariant.Destructive)
+                PocketShellButton(text = "Delete key", onClick = {}, variant = ButtonVariant.Destructive, enabled = false)
+            }
+
+            LoadingLabel("Canonical dialog action row (Text Cancel + Primary confirm)")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PocketShellButton(text = "Cancel", onClick = {}, variant = ButtonVariant.Text)
+                Spacer(modifier = Modifier.width(8.dp))
+                PocketShellButton(text = "Save changes", onClick = {}, variant = ButtonVariant.Primary)
+            }
+        }
+    }
+
+    /** A labelled row pairing an enabled + disabled button for [pocketShellButtons]. */
+    @Composable
+    private fun ButtonRowLabelled(label: String, buttons: @Composable RowScope.() -> Unit) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            LoadingLabel(label)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                content = buttons,
+            )
         }
     }
 

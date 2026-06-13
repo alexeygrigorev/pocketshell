@@ -65,6 +65,7 @@ The current reusable catalog lives under
 | `Breadcrumb` | Host/session/window/pane path chrome. | Terminal chrome should converge here or document why it needs a local variant. |
 | `KeyBar` / `CommandChip` | Terminal input controls. | Shared surface for #454 and #459; no new command-chip styling. |
 | `MicButton` / `MicIcon` | Composer dictation FAB and icon. | Shared surface for #453; no second mic glyph or text-only dictate chip. |
+| `PocketShellButton` | Canonical button: `ButtonVariant.Primary` (filled accent CTA), `Secondary` (outlined accent), `Text` (muted Cancel/Retry), `Destructive` (red-text confirm). | Use for EVERY tappable button. Replaces all raw Material `Button`/`TextButton` and the per-screen `ButtonDefaults.buttonColors(Accent…)` block. Do not hand-declare button colours, shape, or weight. |
 | `LoadingIndicator` | Canonical **indeterminate** loading affordance: `Bar` (linear "in flight" strip) + `Spinner` (circular "something is happening", `SpinnerSize.Small`/`Medium`, optional label). | Use for ANY "busy, no known percentage" state. Replaces all raw Material `LinearProgressIndicator`/`CircularProgressIndicator`. Do not hand-pick a spinner diameter or bar height. |
 | `ProgressBar` | Usage/progress fill (**determinate**, `progress: Float`). | Use only when the percentage is KNOWN (usage quota, download). For unknown-duration work use `LoadingIndicator` instead. |
 
@@ -198,6 +199,46 @@ Don't:
 
 - Add large hero sections, marketing copy, or nested panel chrome.
 - Add a custom top bar when `ScreenHeader` fits.
+
+### Buttons: the canonical `PocketShellButton` (#756)
+
+Before #756 there were **zero** ui-kit buttons. The audit (#756) found ~142 raw
+Material `Button`/`TextButton`/`IconButton` call sites, and the **same** accent
+primary-CTA colour block
+(`ButtonDefaults.buttonColors(containerColor = Accent, contentColor = OnAccent,
+disabled… )`, plus `fontWeight = SemiBold` re-applied per call) was hand-copied
+into **9 different files** — so the filled-button colour/weight/shape was defined
+nine different times and the muted Cancel/Retry treatment was whatever Material
+defaulted to per theme.
+
+[`PocketShellButton`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/components/PocketShellButton.kt)
+is the single button every tappable button site converges onto. Pick a
+`ButtonVariant`, pass a label — colour, shape (8dp), typography, and the disabled
+treatment all come from the theme tokens, never from a per-call `colors` block.
+
+| Variant | Use | Treatment |
+|---------|-----|-----------|
+| `ButtonVariant.Primary` | The page/dialog's ONE main affordance (Add host, Save, Start, Create). | Filled accent container, `OnAccent` SemiBold label. |
+| `ButtonVariant.Secondary` | A lower-emphasis affirmative action beside a Primary (e.g. "Browse" next to "Save"). | Outlined: accent label + `accentDim` border, no fill. |
+| `ButtonVariant.Text` | The muted, chrome-less action: Cancel / Retry / dialog dismiss / inline links. | No container, `TextSecondary` label. |
+| `ButtonVariant.Destructive` | The confirm action of a delete/reset/stop flow. | Red TEXT only (NOT a filled red slab) — matches "destructive confirmation uses red text only on the confirm action". |
+
+Rules:
+
+- **Pick a variant, never a `colors`/`shape`.** There is intentionally no
+  per-call colour or radius knob. If a genuinely new treatment is needed, add a
+  `ButtonVariant` (and justify it) rather than passing raw values at the call
+  site.
+- **One Primary per action group.** A screen / dialog action row has at most one
+  Primary; everything else is Secondary / Text.
+- **Canonical dialog action row** is a `Text` Cancel followed by a `Primary`
+  confirm, right-aligned. Destructive dialogs swap the confirm for a
+  `Destructive` variant.
+- The label-`String` overload is the common case; the `content` slot overload is
+  the escape hatch for an icon + label button (it still inherits the variant
+  container/shape/disabled treatment).
+- Disabled state collapses to ONE muted treatment across all variants
+  (`Border` container / `TextMuted` label for filled, muted label for the rest).
 
 ### Rows
 

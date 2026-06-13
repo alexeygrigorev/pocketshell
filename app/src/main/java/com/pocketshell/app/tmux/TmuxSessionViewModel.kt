@@ -442,15 +442,20 @@ public class TmuxSessionViewModel @Inject constructor(
         ConnectionControllerShadowBridge(transport = connectionTransportPort)
 
     /**
-     * EPIC #687 slice 1c-iv-b-A2 (#739): the OBSERVE-ONLY [ConnectionEffectDriver],
-     * now wired over the REAL adapters — it observes the shadow
+     * EPIC #687 slice 1c-iv-b-A2 (#739) + slice 1c-iv-b-B1 (#738): the
+     * [ConnectionEffectDriver], wired over the REAL adapters — it observes the shadow
      * [ConnectionController]'s [ConnectionController.state] transitions, the real
      * [SshLeaseTransportPort.transportEvents] lease edges, and the real
-     * [CurrentClientTmuxPort.disconnected] transport-drop oracle. It performs ZERO
-     * IO and ZERO cutover: the inline `runConnect`/`backgroundDetachJob` remain the
-     * sole live IO and are untouched. The driver only LOGS the transitions it sees
-     * (logcat tag [ConnectionEffectDriver.TAG]) so a later sub-slice can let it ACT
-     * against this verified seam. Started once, here, in [viewModelScope].
+     * [CurrentClientTmuxPort.disconnected] transport-drop oracle.
+     *
+     * Slice B1 (#738) takes the FIRST effect off observe-only: the driver now OWNS
+     * the clean BACKGROUND DETACH. On a transition INTO [ConnectionState.Backgrounded]
+     * it fires [backgroundedEffect] = [launchBackgroundDetachTeardown], which runs the
+     * EXISTING full teardown ([closeCurrentConnectionAndJoin] under `NonCancellable`)
+     * — the same job the deleted inline `backgroundDetachJob` trigger launched, with
+     * identical timing. The OPEN path (`runConnect`/`connectJob`) and the cold/warm
+     * projection read STAY inline (deferred to a re-planned slice); the driver still
+     * performs ZERO port IO for those. Started once, here, in [viewModelScope].
      */
     private val connectionEffectDriver: ConnectionEffectDriver =
         ConnectionEffectDriver(
@@ -458,6 +463,7 @@ public class TmuxSessionViewModel @Inject constructor(
             tmuxPort = connectionTmuxPort,
             transportPort = connectionTransportPort,
             scope = viewModelScope,
+            backgroundedEffect = { launchBackgroundDetachTeardown() },
         ).also { it.start() }
 
     /**
@@ -1733,6 +1739,14 @@ public class TmuxSessionViewModel @Inject constructor(
     private var pendingReattach: PendingReattach? = null
     private var pausedAutoReconnect: PausedAutoReconnect? = null
     private var backgroundDetachJob: Job? = null
+
+    // EPIC #687 slice 1c-iv-b-B1 (#738): the `preserveConnectingTarget` computed
+    // SYNCHRONOUSLY by [detachForBackground] at background time, stashed for the
+    // DRIVER-fired teardown ([launchBackgroundDetachTeardown]) to consume. The
+    // value must be read at the same instant the old inline launch read it (before
+    // any rapid foreground mutates `connectingTarget`), so the field captures it on
+    // the background-decision turn rather than re-deriving it in the driver effect.
+    private var pendingBackgroundDetachPreserveTarget: ConnectionTarget? = null
     private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
     private var processForegroundForClearedOverrideForTest: Boolean? = null
@@ -1777,9 +1791,16 @@ public class TmuxSessionViewModel @Inject constructor(
         appActive = false
         foregroundRuntimeProbeJob?.cancel()
         foregroundRuntimeProbeJob = null
-        // EPIC #687 slice 1c-iii: observe-only — feed the shadow controller the
-        // same lifecycle event; it drives nothing.
-        connectionControllerShadow.observeBackground()
+        // EPIC #687 slice 1c-iv-b-B1 (#738): run the inline SYNCHRONOUS bookkeeping
+        // FIRST — [detachForBackground] sets `pendingReattach` and stashes
+        // `pendingBackgroundDetachPreserveTarget`. THEN drive the controller to
+        // Backgrounded, which fires the DRIVER's teardown effect
+        // ([launchBackgroundDetachTeardown]). This ordering guarantees the bookkeeping
+        // is in place before the driver launches the teardown — the driver collector
+        // resumes off [observeBackground] (eagerly on the test main dispatcher; on the
+        // next Main turn in production), so [detachForBackground] must have run first.
+        // `pauseReconnectForBackground` (the no-client-detach branch) is unaffected:
+        // the controller has no live host to enter Backgrounded, so no teardown fires.
         when (reduceConnection(ConnectionEvent.Background)) {
             ConnectionDecision.PauseReconnectForBackground ->
                 pauseReconnectForBackground()
@@ -1787,6 +1808,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 detachForBackground()
             else -> Unit
         }
+        // Feed the shadow controller the Background event — its transition INTO
+        // Backgrounded is what fires the [ConnectionEffectDriver]'s clean-detach
+        // teardown (the SOLE detach trigger now the inline launch is deleted).
+        connectionControllerShadow.observeBackground()
         // The controller moved to Backgrounded (mapped → Connected, the inline
         // "keep prior status on background" behavior); re-project after the inline
         // effects ran (they read inlineConnectionStatus, unaffected by this).
@@ -1831,10 +1856,23 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * EPIC #687 slice 1a: the [ConnectionDecision.DetachForBackground] body —
-     * formerly the lower half of [onAppBackgrounded]. Unchanged behavior; the
-     * `target`/`clientRef||sessionRef` guards already passed in [reduceBackground]
-     * but are kept here so the side-effect body is self-contained and the field
-     * reads happen at the same point in time as before.
+     * formerly the lower half of [onAppBackgrounded]. The `target`/`clientRef||
+     * sessionRef` guards already passed in [reduceBackground] but are kept here so
+     * the side-effect body is self-contained and the field reads happen at the same
+     * point in time as before.
+     *
+     * EPIC #687 slice 1c-iv-b-B1 (#738): this method keeps ONLY the SYNCHRONOUS
+     * bookkeeping — `pendingReattach`, the detach telemetry, and stashing the
+     * `preserveConnectingTarget` computed AT THIS INSTANT into
+     * [pendingBackgroundDetachPreserveTarget]. It NO LONGER launches the teardown
+     * job. The actual `closeCurrentConnectionAndJoin` teardown is now launched by
+     * [launchBackgroundDetachTeardown], fired by the [ConnectionEffectDriver] on the
+     * controller's transition INTO [ConnectionState.Backgrounded] (the inline
+     * `backgroundDetachJob` *trigger* is deleted — D22 hard-cut). Keeping the
+     * bookkeeping synchronous preserves the within-grace foreground reattach behavior
+     * exactly: `onAppForegrounded` always sees `pendingReattach` set, identical to
+     * before; only the teardown-job *launch* moved to the driver, with identical
+     * `viewModelScope`/`NonCancellable` timing.
      */
     private fun detachForBackground() {
         val target = activeTarget ?: connectingTarget
@@ -1883,11 +1921,30 @@ public class TmuxSessionViewModel @Inject constructor(
             "clientHash" to clientRef?.let { System.identityHashCode(it) },
             "hasPendingReattach" to true,
         )
-        if (backgroundDetachJob?.isActive == true) return
-        val preserveConnectingTarget = connectingTarget?.takeIf { connecting ->
+        // Capture `preserveConnectingTarget` SYNCHRONOUSLY now (same instant the old
+        // inline launch read it) so the driver-fired teardown uses the value from the
+        // background turn, not a re-derivation after a possible rapid foreground.
+        pendingBackgroundDetachPreserveTarget = connectingTarget?.takeIf { connecting ->
             !sameSessionIdentity(connecting, target) &&
                 intent?.target?.let { sameSessionIdentity(it, connecting) } == true
         }
+    }
+
+    /**
+     * EPIC #687 slice 1c-iv-b-B1 (#738): launch the clean background-detach teardown.
+     * Fired by the [ConnectionEffectDriver] when the controller transitions INTO
+     * [ConnectionState.Backgrounded] — the SOLE trigger now the inline
+     * `backgroundDetachJob` launch (formerly the tail of [detachForBackground]) is
+     * deleted. The teardown body is UNCHANGED from the inline one: the same
+     * `viewModelScope.launch { withContext(NonCancellable) { closeCurrentConnectionAndJoin(...) } }`,
+     * the same single-flight guard (`backgroundDetachJob?.isActive`), the same
+     * `invokeOnCompletion` clear, the same `preserveConnectingTarget` — now read from
+     * [pendingBackgroundDetachPreserveTarget] (stashed at background time). So the
+     * teardown timing/behavior is byte-identical; only the trigger moved.
+     */
+    private fun launchBackgroundDetachTeardown() {
+        if (backgroundDetachJob?.isActive == true) return
+        val preserveConnectingTarget = pendingBackgroundDetachPreserveTarget
         val detachJob = viewModelScope.launch {
             // NonCancellable so a fresh lifecycle transition (e.g.
             // rapid foreground/background) cannot interrupt the detach

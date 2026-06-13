@@ -17,25 +17,45 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * EPIC #687 Phase-2, slice 1c-iv-b-A — the INERT, OBSERVE-ONLY effect driver.
+ * EPIC #687 Phase-2, slice 1c-iv-b — the effect driver.
  *
- * This is the de-risking seam for the effect-driver hard-cut. It owns a
+ * Slice 1c-iv-b-A landed this as the INERT, OBSERVE-ONLY seam: it owns a
  * [CoroutineScope] and, through the already-built+unit-tested
  * [ConnectionPortAdapters] ([TmuxPort.disconnected] / [TransportPort.transportEvents])
  * plus the pure [ConnectionController]'s [ConnectionController.state] flow, it
- * COLLECTS every transition and signal the eventual effect bodies will fire off.
+ * COLLECTS every transition and signal the effect bodies fire off.
  *
- * ## Inert contract (HARD RULE for this slice)
- * The driver calls **ZERO port IO**. It never invokes [TransportPort.ensureLease],
- * [TransportPort.evictStale], [TmuxPort.attach], [TmuxPort.selectWindow],
- * [TmuxPort.seedActivePane], or [TmuxPort.detachCleanly]. It does not submit any
- * [com.pocketshell.core.connection.ConnectionEvent] back into the controller. It
- * only READS the three flows and LOGS what it sees. The inline VM machinery
- * remains the sole driver of all connection behavior — this driver changes no
- * user-visible behavior. It exists ONLY to prove the driver SEES the right
- * transition sequence (enter / switch / background / foreground / transport-drop)
- * through the real adapters BEFORE a later sub-slice (1c-iv-b-B onward) lets it
- * ACT and the inline machinery is deleted.
+ * Slice 1c-iv-b-B1 (#738) takes the FIRST effect off observe-only: the driver now
+ * OWNS the clean background detach. When the controller's [ConnectionController.state]
+ * transitions INTO [ConnectionState.Backgrounded], the driver fires
+ * [backgroundedEffect] — the VM supplies the body that runs the EXISTING full
+ * teardown ([com.pocketshell.app.tmux.TmuxSessionViewModel] `closeCurrentConnectionAndJoin`
+ * under `NonCancellable`). The inline `backgroundDetachJob` *trigger* is deleted
+ * (D22 hard-cut — no fallback); the driver is the sole detach trigger.
+ *
+ * ## What is STILL observe-only (this slice)
+ * Every OTHER effect remains inline. The driver calls **ZERO port IO** — it never
+ * invokes [TransportPort.ensureLease], [TransportPort.evictStale], [TmuxPort.attach],
+ * [TmuxPort.selectWindow], [TmuxPort.seedActivePane], or [TmuxPort.detachCleanly],
+ * and it does not submit any [com.pocketshell.core.connection.ConnectionEvent] back
+ * into the controller. The OPEN path (`runConnect`/`connectJob`) and the cold/warm
+ * projection read stay inline (deferred to a later slice). The detach effect is
+ * routed through the VM-supplied [backgroundedEffect] callback — which calls the
+ * VM's own full teardown — so no behavior moves into the driver itself; only the
+ * *trigger* moves.
+ *
+ * ## Backgrounded-effect timing (the bg→fg-within-grace invariant)
+ * The state collector fires [backgroundedEffect] SYNCHRONOUSLY in the same collector
+ * resumption that observes the [ConnectionState.Backgrounded] transition. In
+ * production the controller reaches Backgrounded from the VM's synchronous
+ * `observeBackground()` (inside `onAppBackgrounded()` on the Main thread); the
+ * collector resumption — and thus the detach trigger — runs on the next Main loop
+ * turn, exactly like the inline `viewModelScope.launch` the detach job used. The VM
+ * keeps the `pendingReattach` bookkeeping SYNCHRONOUS in `onAppBackgrounded()` so the
+ * within-grace foreground reattach reads it identically; only the teardown-job launch
+ * is driver-triggered. `ProcessLifecycleOwner` always posts `ON_STOP`/`ON_START` on
+ * separate Main turns, so the collector resumes between background and foreground —
+ * preserving the rapid-bg→fg join behavior.
  *
  * ## Why an injectable [sink]
  * Production logs go to logcat under [TAG]. Tests inject a recording sink so the
@@ -51,6 +71,10 @@ import kotlinx.coroutines.launch
  *   [TransportPort.transportEvents] flow is collected; no IO method is ever called.
  * @param scope the scope the three collectors run in (the VM supplies its
  *   `viewModelScope`; tests supply a `TestScope`'s scope).
+ * @param backgroundedEffect fired SYNCHRONOUSLY when the controller transitions INTO
+ *   [ConnectionState.Backgrounded]. The VM supplies the clean-detach body (its full
+ *   `closeCurrentConnectionAndJoin` teardown). Defaults to a no-op so the
+ *   observe-only test harness keeps its inert contract.
  * @param sink where every observed transition is recorded. Defaults to logcat.
  */
 class ConnectionEffectDriver(
@@ -58,6 +82,7 @@ class ConnectionEffectDriver(
     private val tmuxPort: TmuxPort,
     private val transportPort: TransportPort,
     private val scope: CoroutineScope,
+    private val backgroundedEffect: () -> Unit = {},
     private val sink: (String) -> Unit = { line -> Log.i(TAG, line) },
 ) {
     private val jobs = mutableListOf<Job>()
@@ -104,6 +129,13 @@ class ConnectionEffectDriver(
             // unchanged StateFlow value.
             if (previous != null && current == previous) return@collect
             record(Observation.StateTransition(from = previous, to = current))
+            // Slice 1c-iv-b-B1 (#738): the driver OWNS the clean background detach.
+            // On a transition INTO Backgrounded (from a non-Backgrounded state),
+            // fire the VM-supplied teardown effect SYNCHRONOUSLY in this collector
+            // resumption — the sole detach trigger now the inline one is deleted.
+            if (current is ConnectionState.Backgrounded && previous !is ConnectionState.Backgrounded) {
+                backgroundedEffect()
+            }
             previous = current
         }
     }

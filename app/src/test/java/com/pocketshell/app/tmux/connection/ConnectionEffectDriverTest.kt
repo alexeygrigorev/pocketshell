@@ -12,6 +12,7 @@ import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
 import com.pocketshell.core.connection.TransportUpDown
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
@@ -20,7 +21,6 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
-import com.pocketshell.core.ssh.ExecResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -202,6 +202,79 @@ class ConnectionEffectDriverTest {
             listOf("Idle", "Connecting", "Attaching", "Live", "Backgrounded", "Reconnecting(1)"),
             h.stateNames(),
         )
+        scope.cancel()
+    }
+
+    // --- slice 1c-iv-b-B1 (#738): the driver OWNS the clean background detach ------
+    //
+    // The driver fires the VM-supplied `backgroundedEffect` SYNCHRONOUSLY on the
+    // controller's transition INTO Backgrounded — the SOLE detach trigger now the
+    // inline `backgroundDetachJob` launch is deleted. These pin that the driver is
+    // the trigger, fires exactly once per background entry, and never on any other
+    // transition.
+
+    @Test
+    fun firesBackgroundedEffectExactlyOnBackgroundedEntry() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val clock = TestClock()
+        var detachTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = clock, transport = transportPort)
+        val recorded = mutableListOf<String>()
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            backgroundedEffect = { detachTriggers += 1 },
+            sink = { recorded += it },
+        ).also { it.start() }
+
+        // Drive to Live — NO detach trigger yet (no Backgrounded entry).
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals("no detach before background", 0, detachTriggers)
+
+        // Background: the driver fires the teardown effect exactly once.
+        controller.submit(ConnectionEvent.Background)
+        assertEquals("driver triggers the clean detach on Backgrounded entry", 1, detachTriggers)
+
+        // Foreground within grace then re-background: a SECOND background entry fires
+        // the effect again (once per entry), never on the Reattaching/Live in between.
+        clock.now = 1_000L
+        controller.submit(ConnectionEvent.Foreground) // -> Reattaching
+        controller.submit(ConnectionEvent.TransportLive) // -> Live
+        assertEquals("no extra trigger across fg/reattach/live", 1, detachTriggers)
+        controller.submit(ConnectionEvent.Background)
+        assertEquals("a fresh background entry re-fires the detach trigger", 2, detachTriggers)
+
+        scope.cancel()
+    }
+
+    @Test
+    fun doesNotFireBackgroundedEffectOnNonBackgroundTransitions() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        var detachTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            backgroundedEffect = { detachTriggers += 1 },
+        ).also { it.start() }
+
+        // A full open/switch/drop lifecycle WITHOUT a Background never triggers detach.
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.Switch(sessionB))
+        controller.submit(ConnectionEvent.SeedLanded(sessionB, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.TransportDropped("drop")) // -> Reattaching
+
+        assertEquals("detach trigger only on Backgrounded entry", 0, detachTriggers)
         scope.cancel()
     }
 

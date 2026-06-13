@@ -151,52 +151,9 @@ internal fun leaseStateToTransportEdge(event: SshLeaseStateEvent): TransportUpDo
 }
 
 /**
- * [TmuxPort] over a single [TmuxClient]. The controller decides WHICH
- * target/pane to attach/select/seed/detach; this adapter performs the
- * control-mode IO under the client's existing single-flight serialization.
- *
- * @param client the active control-mode client.
- * @param activePaneIdFor resolves a [SessionId] to the active pane id to capture
- *   (the VM owns the session→pane mapping).
- * @param scrollbackLines capture depth for the seed (matches the VM's reseed).
- */
-class TmuxClientPort(
-    private val client: TmuxClient,
-    private val activePaneIdFor: (SessionId) -> String,
-    private val scrollbackLines: Int,
-) : TmuxPort {
-
-    override suspend fun attach(targetId: SessionId) {
-        // The control channel is `-CC attach-session`; connect() is idempotent.
-        client.connect()
-    }
-
-    override suspend fun selectWindow(targetId: SessionId) {
-        // Fast-switch primitive on an already-attached control channel — no
-        // second `-CC`, no re-handshake. select-window keys on the tmux target.
-        client.sendCommand("select-window -t ${targetId.value}")
-    }
-
-    override suspend fun seedActivePane(targetId: SessionId): Seed {
-        val paneId = activePaneIdFor(targetId)
-        val capture = client.captureWithCursor(paneId = paneId, scrollbackLines = scrollbackLines)
-        val frame = capture.capture.output.joinToString("\n")
-        return Seed(targetId = targetId, paneId = paneId, frame = frame)
-    }
-
-    override suspend fun detachCleanly() {
-        // Clean background detach of the control channel; the lease stays warm.
-        client.detachCleanly()
-    }
-
-    override val disconnected: Flow<Boolean> = client.disconnected
-}
-
-/**
  * EPIC #687 Phase-2, slice 1c-iv-b-A2 (#739) — a [TmuxPort] over the VM's CURRENT
  * control-mode client, which is swapped on every attach/reconnect/switch
- * (`TmuxSessionViewModel.clientRef`). A single [TmuxClientPort] binds ONE
- * [TmuxClient]; this adapter instead tracks the live client through a
+ * (`TmuxSessionViewModel.clientRef`). It tracks the live client through a
  * [setClient]-updated [MutableStateFlow], so its [disconnected] oracle always
  * reflects whichever client is currently attached — the REAL transport-drop signal
  * the [ConnectionEffectDriver] observes, not a stub `emptyFlow`.

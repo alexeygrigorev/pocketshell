@@ -29,7 +29,9 @@ import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_SESSION_LABEL_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_BREADCRUMB_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_PROJECT_SWITCHER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -338,6 +340,247 @@ class MultiSessionSwitchJourneyE2eTest {
     }
 
     /**
+     * Issue #686 (D28, reveal/session-identity slice 1) — the SINGLE-IDENTITY
+     * invariant. The header must be keyed to ONE target session id and never
+     * show a STALE/DUPLICATED identity during a switch (the v0.3.34 dogfood
+     * report: switching BACK to the picker then opening another session painted
+     * a header with TWO/THREE identities at once — `pocketshell ▾` +
+     * `git-ai-shipping-labs` + a faint stray `git-3d-models` — over a blank
+     * pane).
+     *
+     * The root cause is that the header is composed from two independently-timed
+     * sources that are NOT keyed to one target id:
+     *   - the SESSION LABEL ([TMUX_CONSOLIDATED_SESSION_LABEL_TAG]) reads the
+     *     nav-route TARGET `sessionName` and is correct immediately, and
+     *   - the PROJECT CRUMB ([TMUX_PROJECT_SWITCHER_TAG]) reads the currently-
+     *     visible (LEAVING) pane's cwd, so during a switch it still wears the
+     *     leaving session's project folder.
+     * They DESYNC mid-switch and the header paints two identities at once.
+     *
+     * This test reproduces the EXACT screenshot by seeding the three sessions in
+     * THREE DISTINCT project directories (so each carries a DISTINCT project
+     * crumb), then switching BACK->picker->open-B (the worst case, which runs no
+     * teardown) and asserting that across the whole header — crumb AND label —
+     * the LEAVING session's project identity is NEVER visible once the switch
+     * has landed: exactly ONE identity is shown, the target's.
+     *
+     * Fail-first contract (D28 rule 3): on base `main` the leaving crumb is NOT
+     * suppressed during the switch window, so the header transiently/at-rest
+     * wears the leaving project label -> RED. After the slice-1 fix (the crumb is
+     * keyed to the same target window as the label) -> GREEN.
+     *
+     * Regular-CI gate: plain Docker `agents` fixture on host port 2222, no
+     * toxiproxy, no [assumeFalse(isRunningOnCi())].
+     */
+    @Test
+    fun backToPickerThenOpenShowsSingleTargetIdentityNeverStaleProjectCrumb() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        // Seed the three sessions in DISTINCT project directories so each header
+        // crumb is a DISTINCT, unambiguous project leaf (proj-a / proj-b /
+        // proj-c). With distinct crumbs a stale-crumb desync is directly visible.
+        seedTmuxSessionsInDistinctProjects(key)
+        val hostRowTag = seedDockerHost(key, "Issue686 Single Identity")
+        forceFlatHostDetailViewMode()
+        clearLogcat()
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady(hostRowTag)
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalContains(SESSION_A_MARKER, "issue686 initial attach to A")
+        // The crumb only resolves once the pane's cwd is known; wait for A's
+        // crumb so the baseline is the steady single-identity header.
+        waitForHeaderProjectCrumb(PROJECT_A_LABEL, "issue686 baseline A crumb")
+        captureViewport("issue686-00-attached-$SESSION_A")
+        expectedMarker[SESSION_A] = SESSION_A_MARKER
+        expectedMarker[SESSION_B] = SESSION_B_MARKER
+        expectedMarker[SESSION_C] = SESSION_C_MARKER
+
+        // BACK -> picker -> open B (the v0.3.34 worst case). Assert the SINGLE
+        // target identity: the header shows B's project crumb + session label,
+        // and NEVER A's project identity.
+        assertSingleTargetIdentityAfterBackOpen(
+            step = 1,
+            fromSession = SESSION_A,
+            fromProjectLabel = PROJECT_A_LABEL,
+            toSession = SESSION_B,
+            toProjectLabel = PROJECT_B_LABEL,
+        )
+        // And once more, B -> C, to prove it holds across a second back->open.
+        assertSingleTargetIdentityAfterBackOpen(
+            step = 2,
+            fromSession = SESSION_B,
+            fromProjectLabel = PROJECT_B_LABEL,
+            toSession = SESSION_C,
+            toProjectLabel = PROJECT_C_LABEL,
+        )
+
+        writeSummary(
+            lines = listOf(
+                "scenario=back->picker->open single-target-identity (#686)",
+                "projects=$PROJECT_A_LABEL,$PROJECT_B_LABEL,$PROJECT_C_LABEL",
+                "expectation=after each back->open the header shows ONLY the target's " +
+                    "project crumb + session label, never the leaving session's identity " +
+                    "(no two/duplicated identities at once)",
+            ),
+        )
+        writeTimings()
+        Unit
+    }
+
+    /**
+     * Issue #686 — back->picker->open [toSession], then assert the header is
+     * keyed to the SINGLE target identity:
+     *   - the session label shows [toSession], never [fromSession];
+     *   - the project crumb shows [toProjectLabel] (the target's project),
+     *     never [fromProjectLabel] (the leaving session's project);
+     *   - NO header node anywhere bears the leaving project label — i.e. the
+     *     header never paints two/duplicated identities at once.
+     */
+    private fun assertSingleTargetIdentityAfterBackOpen(
+        step: Int,
+        fromSession: String,
+        fromProjectLabel: String,
+        toSession: String,
+        toProjectLabel: String,
+    ) {
+        val toMarker = requireNotNull(expectedMarker[toSession]) {
+            "no tracked marker for $toSession"
+        }
+        Log.i(LOG_TAG, "issue686 back->open step=$step $fromSession -> $toSession")
+        val switchAt = SystemClock.elapsedRealtime()
+
+        // BACK -> picker -> tap the target row, then POLL the header
+        // CONTINUOUSLY from the moment the switch starts until the target marker
+        // lands. The DESYNC we are catching is the TWO-identities-at-once state:
+        // the session LABEL already shows the TARGET (B) while the project CRUMB
+        // still wears the LEAVING session's project (A). That exact combination
+        // is the v0.3.34 screenshot (`...-session-b` label + `...-proj-a` crumb).
+        // A crumb showing A's project while the label ALSO still shows A is just
+        // A's legitimate steady state in the brief pre-switch window — NOT a
+        // desync — so we only flag a sighting when the label has flipped to the
+        // target but the crumb still bears the leaving project. Sampling during
+        // the loading window (not only at rest) is what makes this fail-first on
+        // base, where the crumb is NOT suppressed.
+        // We RETRY the back->tap (like [switchToSessionViaBackTap]) so a transport
+        // strand (#758 territory, already merged but flaky on a contended box)
+        // does not flake the IDENTITY assertion; on each settle window we sample
+        // the header for the desync. The identity invariant is asserted over
+        // EVERY sample across all retries.
+        val staleCrumbSightings = mutableListOf<String>()
+        val landDeadline = SystemClock.elapsedRealtime() + SWITCH_DEADLINE_MS
+        var landed = false
+        while (!landed && SystemClock.elapsedRealtime() < landDeadline) {
+            clickTmuxBack()
+            waitForSessionInPicker(rule = compose, sessionName = toSession, timeoutMs = pickerWaitMs)
+            compose.onNodeWithText(toSession, useUnmergedTree = true).performClick()
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+            val settleDeadline = SystemClock.elapsedRealtime() + SWITCH_LAND_RETRY_MS
+            while (SystemClock.elapsedRealtime() < settleDeadline) {
+                // Two-identities-at-once detector: the label shows the TARGET
+                // while the project CRUMB still wears the LEAVING project.
+                val label = headerSessionCrumbText() ?: ""
+                val crumb = headerProjectCrumbText() ?: ""
+                if (label.contains(toSession) && crumb.contains(fromProjectLabel)) {
+                    staleCrumbSightings.add("label='$label' crumb='$crumb'")
+                }
+                if (TerminalTextMatcher.containsWrapTolerant(
+                        visibleTerminalText(),
+                        toMarker,
+                        terminalCols = terminalGridSize().columns,
+                    )
+                ) {
+                    landed = true
+                    break
+                }
+                SystemClock.sleep(40)
+            }
+        }
+        recordTiming(
+            "issue686_step${step}_stale_crumb_sightings",
+            staleCrumbSightings.size.toLong(),
+        )
+        captureViewport("issue686-${"%02d".format(step)}-open-$toSession")
+
+        // (A) The transient flash — asserted FIRST, before the marker-landing
+        // wait, so the fail-first RED unambiguously attributes to the screen
+        // IDENTITY-keying regression (#686), not to a transport strand (#758,
+        // already merged). At NO point during the switch may the header wear the
+        // LEAVING session's project label. On base `main` the crumb is NOT
+        // suppressed during the loading window, so this set is non-empty (RED);
+        // with the slice-1 keying the crumb is suppressed while hidden -> empty
+        // (GREEN).
+        assertTrue(
+            "step$step open $toSession: during the switch the header NEVER showed " +
+                "the leaving session's project identity '$fromProjectLabel', but it " +
+                "appeared in these header nodes while loading: $staleCrumbSightings. " +
+                "A stale/duplicated project identity mid-switch is the v0.3.34 #686 " +
+                "regression.",
+            staleCrumbSightings.isEmpty(),
+        )
+
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalContains(toMarker, "issue686 step$step open $toSession")
+        assertTrue("issue686 step$step switch to $toSession never landed", landed)
+        // The target's crumb must resolve (the switch reveal seeds the target's
+        // cwd). This is the post-switch steady state the maintainer sees.
+        waitForHeaderProjectCrumb(toProjectLabel, "issue686 step$step target crumb")
+        recordTiming(
+            "issue686_step${step}_${fromSession}_to_${toSession}_ms",
+            SystemClock.elapsedRealtime() - switchAt,
+        )
+
+        // The session LABEL must show the TARGET, never the leaving name.
+        assertHeaderShowsSession(step, fromSession, toSession)
+
+        // (B) The PROJECT CRUMB must show the TARGET project, never the leaving one.
+        val crumbText = headerProjectCrumbText() ?: ""
+        assertTrue(
+            "step$step open $toSession: the HEADER project crumb " +
+                "('${TMUX_PROJECT_SWITCHER_TAG}') must show the TARGET project " +
+                "'$toProjectLabel', never the LEAVING session's project " +
+                "'$fromProjectLabel'. Crumb text after the switch landed: " +
+                "'$crumbText' — a crumb wearing '$fromProjectLabel' is the #686 " +
+                "stale/duplicated-identity header (the v0.3.34 report).",
+            crumbText.contains(toProjectLabel) && !crumbText.contains(fromProjectLabel),
+        )
+
+        // The WHOLE header must show exactly ONE identity: scan every text node
+        // under the breadcrumb row and assert NONE bears the leaving project
+        // label. (The previous-session toggle chip renders the leaving SESSION
+        // name in the bottom chrome — intended #628/#705 UX — but the leaving
+        // PROJECT FOLDER label has no legitimate place in the header once the
+        // switch has landed, so it is the unambiguous duplicated-identity proof.)
+        val headerTexts = headerBreadcrumbTexts()
+        val staleHeaderNodes = headerTexts.filter { it.contains(fromProjectLabel) }
+        assertTrue(
+            "step$step open $toSession: the header must show a SINGLE target " +
+                "identity — no node in the breadcrumb row may bear the LEAVING " +
+                "session's project label '$fromProjectLabel'. Offending header " +
+                "text nodes: $staleHeaderNodes (all header texts: $headerTexts). " +
+                "Two identities at once in the header is the #686 regression.",
+            staleHeaderNodes.isEmpty(),
+        )
+        Log.i(
+            LOG_TAG,
+            "issue686 single-identity ok step=$step crumb='$crumbText' " +
+                "shows=$toProjectLabel not=$fromProjectLabel headerTexts=$headerTexts",
+        )
+    }
+
+    /**
      * Drive ONE switch [fromSession] -> [toSession] via the in-session drawer
      * pager, then assert all five journey invariants for that switch.
      */
@@ -536,6 +779,70 @@ class MultiSessionSwitchJourneyE2eTest {
     }
 
     /**
+     * Issue #686: read the text carried by the header PROJECT-CRUMB node
+     * ([TMUX_PROJECT_SWITCHER_TAG]). Returns `null` when the crumb is not
+     * currently present — which is exactly the desired suppressed state during a
+     * switch's loading window — so callers can retry for the post-switch value.
+     */
+    private fun headerProjectCrumbText(): String? {
+        val nodes =
+            compose.onAllNodesWithTag(
+                TMUX_PROJECT_SWITCHER_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes()
+        val node = nodes.firstOrNull() ?: return null
+        // The crumb label is a Text CHILD of the tagged Box/Row, so recurse.
+        return collectTexts(node).joinToString(separator = "")
+    }
+
+    /**
+     * Issue #686: every text fragment rendered anywhere under the full
+     * breadcrumb row ([TMUX_FULL_BREADCRUMB_TAG]) — the header chrome. Used to
+     * assert the header shows a SINGLE identity (no node bears the leaving
+     * session's project label).
+     */
+    private fun headerBreadcrumbTexts(): List<String> {
+        val rows =
+            compose.onAllNodesWithTag(
+                TMUX_FULL_BREADCRUMB_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes()
+        return rows.flatMap { collectTexts(it) }
+    }
+
+    private fun collectTexts(
+        node: androidx.compose.ui.semantics.SemanticsNode,
+    ): List<String> {
+        val here = node.config.getOrNull(SemanticsProperties.Text)
+            ?.map { it.text }
+            ?.filter { it.isNotBlank() }
+            ?: emptyList()
+        return here + node.children.flatMap { collectTexts(it) }
+    }
+
+    /**
+     * Issue #686: wait for the header project crumb to read [expected] (the
+     * target project leaf). The crumb resolves only once the active pane's cwd is
+     * known — and is intentionally suppressed during the switch loading window —
+     * so this is the post-switch steady state.
+     */
+    private fun waitForHeaderProjectCrumb(expected: String, label: String) {
+        var last = ""
+        val satisfied = runCatching {
+            compose.waitUntil(timeoutMillis = 15_000) {
+                last = headerProjectCrumbText() ?: ""
+                last.contains(expected)
+            }
+            true
+        }.getOrDefault(false)
+        assertTrue(
+            "expected header project crumb to read '$expected' for $label within 15s; " +
+                "last crumb text='$last'",
+            satisfied,
+        )
+    }
+
+    /**
      * Type a unique marker through the live terminal input connection and
      * confirm it echoes back into the CURRENTLY SHOWN session's terminal —
      * proving input is wired to the session the user sees, not a stale one.
@@ -642,6 +949,66 @@ class MultiSessionSwitchJourneyE2eTest {
         )
         Log.i(LOG_TAG, "seeded sessions: ${exec?.stdout?.trim()}")
     }
+
+    /**
+     * Issue #686: like [seedTmuxSessions] but each session is created with its
+     * own working directory under a DISTINCT project folder, so the header
+     * project crumb is a DISTINCT leaf per session (proj-a / proj-b / proj-c).
+     * This is what makes a stale-crumb desync directly observable: with distinct
+     * crumbs, a header still wearing the leaving session's project label is
+     * unambiguous.
+     */
+    private suspend fun seedTmuxSessionsInDistinctProjects(key: String) {
+        val script = buildString {
+            appendLine("set -eu")
+            listOf(SESSION_A, SESSION_B, SESSION_C).forEach { name ->
+                appendLine("tmux kill-session -t ${shellQuote(name)} 2>/dev/null || true")
+            }
+            appendLine(
+                "tmux list-sessions -F '#{session_name}' 2>/dev/null | " +
+                    "grep -vx ${shellQuote(SESSION_A)} | grep -vx ${shellQuote(SESSION_B)} | " +
+                    "grep -vx ${shellQuote(SESSION_C)} | " +
+                    "while IFS= read -r s; do tmux kill-session -t \"\$s\" 2>/dev/null || true; done",
+            )
+            appendLine("mkdir -p ${shellQuote(PROJECT_DIR_BASE)}")
+            appendLine("mkdir -p ${shellQuote(projectDir(PROJECT_A_LABEL))}")
+            appendLine("mkdir -p ${shellQuote(projectDir(PROJECT_B_LABEL))}")
+            appendLine("mkdir -p ${shellQuote(projectDir(PROJECT_C_LABEL))}")
+            appendLine(
+                "tmux new-session -d -s ${shellQuote(SESSION_A)} " +
+                    "-c ${shellQuote(projectDir(PROJECT_A_LABEL))} " +
+                    shellQuote("printf '$SESSION_A_MARKER\\n'; exec sh"),
+            )
+            appendLine(
+                "tmux new-session -d -s ${shellQuote(SESSION_B)} " +
+                    "-c ${shellQuote(projectDir(PROJECT_B_LABEL))} " +
+                    shellQuote("printf '$SESSION_B_MARKER\\n'; exec sh"),
+            )
+            appendLine(
+                "tmux new-session -d -s ${shellQuote(SESSION_C)} " +
+                    "-c ${shellQuote(projectDir(PROJECT_C_LABEL))} " +
+                    shellQuote("printf '$SESSION_C_MARKER\\n'; exec sh"),
+            )
+            appendLine("tmux list-sessions")
+        }
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session -> session.use { it.exec(script) } }
+        val exec = result.getOrNull()
+        assertTrue(
+            "expected distinct-project tmux session seeding to succeed for #686, got " +
+                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
+        Log.i(LOG_TAG, "seeded distinct-project sessions: ${exec?.stdout?.trim()}")
+    }
+
+    private fun projectDir(label: String): String = "$PROJECT_DIR_BASE/$label"
 
     private suspend fun cleanupSeededSessions(key: String) {
         runCatching {
@@ -1159,6 +1526,15 @@ class MultiSessionSwitchJourneyE2eTest {
         const val SESSION_A_MARKER: String = "AAA-READY-638"
         const val SESSION_B_MARKER: String = "BBB-READY-638"
         const val SESSION_C_MARKER: String = "CCC-READY-638"
+
+        // Issue #686: distinct project directories so each session's header
+        // project crumb is a DISTINCT leaf. The leaf labels are what the
+        // [projectCrumbLabel] crumb renders (last path segment) — chosen to be
+        // unambiguous and unique so a stale-crumb desync is directly visible.
+        const val PROJECT_DIR_BASE: String = "/tmp/issue686-projects"
+        const val PROJECT_A_LABEL: String = "issue686-proj-a"
+        const val PROJECT_B_LABEL: String = "issue686-proj-b"
+        const val PROJECT_C_LABEL: String = "issue686-proj-c"
 
         // How long one back-then-tap is given to land on the target session's
         // marker before the loop retries the Back + named-row tap.

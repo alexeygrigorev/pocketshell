@@ -485,7 +485,36 @@ public fun TmuxSessionScreen(
     // Issue #626: fall back to the unified pane's cwd when the active pane
     // is null (viewing a cached-session pane).
     val projectPath = (currentPane ?: currentUnifiedPane)?.cwd?.takeIf { it.isNotBlank() }
-    val projectLabel = remember(projectPath) { projectPath?.let(::projectCrumbLabel) }
+    // Issue #686 (D28, reveal/session-identity slice 1): the header must be
+    // keyed to ONE target session id and never show a STALE/DUPLICATED identity
+    // during a switch. The project crumb is derived from the currently-visible
+    // (leaving) pane's cwd — a DIFFERENT, separately-timed source than the
+    // session label, which already reads the nav-route TARGET `sessionName`.
+    // During a cross-session switch those two sources DESYNC: the label
+    // correctly flips to the target while the crumb still wears the LEAVING
+    // session's project folder, so the header paints two identities at once (the
+    // v0.3.34 "pocketshell ▾ + git-ai-shipping-labs + stray git-3d-models over a
+    // blank pane" report). [keyedProjectCrumbLabel] keys the crumb to the SAME
+    // target identity the label uses via two guards — suppressed while the switch
+    // hides the terminal AND whenever the visible pane belongs to a non-target
+    // session — so the header shows the SINGLE target identity throughout the
+    // switch, then the crumb returns once the target's own pane is visible. This
+    // unifies both header identity sources behind one target-keyed gate (the
+    // screen-identity-keying half of #686; full RevealStateMachine wiring is a
+    // later slice).
+    val projectLabel = remember(
+        projectPath,
+        switchHidesTerminal,
+        sessionName,
+        currentUnifiedPaneSessionName,
+    ) {
+        keyedProjectCrumbLabel(
+            projectPath = projectPath,
+            switchHidesTerminal = switchHidesTerminal,
+            targetSessionName = sessionName,
+            visiblePaneSessionName = currentUnifiedPaneSessionName,
+        )
+    }
     val haptics = LocalHapticFeedback.current
     val verticalSwipeThresholdPx = with(LocalDensity.current) { VerticalSwipeThreshold.toPx() }
     var moreExpanded by remember { mutableStateOf(false) }
@@ -2765,6 +2794,60 @@ internal fun projectCrumbLabel(path: String): String {
     if (trimmed == "~") return "~"
     val leaf = trimmed.substringAfterLast('/')
     return leaf.ifBlank { trimmed }
+}
+
+/**
+ * Issue #686 (D28, reveal/session-identity slice 1): compute the header project
+ * crumb label keyed to the SINGLE target session identity.
+ *
+ * The header is composed from two independently-timed sources: the session
+ * label reads the nav-route TARGET `sessionName` (correct immediately), while
+ * the project crumb is derived from the currently-visible pane's cwd. During a
+ * cross-session switch (especially back->picker->open-B, which runs no teardown)
+ * the VISIBLE pane is still the LEAVING session's for several frames, so its cwd
+ * resolves to the LEAVING project. The two sources then DESYNC — the label
+ * already shows the target while the crumb still wears the leaving session's
+ * project folder, so the header paints TWO identities at once (the v0.3.34
+ * dogfood report: `...-session-b` label + `...-proj-a` crumb over a blank pane).
+ *
+ * The fix keys the crumb to the SAME target session identity the label uses, via
+ * TWO guards (a single boolean gate is not enough — back->open-B has sub-windows
+ * where the gate is briefly false while the visible pane is still the leaving
+ * one):
+ *   1. while a switch is hiding the terminal ([switchHidesTerminal]) the crumb is
+ *      suppressed (loading window), AND
+ *   2. the crumb is suppressed whenever the VISIBLE pane's session
+ *      ([visiblePaneSessionName]) does NOT match the nav-route TARGET
+ *      ([targetSessionName]) — i.e. the crumb only renders when its cwd belongs
+ *      to the session the header is keyed to.
+ * Once the target's own pane is visible the crumb returns, keyed to the target.
+ *
+ * Pure so it can be unit-tested deterministically (the desync is a transient
+ * mid-switch flash that is hard to sample reliably on an emulator).
+ *
+ * @param projectPath the visible pane's working directory (null when unknown).
+ * @param switchHidesTerminal true while a cross-session switch is loading.
+ * @param targetSessionName the nav-route TARGET session the header is keyed to.
+ * @param visiblePaneSessionName the session the currently-visible pane belongs
+ *   to (null when unknown). When it differs from [targetSessionName] the crumb
+ *   would wear a NON-target session's project, so it is suppressed.
+ * @return the crumb leaf label, or null when there should be NO crumb.
+ */
+internal fun keyedProjectCrumbLabel(
+    projectPath: String?,
+    switchHidesTerminal: Boolean,
+    targetSessionName: String,
+    visiblePaneSessionName: String?,
+): String? {
+    if (switchHidesTerminal) return null
+    // Only show the crumb when the visible pane belongs to the target session.
+    // A null visible-pane session (unknown) is allowed through so the steady
+    // state still renders the crumb (the active pane is the target's), but a
+    // KNOWN mismatch (the leaving session's pane is still shown) is suppressed.
+    if (visiblePaneSessionName != null && visiblePaneSessionName != targetSessionName) {
+        return null
+    }
+    return projectPath?.let(::projectCrumbLabel)
 }
 
 internal fun sessionSwitcherPages(

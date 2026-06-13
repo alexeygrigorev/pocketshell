@@ -327,6 +327,108 @@ class TmuxSessionScreenTest {
         assertEquals("/", projectCrumbLabel("   "))
     }
 
+    /**
+     * Issue #686 (D28, reveal/session-identity slice 1) — the header project
+     * crumb must be keyed to the SINGLE target session identity. While a
+     * cross-session switch is loading (switchHidesTerminal == true) the crumb is
+     * derived from the LEAVING pane's cwd; if it is NOT suppressed it desyncs
+     * from the session label (which already shows the target name) and the
+     * header paints two identities at once — the v0.3.34 dogfood report.
+     *
+     * Fail-first: before the fix, [keyedProjectCrumbLabel] returned the leaving
+     * project label during the switch window; the suppression-while-hidden
+     * assertion below is RED. After the fix it returns null while hidden -> GREEN.
+     */
+    @Test
+    fun keyedProjectCrumbSuppressedWhileSwitchHidesTerminal() {
+        // During a switch the visible pane is still the LEAVING session's, so its
+        // cwd resolves to the leaving project. The crumb MUST be suppressed so
+        // the header shows the single target identity (the session label), not a
+        // second, stale project identity.
+        assertNull(
+            "the header project crumb must be suppressed while a switch is hiding " +
+                "the terminal — otherwise it wears the LEAVING session's project " +
+                "label and the header shows two identities at once (#686)",
+            keyedProjectCrumbLabel(
+                projectPath = "/home/alexey/git/git-3d-models",
+                switchHidesTerminal = true,
+                targetSessionName = "session-b",
+                visiblePaneSessionName = "session-a",
+            ),
+        )
+        // Belt-and-braces: even a non-blank leaving path is suppressed.
+        assertNull(
+            keyedProjectCrumbLabel(
+                projectPath = "/home/alexey/git/git-ai-shipping-labs",
+                switchHidesTerminal = true,
+                targetSessionName = "session-b",
+                visiblePaneSessionName = "session-a",
+            ),
+        )
+    }
+
+    /**
+     * Issue #686 — the second keying guard (independent of [switchHidesTerminal]):
+     * the back->open-B path has sub-windows where the switch gate is briefly
+     * false while the VISIBLE pane is still the LEAVING session's. In that state
+     * the crumb would wear the leaving session's project while the label already
+     * shows the target — two identities at once. Keying on the visible-pane
+     * session vs the target session suppresses it.
+     */
+    @Test
+    fun keyedProjectCrumbSuppressedWhenVisiblePaneIsNotTargetSession() {
+        assertNull(
+            "the crumb must be suppressed when the visible pane belongs to a " +
+                "NON-target session — otherwise it wears that session's project " +
+                "while the label shows the target (the #686 desync), even with the " +
+                "switch gate already cleared",
+            keyedProjectCrumbLabel(
+                projectPath = "/home/alexey/git/git-3d-models",
+                switchHidesTerminal = false,
+                targetSessionName = "session-b",
+                visiblePaneSessionName = "session-a",
+            ),
+        )
+    }
+
+    /**
+     * Issue #686 — once the switch settles the visible pane IS the target's and
+     * the crumb returns, keyed to the target pane's cwd. This proves the fix does
+     * not permanently hide the crumb (no functional regression of the #463
+     * project switcher) — it only suppresses the stale leaving crumb.
+     */
+    @Test
+    fun keyedProjectCrumbShowsTargetLeafWhenVisiblePaneIsTarget() {
+        assertEquals(
+            "git-ai-shipping-labs",
+            keyedProjectCrumbLabel(
+                projectPath = "/home/alexey/git/git-ai-shipping-labs",
+                switchHidesTerminal = false,
+                targetSessionName = "session-b",
+                visiblePaneSessionName = "session-b",
+            ),
+        )
+        // A null visible-pane session (unknown — steady state) renders the crumb.
+        assertEquals(
+            "git-ai-shipping-labs",
+            keyedProjectCrumbLabel(
+                projectPath = "/home/alexey/git/git-ai-shipping-labs",
+                switchHidesTerminal = false,
+                targetSessionName = "session-b",
+                visiblePaneSessionName = null,
+            ),
+        )
+        // No crumb when the project path is unknown (cwd not yet known).
+        assertNull(
+            keyedProjectCrumbLabel(
+                projectPath = null,
+                switchHidesTerminal = false,
+                targetSessionName = "session-b",
+                visiblePaneSessionName = "session-b",
+            ),
+        )
+    }
+
     @Test
     fun tmuxSessionTabStateShowsOnlyTerminalForNonAgentPane() {
         val state = tmuxSessionTabState(null)

@@ -34,8 +34,8 @@ import java.io.FileOutputStream
  *    reflows nothing.
  *  - It asserts the rendered row order is exactly the (stable) order it was
  *    given, in both the OFF and ON states — the screen renders in the order the
- *    ViewModel supplies, and [FolderListViewModel.stabiliseSessionOrder] freezes
- *    that order across a refresh (covered by the JVM unit tests).
+ *    ViewModel supplies, which the maintained [HostTreeModel] keeps in stable
+ *    slots across a refresh (covered by the JVM unit tests).
  *
  * Before/after PNGs are written for the status comment.
  */

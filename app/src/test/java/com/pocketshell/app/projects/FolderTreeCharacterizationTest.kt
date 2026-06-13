@@ -245,6 +245,93 @@ class FolderTreeCharacterizationTest {
         assertTrue("the left root is now empty of sessions", gitRoot.folders.isEmpty())
     }
 
+    // --- Production rank-free order (the only path HostTreeModel feeds, #733) --
+
+    /**
+     * #733 deletion gate. Production projects the tree via [HostTreeModel.project],
+     * which NEVER passes a `sessionOrderRank` — order is intrinsic to the already-
+     * stable maintained session list. This pins the within-folder session order
+     * AND the folder order produced by the rank-free production path so deleting
+     * the dead `sessionOrderRank` / `stabiliseSessionOrder` plumbing is provably
+     * behavior-preserving: agents float ahead of shells, recency breaks ties,
+     * then session name; folders order by most-recent activity, then label.
+     */
+    @Test
+    fun rankFreeProductionPathPinsWithinFolderAndFolderOrder() {
+        val sessions = listOf(
+            session("old-shell", agentKind = SessionAgentKind.Shell, lastActivity = 500L),
+            session("new-shell", agentKind = SessionAgentKind.Shell, lastActivity = 4_000L),
+            session("newer-claude", agentKind = SessionAgentKind.Claude, lastActivity = 3_000L),
+            session("older-codex", agentKind = SessionAgentKind.Codex, lastActivity = 1_000L),
+            session("solo", agentKind = SessionAgentKind.Shell, lastActivity = 2_000L),
+        )
+        val tree = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = mapOf(
+                "old-shell" to "/home/alexey/git/alpha",
+                "new-shell" to "/home/alexey/git/alpha",
+                "newer-claude" to "/home/alexey/git/alpha",
+                "older-codex" to "/home/alexey/git/alpha",
+                "solo" to "/home/alexey/git/beta",
+            ),
+            watchedFolders = listOf(root("/home/alexey/git", "git")),
+            scannedProjectFoldersByRoot = emptyMap(),
+            resolvedWatchedRootPaths = mapOf("/home/alexey/git" to "/home/alexey/git"),
+        )
+        val gitRoot = tree.single { it.path == "/home/alexey/git" }
+        // Folder order: alpha leads (its newest session 4_000 > beta's 2_000).
+        assertEquals(
+            listOf("/home/alexey/git/alpha", "/home/alexey/git/beta"),
+            gitRoot.folders.map { it.path },
+        )
+        // Within alpha: agents first (claude then codex by recency), then shells
+        // by recency (new-shell > old-shell).
+        assertEquals(
+            listOf("newer-claude", "older-codex", "new-shell", "old-shell"),
+            gitRoot.folders.first { it.path == "/home/alexey/git/alpha" }
+                .sessions.map { it.sessionName },
+        )
+    }
+
+    /** #733: the same rank-free order is stable across a routine same-set refresh. */
+    @Test
+    fun rankFreeOrderIsStableAcrossSameSetRefresh() {
+        val paths = mapOf(
+            "claude-a" to "/home/alexey/git/proj",
+            "shell-b" to "/home/alexey/git/proj",
+            "shell-c" to "/home/alexey/git/proj",
+        )
+        val watched = listOf(root("/home/alexey/git", "git"))
+        val resolved = mapOf("/home/alexey/git" to "/home/alexey/git")
+        val first = FolderListViewModel.buildFolderTree(
+            sessions = listOf(
+                session("claude-a", agentKind = SessionAgentKind.Claude, lastActivity = 1_000L),
+                session("shell-b", agentKind = SessionAgentKind.Shell, lastActivity = 900L),
+                session("shell-c", agentKind = SessionAgentKind.Shell, lastActivity = 800L),
+            ),
+            sessionFolderPaths = paths,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+            resolvedWatchedRootPaths = resolved,
+        )
+        // HostTreeModel keeps sessions in their stable slots, so a refresh feeds
+        // the SAME intrinsic order — pass it back in to mirror that contract.
+        val refreshed = FolderListViewModel.buildFolderTree(
+            sessions = listOf(
+                session("claude-a", agentKind = SessionAgentKind.Claude, lastActivity = 1_000L),
+                session("shell-b", agentKind = SessionAgentKind.Shell, lastActivity = 900L),
+                session("shell-c", agentKind = SessionAgentKind.Shell, lastActivity = 800L),
+            ),
+            sessionFolderPaths = paths,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+            resolvedWatchedRootPaths = resolved,
+        )
+        val order = listOf("claude-a", "shell-b", "shell-c")
+        assertEquals(order, first.single().folders.single().sessions.map { it.sessionName })
+        assertEquals(order, refreshed.single().folders.single().sessions.map { it.sessionName })
+    }
+
     // --- Multi-window declutter inputs (#675) ----------------------------
 
     @Test

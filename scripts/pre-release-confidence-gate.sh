@@ -41,12 +41,43 @@ CORE_TERMINAL_CONNECTED_ATTEMPTS="${CORE_TERMINAL_CONNECTED_ATTEMPTS:-2}"
 PRE_RELEASE_MANAGE_EMULATOR="${PRE_RELEASE_MANAGE_EMULATOR:-0}"
 PRE_RELEASE_EMULATOR_START_ARGS="${PRE_RELEASE_EMULATOR_START_ARGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save}"
 
+# Issue #749: the previous list referenced three test classes that were
+# DELETED in 006c9dd1 (the #684 dead raw-SSH SessionScreen harvest) —
+# `PromptComposerSmokeTest`, `SnippetTerminalE2eTest`, and
+# `InlineDictationUiTest`. The gate aborted at the first deleted selector with
+# `ClassNotFoundException` and never reached the substantive
+# `EmulatorDockerSshSmokeTest` proof. Each deleted walkthrough is remapped to
+# its CURRENT equivalent (behaviors moved during the composer rework):
+#   recordingAndTranscribingStatesAreVisible
+#     -> composer.PromptComposerVisualScreenshotTest#capturesAllFourComposerStates
+#        (asserts the recording waveform/timer + transcribing-spinner states and
+#         produces the walkthrough composer screenshots 05b/06/07/08)
+#   typedDraftSendEnterReachesDockerShell
+#     -> composer.PromptComposerSendDismissE2eTest#successfulSendDismissesComposerEveryTime
+#        (drives the real PromptComposerViewModel: type -> Send + ↵ -> dispatch;
+#         terminal arrival itself is covered by the EmulatorDockerSshSmokeTest
+#         walkthrough journey below)
+#   SnippetTerminalE2eTest#tappingCommandSnippetSendsInputToDockerShell
+#     -> snippets.SnippetPickerSendButtonsTest#tappingSendWithEnterChip_dispatchesSendWithEnter
+#        (the dispatch contract: chip tap -> onSnippetSend(snippet, withEnter=true))
+#        plus snippets.SnippetPickerTmuxZOrderDockerTest#snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen
+#        (the on-device tmux-screen docker proof of the picker over a real session)
+#   InlineDictationUiTest#recordingStateShowsAmplitudeWaveformOnInlineMicSlot
+#     -> composer.PromptComposerCancelRecordingTest#discardIsHiddenInIdleAndVisibleInRecording
+#        (the recording-state surface: timer, live transcript, discard)
+#   InlineDictationUiTest#transcribingStateShowsSpinnerAndBlocksDuplicateTap
+#     -> composer.PromptComposerSendWhileRecordingTest#sendWhileTranscribingFiresOnlyAfterWhisperSuccess
+#        (the transcribing-state surface: queued send fires once, only after Whisper)
+# The selector-existence guard below (assert_app_walkthrough_selectors_exist)
+# hard-fails fast if any entry stops resolving so a future deletion can't
+# silently re-break this gate.
 APP_WALKTHROUGH_TESTS=(
-  "com.pocketshell.app.composer.PromptComposerSmokeTest#recordingAndTranscribingStatesAreVisible"
-  "com.pocketshell.app.composer.PromptComposerSmokeTest#typedDraftSendEnterReachesDockerShell"
-  "com.pocketshell.app.snippets.SnippetTerminalE2eTest#tappingCommandSnippetSendsInputToDockerShell"
-  "com.pocketshell.app.session.InlineDictationUiTest#recordingStateShowsAmplitudeWaveformOnInlineMicSlot"
-  "com.pocketshell.app.session.InlineDictationUiTest#transcribingStateShowsSpinnerAndBlocksDuplicateTap"
+  "com.pocketshell.app.composer.PromptComposerVisualScreenshotTest#capturesAllFourComposerStates"
+  "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest#successfulSendDismissesComposerEveryTime"
+  "com.pocketshell.app.snippets.SnippetPickerSendButtonsTest#tappingSendWithEnterChip_dispatchesSendWithEnter"
+  "com.pocketshell.app.snippets.SnippetPickerTmuxZOrderDockerTest#snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen"
+  "com.pocketshell.app.composer.PromptComposerCancelRecordingTest#discardIsHiddenInIdleAndVisibleInRecording"
+  "com.pocketshell.app.composer.PromptComposerSendWhileRecordingTest#sendWhileTranscribingFiresOnlyAfterWhisperSuccess"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
 )
@@ -564,6 +595,51 @@ require_command_or_executable() {
   elif ! command -v "$command_or_path" >/dev/null 2>&1; then
     fail "$label is not available on PATH as $command_or_path"
   fi
+}
+
+# Issue #749: selector-existence guard. Before doing any expensive work
+# (compile, emulator boot, APK install) verify that EVERY entry in
+# APP_WALKTHROUGH_TESTS resolves to a `fun <method>` in the matching
+# androidTest source file. A future deletion/rename of a referenced test must
+# fail this gate immediately with a clear, actionable message instead of
+# aborting deep into the run with a `ClassNotFoundException` on the device (the
+# #749 failure mode). Resolves against the androidTest source tree under the
+# current ROOT_DIR, which works both in the source workspace and in the
+# rsynced isolated worktree copy (app/src is preserved by the rsync).
+assert_app_walkthrough_selectors_exist() {
+  local androidtest_root="$ROOT_DIR/app/src/androidTest/java"
+  local missing=()
+  local selector class method relative_path
+  for selector in "${APP_WALKTHROUGH_TESTS[@]}"; do
+    if [[ "$selector" != *"#"* ]]; then
+      missing+=("$selector (not in 'class#method' form)")
+      continue
+    fi
+    class="${selector%%#*}"
+    method="${selector##*#}"
+    relative_path="$androidtest_root/${class//.//}.kt"
+    if [[ ! -f "$relative_path" ]]; then
+      missing+=("$selector (referenced test class not found: $relative_path)")
+      continue
+    fi
+    if ! grep -Eq "fun[[:space:]]+${method}[[:space:]]*\(" "$relative_path"; then
+      missing+=("$selector (referenced test method not found in $relative_path)")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    printf 'Selector existence guard failed for APP_WALKTHROUGH_TESTS:\n' >&2
+    local entry
+    for entry in "${missing[@]}"; do
+      printf '  - referenced test not found: %s\n' "$entry" >&2
+    done
+    printf 'Update APP_WALKTHROUGH_TESTS in %s to reference existing androidTest class#method selectors.\n' \
+      "${POCKETSHELL_GATE_SOURCE_ROOT:-$ROOT_DIR}/scripts/pre-release-confidence-gate.sh" >&2
+    fail "APP_WALKTHROUGH_TESTS references ${#missing[@]} test selector(s) that do not exist"
+  fi
+
+  printf 'Selector existence guard passed: all %s APP_WALKTHROUGH_TESTS selectors resolve to an androidTest class#method.\n' \
+    "${#APP_WALKTHROUGH_TESTS[@]}"
 }
 
 cold_reset_app_packages_script() {
@@ -1220,6 +1296,11 @@ fi
 if ! [[ "$APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   fail "APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS must be a positive integer"
 fi
+
+# Issue #749: cheap selector-existence guard runs before the heavy steps so a
+# deleted/renamed walkthrough test fails fast with a clear message instead of a
+# ClassNotFoundException deep inside the on-device instrumentation loop.
+assert_app_walkthrough_selectors_exist
 
 run_step "android-sdk-paths" "$ADB" version
 run_step "available-avds" "$EMULATOR" -list-avds

@@ -213,12 +213,13 @@ jobs:
       - name: Build SSH base image
         run: docker compose -f tests/docker/docker-compose.yml build sshd
 
-      # The selected journeys (DeepLinkSessionSwitch,
+      # The selected journeys (DeepLinkSessionSwitch, MultiSessionSwitch,
       # ColdRestoreGoneSessionNoResurrect, ReconnectRepaint,
-      # BackgroundGraceReconnect — MultiSessionSwitch quarantined per #691) all
-      # drive the plain deterministic `agents` fixture on host port 2222
-      # (emulator 10.0.2.2:2222) and NONE of them need the opt-in toxiproxy
-      # network-fault proxies. Bring up ONLY `agents` so the job is deterministic.
+      # BackgroundGraceReconnect, plus the share-auth pair ShareTarget +
+      # SharePassphraseDialog promoted in #727) all drive the plain deterministic
+      # `agents` fixture on host port 2222 (emulator 10.0.2.2:2222) and NONE of
+      # them need the opt-in toxiproxy network-fault proxies. Bring up ONLY
+      # `agents` so the job is deterministic.
       - name: Start Docker fixture (agents)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents

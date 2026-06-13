@@ -103,6 +103,17 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
+  # PROMOTED (#727, epic #657 Wave 1 / S1): the share-auth journey pair. The
+  # maintainer's recurring share-auth breakages had nightly-only / advisory E2E
+  # coverage, so a share-auth regression was NOT caught at PR time. Both classes
+  # drive ONLY the default deterministic `agents` fixture via DEFAULT_HOST /
+  # DEFAULT_PORT / DEFAULT_USER (AgentsFixtureTarget -> 10.0.2.2:2222, or the
+  # pool-allocated port under `--pool`), so no new Docker fixture/port is needed.
+  # Neither class self-skips on CI (no assumeFalse(isRunningOnCi())). These live
+  # under com.pocketshell.app.share, not the com.pocketshell.app.proof prefix, so
+  # they carry their fully-qualified names directly.
+  "com.pocketshell.app.share.ShareTargetE2eTest"
+  "com.pocketshell.app.share.SharePassphraseDialogE2eTest"
 )
 
 echo "=========================================================="

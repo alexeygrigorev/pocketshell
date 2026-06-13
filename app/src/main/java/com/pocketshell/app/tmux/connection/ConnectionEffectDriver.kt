@@ -100,6 +100,18 @@ import kotlinx.coroutines.launch
  *   [ConnectionState.Backgrounded]. The VM supplies the clean-detach body (its full
  *   `closeCurrentConnectionAndJoin` teardown). Defaults to a no-op so the
  *   observe-only test harness keeps its inert contract.
+ * @param foregroundReattachEffect fired SYNCHRONOUSLY when the controller transitions
+ *   [ConnectionState.Backgrounded] -> [ConnectionState.Reattaching] — the within-grace
+ *   foreground return (#754, slice 1c-iv-c). The VM supplies the RESEED-ONLY body: the
+ *   warm `-CC` lease is still attached, so it re-captures the active pane(s) and lets a
+ *   real `SeedLanded` promote the controller back to [ConnectionState.Live]. It NEVER
+ *   runs `connect()` and NEVER raises the "Attaching…" overlay (`_switchHidesTerminal`)
+ *   — that is the whole point of the D21 within-grace contract (no reconnect UI). The
+ *   superseded inline `probeCurrentRuntimeOnForegroundIfNeeded -> connect(LifecycleReattach)`
+ *   path is DELETED in the same PR (D22 hard-cut). Defaults to a no-op so the observe-only
+ *   test harness keeps its inert contract. NOTE: a [ConnectionState.Reattaching] reached
+ *   from a transport DROP (the silent heal ladder) is NOT a foreground return and does
+ *   NOT fire this effect — only the `Backgrounded -> Reattaching` edge does.
  * @param onControllerTransition fired AFTER each driver-submitted transport event so
  *   the VM re-projects `_connectionStatus` from the controller's state (the controller
  *   is the single status source). Defaults to a no-op (tests read [observations]/
@@ -112,6 +124,7 @@ class ConnectionEffectDriver(
     private val transportPort: TransportPort,
     private val scope: CoroutineScope,
     private val backgroundedEffect: () -> Unit = {},
+    private val foregroundReattachEffect: () -> Unit = {},
     private val onControllerTransition: () -> Unit = {},
     private val sink: (String) -> Unit = { line -> Log.i(TAG, line) },
 ) {
@@ -132,7 +145,8 @@ class ConnectionEffectDriver(
     /**
      * Begin observing. Launches three collectors in [scope]:
      *  - [ConnectionController.state] transitions (fires [backgroundedEffect] on the
-     *    Backgrounded entry — slice B1),
+     *    Backgrounded entry — slice B1; fires [foregroundReattachEffect] on the
+     *    Backgrounded -> Reattaching within-grace foreground edge — slice 1c-iv-c #754),
      *  - [TmuxPort.disconnected] — the transport-drop oracle; its true-edge is
      *    submitted as [ConnectionEvent.TransportDropped] (slice B2),
      *  - [TransportPort.transportEvents] — the lease up/down edge stream; an `Up` for
@@ -167,6 +181,18 @@ class ConnectionEffectDriver(
             // resumption — the sole detach trigger now the inline one is deleted.
             if (current is ConnectionState.Backgrounded && previous !is ConnectionState.Backgrounded) {
                 backgroundedEffect()
+            }
+            // Slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach.
+            // The within-grace foreground return is the controller's
+            // Backgrounded -> Reattaching edge (warm lease + still in grace). On that
+            // edge the driver fires the VM-supplied RESEED-ONLY effect — re-capture the
+            // active pane(s) over the still-warm `-CC` lease and let the real SeedLanded
+            // promote the controller back to Live. NO connect(), NO "Attaching…" overlay
+            // (the deleted inline probe->connect path is what showed it). Only the
+            // Backgrounded -> Reattaching edge fires this; a Reattaching reached from a
+            // transport DROP (the silent heal) is NOT a foreground return.
+            if (current is ConnectionState.Reattaching && previous is ConnectionState.Backgrounded) {
+                foregroundReattachEffect()
             }
             previous = current
         }

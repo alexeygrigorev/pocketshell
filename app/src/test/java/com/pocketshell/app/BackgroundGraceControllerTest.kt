@@ -253,7 +253,7 @@ class BackgroundGraceControllerTest {
                 events += "ssh:start"
                 // Issue #548: always dispatch the foreground probe regardless
                 // of grace status so stale transports are caught early.
-                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
             },
         )
 
@@ -308,7 +308,7 @@ class BackgroundGraceControllerTest {
                     )
                     // Issue #548: always dispatch the foreground probe regardless
                     // of grace status so stale transports are caught early.
-                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                    activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
                     if (decision is TerminalNetworkDecision.Dispatch) {
                         activeTmuxClients.lifecycleHooksSnapshot().forEach {
                             it.onNetworkChanged(decision.change)
@@ -433,7 +433,7 @@ class BackgroundGraceControllerTest {
             onForeground = { resumedWithinGrace ->
                 events += "ssh:start"
                 // Issue #548: always run foreground probe, even within grace.
-                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
                 if (!resumedWithinGrace) {
                     if (shouldDispatchPendingTerminalNetworkChange(
                             resumedWithinGrace = resumedWithinGrace,
@@ -505,7 +505,7 @@ class BackgroundGraceControllerTest {
             onForeground = { resumedWithinGrace ->
                 events += "ssh:start"
                 // Issue #548: always run foreground probe, even within grace.
-                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
                 if (shouldDispatchPendingTerminalNetworkChange(
                         resumedWithinGrace = resumedWithinGrace,
                         pendingChange = pendingNetworkChange,
@@ -1093,7 +1093,7 @@ class BackgroundGraceControllerTest {
             onForeground = { resumedWithinGrace ->
                 events += "ssh:start"
                 // Issue #548: always run foreground probe.
-                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
             },
         )
 
@@ -1184,7 +1184,7 @@ class BackgroundGraceControllerTest {
             onForeground = { resumedWithinGrace ->
                 events += "ssh:start"
                 // Issue #548: always run foreground probe.
-                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground() }
+                activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
             },
         )
 

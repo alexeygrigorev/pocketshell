@@ -205,6 +205,19 @@ class ConnectionControllerShadowBridge(
     }
 
     /**
+     * EPIC #687 slice 1c-iv-c (#754): within-grace foreground reattach promotion. The
+     * warm `-CC` control channel was NEVER torn down across the brief background, so on
+     * return the controller is [ConnectionState.Reattaching] (from its `onForeground`
+     * grace predicate). Submitting [ConnectionEvent.TransportLive] promotes it back to
+     * [ConnectionState.Live] (`onTransportLive(Reattaching) → Live`) WITHOUT any
+     * handshake — the channel is the same live one. Idempotent: a `TransportLive` for an
+     * already-[ConnectionState.Live] target is a no-op in the reducer.
+     */
+    fun observeForegroundReattachLive() {
+        controller.submit(ConnectionEvent.TransportLive)
+    }
+
+    /**
      * EPIC #687 slice 1c-iv-b-B2 (#742): the controller's transport inputs
      * (`TransportLive` / `TransportDropped`) are now SUBMITTED by the
      * [ConnectionEffectDriver] from the REAL port flows

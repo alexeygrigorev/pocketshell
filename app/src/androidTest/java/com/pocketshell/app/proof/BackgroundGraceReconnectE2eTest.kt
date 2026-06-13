@@ -29,6 +29,7 @@ import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -133,6 +134,7 @@ class BackgroundGraceReconnectE2eTest {
         waitForVisibleTerminal("within-grace terminal") { it.contains(READY_MARKER) }
         waitForClientCountAtLeast(1, "within-grace after foreground")
         assertNoReconnectOrReattachDiagnostics("within-grace foreground")
+        assertWithinGraceReseedOnlyDriverOwned("within-grace foreground")
         captureViewport("issue548-02-within-grace-foreground")
 
         // Post-grace branch: with the same real UI path still open, use a
@@ -211,6 +213,7 @@ class BackgroundGraceReconnectE2eTest {
         waitForVisibleTerminal("six-second production-grace terminal") { it.contains(READY_MARKER) }
         waitForClientCountAtLeast(1, "six-second production-grace after foreground")
         assertNoReconnectOrReattachDiagnostics("six-second production-grace foreground")
+        assertWithinGraceReseedOnlyDriverOwned("six-second production-grace foreground")
         captureViewport("issue548-sixsec-02-foreground")
         writeTimings()
     }
@@ -321,7 +324,19 @@ class BackgroundGraceReconnectE2eTest {
                 .fetchSemanticsNodes()
                 .size,
         )
-        listOf("Connecting", "Reconnecting", "Disconnected", "Tap Reconnect").forEach { text ->
+        // Issue #754: the "Attaching…" SwitchingLoadingPlaceholder overlay is the
+        // EXACT surface the maintainer reported on a within-grace return. The old
+        // inline foreground probe→connect raised `_switchHidesTerminal` (this tag) on
+        // any confirmed-dead probe verdict even inside grace — the D21 violation #754
+        // deletes. A within-grace foreground must NEVER paint it.
+        assertEquals(
+            "expected no 'Attaching…' switching-loading overlay for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        listOf("Connecting", "Reconnecting", "Disconnected", "Tap Reconnect", "Attaching").forEach { text ->
             assertEquals(
                 "expected no visible '$text' text for $label",
                 0,
@@ -330,6 +345,44 @@ class BackgroundGraceReconnectE2eTest {
                     .size,
             )
         }
+    }
+
+    /**
+     * Issue #754 (slice 1c-iv-c): the within-grace foreground reattach must be the
+     * NEW driver/controller-owned RESEED-ONLY effect, NOT the deleted inline
+     * `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)` path.
+     *
+     * This is the per-PR-CI deterministic regression catcher (no toxiproxy needed):
+     *  - it asserts a `foreground_reattach outcome=reseed_only` cause-trail was
+     *    recorded — the new path's signature; on `main` the within-grace foreground
+     *    runs the inline probe, which records `tmux_probe_result` and NEVER
+     *    `reseed_only`, so this assertion FAILS on `main`;
+     *  - it asserts NO `tmux_probe_result` cause-trail and NO
+     *    `foreground_runtime_probe_failed` diagnostic — the deleted probe must not run.
+     * Combined with [assertNoVisibleReconnect]'s new `TMUX_SWITCHING_LOADING_TAG`
+     * forbid, this pins both the visible behaviour and the owning effect.
+     */
+    private fun assertWithinGraceReseedOnlyDriverOwned(label: String) {
+        val causeTrail = diagnostics!!.eventsNamed("cause_trail")
+        val reseedOnly = causeTrail.filter {
+            it.fields["stage"] == "foreground_reattach" && it.fields["outcome"] == "reseed_only"
+        }
+        assertTrue(
+            "within-grace foreground for $label must record the driver-owned reseed_only " +
+                "cause-trail (the new path); trail=$causeTrail",
+            reseedOnly.isNotEmpty(),
+        )
+        val probeResults = causeTrail.filter { it.fields["stage"] == "tmux_probe_result" }
+        assertTrue(
+            "within-grace foreground for $label must NOT run the deleted inline probe " +
+                "(tmux_probe_result); trail=$probeResults",
+            probeResults.isEmpty(),
+        )
+        assertTrue(
+            "within-grace foreground for $label must NOT emit foreground_runtime_probe_failed; " +
+                "events=${diagnostics!!.events}",
+            diagnostics!!.eventsNamed("foreground_runtime_probe_failed").isEmpty(),
+        )
     }
 
     private fun watchNoVisibleReconnect(label: String, durationMs: Long) {

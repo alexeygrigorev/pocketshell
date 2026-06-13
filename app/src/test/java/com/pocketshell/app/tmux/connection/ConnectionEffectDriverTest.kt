@@ -278,6 +278,113 @@ class ConnectionEffectDriverTest {
         scope.cancel()
     }
 
+    // --- slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach ----
+    //
+    // On the controller's Backgrounded -> Reattaching edge (within grace + warm lease)
+    // the driver fires the VM-supplied RESEED-ONLY effect — the hard-cut replacement for
+    // the deleted inline `probeCurrentRuntimeOnForegroundIfNeeded -> connect(...)` path
+    // that raised the "Attaching…" overlay. These pin that the driver is the trigger,
+    // fires only on the foreground (Backgrounded -> Reattaching) edge, and NEVER on a
+    // Reattaching reached from a transport DROP (the silent heal ladder).
+
+    @Test
+    fun firesForegroundReattachEffectOnWithinGraceForegroundEdge() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val clock = TestClock()
+        var reseedTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = clock, transport = transportPort)
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            foregroundReattachEffect = { reseedTriggers += 1 },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.Background) // -> Backgrounded
+        assertEquals("no reseed before foreground", 0, reseedTriggers)
+
+        // Foreground within grace (clock barely advanced, warm) -> Reattaching.
+        clock.now = 1_000L
+        controller.submit(ConnectionEvent.Foreground) // -> Reattaching
+        assertEquals(
+            "driver fires the RESEED-ONLY effect on the within-grace foreground edge",
+            1,
+            reseedTriggers,
+        )
+
+        // The reseed's SeedLanded promotes Reattaching -> Live; no extra reseed fires.
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // -> Live
+        assertEquals("no extra reseed once promoted to Live", 1, reseedTriggers)
+        scope.cancel()
+    }
+
+    @Test
+    fun doesNotFireForegroundReattachEffectOnTransportDropHeal() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        var reseedTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            foregroundReattachEffect = { reseedTriggers += 1 },
+        ).also { it.start() }
+
+        // A transport DROP also reaches Reattaching (the silent heal ladder) — but it is
+        // NOT a foreground return, so the reseed-only foreground effect must NOT fire.
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.TransportDropped("keepalive")) // Live -> Reattaching
+
+        assertEquals(
+            "the within-grace foreground reseed must only fire on Backgrounded -> Reattaching",
+            0,
+            reseedTriggers,
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun beyondGraceForegroundDoesNotFireForegroundReattachEffect() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val clock = TestClock()
+        var reseedTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        // Beyond grace: warm-snapshot false forces Backgrounded -> Reconnecting, NOT
+        // Reattaching — the reseed-only foreground effect must NOT fire.
+        val transportPort = InertTransportPort(warm = false)
+        val controller = ConnectionController(clock = clock, transport = transportPort)
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            foregroundReattachEffect = { reseedTriggers += 1 },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.TransportLive)
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.Background)
+        clock.now = ConnectionController.DEFAULT_GRACE_MS + 1L
+        controller.submit(ConnectionEvent.Foreground) // -> Reconnecting(1)
+
+        assertEquals(
+            "a beyond-grace foreground is a Reconnecting, not a reseed-only Reattaching",
+            0,
+            reseedTriggers,
+        )
+        scope.cancel()
+    }
+
     @Test
     fun observesTransportDropHealThroughReattaching() = runTest {
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))

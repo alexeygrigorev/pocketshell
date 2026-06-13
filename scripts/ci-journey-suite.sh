@@ -134,6 +134,19 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
+  # Issue #754 (slice 1c-iv-c): this class is the per-PR-CI deterministic regression
+  # catcher for the within-grace "Attaching…" reconnect bug. It now (a) forbids the
+  # TMUX_SWITCHING_LOADING_TAG "Attaching…" overlay on every within-grace foreground
+  # and (b) asserts the within-grace reattach is the NEW driver-owned reseed-only
+  # effect (`foreground_reattach outcome=reseed_only`) with NO inline probe
+  # (`tmux_probe_result`). It runs on the deterministic agents:2222 fixture and needs
+  # NO toxiproxy, so it stays in this per-push subset. On `main` the within-grace
+  # foreground runs the inline probe (records tmux_probe_result, never reseed_only),
+  # so these assertions FAIL on `main` and PASS after the fix. The strongest
+  # CONFIRMED-DEAD-within-grace reproduction lives in WithinGraceResumeRideThroughE2eTest
+  # (toxiproxy clean-cut, `withinGraceForegroundConfirmedDeadDoesNotShowAttachingOverlayOrReconnect`),
+  # which is opt-in (assumeNetworkFaultProofsEnabled self-skips on CI since tests.yml
+  # keeps this job toxiproxy-free); it is the local/manual fault-injection proof.
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
   # PROMOTED (#727, epic #657 Wave 1 / S1): the share-auth journey pair. The
   # maintainer's recurring share-auth breakages had nightly-only / advisory E2E

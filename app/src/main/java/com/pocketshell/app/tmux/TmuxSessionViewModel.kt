@@ -461,6 +461,17 @@ public class TmuxSessionViewModel @Inject constructor(
             transportPort = connectionTransportPort,
             scope = viewModelScope,
             backgroundedEffect = { launchBackgroundDetachTeardown() },
+            // Slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach.
+            // On the controller's Backgrounded→Reattaching edge (within grace + warm
+            // lease) it fires the RESEED-ONLY body — re-promote Live + heal blank panes
+            // over the still-warm `-CC` lease, NO connect(), NO "Attaching…" overlay.
+            // The same body runs directly from `onAppForegrounded(resumedWithinGrace)`
+            // in production (the controller does not reach that edge there because the
+            // teardown — and thus the controller's Background — is deferred to
+            // grace-elapsed); both paths invoke the one [launchForegroundReattachReseed]
+            // owner. The deleted inline `probeCurrentRuntimeOnForegroundIfNeeded →
+            // connect(LifecycleReattach)` path is the superseded behavior (D22 hard-cut).
+            foregroundReattachEffect = { launchForegroundReattachReseed() },
             // Slice 1c-iv-b-B2 (#742): after the driver submits a TransportLive /
             // TransportDropped from the real flows, re-project _connectionStatus from
             // the controller's (now real-flow-driven) state — the controller is the
@@ -872,7 +883,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
     private var passiveDisconnectGraceJob: Job? = null
-    private var foregroundRuntimeProbeJob: Job? = null
     private var lifecycleReattachNetworkCoalesce: LifecycleReattachNetworkCoalesce? = null
 
     // Issue #440: the cause of the most recent failed connect attempt, set
@@ -1729,6 +1739,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var pendingBackgroundDetachPreserveTarget: ConnectionTarget? = null
     private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
+    private var foregroundReattachReseedForTest: (() -> Unit)? = null
     private var processForegroundForClearedOverrideForTest: Boolean? = null
     private var latestConnectIntent: ConnectIntent? = null
     private var connectGeneration: Long = 0L
@@ -1769,8 +1780,6 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onAppBackgrounded() {
         appActive = false
-        foregroundRuntimeProbeJob?.cancel()
-        foregroundRuntimeProbeJob = null
         // EPIC #687 slice 1c-iv-b-B1 (#738): run the inline SYNCHRONOUS bookkeeping
         // FIRST — [detachForBackground] sets `pendingReattach` and stashes
         // `pendingBackgroundDetachPreserveTarget`. THEN drive the controller to
@@ -1963,8 +1972,37 @@ public class TmuxSessionViewModel @Inject constructor(
      * the existing handshake instrumentation, project-roots binding,
      * and pane reconcile all fire identically to a cold attach.
      */
-    public fun onAppForegrounded() {
+    public fun onAppForegrounded(resumedWithinGrace: Boolean = false) {
         appActive = true
+        // EPIC #687 slice 1c-iv-c (#754): the within-grace foreground return is now
+        // owned by the driver/controller as a RESEED-ONLY effect, gated on the
+        // controller's grace predicate. Within grace the `-CC` control client was
+        // NEVER torn down (the teardown is deferred to grace-elapsed), so the warm
+        // lease is intact: we re-capture the active pane and let the existing
+        // SeedLanded feedback promote the controller back to Live. We DO NOT run the
+        // old inline `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)`
+        // path, which raised `_switchHidesTerminal` (the "Attaching…" overlay) on any
+        // confirmed-dead probe verdict even inside grace — the D21 violation #754 fixes.
+        // The within-grace gate (`resumedWithinGrace && warm lease`) is exactly the
+        // controller's `onForeground` predicate (`now < deadline && transport.isWarm`),
+        // so the VM and the `ConnectionController` agree on the classification by
+        // construction; the driver's `foregroundReattachEffect` seam fires the SAME
+        // reseed body on the controller's Backgrounded→Reattaching edge (unit-tested in
+        // `ConnectionEffectDriverTest`).
+        if (resumedWithinGrace && canReseedWithinGraceForeground()) {
+            // The `-CC` control client was NEVER torn down within grace (the controller
+            // therefore stays Live in production — Background is only submitted at
+            // grace-elapsed teardown, NOT here, so the #738 driver detach never fires).
+            // Run the RESEED-ONLY effect directly: it re-promotes Live (a no-op
+            // TransportLive on an already-Live controller) and heals blank panes over
+            // the warm client. NO connect(), NO `_switchHidesTerminal` "Attaching…"
+            // overlay — the D21 within-grace contract. The driver's
+            // `foregroundReattachEffect` seam invokes this SAME body on the controller's
+            // Backgrounded→Reattaching edge (the classification model, unit-tested in
+            // `ConnectionEffectDriverTest`); both paths share the one reseed owner.
+            foregroundReattachReseedForTest?.invoke() ?: launchForegroundReattachReseed()
+            return
+        }
         // EPIC #687 slice 1c-iii: observe-only — the single grace predicate in the
         // shadow controller decides reattach-vs-reconnect; it drives nothing.
         connectionControllerShadow.observeForeground()
@@ -1973,8 +2011,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 replayPendingReattach()
             ConnectionDecision.ResumePausedReconnect ->
                 pausedAutoReconnect?.let { resumePausedAutoReconnect(it) }
-            ConnectionDecision.ProbeForeground ->
-                probeCurrentRuntimeOnForegroundIfNeeded()
             else ->
                 latestConnectIntent?.let { intent ->
                     Log.i(
@@ -1991,6 +2027,78 @@ public class TmuxSessionViewModel @Inject constructor(
         // probe churn); beyond grace it is Reconnecting (matches inline). Re-project
         // after the inline effects ran.
         projectStatusFromController()
+    }
+
+    /**
+     * EPIC #687 slice 1c-iv-c (#754): the within-grace foreground gate. We can run
+     * the RESEED-ONLY reattach (no `connect()`, no overlay) only when there is a live
+     * `-CC` control client + session to re-capture against and a warm lease for the
+     * active target — i.e. the connection was genuinely preserved across the brief
+     * background. This is the VM-side mirror of the controller's `onForeground`
+     * within-grace predicate (`transport.isWarm`); when it is false we fall through to
+     * the normal foreground decision (a real reconnect path).
+     */
+    private fun canReseedWithinGraceForeground(): Boolean {
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
+        if (clientRef == null) return false
+        if (sessionRef == null) return false
+        val target = activeTarget ?: return false
+        if (pendingReattach != null) return false
+        if (pausedAutoReconnect != null) return false
+        return liveLeaseKeys.contains(target.toSshLeaseTarget().leaseKey)
+    }
+
+    /**
+     * EPIC #687 slice 1c-iv-c (#754): the RESEED-ONLY within-grace foreground reattach
+     * body — the hard-cut replacement for the deleted inline
+     * `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)` path. The
+     * warm `-CC` control client is still attached (the teardown is deferred to
+     * grace-elapsed), so there is NOTHING to reconnect: the emulator still holds the
+     * live frame the channel streamed while attached. We promote the controller back
+     * to Live (the channel is live) and run the existing blank-pane safety-net reseed
+     * over the SAME live client so a pane that came back blank under a brief link blip
+     * still heals — without a handshake. Crucially this NEVER calls `connect()` and
+     * NEVER raises `_switchHidesTerminal`, so the user sees no "Attaching…" overlay and
+     * no reconnect — the D21 within-grace contract.
+     *
+     * This is also the body the [ConnectionEffectDriver]'s `foregroundReattachEffect`
+     * seam invokes on the controller's Backgrounded→Reattaching edge (unit-tested),
+     * so there is a SINGLE owner of the within-grace reseed effect.
+     */
+    private fun launchForegroundReattachReseed() {
+        val client = clientRef ?: return
+        val target = activeTarget ?: return
+        Log.i(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-foreground-reseed-within-grace generation=$connectGeneration " +
+                targetLogFields(target),
+        )
+        ReconnectCauseTrail.record(
+            stage = "foreground_reattach",
+            outcome = "reseed_only",
+            cause = "within_grace_foreground",
+            trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "clientHash" to System.identityHashCode(client),
+        )
+        // The control channel is still live — promote the controller Reattaching → Live
+        // so the displayed status stays the calm `Connected` (no Reconnecting/overlay).
+        connectionControllerShadow.observeForegroundReattachLive()
+        projectStatusFromController()
+        viewModelScope.launch {
+            if (client.disconnected.value) return@launch
+            val guard = RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+            // Safety net: tmux `-CC` does not re-emit an idle pane's existing content,
+            // so a pane that came back blank during the brief background heals here over
+            // the SAME live client (no handshake). The per-pane seed success also fires
+            // the controller's SeedLanded feedback (idempotent once already Live).
+            reseedBlankVisiblePanes(guard)
+        }
     }
 
     /**
@@ -2075,127 +2183,6 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    private fun probeCurrentRuntimeOnForegroundIfNeeded(): Boolean {
-        val current = inlineConnectionStatus
-        if (current !is ConnectionStatus.Connected) return false
-        val target = activeTarget ?: return false
-        val client = clientRef ?: return false
-        val session = sessionRef ?: return false
-        if (foregroundRuntimeProbeJob?.isActive == true) return true
-        val generation = connectGeneration
-        val probeJob = viewModelScope.launch {
-            var verdict = probeRuntimeControlChannel(client, session)
-            // Issue #635 / #636 (Slice 1): a probe *timeout* on a still-live
-            // socket means the link is slow/recovering, not dead. Retry once
-            // after a short delay to give a still-recovering link a chance to
-            // answer before we ride it through; we still never reconnect on a
-            // timeout — sshj's 60s keepalive is the real death oracle.
-            if (verdict == RuntimeHealthVerdict.TIMEOUT &&
-                appActive &&
-                connectGeneration == generation &&
-                clientRef === client &&
-                sessionRef === session
-            ) {
-                delay(RUNTIME_HEALTH_PROBE_RETRY_DELAY_MS)
-                verdict = probeRuntimeControlChannel(client, session)
-            }
-            val healthy = verdict == RuntimeHealthVerdict.HEALTHY
-            // A timeout is a ride-through: keep the live session and let the
-            // SSH keepalive decide death. Only a confirmed dead transport
-            // (disconnected / not-connected) or an explicit protocol/IO error
-            // justifies tearing down and reconnecting.
-            val rideThrough = verdict == RuntimeHealthVerdict.TIMEOUT
-            ReconnectCauseTrail.record(
-                stage = "tmux_probe_result",
-                outcome = when {
-                    healthy -> "healthy"
-                    rideThrough -> "ride_through"
-                    else -> "failed"
-                },
-                cause = "foreground_runtime_probe",
-                trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
-                "hostId" to target.hostId,
-                "generation" to generation,
-                "clientHash" to System.identityHashCode(client),
-                "failReason" to verdict.failReason,
-            )
-            if (healthy || rideThrough) {
-                if (rideThrough) {
-                    Log.i(
-                        ISSUE_235_LIFECYCLE_TAG,
-                        "tmux-foreground-runtime-probe-timeout ride-through " +
-                            "generation=$generation " + targetLogFields(target),
-                    )
-                }
-                return@launch
-            }
-            if (
-                !appActive ||
-                connectGeneration != generation ||
-                clientRef !== client ||
-                sessionRef !== session ||
-                activeTarget?.let { sameSessionIdentity(it, target) } != true ||
-                inlineConnectionStatus !is ConnectionStatus.Connected
-            ) {
-                ReconnectCauseTrail.record(
-                    stage = "tmux_probe_result",
-                    outcome = "failed_stale_skip",
-                    cause = "foreground_runtime_probe_stale",
-                    trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
-                    "hostId" to target.hostId,
-                    "generation" to generation,
-                    "clientStillCurrent" to (clientRef === client),
-                    "sessionStillCurrent" to (sessionRef === session),
-                    "appActive" to appActive,
-                    "failReason" to verdict.failReason,
-                )
-                return@launch
-            }
-            Log.w(
-                ISSUE_235_LIFECYCLE_TAG,
-                "tmux-foreground-runtime-probe-failed reconnecting " +
-                    "generation=$generation " + targetLogFields(target),
-            )
-            DiagnosticEvents.record(
-                "connection",
-                "foreground_runtime_probe_failed",
-                "source" to "app_lifecycle",
-                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
-                "generation" to generation,
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "user" to target.user,
-                "session" to target.sessionName,
-                "clientHash" to System.identityHashCode(client),
-                "failReason" to verdict.failReason,
-                *shortAppSwitchReconnectFields(
-                    trigger = TmuxConnectTrigger.LifecycleReattach,
-                    target = target,
-                    sourceCandidate = "foreground_runtime_probe",
-                ),
-            )
-            connect(
-                hostId = target.hostId,
-                hostName = target.hostName,
-                host = target.host,
-                port = target.port,
-                user = target.user,
-                keyPath = target.keyPath,
-                passphrase = target.passphrase,
-                sessionName = target.sessionName,
-                startDirectory = target.startDirectory,
-                trigger = TmuxConnectTrigger.LifecycleReattach,
-            )
-        }
-        foregroundRuntimeProbeJob = probeJob
-        probeJob.invokeOnCompletion {
-            if (foregroundRuntimeProbeJob == probeJob) {
-                foregroundRuntimeProbeJob = null
-            }
-        }
-        return true
-    }
 
     /**
      * Activity-level visibility signal used only by [onCleared]'s runtime
@@ -2603,7 +2590,7 @@ public class TmuxSessionViewModel @Inject constructor(
             hostId = hostId,
             hooks = ActiveTmuxClients.LifecycleHooks(
                 onBackground = { onAppBackgrounded() },
-                onForeground = { onAppForegrounded() },
+                onForeground = { resumedWithinGrace -> onAppForegrounded(resumedWithinGrace) },
                 onNetworkChanged = { change -> onNetworkChanged(change) },
             ),
         )
@@ -9971,8 +9958,6 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionPrewarmJob = null
         passiveDisconnectGraceJob?.cancelAndJoin()
         passiveDisconnectGraceJob = null
-        foregroundRuntimeProbeJob?.cancelAndJoin()
-        foregroundRuntimeProbeJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
         outputOverflowJob?.cancelAndJoin()
@@ -10211,8 +10196,6 @@ public class TmuxSessionViewModel @Inject constructor(
         orphanDetachJob = null
         passiveDisconnectGraceJob?.cancel()
         passiveDisconnectGraceJob = null
-        foregroundRuntimeProbeJob?.cancel()
-        foregroundRuntimeProbeJob = null
         eventsJob?.cancel()
         eventsJob = null
         outputOverflowJob?.cancel()
@@ -10630,9 +10613,6 @@ public class TmuxSessionViewModel @Inject constructor(
         /** Resume an auto-reconnect that was paused while backgrounded. */
         data object ResumePausedReconnect : ConnectionDecision
 
-        /** No pending reattach but a live session — probe the runtime channel. */
-        data object ProbeForeground : ConnectionDecision
-
         /** Replay the [pendingReattach] stashed when we backgrounded. */
         data object ReplayPendingReattach : ConnectionDecision
 
@@ -10688,22 +10668,13 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun reduceForeground(): ConnectionDecision {
         if (pendingReattach != null) return ConnectionDecision.ReplayPendingReattach
         if (pausedAutoReconnect != null) return ConnectionDecision.ResumePausedReconnect
-        if (canProbeCurrentRuntimeOnForeground()) return ConnectionDecision.ProbeForeground
+        // EPIC #687 slice 1c-iv-c (#754): the within-grace foreground (no pending
+        // reattach, live session) is now handled BEFORE this reducer in
+        // [onAppForegrounded] via the driver-owned RESEED-ONLY effect — the old
+        // `ProbeForeground → probeCurrentRuntimeOnForegroundIfNeeded → connect(...)`
+        // decision is DELETED (D22 hard-cut). A foreground that is NOT within grace
+        // and has no pending reattach is a no-op here.
         return ConnectionDecision.Ignore
-    }
-
-    /**
-     * The pure gate of [probeCurrentRuntimeOnForegroundIfNeeded]: are we in a
-     * state where a foreground runtime probe is warranted? Mirrors that
-     * function's early returns exactly so the probe behavior is unchanged — only
-     * the decision is hoisted into the reducer.
-     */
-    private fun canProbeCurrentRuntimeOnForeground(): Boolean {
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
-        if (activeTarget == null) return false
-        if (clientRef == null) return false
-        if (sessionRef == null) return false
-        return true
     }
 
     private fun reduceNetworkChanged(change: TerminalNetworkChange): ConnectionDecision {
@@ -11514,15 +11485,6 @@ internal const val SEND_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val SEND_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
 
-/**
- * Issue #635 / #636 (Slice 1): short delay between the first foreground
- * health probe and a single retry when the first probe *times out* on a
- * still-`isConnected` transport. Gives a slow/recovering link a moment to
- * answer before we ride it through. A retry timeout is still NOT death — the
- * within-grace resume keeps the live session and defers the death verdict to
- * sshj's 60s keepalive oracle.
- */
-internal const val RUNTIME_HEALTH_PROBE_RETRY_DELAY_MS: Long = 250L
 internal const val CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = RUNTIME_HEALTH_PROBE_TIMEOUT_MS
 
 /**

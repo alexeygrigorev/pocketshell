@@ -282,7 +282,11 @@ class ActiveTmuxClients @Inject constructor() {
      */
     class LifecycleHooks(
         val onBackground: suspend () -> Unit,
-        val onForeground: suspend () -> Unit,
+        // EPIC #687 slice 1c-iv-c (#754): the foreground hook now carries
+        // `resumedWithinGrace` (the App-level background-grace decision) so the VM
+        // can run the within-grace RESEED-ONLY reattach instead of the old inline
+        // probe→connect that showed the "Attaching…" overlay.
+        val onForeground: suspend (resumedWithinGrace: Boolean) -> Unit,
         val onNetworkChanged: suspend (TerminalNetworkChange) -> Unit = {},
     )
 

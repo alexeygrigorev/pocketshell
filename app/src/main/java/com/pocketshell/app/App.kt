@@ -470,7 +470,7 @@ class App : Application() {
         )
         for (hook in hooks) {
             tmuxLifecycleScope.launch {
-                runCatching { hook.onForeground() }
+                runCatching { hook.onForeground(resumedWithinGrace) }
                     .onFailure { Log.w(APP_LIFECYCLE_TAG, "tmux foreground hook failed", it) }
             }
         }

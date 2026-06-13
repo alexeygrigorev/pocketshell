@@ -18,8 +18,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +44,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -314,24 +314,15 @@ fun AddEditHostScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        Button(
+                        PocketShellButton(
+                            text = if (hostId == null) "Add host" else "Save changes",
                             onClick = viewModel::save,
                             enabled = canSubmit,
+                            variant = ButtonVariant.Primary,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag(ADD_HOST_CTA_TAG),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = PocketShellColors.Accent,
-                                contentColor = PocketShellColors.OnAccent,
-                                disabledContainerColor = PocketShellColors.Border,
-                                disabledContentColor = PocketShellColors.TextMuted,
-                            ),
-                        ) {
-                            Text(
-                                text = if (hostId == null) "Add host" else "Save changes",
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
+                        )
                     }
                 }
 
@@ -738,14 +729,18 @@ private fun DiscardChangesDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text("Discard", color = PocketShellColors.Red)
-            }
+            PocketShellButton(
+                text = "Discard",
+                onClick = onConfirm,
+                variant = ButtonVariant.Destructive,
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Keep editing", color = PocketShellColors.Accent)
-            }
+            PocketShellButton(
+                text = "Keep editing",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+            )
         },
         containerColor = PocketShellColors.Surface,
     )

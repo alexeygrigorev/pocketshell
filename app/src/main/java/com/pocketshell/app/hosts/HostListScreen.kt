@@ -25,8 +25,6 @@ import androidx.compose.foundation.shape.CircleShape
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -62,11 +60,13 @@ import com.pocketshell.app.release.launchUpdateDownload
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.Pill
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.model.HostSetupState
@@ -1538,14 +1538,18 @@ private fun HostShareDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onShare) {
-                Text("Share text", color = PocketShellColors.Accent)
-            }
+            PocketShellButton(
+                text = "Share text",
+                onClick = onShare,
+                variant = ButtonVariant.Primary,
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Close",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+            )
         },
         containerColor = PocketShellColors.Surface,
     )
@@ -1605,27 +1609,27 @@ private fun ImportConflictDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Update",
                 onClick = onOverwrite,
+                variant = ButtonVariant.Primary,
                 modifier = Modifier.testTag(IMPORT_CONFLICT_OVERWRITE_TAG),
-            ) {
-                Text("Update", color = PocketShellColors.Accent)
-            }
+            )
         },
         dismissButton = {
             Row {
-                TextButton(
+                PocketShellButton(
+                    text = "Add as new",
                     onClick = onAddAsNew,
+                    variant = ButtonVariant.Secondary,
                     modifier = Modifier.testTag(IMPORT_CONFLICT_ADD_AS_NEW_TAG),
-                ) {
-                    Text("Add as new", color = PocketShellColors.TextSecondary)
-                }
-                TextButton(
+                )
+                PocketShellButton(
+                    text = "Already added",
                     onClick = onSkip,
+                    variant = ButtonVariant.Text,
                     modifier = Modifier.testTag(IMPORT_CONFLICT_SKIP_TAG),
-                ) {
-                    Text("Already added", color = PocketShellColors.TextSecondary)
-                }
+                )
             }
         },
         containerColor = PocketShellColors.Surface,
@@ -1667,21 +1671,19 @@ private fun SshPassphraseDialog(
             }
         },
         confirmButton = {
-            Button(
+            PocketShellButton(
+                text = "Connect",
                 onClick = onConnect,
                 enabled = passphrase.isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PocketShellColors.Accent,
-                    contentColor = PocketShellColors.OnAccent,
-                ),
-            ) {
-                Text("Connect")
-            }
+                variant = ButtonVariant.Primary,
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+            )
         },
         containerColor = PocketShellColors.Surface,
     )

@@ -36,7 +36,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -58,7 +57,9 @@ import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.release.launchUpdateDownload
 import com.pocketshell.core.assistant.AssistantProvider
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -322,30 +323,32 @@ private fun HostImportSection(
                 )
             },
             confirmButton = {
-                TextButton(
+                PocketShellButton(
+                    text = "Scan QR",
                     onClick = {
                         showImportDialog = false
                         onScanQr()
                     },
+                    variant = ButtonVariant.Primary,
                     modifier = Modifier.testTag(HOST_IMPORT_SCAN_QR_TAG),
-                ) {
-                    Text("Scan QR", color = PocketShellColors.Accent)
-                }
+                )
             },
             dismissButton = {
                 Row {
-                    TextButton(
+                    PocketShellButton(
+                        text = "Choose file",
                         onClick = {
                             showImportDialog = false
                             onChooseFile()
                         },
+                        variant = ButtonVariant.Secondary,
                         modifier = Modifier.testTag(HOST_IMPORT_CHOOSE_FILE_TAG),
-                    ) {
-                        Text("Choose file", color = PocketShellColors.Accent)
-                    }
-                    TextButton(onClick = { showImportDialog = false }) {
-                        Text("Cancel", color = PocketShellColors.TextSecondary)
-                    }
+                    )
+                    PocketShellButton(
+                        text = "Cancel",
+                        onClick = { showImportDialog = false },
+                        variant = ButtonVariant.Text,
+                    )
                 }
             },
             containerColor = PocketShellColors.Surface,
@@ -1205,22 +1208,24 @@ internal fun VoiceApiKeyEntryDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Save",
                 onClick = {
                     val chars = keyText.toCharArray()
                     onSave(chars)
                     keyText = ""
                 },
                 enabled = keyText.isNotBlank(),
+                variant = ButtonVariant.Primary,
                 modifier = Modifier.testTag(VOICE_API_KEY_SAVE_TAG),
-            ) {
-                Text("Save", color = PocketShellColors.Accent)
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+            )
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,
@@ -1461,22 +1466,24 @@ internal fun AssistantApiKeyEntryDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Save",
                 onClick = {
                     val chars = keyText.toCharArray()
                     onSave(chars)
                     keyText = ""
                 },
                 enabled = keyText.isNotBlank(),
+                variant = ButtonVariant.Primary,
                 modifier = Modifier.testTag(ASSISTANT_API_KEY_SAVE_TAG),
-            ) {
-                Text("Save", color = PocketShellColors.Accent)
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+            )
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,

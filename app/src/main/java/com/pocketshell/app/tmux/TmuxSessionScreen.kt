@@ -101,6 +101,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.conversation.ConversationInteractionCleanupEffect
+import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
 import com.pocketshell.app.conversation.ToolResultPairing
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
@@ -1277,6 +1278,16 @@ public fun TmuxSessionScreen(
             val showConversation = currentPane != null &&
                 visibleConversation?.detection != null &&
                 visibleConversation.selectedTab == SessionTab.Conversation
+            // Issue #605: hold the heavyweight terminal AndroidView re-attach
+            // for exactly one frame on the Conversation → Terminal edge so the
+            // leaving conversation pane's selection-toolbar/focus teardown
+            // (ConversationInteractionCleanupEffect's onDispose) does not
+            // contend with the embedded TerminalView's input-connection attach
+            // in the same frame — the residual same-frame race behind the
+            // post-transcript-interaction switch hang.
+            val deferTerminalAttachForSwap by rememberConversationToTerminalSwapLatch(
+                showConversation = showConversation,
+            )
             // Issue #488 / #557: shared URL-tap routing — a server-local
             // (loopback) link goes through the port-forward flow; a real-host
             // link opens in the browser. Used by both the Terminal surface and
@@ -1329,6 +1340,14 @@ public fun TmuxSessionScreen(
                     // until the VM reveals the NEW session's seeded panes. This
                     // takes precedence over the conversation / pager branches so
                     // not a single frame of the previous session can leak.
+                    SwitchingLoadingPlaceholder()
+                } else if (deferTerminalAttachForSwap) {
+                    // Issue #605: one-frame hold on the Conversation → Terminal
+                    // edge. The conversation pane has just been disposed (its
+                    // selection-toolbar/focus teardown runs this frame); paint
+                    // the lightweight placeholder so the terminal AndroidView
+                    // attaches on the NEXT frame, never sharing a frame with the
+                    // teardown. The latch self-clears after one frame.
                     SwitchingLoadingPlaceholder()
                 } else if (showConversation) {
                     val paneIdForSend = currentPane!!.paneId

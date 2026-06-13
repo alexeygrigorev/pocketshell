@@ -209,6 +209,22 @@ JOURNEY_CLASSES=(
   # collector parks on a test-controlled CompletableDeferred), so it does not
   # race a wall-clock timeout. It carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerDegradedSendE2eTest"
+  # PROMOTED (#746): the composer "Not sent" DISCARD + draft session-scoping
+  # journey. The maintainer's dogfood report: a "Not sent" draft authored in one
+  # session had no Discard control (only Send + the close ×, which PRESERVES the
+  # draft) AND bled into other sessions (the activity-scoped composer is shared
+  # across every session on a host). This proof drives the real
+  # PromptComposerViewModel and asserts (1) the "Not sent" banner shows a Discard
+  # button that clears text + attachments + banner, and (2) a draft authored in
+  # session A is gone after the composer is re-targeted to session B (no bleed).
+  # It coexists with the #745 send-feedback states (the failed send routes
+  # through restoreFailedSend, which folds the attachment into the draft). It
+  # uses NO Docker fixture (pure Compose-rule UI test, no SSH/tmux) and does NOT
+  # self-skip on CI. Per the "load-bearing journeys run at PR time" principle
+  # (#638/#691) it runs per-push so the no-discard / cross-session-bleed
+  # regression cannot silently return. It lives under com.pocketshell.app.composer,
+  # not the proof prefix, so it carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.PromptComposerDiscardE2eTest"
 )
 
 echo "=========================================================="

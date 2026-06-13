@@ -2994,6 +2994,141 @@ class PromptComposerViewModelTest {
         assertEquals(PromptComposerViewModel.RecordingState.Idle, vm.uiState.value.recording)
     }
 
+    // -- Issue #746: discard draft + session scoping ------------------------
+
+    @Test
+    fun discardDraftClearsTextAttachmentsBannerAndSavedState() = runTest {
+        // Issue #746: the "Not sent. …or discard the draft." banner promised a
+        // Discard action that did not exist. discardDraft() must wipe the draft
+        // text, every staged attachment, the error/status banner, and the
+        // persisted SavedStateHandle keys so the next open is a clean slate.
+        val savedStateHandle = SavedStateHandle()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            savedStateHandle = savedStateHandle,
+        )
+        vm.onDraftChange("ничего не происходит")
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/shot.png"))
+        }
+        advanceUntilIdle()
+        // The draft + attachment chip are staged before the failed send.
+        assertTrue(vm.uiState.value.draft.isNotEmpty())
+        assertTrue(vm.uiState.value.attachments.isNotEmpty())
+        // Simulate the degraded-send "Not sent" banner. Issue #745's
+        // restoreFailedSend folds the attachment paths into the draft text and
+        // clears the chips, so the "Not sent" state is a draft + banner the
+        // user must be able to discard.
+        vm.restoreFailedSend(
+            PromptComposerViewModel.SendRequest(text = "ничего не происходит", withEnter = true),
+        )
+        assertTrue(vm.uiState.value.draft.isNotEmpty())
+        assertNotNull(vm.uiState.value.error)
+
+        vm.discardDraft()
+
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertNull(vm.uiState.value.error)
+        // SavedStateHandle is wiped so a process-death recreate stays clean.
+        assertEquals("", savedStateHandle.get<String>(PromptComposerViewModel.KEY_DRAFT).orEmpty())
+        assertNull(savedStateHandle.get<String>(PromptComposerViewModel.KEY_DRAFT_OWNER))
+    }
+
+    @Test
+    fun discardDraftClearsStagedAttachmentChipsBeforeSend() = runTest {
+        // Issue #746: discard must also clear staged attachment chips that are
+        // still present (i.e. before a send folded them into the draft text).
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onDraftChange("with a chip")
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/shot.png"))
+        }
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.attachments.isNotEmpty())
+
+        vm.discardDraft()
+
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+    }
+
+    @Test
+    fun draftFromOneSessionDoesNotBleedIntoAnother() = runTest {
+        // Issue #746: a "Not sent" draft authored in session A must NOT appear
+        // when the composer is opened/focused in session B. Switching the
+        // target session discards the stale draft + banner.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onComposerTargetChanged("1/sessionA")
+        vm.restoreFailedSend(
+            PromptComposerViewModel.SendRequest(text = "draft for A", withEnter = true),
+        )
+        assertEquals("draft for A", vm.uiState.value.draft)
+        assertNotNull(vm.uiState.value.error)
+
+        // Switch to session B: the stale draft + banner are gone.
+        vm.onComposerTargetChanged("1/sessionB")
+        assertEquals("", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun draftSurvivesReturningToTheOwningSession() = runTest {
+        // Issue #746: scoping discards the draft only in OTHER sessions. While
+        // the composer stays on the session that authored the draft, the draft
+        // (and its retry banner) must be preserved so the user can resend.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onComposerTargetChanged("1/sessionA")
+        vm.restoreFailedSend(
+            PromptComposerViewModel.SendRequest(text = "draft for A", withEnter = true),
+        )
+        // Re-reporting the same target (e.g. a recomposition) is a no-op.
+        vm.onComposerTargetChanged("1/sessionA")
+        assertEquals("draft for A", vm.uiState.value.draft)
+        assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun processRestoredDraftIsAdoptedByFirstTargetNotDropped() = runTest {
+        // Issue #746: a draft restored from SavedStateHandle after process
+        // death has no owner stamp yet. The FIRST target the host reports must
+        // ADOPT it (the user is back where they typed it) rather than discard a
+        // legitimately-recovered prompt. A subsequent switch to a different
+        // session then discards it.
+        val savedStateHandle = SavedStateHandle()
+        savedStateHandle[PromptComposerViewModel.KEY_DRAFT] = "recovered draft"
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            savedStateHandle = savedStateHandle,
+        )
+        assertEquals("recovered draft", vm.uiState.value.draft)
+
+        // First target after restore adopts the orphan draft.
+        vm.onComposerTargetChanged("1/sessionA")
+        assertEquals("recovered draft", vm.uiState.value.draft)
+
+        // A later switch to a different session discards it.
+        vm.onComposerTargetChanged("1/sessionB")
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun emptyDraftSwitchJustReassignsTargetWithoutClearingFutureDrafts() = runTest {
+        // Issue #746: switching sessions with NO draft is a no-op clear, and a
+        // draft typed afterwards is owned by the now-current session so it
+        // persists on a same-session recomposition.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onComposerTargetChanged("1/sessionA")
+        vm.onComposerTargetChanged("1/sessionB")
+        vm.onDraftChange("typed in B")
+        // Same-session re-report keeps the draft.
+        vm.onComposerTargetChanged("1/sessionB")
+        assertEquals("typed in B", vm.uiState.value.draft)
+        // Switching away from B discards B's draft.
+        vm.onComposerTargetChanged("1/sessionA")
+        assertEquals("", vm.uiState.value.draft)
+    }
+
     @Test
     fun failedAttachmentSendPreservesAttachmentPathsForResend() = runTest {
         // Issue #694: the maintainer's "I can't send attachments anymore"

@@ -151,6 +151,19 @@ public class PromptComposerViewModel @Inject constructor(
     private var transcribeJob: Job? = null
 
     /**
+     * Issue #746: the session/pane this composer instance is currently
+     * targeting (`"<hostId>/<sessionName>"`). The composer ViewModel is
+     * activity-scoped and shared across every session on a host, so a draft
+     * (and especially a "Not sent" banner) authored in session A used to
+     * bleed into session B on a switch. The host screen calls
+     * [onComposerTargetChanged] whenever the focused session changes; when
+     * the new target differs from the one that owns the current draft, the
+     * stale draft is discarded so it never appears in a session it was not
+     * authored in. Null until the host wires the first target.
+     */
+    private var composerTarget: String? = null
+
+    /**
      * Issue #688: ids of pending-transcription rows with a retry round-trip
      * currently in flight. A row's id is claimed synchronously when
      * [retryPending] is called (an atomic check-and-add) and released in the
@@ -278,6 +291,11 @@ public class PromptComposerViewModel @Inject constructor(
         // lock + low-memory device can still tear the process down, and
         // the dictated text deserves to come back either way.
         savedStateHandle[KEY_DRAFT] = newText
+        // Issue #746: stamp the session that owns this draft so a later
+        // session switch can tell whether the draft belongs to the newly
+        // focused session (keep it) or was authored elsewhere (discard it).
+        // An empty draft has no owner — clearing it releases the stamp.
+        savedStateHandle[KEY_DRAFT_OWNER] = if (newText.isEmpty()) null else composerTarget
         _uiState.update { it.copy(draft = newText, error = null) }
     }
 
@@ -679,6 +697,10 @@ public class PromptComposerViewModel @Inject constructor(
     ) {
         if (request.text.isEmpty()) return
         savedStateHandle[KEY_DRAFT] = request.text
+        // Issue #746: a restored "Not sent" draft belongs to the session it
+        // was sent from. Stamp the owner so switching away discards it rather
+        // than carrying the banner into an unrelated session.
+        savedStateHandle[KEY_DRAFT_OWNER] = composerTarget
         _uiState.update { current ->
             current.copy(
                 draft = request.text,
@@ -693,6 +715,74 @@ public class PromptComposerViewModel @Inject constructor(
                 attachments = emptyList(),
                 attachmentUpload = AttachmentUploadState.Idle,
             )
+        }
+    }
+
+    /**
+     * Issue #746: explicitly throw the current draft away. Wired to the
+     * Discard action the "Not sent" banner instructs the user to use — and
+     * the only control that actually clears a stale unsent prompt
+     * (the sheet `×` deliberately preserves the draft for resend). Clears the
+     * draft text, every staged attachment tile, the error/status banner, the
+     * cancelled-upload state, and the persisted [SavedStateHandle] keys so the
+     * next composer open is a clean slate that survives a process-death
+     * recreate.
+     */
+    public fun discardDraft() {
+        // Stop any in-flight attachment upload so it cannot write a late
+        // result back into the now-cleared composer (mirrors the send path).
+        attachmentJob?.cancel()
+        attachmentJob = null
+        savedStateHandle[KEY_DRAFT] = ""
+        savedStateHandle[KEY_DRAFT_OWNER] = null
+        _uiState.update { current ->
+            current.copy(
+                draft = "",
+                attachments = emptyList(),
+                attachmentUpload = AttachmentUploadState.Idle,
+                error = null,
+            )
+        }
+        DiagnosticEvents.record("action", "composer_discard_draft")
+    }
+
+    /**
+     * Issue #746: tell the composer which session/pane it is currently
+     * targeting (`"<hostId>/<sessionName>"`). The host screen calls this when
+     * the focused session changes. Because the composer ViewModel is
+     * activity-scoped and shared across every session on a host, a draft (and
+     * its "Not sent" banner) authored in session A would otherwise reappear in
+     * session B. When the new target differs from the session that owns the
+     * current draft, the stale draft is discarded so it never bleeds across
+     * sessions. A draft authored before any target was wired (owner == null)
+     * is adopted by the first target so process-death-restored drafts are not
+     * dropped on the first switch callback.
+     */
+    public fun onComposerTargetChanged(targetKey: String?) {
+        val previousTarget = composerTarget
+        composerTarget = targetKey
+        if (targetKey == null || targetKey == previousTarget) return
+        val draftOwner = savedStateHandle.get<String>(KEY_DRAFT_OWNER)
+        val hasDraft = _uiState.value.draft.isNotEmpty() ||
+            _uiState.value.attachments.isNotEmpty()
+        if (!hasDraft) {
+            // No draft to bleed; just (re)stamp the owner to the new target so
+            // a brand-new draft is attributed correctly.
+            return
+        }
+        when (draftOwner) {
+            // Draft authored before any target was known: adopt it for this
+            // target instead of discarding a legitimately-restored prompt.
+            null -> savedStateHandle[KEY_DRAFT_OWNER] = targetKey
+            // Draft belongs to a DIFFERENT session: discard so it does not
+            // appear where it was never authored (issue #746 hard-cut).
+            else -> if (draftOwner != targetKey) {
+                DiagnosticEvents.record(
+                    "action",
+                    "composer_discard_on_session_switch",
+                )
+                discardDraft()
+            }
         }
     }
 
@@ -2400,6 +2490,20 @@ public class PromptComposerViewModel @Inject constructor(
          * silently discard the dictated text.
          */
         internal const val KEY_DRAFT: String = "prompt-composer-draft"
+
+        /**
+         * Issue #746: [SavedStateHandle] key for the session/pane that owns
+         * the current draft (`"<hostId>/<sessionName>"`). The composer
+         * ViewModel is activity-scoped and shared across every session on a
+         * host, so without an owner stamp a draft (and its "Not sent" banner)
+         * authored in one session bleeds into another on a switch. The host
+         * screen reports the focused session via
+         * [onComposerTargetChanged]; a target change that does not match the
+         * stamped owner discards the stale draft. Survives process death
+         * alongside [KEY_DRAFT] so the restore path can still attribute a
+         * recovered draft to its session.
+         */
+        internal const val KEY_DRAFT_OWNER: String = "prompt-composer-draft-owner"
 
         /**
          * Issue #169 Part 2: [SavedStateHandle] key for the one-shot

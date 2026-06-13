@@ -185,6 +185,15 @@ public fun PromptComposerSheet(
     // a silent blind wait. Defaults to false (connected) for previews / tests
     // that don't wire a host connection.
     connectionLost: Boolean = false,
+    // Issue #746: a stable id for the session/pane this composer is acting on
+    // (`"<hostId>/<sessionName>"`). The composer ViewModel is activity-scoped
+    // and shared across every session on a host, so a draft (and its "Not
+    // sent" banner) authored in one session bled into another on a switch.
+    // The sheet forwards this to [PromptComposerViewModel.onComposerTargetChanged]
+    // so a draft owned by a different session is discarded instead of shown
+    // where it was never authored. Null leaves the draft un-scoped (callers
+    // without a session context, e.g. previews / proof-of-life entry points).
+    composerTargetKey: String? = null,
     onStageAttachments: (suspend (List<Uri>) -> Result<List<String>>)? = null,
     viewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #234: the composer is partial-expand by default so the terminal
@@ -317,6 +326,15 @@ public fun PromptComposerSheet(
         viewModel.setConnectionDegraded(connectionLost)
     }
 
+    // Issue #746: report the targeted session to the ViewModel so it can
+    // discard a draft that belongs to a different session (the activity-scoped
+    // composer is shared across every session on a host). Keyed on the target
+    // so a switch to a new session re-runs the check; a null key (no session
+    // context) leaves the draft un-scoped.
+    LaunchedEffect(composerTargetKey) {
+        viewModel.onComposerTargetChanged(composerTargetKey)
+    }
+
     // Issue #511 / #509: dismissing the composer (× button, scrim tap,
     // system back, swipe-down) must RELEASE the microphone — not merely
     // hide the sheet. This [PromptComposerViewModel] is scoped to the
@@ -395,6 +413,9 @@ public fun PromptComposerSheet(
             onCancelRecording = viewModel::cancelRecording,
             onCancelTranscription = viewModel::cancelTranscription,
             onLockRecording = viewModel::lockRecording,
+            // Issue #746: clears the stale "Not sent" draft + attachments +
+            // banner so the user no longer has to delete it by hand.
+            onDiscard = viewModel::discardDraft,
             onSend = { withEnter ->
                 // Issue #211: route through the ViewModel so the FSM
                 // decides whether to dispatch now (Idle) or queue for
@@ -506,6 +527,11 @@ internal fun SheetContent(
     // has already moved out of active capture.
     onCancelTranscription: () -> Unit = {},
     onLockRecording: () -> Unit = {},
+    // Issue #746: throw away the current "Not sent" / unsent draft (text +
+    // attachments + banner). Rendered as the Discard action inside the error
+    // banner the maintainer reported had no way to clear a stale prompt.
+    // Defaults to a no-op so previews / legacy tests keep compiling.
+    onDiscard: () -> Unit = {},
     // Issue #180: queued failed / offline transcriptions. Defaults to
     // an empty list so older previews + tests that pre-date the queue
     // render the same composer shape they always did.
@@ -777,16 +803,49 @@ internal fun SheetContent(
             // user informed about permission / API-key / Whisper failures
             // without a Snackbar (the sheet doesn't host a scaffold).
             state.error?.let { msg ->
-                Box(
+                // Issue #746: when the banner is shown while there is a draft
+                // to clear (the "Not sent. …or discard the draft." case), give
+                // the user the Discard action the copy refers to. Without it,
+                // the maintainer had to delete the stale prompt character by
+                // character. Errors with no draft (e.g. permission denied)
+                // render the message alone.
+                val canDiscard = state.draft.isNotEmpty() || state.attachments.isNotEmpty()
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(
                             color = PocketShellColors.AccentSoft,
                             shape = RoundedCornerShape(8.dp),
                         )
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(start = 12.dp, end = if (canDiscard) 4.dp else 12.dp)
+                        .padding(vertical = if (canDiscard) 0.dp else 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(text = msg, color = PocketShellColors.Accent, fontSize = 12.sp)
+                    Text(
+                        text = msg,
+                        color = PocketShellColors.Accent,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(
+                                if (canDiscard) Modifier.padding(vertical = 8.dp) else Modifier,
+                            ),
+                    )
+                    if (canDiscard) {
+                        TextButton(
+                            onClick = onDiscard,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .testTag(COMPOSER_DISCARD_TAG)
+                                .semantics { contentDescription = "Discard draft" },
+                        ) {
+                            Text(
+                                text = "Discard",
+                                color = PocketShellColors.Accent,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -2390,6 +2449,14 @@ internal fun ApiKeyEntryDialog(
 }
 
 internal const val COMPOSER_DRAFT_TAG = "prompt-composer-draft"
+
+/**
+ * Issue #746: the Discard action rendered inside the error/status banner.
+ * Tagged so the discard-draft regression test can tap the real control that
+ * clears a stale "Not sent" prompt (text + attachments + banner) — the
+ * affordance the banner's "or discard the draft" copy refers to.
+ */
+internal const val COMPOSER_DISCARD_TAG = "prompt-composer-discard"
 
 /**
  * Issue #511: the header `×` close button. Tagged so the dismiss-releases-

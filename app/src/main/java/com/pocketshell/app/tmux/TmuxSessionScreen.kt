@@ -1929,6 +1929,10 @@ public fun TmuxSessionScreen(
             currentAgentConversation.selectedTab == SessionTab.Conversation
         PromptComposerSheet(
             viewModel = promptComposerViewModel,
+            // Issue #746: scope the shared activity-level composer draft to the
+            // focused session so a "Not sent" draft authored here never bleeds
+            // into another session on a switch.
+            composerTargetKey = "$hostId/$sessionName",
             onDismiss = { showMicSheet = false },
             // Issue #745: surface the live connection state in the composer so a
             // send while the SSH/tmux link is degraded shows a connection-lost

@@ -39,9 +39,22 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # Issue #760: the unit job occasionally failed with ALL visible tests
+      # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
+      # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out
+      # plus an oversized test JVM heap can push the runner into the OOM-killer,
+      # which kills the gradle process mid-run AFTER the tests reported green.
+      # Bound BOTH the gradle worker count and the JVM heaps so the job stays
+      # inside the runner's memory budget: --max-workers=2 matches the 2 vCPUs,
+      # and the explicit -Dorg.gradle.jvmargs caps the gradle daemon/launcher
+      # heap while -Pkotlin/test forks inherit the project's modest -Xmx. This is
+      # infra robustness only — no test is removed, skipped, or weakened.
       - name: Run JVM unit tests
         timeout-minutes: 35
-        run: ./gradlew test --no-daemon --stacktrace
+        run: |
+          ./gradlew test --no-daemon --stacktrace \
+            --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
 
       - name: Upload unit test reports on failure
         if: failure()
@@ -210,6 +223,41 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # Issue #760: the AVD create intermittently FATAL-ed with
+      # "Not enough space to create userdata partition. Available: 6957 MB,
+      # need 7372 MB" — pure runner disk pressure, not a test failure. The
+      # ubuntu-latest image ships ~30 GB of preinstalled SDKs/toolchains we do
+      # not use for this job (.NET, Haskell/GHC, the bundled Android NDK, the
+      # large CodeQL/boost caches). Reclaim them BEFORE the emulator-runner
+      # creates the AVD so the userdata partition always fits, then print the
+      # free space so a future disk regression is visible in the log. The `|| true`
+      # guards keep the step green if a path is already gone on a newer image.
+      - name: Free disk space for the AVD
+        run: |
+          echo "::group::Disk before cleanup"
+          df -h /
+          echo "::endgroup::"
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android/sdk/ndk || true
+          sudo rm -rf /opt/ghc /usr/local/.ghcup || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          echo "::group::Disk after cleanup"
+          df -h /
+          echo "::endgroup::"
+          avail_mb="$(df -m --output=avail / | tail -1 | tr -d ' ')"
+          echo "Available on / after cleanup: ${avail_mb} MB"
+          # The AVD userdata partition needs ~7372 MB; require a safe margin so
+          # the create cannot FATAL on disk. If it still can't be freed, fail
+          # NOW with an explicit infra classification rather than letting the
+          # emulator-runner FATAL deeper in with a confusing message.
+          if [[ "$avail_mb" -lt 9000 ]]; then
+            echo "::error title=EMULATOR INFRA UNAVAILABLE::Only ${avail_mb} MB free on / after cleanup; the AVD userdata partition needs ~7372 MB. This is a runner-disk infra shortage (issue #760), not a test failure."
+            exit 1
+          fi
+
       - name: Build SSH base image
         run: docker compose -f tests/docker/docker-compose.yml build sshd
 
@@ -241,17 +289,81 @@ jobs:
             testuser@127.0.0.1 \
             'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
 
+      # Issue #760: the journey job intermittently failed with
+      # "WARNING | Failed to load snapshot 'default_boot'" followed by
+      # "adb … exit code 1" — a STALE/CORRUPT quickboot snapshot the runner
+      # tried to restore, so the emulator never reached `device`. Force a clean
+      # COLD boot every run so we never depend on a `default_boot` snapshot:
+      #   * `force-avd-creation: true`  — recreate the AVD from scratch (no reuse
+      #     of a prior, possibly-corrupt AVD/snapshot state).
+      #   * `-no-snapshot-load` in emulator-options — never restore quickboot;
+      #     boot cold. (`-no-snapshot-save` was already set, so nothing is saved
+      #     either — the pair guarantees a deterministic cold boot.)
+      #
+      # Infra-retry-once (separate from the per-class test retry inside
+      # scripts/ci-journey-suite.sh): the FIRST emulator bringup is
+      # `continue-on-error`; if it fails (boot/adb infra flake), a SECOND
+      # identical bringup runs. The journey TESTS only "really failed" if the
+      # second attempt's suite reports failures — a one-off boot flake recovers
+      # to green instead of spamming a red-CI email on an inert diff.
       - name: Run load-bearing journey subset on the emulator
+        id: journey
+        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           target: google_apis
           arch: x86_64
           profile: pixel_7
+          force-avd-creation: true
           disable-animations: true
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           emulator-boot-timeout: 900
           script: scripts/ci-journey-suite.sh
+
+      # Infra-retry-once: only runs if the first bringup failed (boot/adb infra
+      # flake OR a real test failure). A second cold boot recovers a transient
+      # emulator-boot flake; a genuine regression fails here too and turns the
+      # job red below.
+      - name: Retry journey subset on a fresh cold-booted emulator
+        id: journey_retry
+        if: steps.journey.outcome == 'failure'
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-boot-timeout: 900
+          script: scripts/ci-journey-suite.sh
+
+      # Classify the final verdict. The job is red ONLY if the retry also failed
+      # (or there was no retry because the first run failed but produced no
+      # outcome we can trust). A first-attempt failure that the retry recovered
+      # is surfaced as an explicit "infra flake recovered" note in the log so a
+      # degrading-flake trend stays visible (parity with the suite script's
+      # JOURNEY_FLAKE_RECOVERED marker), not silently hidden.
+      - name: Classify emulator-journey result (infra-abort vs test-failure)
+        if: always()
+        run: |
+          first="${{ steps.journey.outcome }}"
+          retry="${{ steps.journey_retry.outcome }}"
+          echo "first attempt outcome:  $first"
+          echo "retry attempt outcome:  ${retry:-<skipped>}"
+          if [[ "$first" == "success" ]]; then
+            echo "Emulator journey passed on the first cold boot."
+            exit 0
+          fi
+          if [[ "$retry" == "success" ]]; then
+            echo "::warning title=Emulator infra flake recovered::The first emulator bringup failed but a second cold boot passed (issue #760). Treating as a recovered infra flake, NOT a test failure. Watch for a degrading trend."
+            exit 0
+          fi
+          echo "::error title=Emulator journey FAILED (both attempts)::The journey suite failed on BOTH cold-boot attempts. If the logs show the emulator never reached 'device' (boot/adb infra), this is EMULATOR INFRA UNAVAILABLE; otherwise it is a genuine test failure. See the per-class verdicts in the suite summary above."
+          exit 1
 
       - name: Collect Docker logs
         if: always()

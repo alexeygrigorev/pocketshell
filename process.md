@@ -65,6 +65,35 @@ about existing users."
 When in doubt: hard-cut wins. The orchestrator removes legacy code
 proactively as part of every round, not as a separate cleanup task.
 
+## Connection Manager is the most critical subsystem (locked principle D28)
+
+The SSH/tmux Connection Manager (connect / attach / reattach / grace / lease /
+reconnect) is the **single most important subsystem** and the #1 dogfood
+blocker. It is managed as a first-class architecture, **never via
+patches-on-patches**:
+
+- **Rewrite over patch.** When the architecture stops allowing clean
+  extension, prefer a clean-slate rewrite over stacking another
+  shim/branch/special-case onto the reconnect path (epic #687 clean-slate
+  mandate; hard-cut per D22).
+- **Flag cardinal rework — don't silently keep patching.** The orchestrator
+  continuously watches the connection core's architectural health. The moment
+  it judges the design can no longer be extended cleanly and needs cardinal
+  rework, it **STOPS and tells the maintainer explicitly**. The maintainer owns
+  the rewrite-vs-patch call.
+- **Tests preserved + expanded** across any rewrite. The load-bearing journeys
+  (background→foreground within the D21 grace window, multi-session switch,
+  reconnect/EOF) run in per-PR CI (#638/#691), and a journey test must FAIL when
+  the **user-visible** behaviour regresses — not merely when an internal/shadow
+  state diverges.
+- **"Done" for #687 = single active path.** The new `core-connection`
+  `ConnectionController` is the SOLE active path; the old
+  `TmuxSessionViewModel` reconnect/grace path is DELETED. No shadow/old
+  coexistence remains — that half-migrated state is itself the
+  patches-on-patches condition D28 exists to end.
+
+This is locked decision **D28** in `docs/decisions.md`.
+
 ## Non-Negotiable Loop
 
 Every issue moves through this state machine:

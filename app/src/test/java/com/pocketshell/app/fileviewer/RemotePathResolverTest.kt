@@ -1,6 +1,7 @@
 package com.pocketshell.app.fileviewer
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -165,5 +166,161 @@ class RemotePathResolverTest {
             "/home/me/b.txt",
             RemotePathResolver.resolve("~/a/../b.txt", "/home/me", "/home/me"),
         )
+    }
+
+    // --- Issue #748: basename-search fallback plan ---------------------------
+
+    @Test
+    fun `search plan targets the session cwd tree for a relative path`() {
+        // The maintainer's exact case: agent referenced renders/foo.png relative
+        // to a subdirectory it cd'd into; resolution against the project root
+        // missed, so the fallback searches the project tree for the basename.
+        val plan = RemotePathResolver.searchPlan(
+            "renders/white_bathtub_3d_preview.png",
+            "/home/alexey/git/3d-models",
+        )
+        assertEquals("/home/alexey/git/3d-models", plan?.searchRoot)
+        assertEquals("white_bathtub_3d_preview.png", plan?.basename)
+        assertEquals("renders/white_bathtub_3d_preview.png", plan?.relativeSuffix)
+    }
+
+    @Test
+    fun `search plan resolves a bare basename`() {
+        val plan = RemotePathResolver.searchPlan("notes.txt", "/home/me/proj")
+        assertEquals("/home/me/proj", plan?.searchRoot)
+        assertEquals("notes.txt", plan?.basename)
+        assertEquals("notes.txt", plan?.relativeSuffix)
+    }
+
+    @Test
+    fun `search plan expands a tilde cwd against the known remote home`() {
+        val plan = RemotePathResolver.searchPlan("out/a.png", "~/proj", "/home/me")
+        assertEquals("/home/me/proj", plan?.searchRoot)
+        assertEquals("a.png", plan?.basename)
+        assertEquals("out/a.png", plan?.relativeSuffix)
+    }
+
+    @Test
+    fun `search plan collapses leading dot-slash and dotdot in the suffix`() {
+        val plan = RemotePathResolver.searchPlan("./sub/../out/a.png", "/home/me/proj")
+        assertEquals("/home/me/proj", plan?.searchRoot)
+        assertEquals("a.png", plan?.basename)
+        assertEquals("out/a.png", plan?.relativeSuffix)
+    }
+
+    @Test
+    fun `no search plan for an absolute path`() {
+        // A rooted path was resolved exactly; a miss is a real miss, not a
+        // wrong-base subdirectory problem.
+        assertNull(RemotePathResolver.searchPlan("/etc/hosts", "/home/me/proj"))
+    }
+
+    @Test
+    fun `no search plan for a tilde path`() {
+        assertNull(RemotePathResolver.searchPlan("~/notes.txt", "/home/me/proj"))
+        assertNull(RemotePathResolver.searchPlan("~", "/home/me/proj"))
+    }
+
+    @Test
+    fun `no search plan for a local file uri`() {
+        assertNull(
+            RemotePathResolver.searchPlan(
+                "file:///home/me/out.png",
+                "/home/me/proj",
+            ),
+        )
+    }
+
+    @Test
+    fun `no search plan without a usable rooted cwd`() {
+        assertNull(RemotePathResolver.searchPlan("a.png", null))
+        assertNull(RemotePathResolver.searchPlan("a.png", "  "))
+        assertNull(RemotePathResolver.searchPlan("a.png", "some/relative/dir"))
+    }
+
+    @Test
+    fun `no search plan for blank input`() {
+        assertNull(RemotePathResolver.searchPlan("   ", "/home/me/proj"))
+    }
+
+    // --- Issue #748: choosing the best basename-search match -----------------
+
+    @Test
+    fun `choose match prefers the candidate whose tail matches the relative path`() {
+        val plan = RemotePathResolver.SearchPlan(
+            searchRoot = "/home/alexey/git/3d-models",
+            basename = "white_bathtub_3d_preview.png",
+            relativeSuffix = "renders/white_bathtub_3d_preview.png",
+        )
+        val candidates = listOf(
+            "/home/alexey/git/3d-models/archive/white_bathtub_3d_preview.png",
+            "/home/alexey/git/3d-models/matchbox-mattel-atv-6x6/renders/white_bathtub_3d_preview.png",
+        )
+        assertEquals(
+            "/home/alexey/git/3d-models/matchbox-mattel-atv-6x6/renders/white_bathtub_3d_preview.png",
+            RemotePathResolver.chooseSearchMatch(plan, candidates),
+        )
+    }
+
+    @Test
+    fun `choose match returns the only candidate when there is exactly one`() {
+        val plan = RemotePathResolver.SearchPlan(
+            searchRoot = "/home/me/proj",
+            basename = "a.png",
+            relativeSuffix = "out/a.png",
+        )
+        assertEquals(
+            "/home/me/proj/deep/nested/a.png",
+            RemotePathResolver.chooseSearchMatch(
+                plan,
+                listOf("/home/me/proj/deep/nested/a.png"),
+            ),
+        )
+    }
+
+    @Test
+    fun `choose match returns null for multiple non-suffix candidates`() {
+        val plan = RemotePathResolver.SearchPlan(
+            searchRoot = "/home/me/proj",
+            basename = "a.png",
+            relativeSuffix = "out/a.png",
+        )
+        // Same basename, but neither path ends with `out/a.png` — ambiguous, so
+        // the UI should offer the list rather than guess.
+        assertNull(
+            RemotePathResolver.chooseSearchMatch(
+                plan,
+                listOf("/home/me/proj/x/a.png", "/home/me/proj/y/a.png"),
+            ),
+        )
+    }
+
+    @Test
+    fun `choose match picks the shallowest among multiple suffix matches`() {
+        val plan = RemotePathResolver.SearchPlan(
+            searchRoot = "/home/me/proj",
+            basename = "a.png",
+            relativeSuffix = "out/a.png",
+        )
+        assertEquals(
+            "/home/me/proj/out/a.png",
+            RemotePathResolver.chooseSearchMatch(
+                plan,
+                listOf(
+                    "/home/me/proj/deep/sub/out/a.png",
+                    "/home/me/proj/out/a.png",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `choose match returns null for empty candidates`() {
+        val plan = RemotePathResolver.SearchPlan(
+            searchRoot = "/home/me/proj",
+            basename = "a.png",
+            relativeSuffix = "out/a.png",
+        )
+        assertNull(RemotePathResolver.chooseSearchMatch(plan, emptyList()))
     }
 }

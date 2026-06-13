@@ -85,6 +85,36 @@ class FileViewerScaffoldTest {
     }
 
     @Test
+    fun cannotPreviewWithLocateCandidatesOffersOpenRows() {
+        // Issue #748 — a relative path missing under the session cwd but found
+        // deeper in the tree offers candidate rows; tapping one opens it.
+        val candidate =
+            "/home/alexey/git/3d-models/matchbox-mattel-atv-6x6/renders/white_bathtub_3d_preview.png"
+        var opened: String? = null
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.CannotPreview(
+                        displayPath = "/home/alexey/git/3d-models/renders/white_bathtub_3d_preview.png",
+                        message = "Couldn't find white_bathtub_3d_preview.png where the agent " +
+                            "referenced it, but it exists elsewhere in this project. Open it instead?",
+                        locateCandidates = listOf(candidate),
+                    ),
+                    onBack = {},
+                    onRetry = {},
+                    onOpenLocated = { opened = it },
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_VIEWER_CANNOT_PREVIEW_TAG).assertIsDisplayed()
+        compose.onNodeWithText(candidate).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_LOCATE_CANDIDATE_TAG).performClick()
+        compose.waitForIdle()
+        assertEquals(candidate, opened)
+    }
+
+    @Test
     fun audioStateShowsPlayerControls() {
         // Seed a real, valid (silent PCM) WAV so MediaPlayer prepares cleanly
         // and the panel renders its play/pause control, seekbar, and time

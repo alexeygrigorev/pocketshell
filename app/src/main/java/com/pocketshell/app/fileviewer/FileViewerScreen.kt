@@ -97,6 +97,11 @@ const val FILE_VIEWER_AUDIO_TOTAL_TIME_TAG = "fileViewerAudioTotalTime"
 const val FILE_VIEWER_CANNOT_PREVIEW_TAG = "fileViewerCannotPreview"
 const val FILE_VIEWER_RETRY_TAG = "fileViewerRetry"
 
+// Issue #748 — "open it where it actually is" candidate rows on the can't-preview
+// panel when the relative path was missing under the session cwd but the agent
+// worked in a subdirectory.
+const val FILE_VIEWER_LOCATE_CANDIDATE_TAG = "fileViewerLocateCandidate"
+
 // Issue #559 — "act on the opened file" header actions.
 const val FILE_VIEWER_SHARE_TAG = "fileViewerShare"
 const val FILE_VIEWER_COPY_TAG = "fileViewerCopy"
@@ -201,6 +206,7 @@ fun FileViewerScreen(
         reviewState = reviewState,
         onBack = onBack,
         onRetry = viewModel::retry,
+        onOpenLocated = viewModel::openLocated,
         onToggleWordWrap = viewModel::toggleWordWrap,
         onToggleRenderMarkdown = viewModel::toggleRenderMarkdown,
         onToggleReviewMode = viewModel::toggleReviewMode,
@@ -226,6 +232,7 @@ internal fun FileViewerScaffold(
     state: FileViewerUiState,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    onOpenLocated: (String) -> Unit = {},
     readingPrefs: FileViewerReadingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
     reviewState: ReviewState = ReviewState(),
     onToggleWordWrap: () -> Unit = {},
@@ -328,6 +335,8 @@ internal fun FileViewerScaffold(
                     CannotPreviewPanel(
                         message = state.message,
                         onRetry = onRetry,
+                        locateCandidates = state.locateCandidates,
+                        onOpenLocated = onOpenLocated,
                     )
                 }
             }
@@ -1469,11 +1478,14 @@ private fun CannotPreviewPanel(
     message: String,
     onRetry: () -> Unit,
     showRetry: Boolean = true,
+    locateCandidates: List<String> = emptyList(),
+    onOpenLocated: (String) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 24.dp)
+            .verticalScroll(rememberScrollState())
             .testTag(FILE_VIEWER_CANNOT_PREVIEW_TAG),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -1488,6 +1500,28 @@ private fun CannotPreviewPanel(
             color = PocketShellColors.TextSecondary,
             fontSize = 14.sp,
         )
+        // Issue #748 — the agent referenced a relative path that doesn't exist
+        // under the session cwd, but same-named files were found deeper in the
+        // tree (it worked in a subdirectory). Offer to open them instead of a
+        // dead-end Retry.
+        if (locateCandidates.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            locateCandidates.forEach { candidate ->
+                TextButton(
+                    onClick = { onOpenLocated(candidate) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(FILE_VIEWER_LOCATE_CANDIDATE_TAG),
+                ) {
+                    Text(
+                        text = candidate,
+                        color = PocketShellColors.Accent,
+                        fontSize = 13.sp,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
         if (showRetry) {
             Spacer(Modifier.height(4.dp))
             TextButton(onClick = onRetry, modifier = Modifier.testTag(FILE_VIEWER_RETRY_TAG)) {

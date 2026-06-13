@@ -95,12 +95,20 @@ sealed interface FileViewerUiState {
      * panel can show the file info and offer a Download action (issue #623).
      * For other cannot-preview cases (host unreachable, file not found, too
      * large), these remain null/0 and only the message + retry are shown.
+     *
+     * Issue #748 — when a relative path is missing under the session cwd but a
+     * bounded basename search found same-named files deeper in the tree (the
+     * agent worked in a subdirectory), [locateCandidates] holds those absolute
+     * paths so the panel can offer "open this instead" rows rather than a
+     * dead-end Retry. Empty when no candidates were found or the search didn't
+     * apply (rooted path, unreachable host, etc.).
      */
     data class CannotPreview(
         val displayPath: String,
         val message: String,
         val sizeBytes: Long = 0L,
         val cacheFile: File? = null,
+        val locateCandidates: List<String> = emptyList(),
     ) : FileViewerUiState
 }
 
@@ -352,6 +360,19 @@ class FileViewerViewModel @Inject constructor(
         lastRequest?.let { load(it) }
     }
 
+    /**
+     * Open an absolute path the basename-search fallback located (issue #748).
+     * Re-binds the current request onto the chosen [absolutePath] — it's already
+     * rooted, so [RemotePathResolver] passes it through verbatim and the viewer
+     * fetches the file that actually exists in the agent's subdirectory.
+     */
+    fun openLocated(absolutePath: String) {
+        val current = lastRequest ?: return
+        val next = current.copy(path = absolutePath)
+        lastRequest = next
+        load(next)
+    }
+
     private fun load(request: Request) {
         val resolved = RemotePathResolver.resolve(
             input = request.path,
@@ -387,59 +408,22 @@ class FileViewerViewModel @Inject constructor(
     }
 
     private suspend fun readFromSession(request: Request, session: SshSession): FileViewerUiState {
+        val remoteHome = remoteHomeDirectory(session) ?: conventionalRemoteHome(request.username)
         val resolved = RemotePathResolver.resolve(
             input = request.path,
             cwd = request.cwd,
-            remoteHome = remoteHomeDirectory(session) ?: conventionalRemoteHome(request.username),
+            remoteHome = remoteHome,
         )
         return try {
-            val bytes = session.downloadFile(resolved, MAX_PREVIEW_BYTES)
-            when (FileTypeDetector.detect(resolved, bytes)) {
-                FileViewerType.IMAGE -> {
-                    val cached = writeToCache(resolved, bytes)
-                    FileViewerUiState.Image(
-                        displayPath = resolved,
-                        cacheFile = cached,
-                        sizeBytes = bytes.size.toLong(),
-                    )
-                }
-                FileViewerType.TEXT -> FileViewerUiState.TextContent(
-                    displayPath = resolved,
-                    content = bytes.toString(Charsets.UTF_8),
-                    sizeBytes = bytes.size.toLong(),
-                )
-                FileViewerType.PDF -> if (pdfExceedsCap(bytes.size.toLong())) {
-                    pdfTooLarge(resolved, bytes.size.toLong())
-                } else {
-                    FileViewerUiState.Pdf(
-                        displayPath = resolved,
-                        cacheFile = writeToCache(resolved, bytes),
-                        sizeBytes = bytes.size.toLong(),
-                    )
-                }
-                FileViewerType.AUDIO -> if (audioExceedsCap(bytes.size.toLong())) {
-                    audioTooLarge(resolved, bytes.size.toLong())
-                } else {
-                    FileViewerUiState.Audio(
-                        displayPath = resolved,
-                        cacheFile = writeToCache(resolved, bytes),
-                        sizeBytes = bytes.size.toLong(),
-                    )
-                }
-                FileViewerType.BINARY -> FileViewerUiState.CannotPreview(
-                    displayPath = resolved,
-                    message = "Can't preview this file type.",
-                    sizeBytes = bytes.size.toLong(),
-                    cacheFile = writeToCache(resolved, bytes),
-                )
-            }
+            downloadAndRender(session, resolved)
         } catch (e: CancellationException) {
             throw e
         } catch (e: SshFileNotFoundException) {
-            FileViewerUiState.CannotPreview(
-                displayPath = resolved,
-                message = fileNotFoundMessage(resolved),
-            )
+            // The path resolved against the session cwd is missing — but the
+            // agent may have worked in a subdirectory (issue #748). Search the
+            // session-cwd tree for the basename; auto-open a confident single
+            // match, else offer the candidates instead of a dead-end Retry.
+            locateMissingRelativeFile(request, session, resolved, remoteHome)
         } catch (e: SshFileTooLargeException) {
             FileViewerUiState.CannotPreview(
                 displayPath = resolved,
@@ -452,6 +436,142 @@ class FileViewerViewModel @Inject constructor(
                 message = "Couldn't read the file: ${t.message ?: t.javaClass.simpleName}",
             )
         }
+    }
+
+    /**
+     * Download [resolved] over the warm [session] and map it to the right
+     * preview state. Throws [SshFileNotFoundException] / [SshFileTooLargeException]
+     * straight through so the caller can run the issue-#748 basename fallback or
+     * the too-large message. Shared by the primary read and the located-match
+     * re-read so the located file goes through the identical detect/cache path.
+     */
+    private suspend fun downloadAndRender(session: SshSession, resolved: String): FileViewerUiState {
+        val bytes = session.downloadFile(resolved, MAX_PREVIEW_BYTES)
+        return when (FileTypeDetector.detect(resolved, bytes)) {
+            FileViewerType.IMAGE -> {
+                val cached = writeToCache(resolved, bytes)
+                FileViewerUiState.Image(
+                    displayPath = resolved,
+                    cacheFile = cached,
+                    sizeBytes = bytes.size.toLong(),
+                )
+            }
+            FileViewerType.TEXT -> FileViewerUiState.TextContent(
+                displayPath = resolved,
+                content = bytes.toString(Charsets.UTF_8),
+                sizeBytes = bytes.size.toLong(),
+            )
+            FileViewerType.PDF -> if (pdfExceedsCap(bytes.size.toLong())) {
+                pdfTooLarge(resolved, bytes.size.toLong())
+            } else {
+                FileViewerUiState.Pdf(
+                    displayPath = resolved,
+                    cacheFile = writeToCache(resolved, bytes),
+                    sizeBytes = bytes.size.toLong(),
+                )
+            }
+            FileViewerType.AUDIO -> if (audioExceedsCap(bytes.size.toLong())) {
+                audioTooLarge(resolved, bytes.size.toLong())
+            } else {
+                FileViewerUiState.Audio(
+                    displayPath = resolved,
+                    cacheFile = writeToCache(resolved, bytes),
+                    sizeBytes = bytes.size.toLong(),
+                )
+            }
+            FileViewerType.BINARY -> FileViewerUiState.CannotPreview(
+                displayPath = resolved,
+                message = "Can't preview this file type.",
+                sizeBytes = bytes.size.toLong(),
+                cacheFile = writeToCache(resolved, bytes),
+            )
+        }
+    }
+
+    /**
+     * Issue #748 — the relative path resolved against the session cwd is
+     * missing. Run a bounded basename `find` under the session-cwd tree (the
+     * agent likely `cd`'d into a subdirectory before generating the file). If a
+     * confident single/suffix match is found, download + render it directly. If
+     * several same-named files exist, surface them as locate candidates. If none
+     * (or the search doesn't apply), fall back to the plain not-found message.
+     */
+    private suspend fun locateMissingRelativeFile(
+        request: Request,
+        session: SshSession,
+        resolved: String,
+        remoteHome: String?,
+    ): FileViewerUiState {
+        val plan = RemotePathResolver.searchPlan(
+            input = request.path,
+            cwd = request.cwd,
+            remoteHome = remoteHome,
+        ) ?: return FileViewerUiState.CannotPreview(
+            displayPath = resolved,
+            message = fileNotFoundMessage(resolved),
+        )
+
+        val candidates = try {
+            searchByBasename(session, plan)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Log.w(LOG_TAG, "Basename search failed for ${plan.basename}: ${t.message}", t)
+            emptyList()
+        }
+        if (candidates.isEmpty()) {
+            return FileViewerUiState.CannotPreview(
+                displayPath = resolved,
+                message = fileNotFoundMessage(resolved),
+            )
+        }
+
+        val match = RemotePathResolver.chooseSearchMatch(plan, candidates)
+        if (match != null) {
+            // Confident single/suffix match — open it directly. A miss/too-large
+            // on the relocated file degrades to the candidate list / message.
+            try {
+                return downloadAndRender(session, match)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Fall through to the candidate affordance below.
+            }
+        }
+
+        return FileViewerUiState.CannotPreview(
+            displayPath = resolved,
+            message = locateCandidatesMessage(plan.basename, candidates.size),
+            locateCandidates = candidates,
+        )
+    }
+
+    /**
+     * Run a bounded `find` for [SearchPlan.basename] under
+     * [SearchPlan.searchRoot] over the warm [session] (issue #748). Returns the
+     * absolute paths of regular-file matches, capped at [MAX_LOCATE_CANDIDATES].
+     * Quotes both the root and the name single-quote-safely so a path with
+     * spaces/quotes can't break out of the command.
+     */
+    private suspend fun searchByBasename(
+        session: SshSession,
+        plan: RemotePathResolver.SearchPlan,
+    ): List<String> {
+        val root = shellQuote(plan.searchRoot)
+        val name = shellQuote(plan.basename)
+        // -type f: regular files only. head caps the scan output cheaply even on
+        // a huge tree; the +1 lets the UI know the cap was hit (one extra row is
+        // harmless — chooseSearchMatch/UI just see the capped list).
+        val command = "find $root -type f -name $name 2>/dev/null | head -n ${MAX_LOCATE_CANDIDATES + 1}"
+        val result = session.exec(command)
+        if (result.exitCode != 0 && result.stdout.isBlank()) return emptyList()
+        return result.stdout
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("/") }
+            .distinct()
+            .take(MAX_LOCATE_CANDIDATES)
+            .toList()
     }
 
     /**
@@ -704,5 +824,34 @@ class FileViewerViewModel @Inject constructor(
 
         internal fun fileNotFoundMessage(resolvedPath: String): String =
             "No such file on the server: $resolvedPath"
+
+        /** Logcat tag for the file viewer (issue #748 basename-search fallback). */
+        internal const val LOG_TAG = "FileViewer"
+
+        /**
+         * Cap on how many same-named files the basename-search fallback offers
+         * (issue #748). A handful is plenty to disambiguate; more than this and
+         * the `find` is matching something too generic to be useful as a list.
+         */
+        internal const val MAX_LOCATE_CANDIDATES = 8
+
+        /**
+         * Message for the can't-preview panel when the relative path was missing
+         * under the session cwd but the basename search found same-named files
+         * deeper in the tree (issue #748). The panel renders the candidate rows
+         * below it.
+         */
+        internal fun locateCandidatesMessage(basename: String, count: Int): String =
+            if (count == 1) {
+                "Couldn't find $basename where the agent referenced it, but it " +
+                    "exists elsewhere in this project. Open it instead?"
+            } else {
+                "Couldn't find $basename where the agent referenced it. " +
+                    "Found $count files with that name in this project — pick one:"
+            }
+
+        /** Single-quote-safe shell quoting for `find` arguments (issue #748). */
+        internal fun shellQuote(value: String): String =
+            "'" + value.replace("'", "'\"'\"'") + "'"
     }
 }

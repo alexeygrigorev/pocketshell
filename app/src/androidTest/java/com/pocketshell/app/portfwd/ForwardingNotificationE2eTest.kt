@@ -3,7 +3,6 @@ package com.pocketshell.app.portfwd
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -127,15 +126,26 @@ class ForwardingNotificationE2eTest {
         controller().registerActiveHost(hostId = hostId, hostName = "Forward Host")
         controller().updateTunnelCount(hostId, 2)
 
+        // The service first posts an initial "Connecting…" foreground
+        // notification (same "Port forwarding running" title) and then, once the
+        // ForwardingController snapshot lands, updates it with the live host +
+        // forwarded-port detail. Poll until the notification carries the SETTLED
+        // detail (the "Forward Host" + port count) rather than the transient
+        // "Connecting…" placeholder, so the body/number assertions below see the
+        // controller-driven state, not the initial bootstrap.
         val deadline = System.currentTimeMillis() + POST_APPEARS_TIMEOUT_MS
         var posted = forwardingNotification()
-        while (posted == null && System.currentTimeMillis() < deadline) {
+        while (
+            (posted == null || !notificationShowsForwardDetail(posted)) &&
+            System.currentTimeMillis() < deadline
+        ) {
             Thread.sleep(POLL_INTERVAL_MS)
             posted = forwardingNotification()
         }
         assertNotNull(
-            "ongoing 'Port forwarding running' notification did not appear within " +
-                "${POST_APPEARS_TIMEOUT_MS}ms; active titles=" +
+            "ongoing 'Port forwarding running' notification with the forwarded-port " +
+                "detail did not appear within ${POST_APPEARS_TIMEOUT_MS}ms; active " +
+                "titles=" +
                 notificationManager.activeNotifications.map {
                     it.notification.extras.getCharSequence("android.title")
                 },
@@ -175,7 +185,7 @@ class ForwardingNotificationE2eTest {
         val channel = notificationManager.getNotificationChannel(posted.notification.channelId)
         assertEquals(
             "foreground notification should use the upgrade-safe status channel",
-            "pocketshell_forwarding_status_v4",
+            "pocketshell_forwarding_status_v5",
             posted.notification.channelId,
         )
         assertNotNull("foreground notification channel must be registered", channel)
@@ -204,6 +214,13 @@ class ForwardingNotificationE2eTest {
             "the stale v3 (HIGH/buzzing) channel must be deleted on upgrade",
             notificationManager.getNotificationChannel("pocketshell_forwarding_status_v3"),
         )
+        // Issue #752: the stale v4 (no-badge) channel must be gone so the
+        // badge-enabled v5 channel is created fresh — showBadge is immutable
+        // after first creation, so an in-place flip on v4 would be ignored.
+        assertNull(
+            "the stale v4 (no-badge) channel must be deleted on upgrade so v5's badge surfaces",
+            notificationManager.getNotificationChannel("pocketshell_forwarding_status_v4"),
+        )
         // Issue #521: body says it's running in the background + the host +
         // tunnel count (Recorder "Recording now" feel).
         val body = posted.notification.extras
@@ -213,8 +230,21 @@ class ForwardingNotificationE2eTest {
             body.contains("Running in the background"),
         )
         assertTrue(
-            "notification body should show the host + tunnel count: '$body'",
-            body.contains("Forward Host") && body.contains("2 tunnels"),
+            "notification body should show the host + forwarded port count: '$body'",
+            body.contains("Forward Host") && body.contains("2 ports forwarded"),
+        )
+        // Issue #752: the forwarded PORT COUNT is conveyed as the notification
+        // number/badge (Google-Recorder-style circled count near the icon).
+        assertEquals(
+            "notification number must equal the forwarded port (tunnel) count so " +
+                "the status-bar badge shows '2'",
+            2,
+            posted.notification.number,
+        )
+        // Issue #752: the channel must allow badging so the number can surface.
+        assertTrue(
+            "the forwarding channel must allow a badge so the port count can show",
+            requireNotNull(channel).canShowBadge(),
         )
         // Tappable → routes to the port-forward panel.
         assertNotNull(
@@ -249,9 +279,33 @@ class ForwardingNotificationE2eTest {
                 ?.contains("Port forwarding running") == true
         }
 
+    // True once the notification reflects the controller's settled host +
+    // forwarded-port detail, i.e. it has moved past the initial "Connecting…"
+    // bootstrap body to "Forward Host · 2 ports forwarded".
+    private fun notificationShowsForwardDetail(
+        sbn: android.service.notification.StatusBarNotification,
+    ): Boolean {
+        val body = sbn.notification.extras
+            .getCharSequence("android.text")?.toString().orEmpty()
+        return body.contains("Forward Host") && body.contains("2 ports forwarded")
+    }
+
     private fun captureShade(name: String) {
+        // Issue #752: this artifact is the maintainer's visual proof of the
+        // ⇄ icon + forwarded-port count, so it must be readable. Dismiss the
+        // clearable clutter (update-available / "Serial console enabled" /
+        // sibling-test notifications) first so the ongoing forwarding row is the
+        // only PocketShell notification in frame. The forwarding notification is
+        // FLAG_NO_CLEAR, so this does NOT remove it.
+        runShellCommand("cmd notification clear")
+        // Re-poll: the clear above can briefly race the foreground notification;
+        // wait for the forwarding row to be present again before capturing.
+        val reappearDeadline = System.currentTimeMillis() + 3_000L
+        while (forwardingNotification() == null && System.currentTimeMillis() < reappearDeadline) {
+            Thread.sleep(POLL_INTERVAL_MS)
+        }
         instrumentation.uiAutomation.executeShellCommand("cmd statusbar expand-notifications").close()
-        Thread.sleep(1_500)
+        Thread.sleep(2_000)
         val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(context)
         val artifactsDir = File(mediaRoot, "additional_test_output/forwarding-notification")
         assertTrue(
@@ -259,12 +313,25 @@ class ForwardingNotificationE2eTest {
             artifactsDir.exists() || artifactsDir.mkdirs(),
         )
         val shot = File(artifactsDir, "$name-viewport.png")
-        val bitmap: Bitmap? = instrumentation.uiAutomation.takeScreenshot()
-        assertNotNull("could not capture a screenshot of the notification shade", bitmap)
-        FileOutputStream(shot).use { bitmap!!.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        // Capture the actual displayed frame via screencap (the real system
+        // notification shade) rather than UiAutomation.takeScreenshot(), which
+        // under the swiftshader emulator can grab the instrumented app's own
+        // window instead of the system shade.
+        val png = runShellCommandBytes("screencap -p")
+        assertTrue(
+            "screencap returned no bytes for the notification shade",
+            png.isNotEmpty(),
+        )
+        FileOutputStream(shot).use { it.write(png) }
         assertTrue("notification-shade screenshot was not written", shot.exists() && shot.length() > 0)
         println("FORWARDING_NOTIFICATION_SCREENSHOT ${shot.absolutePath}")
         instrumentation.uiAutomation.executeShellCommand("cmd statusbar collapse").close()
+    }
+
+    private fun runShellCommandBytes(command: String): ByteArray {
+        val pfd = instrumentation.uiAutomation.executeShellCommand(command)
+        return FileInputStream(pfd.fileDescriptor).use { it.readBytes() }
+            .also { pfd.close() }
     }
 
     private fun runShellCommand(command: String): String {

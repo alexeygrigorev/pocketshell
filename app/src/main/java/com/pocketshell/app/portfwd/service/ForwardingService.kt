@@ -90,13 +90,19 @@ class ForwardingService : Service() {
         // buzz/heads-up the maintainer explicitly didn't want, and HIGH was
         // never needed for sweep-resistance.
         //
-        // Notification-channel importance is IMMUTABLE after first creation, so
-        // changing it requires a NEW channel id. Hard-cut per D22: we create
-        // `_v4` at LOW (silent) and delete the stale `_v3`/`_v2`/legacy channels
-        // so no install keeps the buzzing HIGH presentation or the old
-        // swipe-away one.
-        private const val CHANNEL_ID = "pocketshell_forwarding_status_v4"
+        // Notification-channel importance AND showBadge are IMMUTABLE after first
+        // creation, so changing either requires a NEW channel id —
+        // `createNotificationChannel()` is a no-op for an existing channel.
+        // `_v4` shipped with `setShowBadge(false)`, so flipping it to `true`
+        // in-place would be silently ignored on every already-installed app and
+        // the forwarded-port count badge (the whole point of #752) would never
+        // surface. Hard-cut per D22: we create `_v5` at LOW (silent) with
+        // `setShowBadge(true)` and delete the stale `_v4`/`_v3`/`_v2`/legacy
+        // channels so no install keeps the buzzing HIGH presentation, the old
+        // swipe-away one, or the no-badge `_v4` channel.
+        private const val CHANNEL_ID = "pocketshell_forwarding_status_v5"
         private val LEGACY_CHANNEL_IDS = listOf(
+            "pocketshell_forwarding_status_v4",
             "pocketshell_forwarding_status_v3",
             "pocketshell_forwarding_status_v2",
             "pocketshell_forwarding_status",
@@ -423,6 +429,14 @@ class ForwardingService : Service() {
         // `detail` is the live host + tunnel topology (changes as tunnels come
         // and go). It's reused both in the collapsed body and in the expanded
         // BigText so the user always sees what's forwarded.
+        //
+        // Issue #752: the maintainer wants the forwarded PORT COUNT conveyed,
+        // Google-Recorder style: a status-bar badge number plus explicit
+        // "N ports forwarded" wording. Each active tunnel is one forwarded
+        // port, so [tunnelCount] is the port count. We lead the detail with
+        // "N ports forwarded" (replacing the older "N tunnels" phrasing) so the
+        // count is the first thing the user reads, and feed the same count into
+        // setNumber() below for the status-bar badge.
         val detail = contentTextOverride ?: buildString {
             if (hostName.isNotEmpty()) {
                 append(hostName)
@@ -431,13 +445,14 @@ class ForwardingService : Service() {
             }
             // Issue #439: while a host's transport is down the supervisor
             // is re-establishing SSH and re-opening the user's desired
-            // forwards. Show "Restoring…" instead of "0 tunnels active"
+            // forwards. Show "Restoring…" instead of "0 ports forwarded"
             // so a transient blip reads as restoring, not removed.
             if (restoringHostCount > 0) {
                 append("Restoring…")
             } else {
-                append("$tunnelCount tunnel")
+                append("$tunnelCount port")
                 if (tunnelCount != 1) append("s")
+                append(" forwarded")
             }
         }
 
@@ -461,6 +476,15 @@ class ForwardingService : Service() {
             // shows an unmistakable PocketShell port-forward mark instead of
             // the old generic ic_dialog_info.
             .setSmallIcon(R.drawable.ic_stat_forwarding)
+            // Issue #752: convey the forwarded PORT COUNT as a badge number on
+            // the status-bar icon, like the circled count Google Recorder /
+            // some apps draw next to their indicator. Each active tunnel is one
+            // forwarded port, so the tunnel count IS the port count. setNumber
+            // drives both the launcher dot's count and (on many OEM status
+            // bars) a small number near the small icon. Only set a positive
+            // number — 0/Connecting renders no badge. The badge requires the
+            // channel to allow badging (setShowBadge(true), see the channel).
+            .apply { if (tunnelCount > 0) setNumber(tunnelCount) }
             .setContentIntent(contentIntent)
             // Ongoing is the closest supported FGS contract to "non-
             // dismissible": while ≥1 tunnel is active Android keeps this as
@@ -473,7 +497,7 @@ class ForwardingService : Service() {
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             // Silence the notification itself (pre-O priority + sound/vibration)
-            // to match the silent `_v4` channel. The sweep-resistance comes from
+            // to match the silent `_v5` channel. The sweep-resistance comes from
             // the ongoing/NO_CLEAR flags below, not from importance, so there is
             // no reason to alert — Recorder/Spotify-style quiet persistent status.
             .setSilent(true)
@@ -525,7 +549,14 @@ class ForwardingService : Service() {
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             description = "Quiet ongoing status while SSH port forwarding is active"
-            setShowBadge(false)
+            // Issue #752: allow the channel to badge so the forwarded port
+            // count (NotificationCompat.setNumber, set per-build) can surface as
+            // the circled count near the status-bar icon / launcher dot, the
+            // Google-Recorder-style "icon + number" the maintainer asked for.
+            // This is just the badge COUNT — the channel stays LOW/silent, so it
+            // never buzzes or pops a heads-up; sweep-resistance is still the
+            // FLAG_NO_CLEAR/ongoing flags, not importance.
+            setShowBadge(true)
             // Belt-and-braces: explicitly silence the channel. IMPORTANCE_LOW is
             // already non-alerting, but null sound + vibration off guarantees the
             // channel never buzzes or rings even if the platform default changes.

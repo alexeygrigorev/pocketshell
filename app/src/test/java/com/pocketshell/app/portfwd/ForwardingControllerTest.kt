@@ -423,7 +423,7 @@ class ForwardingControllerTest {
     }
 
     @Test
-    fun `notification body says running in background and lists host plus tunnels`() {
+    fun `notification body says running in background and lists host plus forwarded ports`() {
         val notification = buildServiceNotification(
             hostName = "alpha",
             hostCount = 1,
@@ -435,29 +435,59 @@ class ForwardingControllerTest {
             "body must explicitly say it's running in the background: '$body'",
             body.contains("Running in the background"),
         )
+        // Issue #752: the forwarded PORT COUNT must be in the body wording.
         assertTrue(
-            "body must list the host + tunnel count: '$body'",
-            body.contains("alpha") && body.contains("2 tunnels"),
+            "body must list the host + forwarded port count: '$body'",
+            body.contains("alpha") && body.contains("2 ports forwarded"),
         )
         // BigText carries the same detail for the expanded shade.
         val bigText = notification.extras.getCharSequence("android.bigText")?.toString().orEmpty()
         assertTrue(
             "expanded BigText must keep the live detail: '$bigText'",
             bigText.contains("Running in the background") &&
-                bigText.contains("alpha") && bigText.contains("2 tunnels"),
+                bigText.contains("alpha") && bigText.contains("2 ports forwarded"),
         )
     }
 
     @Test
-    fun `notification body collapses multiple hosts and pluralises tunnels`() {
+    fun `notification conveys forwarded port count as the badge number`() {
+        // Issue #752: the forwarded PORT COUNT is conveyed as setNumber so the
+        // status-bar badge / launcher dot shows the count (Google-Recorder feel).
+        val three = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 3,
+        )
+        assertEquals(
+            "notification number must equal the forwarded port (tunnel) count",
+            3,
+            three.number,
+        )
+
+        // No forwarded ports yet → no badge number.
+        val none = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 0,
+            restoringHostCount = 1,
+        )
+        assertEquals(
+            "a restoring host with 0 forwarded ports must not draw a badge number",
+            0,
+            none.number,
+        )
+    }
+
+    @Test
+    fun `notification body collapses multiple hosts and pluralises forwarded ports`() {
         val single = buildServiceNotification(
             hostName = "alpha",
             hostCount = 1,
             tunnelCount = 1,
         ).extras.getCharSequence("android.text")?.toString().orEmpty()
         assertTrue(
-            "single tunnel must not be pluralised: '$single'",
-            single.contains("1 tunnel") && !single.contains("1 tunnels"),
+            "single forwarded port must not be pluralised: '$single'",
+            single.contains("1 port forwarded") && !single.contains("1 ports forwarded"),
         )
 
         val multi = buildServiceNotification(
@@ -467,7 +497,7 @@ class ForwardingControllerTest {
         ).extras.getCharSequence("android.text")?.toString().orEmpty()
         assertTrue(
             "multiple hosts must collapse to '+ N more': '$multi'",
-            multi.contains("alpha + 2 more") && multi.contains("5 tunnels"),
+            multi.contains("alpha + 2 more") && multi.contains("5 ports forwarded"),
         )
     }
 
@@ -480,8 +510,8 @@ class ForwardingControllerTest {
             restoringHostCount = 1,
         ).extras.getCharSequence("android.text")?.toString().orEmpty()
         assertTrue(
-            "a restoring host must read 'Restoring…', not '0 tunnels': '$body'",
-            body.contains("Restoring…") && !body.contains("0 tunnel"),
+            "a restoring host must read 'Restoring…', not '0 ports forwarded': '$body'",
+            body.contains("Restoring…") && !body.contains("0 port"),
         )
     }
 
@@ -561,7 +591,7 @@ class ForwardingControllerTest {
         val manager = context.getSystemService(NotificationManager::class.java)
         val channel = manager.getNotificationChannel(notification.channelId)
 
-        assertEquals("pocketshell_forwarding_status_v4", notification.channelId)
+        assertEquals("pocketshell_forwarding_status_v5", notification.channelId)
         assertNotNull("foreground-service notification channel must be registered", channel)
         val forwardingChannel = requireNotNull(channel)
         // Issue #487 (reopened): the maintainer asked for a QUIET persistent
@@ -593,6 +623,15 @@ class ForwardingControllerTest {
         // Issue #487 (reopened): the stale higher/lower-importance channels must
         // be deleted so no install keeps the buzzing HIGH (_v3) or swipe-away
         // DEFAULT (_v2) presentation.
+        // Issue #752: the no-badge `_v4` channel must ALSO be deleted — showBadge
+        // is immutable after first creation, so on an already-installed app the
+        // badge flip is ignored unless the old channel is dropped and the new
+        // badge-enabled `_v5` channel is created fresh.
+        assertNull(
+            "the stale v4 (no-badge) channel must be removed so the badge-enabled v5 " +
+                "channel is created fresh on update (issue #752)",
+            manager.getNotificationChannel("pocketshell_forwarding_status_v4"),
+        )
         assertNull(
             "the stale v3 (HIGH/buzzing) channel must be removed so it can't linger",
             manager.getNotificationChannel("pocketshell_forwarding_status_v3"),

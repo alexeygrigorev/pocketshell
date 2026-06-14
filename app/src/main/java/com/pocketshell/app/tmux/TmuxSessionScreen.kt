@@ -2071,6 +2071,15 @@ public fun TmuxSessionScreen(
         PromptComposerSheet(
             viewModel = promptComposerViewModel,
             keyBar = composerKeyBar,
+            // Issue #767: the detected engine for the focused pane drives the
+            // `/`-autocomplete command catalog in the composer. Reuse the same
+            // flicker-resilient `paletteAgent` (live detection, or the sticky
+            // last-known kind) the standalone command palette uses, falling back
+            // to the optimistic `presumedAgentKind` during the slow-detection
+            // window so `/` still offers commands the moment the user opens the
+            // composer over a freshly-launched agent pane. Null on a shell pane,
+            // where the dropdown is never shown.
+            agentKind = paletteAgent ?: presumedAgentKind,
             // Issue #746: scope the shared activity-level composer draft to the
             // focused session so a "Not sent" draft authored here never bleeds
             // into another session on a switch.

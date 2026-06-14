@@ -1838,6 +1838,149 @@ class DesignRenders {
     }
 
     /**
+     * Issue #767: the `/`-triggered inline command autocomplete dropdown open in
+     * the composer with the keyboard up. The maintainer asked for a Slack /
+     * ChatGPT-style slash-command list that appears the moment the draft starts
+     * with `/`, filters as you type, and inserts the chosen command into the
+     * field. This mirrors that surface: a `/comp` draft, the filtered command
+     * rows floating directly above the field, all riding the composer column
+     * above the soft-keyboard stand-in.
+     *
+     * Caveat (#555): the real `SheetContent` + `SlashCommandDropdown` live in
+     * `:app`, which this ui-kit harness cannot import, so this is a STATIC visual
+     * mirror of the intended layout — dropdown, then header, then the `/comp`
+     * field, then the action row, above the keyboard. The keyboard-up emulator
+     * screenshot (PromptComposerSlashAutocompleteImeTest) is the acceptance.
+     */
+    @Test
+    fun composerSlashAutocomplete() = render("composer-slash-autocomplete") {
+        Spacer(Modifier.height(140.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+        ) {
+            // The autocomplete dropdown — rides the top of the composer column,
+            // above the field, filtered to commands matching the typed `/comp`.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                    .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp)),
+            ) {
+                SlashCommandMirrorRow("Compact context", "Summarise the conversation to free up context.", "/compact", arg = true)
+            }
+            Spacer(Modifier.height(12.dp))
+            // Header.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "Prompt Composer",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketShellColors.Text,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(PocketShellColors.SurfaceElev, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "×", color = PocketShellColors.TextSecondary, fontSize = 20.sp)
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            // The draft field showing the `/comp` slash query being typed.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(96.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                    .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            ) {
+                Row {
+                    Text(text = "/comp", color = PocketShellColors.Text, fontSize = 14.sp)
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 1.dp)
+                            .width(2.dp)
+                            .height(18.dp)
+                            .background(PocketShellColors.Accent),
+                    )
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            // Action row — stays reachable below the field.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
+                    }
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "{ }",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Row(
+                    modifier = Modifier
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Text(
+                        text = "Send",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+                }
+            }
+        }
+        // Soft-keyboard stand-in so "dropdown sits above the keyboard" reads.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(240.dp)
+                .background(Color(0xFF202124)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "soft keyboard (system IME)",
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+            )
+        }
+    }
+
+    /**
      * #704: compact transcript tool-call rows. ui-kit cannot import the
      * app-level `ConversationToolCallChatCard`, so this replicates its layout
      * with the SAME design tokens (post-#704 compact: 6dp vertical padding,
@@ -1859,6 +2002,45 @@ class DesignRenders {
                 input = "{\n  \"file_path\": \"/home/alexey/.pocketshell/attachments/host/shot.png\"\n}",
                 output = "[image image/png · 39124 chars]",
             )
+        }
+    }
+
+    // Issue #767: a single mirror row of the `/`-autocomplete dropdown — label +
+    // description + the command badge, matching the app-level
+    // `SlashCommandDropdown` row visuals (which ui-kit can't import).
+    @Composable
+    private fun SlashCommandMirrorRow(
+        label: String,
+        description: String,
+        command: String,
+        arg: Boolean = false,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    color = PocketShellColors.Text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = description,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (arg) {
+                Text(text = "+arg", color = PocketShellColors.TextSecondary, fontSize = 11.sp)
+            }
+            Badge(label = command, role = BadgeRole.Agent, mono = false)
         }
     }
 

@@ -117,8 +117,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.pocketshell.app.fileviewer.BoundedImageDecoder
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.app.agentcommands.AgentCommand
 import com.pocketshell.app.voice.DictateDotIcon
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.app.voice.PendingTranscriptionItem
+import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -206,6 +210,13 @@ public fun PromptComposerSheet(
     // the separate terminal-screen `TmuxTerminalBottomControls` surface that the
     // keyboard occluded.
     keyBar: (@Composable () -> Unit)? = null,
+    // Issue #767: the detected engine for the focused pane (the same
+    // `paletteAgent` / `presumedAgentKind` the host screen already computes). It
+    // selects which `AgentCommandCatalog` the `/`-autocomplete dropdown filters,
+    // so typing `/` over a Claude Code pane offers Claude's commands and over a
+    // Codex pane offers Codex's. Null on a plain shell pane / non-agent surface,
+    // where the dropdown is simply never offered.
+    agentKind: AgentKind? = null,
     viewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #234: the composer is partial-expand by default so the terminal
     // viewport behind it stays visible. With `skipPartiallyExpanded = false`,
@@ -451,6 +462,7 @@ public fun PromptComposerSheet(
             onSavePendingAsAudio = viewModel::savePendingAsAudioFile,
             onAcknowledgeSavedAudio = viewModel::clearSavedAudioConfirmation,
             keyBar = keyBar,
+            agentKind = agentKind,
         )
     }
 
@@ -560,6 +572,10 @@ internal fun SheetContent(
     // rides the IME inset and is never occluded by the keyboard. Null on surfaces
     // with no key bar (previews / non-terminal hosts).
     keyBar: (@Composable () -> Unit)? = null,
+    // Issue #767: detected engine for the focused pane — selects the
+    // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
+    // shell pane / preview, where the dropdown is never shown.
+    agentKind: AgentKind? = null,
 ) {
     val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
     val attachmentUploading =
@@ -615,6 +631,35 @@ internal fun SheetContent(
     }
     val draftFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+
+    // Issue #767: the `/`-triggered inline command autocomplete. The dropdown is
+    // OPEN when the draft's leading token starts with `/` and the caret sits in
+    // it ([SlashCommandAutocomplete.slashQueryFor] is non-null), and is filtered
+    // by everything typed after the `/`. The data comes from the existing
+    // [AgentCommandCatalog] for the detected [agentKind] — no data work — so a
+    // plain shell pane (null agent) yields an empty list and the dropdown stays
+    // closed. Picking a row replaces the leading slash token with the chosen
+    // command (a trailing space for arg-bearing commands so the caret lands ready
+    // to type the argument) and keeps the field focused so the user can review +
+    // Send. This is the SAME insert path #770 reuses (see [insertSlashCommand]).
+    val slashQuery = SlashCommandAutocomplete.slashQueryFor(draftFieldValue)
+    val commandSuggestions = if (slashQuery != null) {
+        SlashCommandAutocomplete.filteredCommands(agentKind, slashQuery)
+    } else {
+        emptyList()
+    }
+    val showCommandDropdown = slashQuery != null && commandSuggestions.isNotEmpty()
+    // Issue #767/#770: the single reusable insert entry point. Pre-fills the
+    // composer field with a picked command (autocomplete) or any engine-command
+    // string tapped in the terminal (#770) and re-focuses the field. Mirrors the
+    // new value into the ViewModel draft so the source of truth stays in lockstep
+    // (same contract as the editor's onValueChange).
+    val insertSlashCommand: (AgentCommand) -> Unit = { command ->
+        val updated = SlashCommandAutocomplete.insertCommand(draftFieldValue, command)
+        draftFieldValue = updated
+        onDraftChange(updated.text)
+        draftFocusRequester.requestFocus()
+    }
 
     // Issue #491 / #682: the single Send path used by every Send affordance.
     //
@@ -739,6 +784,19 @@ internal fun SheetContent(
                 .padding(horizontal = 18.dp)
                 .padding(bottom = 26.dp),
         ) {
+            // Issue #767: the `/`-triggered inline command autocomplete dropdown.
+            // It rides the top of this same inset-anchored column (so it is never
+            // occluded by the keyboard — it sits above the field, which is above
+            // the IME) and appears ONLY while the draft's leading token is a `/`
+            // slash command. Tap a row to insert the command into the field.
+            if (showCommandDropdown) {
+                SlashCommandDropdown(
+                    commands = commandSuggestions,
+                    onPick = insertSlashCommand,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+            }
+
             // Header: title + close X. The Material 3 sheet draws its own
             // grabber above this, so we don't redraw it.
             //
@@ -1224,6 +1282,79 @@ internal fun SheetContent(
                 }
             }
         }
+        }
+    }
+}
+
+/**
+ * Issue #767: the `/`-triggered inline command autocomplete dropdown. A compact
+ * floating list of [AgentCommand]s that rides the top of the composer's
+ * inset-anchored column — the Slack / Discord / ChatGPT slash-command pattern
+ * the maintainer asked for: type `/` and a filtered command list appears, tap a
+ * row to insert it into the field, ready to review + Send.
+ *
+ * Each row reuses the palette's label + description + command-badge visuals so
+ * the catalog reads the same wherever it appears. The list is height-capped and
+ * self-scrolls so a long catalog never pushes the field/controls off the screen;
+ * arg-bearing commands carry a small "+arg" hint so the user knows the chosen
+ * command still needs an argument typed after it.
+ */
+@Composable
+internal fun SlashCommandDropdown(
+    commands: List<AgentCommand>,
+    onPick: (AgentCommand) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = SLASH_DROPDOWN_MAX_HEIGHT)
+            .clip(RoundedCornerShape(12.dp))
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .verticalScroll(rememberScrollState())
+            .testTag(COMPOSER_SLASH_DROPDOWN_TAG),
+    ) {
+        commands.forEach { command ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(role = Role.Button) { onPick(command) }
+                    .testTag(composerSlashCommandRowTag(command.command))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = command.label,
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = command.description,
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (command.argument != null) {
+                    Text(
+                        text = "+arg",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 11.sp,
+                    )
+                }
+                Badge(label = command.command, role = BadgeRole.Agent, mono = false)
+            }
         }
     }
 }
@@ -2601,6 +2732,17 @@ internal const val COMPOSER_CONNECTION_LOST_TAG = "prompt-composer-connection-lo
  * above the soft keyboard with the IME up.
  */
 internal const val COMPOSER_KEY_BAR_SLOT_TAG = "prompt-composer-key-bar-slot"
+
+/**
+ * Issue #767: test tags for the `/`-autocomplete dropdown. Connected tests
+ * assert the dropdown appears when the draft starts with `/`, filters as more
+ * characters are typed, and that tapping a row inserts the command into the
+ * field.
+ */
+internal const val COMPOSER_SLASH_DROPDOWN_TAG = "prompt-composer-slash-dropdown"
+
+internal fun composerSlashCommandRowTag(command: String): String =
+    "prompt-composer-slash-row:$command"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
@@ -2741,6 +2883,11 @@ private val PROMPT_SCROLL_REGION_IME_MIN_HEIGHT_WITH_KEY_BAR = 24.dp
 // from the keyboard-up scroll region so the bar + controls always stay above the
 // IME (never pushed under it). Zero when no key bar is supplied.
 private val PROMPT_SCROLL_REGION_KEY_BAR_RESERVE = 62.dp
+
+// Issue #767: cap the `/`-autocomplete dropdown so a long catalog scrolls
+// internally instead of squeezing the draft field / pushing the controls under
+// the keyboard. ~3.5 rows tall; the list self-scrolls past this.
+private val SLASH_DROPDOWN_MAX_HEIGHT = 196.dp
 
 /**
  * Issue #180: test tags for the failed-transcription queue surface.

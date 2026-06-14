@@ -36,8 +36,14 @@ pocketshell_acquire_avd_lock() {
   local lock_file="${POCKETSHELL_AVD_LOCK_FILE:-$root_dir/build/.avd-lock}"
   mkdir -p "$(dirname "$lock_file")"
 
+  # P6 (issue #776): a non-blocking probe purely to TELL the operator we are
+  # about to block. If it succeeds the lock is free and we proceed instantly
+  # (no log). If it fails the lock is genuinely held, so we log once that the
+  # real blocking acquire below will queue — this is a queue, not a wedge. The
+  # subshell holder below does the authoritative blocking flock; the "Acquired
+  # AVD lock" line that follows is the proof we got through.
   if ! ( flock -n 9 ) 9>"$lock_file"; then
-    echo "Another emulator-touching script holds the AVD lock ($lock_file); waiting..." >&2
+    echo "AVD lock ($lock_file) held by another emulator-touching run; queuing for it..." >&2
   fi
 
   local state_dir
@@ -99,7 +105,85 @@ pocketshell_release_all() {
   if declare -F pocketshell_release_agents_port >/dev/null 2>&1; then
     pocketshell_release_agents_port
   fi
+  pocketshell_release_toxiproxy_lock
   pocketshell_release_avd_lock
+}
+
+# ---------------------------------------------------------------------------
+# Toxiproxy serialization lock (issue #776 P3)
+#
+# The network-fault tests (NetworkFaultProofBase) all drive ONE global toxiproxy
+# (hardcoded 10.0.2.2:2228 / API 8474, single shared proxy, @After reset()).
+# --pool does NOT isolate that singleton, so two network-fault lanes corrupt
+# each other's toxics. Until per-lane toxiproxy plumbing lands, serialize every
+# network-fault lane on ONE shared, machine-wide flock so at most one touches the
+# proxy at a time — even across distinct pool emulators. This is SEPARATE from
+# the per-serial AVD lock (two lanes on different emulators each hold their own
+# serial lock but must still NOT share the proxy). Released by
+# pocketshell_release_all on exit.
+pocketshell_acquire_toxiproxy_lock() {
+  local root_dir="$1"
+  if [[ -n "${POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID:-}" ]]; then
+    return 0
+  fi
+  local lock_file="$root_dir/build/.toxiproxy-serial-lock"
+  mkdir -p "$(dirname "$lock_file")"
+
+  local state_dir
+  state_dir="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-toxiproxy-lock.XXXXXX")"
+  local ready_file="$state_dir/ready"
+
+  if ! ( flock -n 9 ) 9>"$lock_file"; then
+    echo "Toxiproxy serialization lock held by another network-fault lane; queuing..." >&2
+  fi
+
+  (
+    exec >/dev/null 2>/dev/null
+    if ! exec 9>"$lock_file"; then
+      exit 1
+    fi
+    if ! flock 9; then
+      exit 1
+    fi
+    printf 'ready\n' > "$ready_file"
+    sleep_pid=""
+    trap '[[ -n "$sleep_pid" ]] && kill "$sleep_pid" 2>/dev/null || true; exit 0' HUP INT TERM
+    while :; do
+      sleep 3600 9>&- &
+      sleep_pid="$!"
+      wait "$sleep_pid" || true
+    done
+  ) &
+  local holder_pid="$!"
+
+  while [[ ! -e "$ready_file" ]]; do
+    if ! kill -0 "$holder_pid" 2>/dev/null; then
+      rm -rf "$state_dir"
+      wait "$holder_pid" 2>/dev/null || true
+      echo "FAIL: could not acquire toxiproxy serialization lock: $lock_file" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+
+  rm -rf "$state_dir"
+  export POCKETSHELL_TOXIPROXY_LOCK_HOLDER_PID="$holder_pid"
+  export POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID="$$"
+  echo "Acquired toxiproxy serialization lock: $lock_file" >&2
+  trap pocketshell_release_all EXIT
+}
+
+pocketshell_release_toxiproxy_lock() {
+  if [[ "${POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID:-}" != "$$" ]]; then
+    return 0
+  fi
+  local holder_pid="${POCKETSHELL_TOXIPROXY_LOCK_HOLDER_PID:-}"
+  if [[ -n "$holder_pid" ]]; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+  fi
+  unset POCKETSHELL_TOXIPROXY_LOCK_HOLDER_PID
+  unset POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID
 }
 
 pocketshell_release_avd_lock() {
@@ -221,11 +305,15 @@ _pocketshell_pool_try_lock_serial() {
 #                             these serials are considered (intersected with
 #                             the online set).
 #   POCKETSHELL_POOL_WAIT_SECONDS  how long to keep retrying when all are busy
-#                             (default 600). Set 0 to try once.
+#                             (default 600). Set 0 to try once (fail-fast: the
+#                             lane errors immediately instead of blocking on the
+#                             flock for minutes when the pool is over-subscribed,
+#                             issue #776 P4).
 pocketshell_claim_pool_serial() {
   local root_dir="$1"
   local wait_seconds="${POCKETSHELL_POOL_WAIT_SECONDS:-600}"
   local deadline=$((SECONDS + wait_seconds))
+  local started=$SECONDS
 
   while :; do
     local candidates=()
@@ -270,11 +358,20 @@ pocketshell_claim_pool_serial() {
       fi
     done
 
+    # P4 (issue #776): NEVER co-locate. We only ever claim a serial whose
+    # per-serial flock is FREE; a busy emulator (a sibling lane mid-run) is
+    # skipped, not piled onto. That bounds instrumentation runs per emulator to
+    # 1 and starves the #743/#470 render-timeout family of its trigger. If every
+    # candidate is busy we WAIT for one to free (or fail-fast when
+    # POCKETSHELL_POOL_WAIT_SECONDS=0) — we do not fall back to sharing.
     if (( SECONDS >= deadline )); then
-      echo "FAIL: no free emulator in the pool (online: ${candidates[*]:-none})" >&2
+      echo "FAIL: no free emulator in the pool after ${wait_seconds}s (online/candidates: ${candidates[*]:-none}; all busy with sibling lanes). Boot more pool emulators (scripts/avd-pool.sh start) or reduce concurrent lanes to <= pool size." >&2
       return 1
     fi
-    echo "All pool emulators busy; waiting for a free one..." >&2
+    # Surface progress so an over-subscribed pool looks like a queue, not a
+    # silent wedge (the misdiagnosed "lanes stalled for hours" symptom). Log the
+    # candidate count + elapsed/total wait every cycle.
+    echo "All ${#candidates[@]} pool emulator(s) busy; waiting for a free one ($((SECONDS - started))s/${wait_seconds}s elapsed)..." >&2
     sleep 3
   done
 }

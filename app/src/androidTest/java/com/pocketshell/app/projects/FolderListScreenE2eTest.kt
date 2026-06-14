@@ -238,19 +238,22 @@ class FolderListScreenE2eTest {
 
         compose.waitUntil(timeoutMillis = 10_000) {
             fakeGateway.callCount.get() >= 1 &&
-                compose.onAllNodesWithTag(FOLDER_LIST_OVERFLOW_TAG)
+                compose.onAllNodesWithTag(FOLDER_LIST_PULL_TO_REFRESH_TAG)
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
-        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
-        compose.onNodeWithText("Refresh Sessions").assertIsDisplayed()
-        compose.onNodeWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG)
-            .assertIsDisplayed()
-            .performClick()
+        // EPIC #679 Slice 4: the kebab "Refresh Sessions" item is hard-cut (D22 —
+        // pull-to-refresh is the SINGLE manual refresh affordance). The kebab no
+        // longer carries a refresh action, so this manual reconcile is driven via
+        // the same path the pull-to-refresh swipe wires to (viewModel.refreshSessions).
+        compose.onNodeWithTag(FOLDER_LIST_PULL_TO_REFRESH_TAG).assertExists()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            viewModel.refreshSessions()
+        }
 
         compose.waitUntil(timeoutMillis = 5_000) { fakeGateway.callCount.get() >= 2 }
-        // Issue #607: the manual Refresh Sessions action keeps the user on the
-        // host-detail screen and reloads the session list in place.
+        // Issue #607: the manual refresh keeps the user on the host-detail screen
+        // and reloads the session list in place.
         compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertIsDisplayed()
         compose.onNodeWithText("alpha", useUnmergedTree = true).assertExists()
         // Issue #656: a *successful* refresh emits NO status banner — the
@@ -261,7 +264,7 @@ class FolderListScreenE2eTest {
         compose.onAllNodesWithTag(FOLDER_LIST_ACTION_STATUS_TAG)
             .fetchSemanticsNodes()
             .also {
-                assertTrue("a successful Refresh Sessions must not show a status banner (#656)", it.isEmpty())
+                assertTrue("a successful refresh must not show a status banner (#656)", it.isEmpty())
             }
         assertEquals(false, openedSettings)
         assertEquals(false, openedWorkspaceSettings)
@@ -677,27 +680,22 @@ class FolderListScreenE2eTest {
         compose.onAllNodesWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG)
             .fetchSemanticsNodes()
             .also { assertTrue("Tree/Flat toggle should not render on host detail", it.isEmpty()) }
-        // Open the header kebab, then tap the "Workspace settings" menu item
-        // (#522 item 2). Tapping a menu item dismisses the menu.
+        // EPIC #679 Slice 4: the kebab no longer carries a "Refresh Sessions"
+        // item (D22 hard-cut — pull-to-refresh is the SINGLE manual refresh
+        // affordance). The header kebab still opens the host actions menu.
         compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         // #522 item 2 + #592 evidence: the single header kebab opens a menu
         // with the host actions plus separate global App settings and Workspace
         // settings entries.
         compose.onNodeWithTag(FOLDER_LIST_BROWSE_REPOS_TAG).assertExists()
-        compose.onNodeWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG)
-            .assertExists()
-            .performClick()
-        compose.waitUntil(timeoutMillis = 5_000) { fakeGateway.callCount.get() >= 2 }
-        // Issue #607: refresh reloads in place and keeps the user on the host
-        // screen. Issue #656: a successful refresh emits NO status banner — the
-        // action-status overlay only appears for a failure, so it must be absent.
-        compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertIsDisplayed()
-        compose.onAllNodesWithTag(FOLDER_LIST_ACTION_STATUS_TAG)
+        // The kebab refresh entry is hard-cut — assert it is GONE (the
+        // FOLDER_LIST_REFRESH_SESSIONS_TAG constant was deleted with it, so the
+        // absence is asserted against the former item label).
+        compose.onAllNodesWithText("Refresh Sessions")
             .fetchSemanticsNodes()
             .also {
-                assertTrue("a successful Refresh Sessions must not show a status banner (#656)", it.isEmpty())
+                assertTrue("the kebab 'Refresh Sessions' item is hard-cut (#679 Slice 4, D22)", it.isEmpty())
             }
-        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_USAGE_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_SETTINGS_TAG).assertExists()

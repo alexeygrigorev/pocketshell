@@ -197,26 +197,6 @@ internal class HostTreeModel {
     }
 
     /**
-     * Seed sessions from the cold-render cache (#620) before the first
-     * authoritative reconcile. Marks [hasSnapshot] so [project] can render, but
-     * does NOT set [lastReconciledAt] — a restored snapshot is not a reconcile,
-     * so the staleness gate still fires a real reconcile when due.
-     */
-    fun restoreCached(
-        sessionEntries: List<FolderSessionEntry>,
-        folderPaths: Map<String, String>,
-    ) {
-        sessions.clear()
-        sessionFolderPaths.clear()
-        sessionEntries.forEach { entry ->
-            sessions[entry.sessionName] = entry.toNode(optimisticSince = null)
-            sessionFolderPaths[entry.sessionName] =
-                folderPaths[entry.sessionName] ?: FolderListViewModel.UNTRACKED_PATH
-        }
-        hasSnapshot = true
-    }
-
-    /**
      * Reconcile the held tree against a fresh authoritative probe snapshot
      * (#679 reconcile). Diffs incoming sessions/windows against held nodes:
      *

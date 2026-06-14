@@ -311,15 +311,12 @@ fun FolderListScreen(
             // longer repeats the host name in a second band.
             val headerGroups = (state as? FolderListUiState.Ready)
                 ?.let { FlatSessionGroups.from(it.flatSessions) }
-            val headerRefreshInFlight = (state as? FolderListUiState.Ready)?.isRefreshing == true
             FolderListAppBar(
                 hostName = hostName,
                 headerGroups = headerGroups,
-                isRefreshing = headerRefreshInFlight,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
                 onBrowseFiles = { onBrowseFiles("~") },
-                onRefreshSessions = viewModel::refreshSessions,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
                 onOpenUsage = onOpenUsage,
@@ -677,11 +674,9 @@ internal fun knownSessionNames(state: FolderListUiState): Set<String> =
 private fun FolderListAppBar(
     hostName: String,
     headerGroups: FlatSessionGroups?,
-    isRefreshing: Boolean,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
     onBrowseFiles: () -> Unit,
-    onRefreshSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
     onOpenUsage: () -> Unit,
@@ -730,8 +725,6 @@ private fun FolderListAppBar(
             FolderListOverflowMenu(
                 onBrowseRepos = onBrowseRepos,
                 onBrowseFiles = onBrowseFiles,
-                onRefreshSessions = onRefreshSessions,
-                isRefreshing = isRefreshing,
                 onOpenAssistant = onOpenAssistant,
                 onOpenSettings = onOpenSettings,
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
@@ -754,8 +747,6 @@ private fun FolderListAppBar(
 private fun FolderListOverflowMenu(
     onBrowseRepos: () -> Unit,
     onBrowseFiles: () -> Unit,
-    onRefreshSessions: () -> Unit,
-    isRefreshing: Boolean,
     onOpenAssistant: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
@@ -781,13 +772,6 @@ private fun FolderListOverflowMenu(
                 onClick = onBrowseRepos,
                 contentDescription = "Browse repos",
                 testTag = FOLDER_LIST_BROWSE_REPOS_TAG,
-            ),
-            KebabItem(
-                label = if (isRefreshing) "Refreshing Sessions" else "Refresh Sessions",
-                onClick = onRefreshSessions,
-                contentDescription = if (isRefreshing) "Refreshing Sessions" else "Refresh Sessions",
-                testTag = FOLDER_LIST_REFRESH_SESSIONS_TAG,
-                enabled = !isRefreshing,
             ),
             KebabItem(
                 label = "Usage",
@@ -2735,7 +2719,6 @@ private const val FLAT_IDLE_SECTION_KEY: String = "flat-section-idle"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 const val FOLDER_LIST_BROWSE_FILES_TAG: String = "folder-list:browse-files"
-const val FOLDER_LIST_REFRESH_SESSIONS_TAG: String = "folder-list:refresh-sessions"
 const val FOLDER_LIST_USAGE_TAG: String = "folder-list:usage"
 const val FOLDER_LIST_SETTINGS_TAG: String = "folder-list:settings"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"

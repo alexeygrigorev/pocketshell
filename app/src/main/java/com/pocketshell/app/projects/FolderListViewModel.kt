@@ -330,8 +330,6 @@ class FolderListViewModel internal constructor(
         },
     ),
     @ApplicationContext private val applicationContext: Context? = null,
-    private val hostSessionListCache: HostSessionListCache? =
-        applicationContext?.let(::HostSessionListCache),
     private val assistantClientFactory: AssistantLlmClientFactory? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
     private val forwardingController: ForwardingController,
@@ -386,7 +384,6 @@ class FolderListViewModel internal constructor(
         // connection (reference-counted) instead of racing a second one.
         sshLeaseManager: SshLeaseManager,
         @ApplicationContext applicationContext: Context,
-        hostSessionListCache: HostSessionListCache,
         assistantClientFactory: AssistantLlmClientFactory?,
         reposRemoteSource: ReposRemoteSource?,
         forwardingController: ForwardingController,
@@ -403,7 +400,6 @@ class FolderListViewModel internal constructor(
         projectRootDao = projectRootDao,
         sshLeaseManager = sshLeaseManager,
         applicationContext = applicationContext,
-        hostSessionListCache = hostSessionListCache,
         assistantClientFactory = assistantClientFactory,
         reposRemoteSource = reposRemoteSource,
         forwardingController = forwardingController,
@@ -724,7 +720,13 @@ class FolderListViewModel internal constructor(
         sessionRefreshInFlight = false
         transientRefreshRetries = 0
         _state.value = loadingState()
-        restoreCachedSessions(hostId)
+        // EPIC #679 Slice 5 (D22 hard-cut): the SharedPreferences cold-render
+        // cache (`HostSessionListCache`) is removed. The maintained in-memory
+        // tree is the source of truth — it is held across opens of the SAME host
+        // (so a re-open renders instantly), and a NEW/changed host shows a brief
+        // Loading until the first authoritative reconcile seeds it (then the
+        // staleness gate / pull-to-refresh keep it current). `project_roots`
+        // (Room, D22-protected) still supplies the watched-root overlay.
 
         // Issue #718: fetch the host-DISCOVERED agent profiles over the warm
         // SSH lease (was the #627/#631 client-stored JSON, hard-cut per D22).
@@ -870,6 +872,26 @@ class FolderListViewModel internal constructor(
             )
             result.fold(
                 onSuccess = { resolvedName ->
+                    // EPIC #679 (#678 create side): the app KNOWS it just created
+                    // this session, so insert it into the maintained tree by id
+                    // immediately — optimistically — instead of waiting for the
+                    // next reconcile to discover it ("created session/window
+                    // slow-to-appear"). The node carries an optimistic grace so
+                    // the reconcile that follows does not prune it before the
+                    // probe has observed it; that same reconcile then confirms it
+                    // and clears the grace. The agent kind is left as Probing so
+                    // the gateway's detection (or a plain-Shell verdict) drives
+                    // the final kind via mergeAgentKind on the next reconcile.
+                    tree.insertSession(
+                        entry = FolderSessionEntry(
+                            sessionName = resolvedName,
+                            lastActivity = System.currentTimeMillis(),
+                            attached = false,
+                            agentKind = SessionAgentKind.Probing,
+                        ),
+                        folderPath = cwd,
+                    )
+                    emitReady()
                     onResolved(resolvedName)
                     refresh()
                 },
@@ -1392,7 +1414,6 @@ class FolderListViewModel internal constructor(
         if (bound != params) return
         when (result) {
             is FolderListResult.Sessions -> {
-                hostSessionListCache?.save(params.hostId, result.rows)
                 val sessionEntries = result.rows.map { it.toSessionEntry() }
                 val folderPaths = result.rows.associate { row ->
                     row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
@@ -1588,19 +1609,6 @@ class FolderListViewModel internal constructor(
         if (status.isRefreshFailure) {
             _actionStatus.value = FolderActionStatus.Idle
         }
-    }
-
-    private fun restoreCachedSessions(hostId: Long) {
-        val snapshot = hostSessionListCache?.read(hostId) ?: return
-        val sessionEntries = snapshot.rows.map { it.toSessionEntry() }
-        val folderPaths = snapshot.rows.associate { row ->
-            row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
-        }
-        // EPIC #679: seed the held tree from the cold-render cache so the screen
-        // shows last-known sessions instantly. This is NOT a reconcile, so the
-        // staleness gate still fires a real reconcile when due.
-        tree.restoreCached(sessionEntries, folderPaths)
-        emitReady()
     }
 
     private fun setSessionRefreshInFlight(refreshing: Boolean) {

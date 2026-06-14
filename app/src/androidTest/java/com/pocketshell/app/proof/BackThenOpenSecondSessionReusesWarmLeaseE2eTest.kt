@@ -12,6 +12,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -20,8 +22,7 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
-import com.pocketshell.app.projects.FOLDER_LIST_OVERFLOW_TAG
-import com.pocketshell.app.projects.FOLDER_LIST_REFRESH_SESSIONS_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_PULL_TO_REFRESH_TAG
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
@@ -493,24 +494,18 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
     }
 
     /**
-     * Trigger the production "Refresh Sessions" overflow action — the explicit
-     * pull-to-refresh sibling that forces a picker discovery reconcile over the
-     * warm SSH lease (`FolderListViewModel.refreshSessions`). This is the real
-     * user gesture that re-polls the lease the active session VM still holds,
-     * which is where the #758 eviction fires. Open the kebab overflow, tap
-     * Refresh Sessions, then dismiss any lingering menu by pressing back-free —
-     * the menu auto-dismisses on item click.
+     * Trigger the production pull-to-refresh — the SINGLE explicit manual-refresh
+     * affordance (EPIC #679 Slice 4; the kebab "Refresh Sessions" item is
+     * hard-cut, D22). The swipe-down on the host-detail tree forces a picker
+     * discovery reconcile over the warm SSH lease
+     * (`FolderListViewModel.refreshSessions`). This is the real user gesture that
+     * re-polls the lease the active session VM still holds, which is where the
+     * #758 eviction fires.
      */
     private fun triggerRefreshSessions() {
         runCatching {
-            compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG, useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                compose.onAllNodesWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithTag(FOLDER_LIST_REFRESH_SESSIONS_TAG, useUnmergedTree = true)
-                .performClick()
+            compose.onNodeWithTag(FOLDER_LIST_PULL_TO_REFRESH_TAG, useUnmergedTree = true)
+                .performTouchInput { swipeDown() }
         }
     }
 

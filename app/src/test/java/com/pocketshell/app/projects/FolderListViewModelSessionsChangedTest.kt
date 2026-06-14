@@ -57,18 +57,12 @@ class FolderListViewModelSessionsChangedTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var context: Context
-    private lateinit var cache: HostSessionListCache
     private val viewModelStore = ViewModelStore()
     private var nextViewModelKey: Int = 0
 
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        context.getSharedPreferences("host_session_list_cache", Context.MODE_PRIVATE)
-            .edit()
-            .clear()
-            .commit()
-        cache = HostSessionListCache(context)
     }
 
     @After
@@ -252,7 +246,6 @@ class FolderListViewModelSessionsChangedTest {
                 idleTtlMillis = 0L,
             ),
             applicationContext = context,
-            hostSessionListCache = cache,
             forwardingController = ForwardingController(context),
             activeTmuxClients = registry,
             attachLifecycle = false,

@@ -572,9 +572,10 @@ internal fun ReviewSubmittedSheet(
  * Post-Submit confirmation surface for an annotated image (issue #764). After
  * the flattened PNG is written to `~/inbox/pocketshell/annotations/<file>-<ts>.png`
  * (plus its `pocketshell_annotation` YAML sidecar), this sheet shows where the
- * PNG landed and lets the maintainer **copy the exact saved path**. Mirrors
- * [ReviewSubmittedSheet] but without the attach-to-session action (MVP: inbox-
- * drop only — the orchestrator picks the PNG up like a screenshot).
+ * PNG landed, lets the maintainer **copy the exact saved path**, and — #764 v2 —
+ * **attach it to the current session** (seeds the composer with a prompt that
+ * references the saved PNG, reusing the #763 attach-to-session path). Mirrors
+ * [ReviewSubmittedSheet].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -583,6 +584,7 @@ internal fun AnnotationSavedSheet(
     savedPath: String,
     sheetState: SheetState,
     onCopyPath: () -> Unit,
+    onAttach: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(
@@ -654,6 +656,15 @@ internal fun AnnotationSavedSheet(
             }
 
             Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+            PocketShellButton(
+                text = "Attach to current session",
+                onClick = onAttach,
+                variant = ButtonVariant.Primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(FILE_VIEWER_ANNOTATE_ATTACH_TAG),
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             PocketShellButton(
                 text = "Done",
                 onClick = onDismiss,

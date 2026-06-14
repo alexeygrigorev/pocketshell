@@ -90,4 +90,35 @@ class ImageAnnotationStateTest {
     fun swatchesIncludeTheDefaultColour() {
         assertTrue(ImageAnnotationState.SWATCHES.contains(ImageAnnotationState.DEFAULT_COLOR_ARGB))
     }
+
+    @Test
+    fun selectingTheShapeAndTextToolsAreApplied() {
+        // #764 v2 — Rect / Circle / Text join Pen / Arrow / Pan.
+        assertEquals(AnnotationTool.Rect, ImageAnnotationState().withTool(AnnotationTool.Rect).tool)
+        assertEquals(AnnotationTool.Circle, ImageAnnotationState().withTool(AnnotationTool.Circle).tool)
+        assertEquals(AnnotationTool.Text, ImageAnnotationState().withTool(AnnotationTool.Text).tool)
+    }
+
+    @Test
+    fun newAnnotationTypesGrowTheListAndUndoPopsThem() {
+        // #764 v2 — Rectangle / Circle / Text are accepted by the op list.
+        var s = ImageAnnotationState()
+            .withAnnotation(
+                Annotation.Rectangle(ImagePoint(0f, 0f), ImagePoint(10f, 10f), ImageAnnotationState.DEFAULT_COLOR_ARGB, 4f),
+            )
+            .withAnnotation(
+                Annotation.Circle(ImagePoint(0f, 0f), ImagePoint(10f, 10f), ImageAnnotationState.DEFAULT_COLOR_ARGB, 4f),
+            )
+            .withAnnotation(
+                Annotation.Text("BUG", ImagePoint(5f, 5f), 40f, ImageAnnotationState.DEFAULT_COLOR_ARGB),
+            )
+        assertEquals(3, s.annotations.size)
+        assertTrue(s.annotations[0] is Annotation.Rectangle)
+        assertTrue(s.annotations[1] is Annotation.Circle)
+        assertTrue(s.annotations[2] is Annotation.Text)
+
+        s = s.undone()
+        assertEquals(2, s.annotations.size)
+        assertTrue("undo popped the Text", s.annotations.none { it is Annotation.Text })
+    }
 }

@@ -29,7 +29,7 @@ import org.yaml.snakeyaml.representer.Representer
 /** A point in **source-bitmap pixel space** (origin top-left, x→right, y→down). */
 data class ImagePoint(val x: Float, val y: Float)
 
-/** The drawing tools the MVP offers. [Pan] re-enables pinch/pan (no drawing). */
+/** The drawing tools the viewer offers. [Pan] re-enables pinch/pan (no drawing). */
 enum class AnnotationTool {
     /** Reposition/zoom the image; drawing is disabled. The default. */
     Pan,
@@ -39,6 +39,15 @@ enum class AnnotationTool {
 
     /** A straight arrow from the drag start to the drag end. */
     Arrow,
+
+    /** A rectangle outline — drag defines the two opposite corners (#764 v2). */
+    Rect,
+
+    /** An ellipse/circle outline — drag defines the bounding box (#764 v2). */
+    Circle,
+
+    /** A text label — tap to place an anchor, then enter the text (#764 v2). */
+    Text,
 }
 
 /**
@@ -63,6 +72,43 @@ sealed interface Annotation {
         val end: ImagePoint,
         override val colorArgb: Int,
         override val strokeWidthPx: Float,
+    ) : Annotation
+
+    /**
+     * A rectangle outline (#764 v2). [start]/[end] are any two opposite corners
+     * of the drag; the renderer normalises them to a top-left/bottom-right rect
+     * so a drag in any direction produces the same box.
+     */
+    data class Rectangle(
+        val start: ImagePoint,
+        val end: ImagePoint,
+        override val colorArgb: Int,
+        override val strokeWidthPx: Float,
+    ) : Annotation
+
+    /**
+     * An ellipse outline (#764 v2) inscribed in the bounding box defined by the
+     * two opposite corners [start]/[end] (a square box draws a circle).
+     */
+    data class Circle(
+        val start: ImagePoint,
+        val end: ImagePoint,
+        override val colorArgb: Int,
+        override val strokeWidthPx: Float,
+    ) : Annotation
+
+    /**
+     * A text label (#764 v2) anchored at [anchor] (its top-left baseline box).
+     * [textSizePx] is the font size in **source pixels** so it scales with the
+     * image, exactly like [strokeWidthPx]. [strokeWidthPx] is unused for fill
+     * text but kept on the interface; the glyph fill uses [colorArgb].
+     */
+    data class Text(
+        val text: String,
+        val anchor: ImagePoint,
+        val textSizePx: Float,
+        override val colorArgb: Int,
+        override val strokeWidthPx: Float = 0f,
     ) : Annotation
 }
 

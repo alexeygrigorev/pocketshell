@@ -112,6 +112,16 @@ fun reviewAttachPrompt(remotePath: String): String =
     "Apply the PocketShell review at $remotePath"
 
 /**
+ * The templated prompt the file viewer's "Attach to current session" action for
+ * an annotated image (issue #764 v2) drops into the active session composer. The
+ * annotated PNG was written to [remotePath]; this prompt references that path so
+ * the in-session agent can look at the marked-up screenshot immediately. Pure so
+ * the exact wording is asserted in one place, mirroring [reviewAttachPrompt].
+ */
+fun annotationAttachPrompt(remotePath: String): String =
+    "Look at the annotated screenshot at $remotePath"
+
+/**
  * One comment in the `pocketshell_review` export — either anchored to a line
  * (with the verbatim [code] of that line so an agent can re-locate it if its
  * copy drifted) or scoped to the whole file.

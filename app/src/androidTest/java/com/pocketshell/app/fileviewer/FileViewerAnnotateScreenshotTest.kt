@@ -24,10 +24,11 @@ import java.io.FileOutputStream
 
 /**
  * Issue #764 evidence — capture, on a real emulator, the image-annotation mode:
- * an image preview, the Markup toggle, and the annotate toolbar (Pan/Pen/Arrow +
- * swatches + Undo + Done) with a committed Pen stroke + Arrow drawn over the
- * image. Proves the live `ImagePanel` overlay + `AnnotationToolbar` render
- * on-device against the design.
+ * an image preview, the Markup toggle, and the annotate toolbar (Pan/Pen/Arrow/
+ * Rect/Circle/Text + swatches + Undo + Done) with every committed annotation type
+ * drawn over the image, plus the post-submit saved sheet with the #764 v2
+ * "Attach to current session" action. Proves the live `ImagePanel` overlay +
+ * `AnnotationToolbar` + `AnnotationSavedSheet` render on-device against the design.
  */
 @RunWith(AndroidJUnit4::class)
 class FileViewerAnnotateScreenshotTest {
@@ -46,28 +47,49 @@ class FileViewerAnnotateScreenshotTest {
             writeBytes(checkerboardPng(600, 400))
         }
 
-        // A committed Pen stroke (a rough circle) and an Arrow, in source-pixel
-        // space, so the overlay renders real markup over the image.
+        // One committed annotation of EVERY type, in source-pixel space, so the
+        // overlay renders real Pen / Arrow / Rect / Circle / Text markup.
         val red = ImageAnnotationState.DEFAULT_COLOR_ARGB
-        val circle = (0..36).map { i ->
+        val green = 0xFF22C55E.toInt()
+        val amber = 0xFFF59E0B.toInt()
+        val pen = (0..36).map { i ->
             val a = Math.toRadians((i * 10).toDouble())
-            ImagePoint((180 + 70 * Math.cos(a)).toFloat(), (160 + 70 * Math.sin(a)).toFloat())
+            ImagePoint((150 + 55 * Math.cos(a)).toFloat(), (150 + 55 * Math.sin(a)).toFloat())
         }
         var annotationState by mutableStateOf(
             ImageAnnotationState(
                 active = true,
                 tool = AnnotationTool.Pen,
                 annotations = listOf(
-                    Annotation.Freehand(points = circle, colorArgb = red, strokeWidthPx = 6f),
+                    Annotation.Freehand(points = pen, colorArgb = red, strokeWidthPx = 6f),
                     Annotation.Arrow(
-                        start = ImagePoint(520f, 360f),
-                        end = ImagePoint(260f, 200f),
+                        start = ImagePoint(560f, 360f),
+                        end = ImagePoint(230f, 190f),
                         colorArgb = red,
                         strokeWidthPx = 6f,
+                    ),
+                    Annotation.Rectangle(
+                        start = ImagePoint(330f, 40f),
+                        end = ImagePoint(560f, 170f),
+                        colorArgb = green,
+                        strokeWidthPx = 6f,
+                    ),
+                    Annotation.Circle(
+                        start = ImagePoint(350f, 230f),
+                        end = ImagePoint(520f, 370f),
+                        colorArgb = amber,
+                        strokeWidthPx = 6f,
+                    ),
+                    Annotation.Text(
+                        text = "BUG",
+                        anchor = ImagePoint(30f, 30f),
+                        textSizePx = 44f,
+                        colorArgb = red,
                     ),
                 ),
             ),
         )
+        var saved by mutableStateOf<AnnotationSubmitEvent.Success?>(null)
 
         compose.setContent {
             PocketShellTheme {
@@ -79,22 +101,41 @@ class FileViewerAnnotateScreenshotTest {
                         sizeBytes = imageFile.length(),
                     ),
                     annotationState = annotationState,
+                    submittedAnnotation = saved,
                     onBack = {},
                     onRetry = {},
                     onSetAnnotationTool = { annotationState = annotationState.withTool(it) },
+                    onDismissSubmittedAnnotation = { saved = null },
                 )
             }
         }
         compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_CANVAS_TAG).assertExists()
         compose.waitForIdle()
-        SystemClock.sleep(400)
-        capture("file-viewer-annotate-pen.png")
+        // The overlay maps source→screen once the viewport is measured; let the
+        // first measure/layout pass settle so the marks are drawn before capture.
+        SystemClock.sleep(800)
 
-        // Switch to the Arrow tool to show the tool selection highlight.
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG).performClick()
+        // Show the shape/text tools' selection highlight + the drawn markup.
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_RECT_TAG).performClick()
         compose.waitForIdle()
-        SystemClock.sleep(300)
-        capture("file-viewer-annotate-arrow-tool.png")
+        SystemClock.sleep(400)
+        capture("file-viewer-annotate-all-types.png")
+        capture("file-viewer-annotate-rect-tool.png")
+
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_TEXT_TAG).performClick()
+        compose.waitForIdle()
+        SystemClock.sleep(200)
+        capture("file-viewer-annotate-text-tool.png")
+
+        // Post-submit saved sheet with the Attach-to-session action (#764 v2).
+        saved = AnnotationSubmitEvent.Success(
+            host = "agents",
+            remotePath = "/home/agent/inbox/pocketshell/annotations/login-screen-20260614-101010.png",
+        )
+        compose.waitForIdle()
+        SystemClock.sleep(400)
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_ATTACH_TAG).assertExists()
+        capture("file-viewer-annotate-saved-attach.png")
 
         imageFile.delete()
     }

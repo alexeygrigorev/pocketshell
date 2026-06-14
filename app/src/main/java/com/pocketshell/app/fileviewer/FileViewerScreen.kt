@@ -16,9 +16,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,8 +38,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderColors
 import androidx.compose.material3.SliderDefaults
@@ -65,7 +70,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -79,6 +87,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -150,16 +160,23 @@ const val FILE_VIEWER_REVIEW_COPY_PATH_TAG = "fileViewerReviewCopyPath"
 const val FILE_VIEWER_REVIEW_ATTACH_TAG = "fileViewerReviewAttach"
 const val FILE_VIEWER_REVIEW_SAVED_DONE_TAG = "fileViewerReviewSavedDone"
 
-// Issue #764 — image annotation mode (Pen / Arrow / Undo / Submit + flatten).
+// Issue #764 — image annotation mode (Pen / Arrow / Rect / Circle / Text /
+// colour / Undo / Submit + flatten).
 const val FILE_VIEWER_ANNOTATE_TOGGLE_TAG = "fileViewerAnnotateToggle"
 const val FILE_VIEWER_ANNOTATE_CANVAS_TAG = "fileViewerAnnotateCanvas"
 const val FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG = "fileViewerAnnotateToolPan"
 const val FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG = "fileViewerAnnotateToolPen"
 const val FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG = "fileViewerAnnotateToolArrow"
+const val FILE_VIEWER_ANNOTATE_TOOL_RECT_TAG = "fileViewerAnnotateToolRect"
+const val FILE_VIEWER_ANNOTATE_TOOL_CIRCLE_TAG = "fileViewerAnnotateToolCircle"
+const val FILE_VIEWER_ANNOTATE_TOOL_TEXT_TAG = "fileViewerAnnotateToolText"
+const val FILE_VIEWER_ANNOTATE_TEXT_FIELD_TAG = "fileViewerAnnotateTextField"
+const val FILE_VIEWER_ANNOTATE_TEXT_CONFIRM_TAG = "fileViewerAnnotateTextConfirm"
 const val FILE_VIEWER_ANNOTATE_UNDO_TAG = "fileViewerAnnotateUndo"
 const val FILE_VIEWER_ANNOTATE_SUBMIT_TAG = "fileViewerAnnotateSubmit"
 const val FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG = "fileViewerAnnotateSavedSheet"
 const val FILE_VIEWER_ANNOTATE_SAVED_PATH_TAG = "fileViewerAnnotateSavedPath"
+const val FILE_VIEWER_ANNOTATE_ATTACH_TAG = "fileViewerAnnotateAttach"
 
 /** Test tag for an annotation colour swatch (the packed ARGB int). */
 fun fileViewerAnnotateSwatchTag(argb: Int): String = "fileViewerAnnotateSwatch-$argb"
@@ -295,6 +312,13 @@ fun FileViewerScreen(
         onCopyAnnotationPath = { path ->
             copyTextToClipboard(context, path, "Copied image path")
         },
+        onAttachAnnotation = { path ->
+            // Issue #764 v2 — reuse the #763 attach-to-session path: dismiss the
+            // sheet, then seed the active session composer with an annotation
+            // prompt referencing the saved PNG.
+            submittedAnnotation = null
+            onAttachReviewToSession(annotationAttachPrompt(path))
+        },
         onDismissSubmittedAnnotation = { submittedAnnotation = null },
         modifier = modifier,
     )
@@ -340,6 +364,7 @@ internal fun FileViewerScaffold(
     onUndoAnnotation: () -> Unit = {},
     onSubmitAnnotation: () -> Unit = {},
     onCopyAnnotationPath: (String) -> Unit = {},
+    onAttachAnnotation: (String) -> Unit = {},
     onDismissSubmittedAnnotation: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -509,8 +534,9 @@ internal fun FileViewerScaffold(
         }
 
         // Issue #764 — post-Submit confirmation for an annotated image: the saved
-        // PNG path (copyable). The annotated PNG landed in the host's annotations
-        // inbox; the orchestrator picks it up like a screenshot.
+        // PNG path (copyable) + Attach-to-session (#764 v2). The annotated PNG
+        // landed in the host's annotations inbox; the orchestrator picks it up
+        // like a screenshot, and Attach seeds the active session composer.
         submittedAnnotation?.let { success ->
             val savedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
             AnnotationSavedSheet(
@@ -518,6 +544,7 @@ internal fun FileViewerScaffold(
                 savedPath = success.remotePath,
                 sheetState = savedSheetState,
                 onCopyPath = { onCopyAnnotationPath(success.remotePath) },
+                onAttach = { onAttachAnnotation(success.remotePath) },
                 onDismiss = onDismissSubmittedAnnotation,
             )
         }
@@ -1112,7 +1139,11 @@ private fun ImagePanel(
     }
 
     val annotateActive = annotationState.active
-    val drawing = annotateActive && annotationState.tool != AnnotationTool.Pan
+    // Pen/Arrow/Rect/Circle draw with a drag; Text places with a tap; Pan pans.
+    val dragDrawing = annotateActive &&
+        annotationState.tool != AnnotationTool.Pan &&
+        annotationState.tool != AnnotationTool.Text
+    val textPlacing = annotateActive && annotationState.tool == AnnotationTool.Text
 
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
@@ -1143,7 +1174,11 @@ private fun ImagePanel(
     // The in-progress stroke (screen points), committed to source space on drag-end.
     val livePoints = remember { mutableStateListOf<Offset>() }
 
-    val gestureModifier = if (drawing && mapping != null) {
+    // Issue #764 v2 — Text tool: a tap captures the source-space anchor, then a
+    // dialog enters the label which is committed as an Annotation.Text.
+    var pendingTextAnchor by remember { mutableStateOf<ImagePoint?>(null) }
+
+    val gestureModifier = if (dragDrawing && mapping != null) {
         Modifier.pointerInput(annotationState.tool, mapping, annotationState.colorArgb) {
             detectDragGestures(
                 onDragStart = { start ->
@@ -1160,6 +1195,12 @@ private fun ImagePanel(
                 },
                 onDragCancel = { livePoints.clear() },
             )
+        }
+    } else if (textPlacing && mapping != null) {
+        Modifier.pointerInput(mapping) {
+            detectTapGestures { tap ->
+                pendingTextAnchor = mapping.screenToSource(tap.x, tap.y)
+            }
         }
     } else if (!annotateActive) {
         Modifier.pointerInput(Unit) {
@@ -1226,15 +1267,94 @@ private fun ImagePanel(
             }
         }
     }
+
+    // Issue #764 v2 — Text entry: once the user taps to anchor a label, prompt
+    // for the text and commit it as an Annotation.Text in source-pixel space.
+    val anchor = pendingTextAnchor
+    if (anchor != null && mapping != null) {
+        AnnotationTextDialog(
+            onConfirm = { entered ->
+                if (entered.isNotBlank()) {
+                    onAddAnnotation(
+                        Annotation.Text(
+                            text = entered,
+                            anchor = anchor,
+                            textSizePx = mapping.screenToSourceLength(ANNOTATION_TEXT_SCREEN_SIZE),
+                            colorArgb = annotationState.colorArgb,
+                        ),
+                    )
+                }
+                pendingTextAnchor = null
+            },
+            onDismiss = { pendingTextAnchor = null },
+        )
+    }
+}
+
+/**
+ * Modal text-entry for a Text annotation (#764 v2). Returns the entered string
+ * on confirm; an empty string is dropped by the caller.
+ */
+@Composable
+private fun AnnotationTextDialog(
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PocketShellColors.Surface,
+        title = {
+            Text(
+                text = "Add text",
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                color = PocketShellColors.Text,
+            )
+        },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = false,
+                placeholder = {
+                    Text(
+                        text = "Label…",
+                        style = PocketShellType.bodyDense,
+                        color = PocketShellColors.TextMuted,
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(FILE_VIEWER_ANNOTATE_TEXT_FIELD_TAG),
+            )
+        },
+        confirmButton = {
+            PocketShellButton(
+                text = "Add",
+                onClick = { onConfirm(text) },
+                variant = ButtonVariant.Primary,
+                modifier = Modifier.testTag(FILE_VIEWER_ANNOTATE_TEXT_CONFIRM_TAG),
+            )
+        },
+        dismissButton = {
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Secondary,
+            )
+        },
+    )
 }
 
 /**
  * Commit the captured [screenPoints] of a finished drag as an [Annotation] in
  * source-pixel space (issue #764). Pen → a [Annotation.Freehand] of every
- * sampled point; Arrow → a [Annotation.Arrow] from the first to the last point.
+ * sampled point; Arrow → a [Annotation.Arrow]; Rect/Circle → the bounding box of
+ * the drag (first→last point) as a [Annotation.Rectangle]/[Annotation.Circle].
  * The stroke width is a fixed screen width converted to source pixels so it
  * scales with the image in the flattened export. A degenerate stroke (no points,
- * or an arrow with start==end) is dropped.
+ * or a shape with start==end) is dropped. The Text tool commits on tap, not here.
  */
 private fun commitStroke(
     state: ImageAnnotationState,
@@ -1244,24 +1364,34 @@ private fun commitStroke(
 ) {
     if (screenPoints.isEmpty()) return
     val strokeWidthPx = mapping.screenToSourceLength(ANNOTATION_STROKE_SCREEN_WIDTH)
+    val start = mapping.screenToSource(screenPoints.first().x, screenPoints.first().y)
+    val end = mapping.screenToSource(screenPoints.last().x, screenPoints.last().y)
     when (state.tool) {
         AnnotationTool.Pen -> {
             val pts = screenPoints.map { mapping.screenToSource(it.x, it.y) }
             onAddAnnotation(Annotation.Freehand(points = pts, colorArgb = state.colorArgb, strokeWidthPx = strokeWidthPx))
         }
-        AnnotationTool.Arrow -> {
-            val start = mapping.screenToSource(screenPoints.first().x, screenPoints.first().y)
-            val end = mapping.screenToSource(screenPoints.last().x, screenPoints.last().y)
+        AnnotationTool.Arrow ->
             if (start != end) {
                 onAddAnnotation(Annotation.Arrow(start = start, end = end, colorArgb = state.colorArgb, strokeWidthPx = strokeWidthPx))
             }
-        }
-        AnnotationTool.Pan -> Unit
+        AnnotationTool.Rect ->
+            if (start != end) {
+                onAddAnnotation(Annotation.Rectangle(start = start, end = end, colorArgb = state.colorArgb, strokeWidthPx = strokeWidthPx))
+            }
+        AnnotationTool.Circle ->
+            if (start != end) {
+                onAddAnnotation(Annotation.Circle(start = start, end = end, colorArgb = state.colorArgb, strokeWidthPx = strokeWidthPx))
+            }
+        AnnotationTool.Text, AnnotationTool.Pan -> Unit
     }
 }
 
 /** Fixed on-screen annotation stroke width (dp-ish px); mapped to source pixels. */
 private const val ANNOTATION_STROKE_SCREEN_WIDTH = 8f
+
+/** Fixed on-screen text size for a Text annotation; mapped to source pixels. */
+private const val ANNOTATION_TEXT_SCREEN_SIZE = 48f
 
 /** Draw a committed [annotation] (in source space) onto the screen-space canvas. */
 private fun DrawScope.drawAnnotationOnCanvas(annotation: Annotation, mapping: ImageFitMapping) {
@@ -1290,6 +1420,20 @@ private fun DrawScope.drawAnnotationOnCanvas(annotation: Annotation, mapping: Im
             val (ex, ey) = mapping.sourceToScreen(annotation.end)
             drawArrowOnCanvas(Offset(sx, sy), Offset(ex, ey), color, widthPx)
         }
+        is Annotation.Rectangle -> {
+            val (sx, sy) = mapping.sourceToScreen(annotation.start)
+            val (ex, ey) = mapping.sourceToScreen(annotation.end)
+            drawRectOnCanvas(Offset(sx, sy), Offset(ex, ey), color, widthPx)
+        }
+        is Annotation.Circle -> {
+            val (sx, sy) = mapping.sourceToScreen(annotation.start)
+            val (ex, ey) = mapping.sourceToScreen(annotation.end)
+            drawEllipseOnCanvas(Offset(sx, sy), Offset(ex, ey), color, widthPx)
+        }
+        is Annotation.Text -> {
+            val (ax, ay) = mapping.sourceToScreen(annotation.anchor)
+            drawTextOnCanvas(annotation.text, Offset(ax, ay), color, annotation.textSizePx * mapping.scale)
+        }
     }
 }
 
@@ -1313,7 +1457,56 @@ private fun DrawScope.drawLiveStroke(state: ImageAnnotationState, screenPoints: 
         AnnotationTool.Arrow -> {
             drawArrowOnCanvas(screenPoints.first(), screenPoints.last(), color, widthPx)
         }
-        AnnotationTool.Pan -> Unit
+        AnnotationTool.Rect -> {
+            drawRectOnCanvas(screenPoints.first(), screenPoints.last(), color, widthPx)
+        }
+        AnnotationTool.Circle -> {
+            drawEllipseOnCanvas(screenPoints.first(), screenPoints.last(), color, widthPx)
+        }
+        AnnotationTool.Text, AnnotationTool.Pan -> Unit
+    }
+}
+
+/** Draw a rectangle outline (normalised corners) on the screen-space canvas. */
+private fun DrawScope.drawRectOnCanvas(a: Offset, b: Offset, color: ComposeColor, widthPx: Float) {
+    val left = minOf(a.x, b.x)
+    val top = minOf(a.y, b.y)
+    drawRect(
+        color = color,
+        topLeft = Offset(left, top),
+        size = androidx.compose.ui.geometry.Size(kotlin.math.abs(b.x - a.x), kotlin.math.abs(b.y - a.y)),
+        style = Stroke(width = widthPx, join = StrokeJoin.Round),
+    )
+}
+
+/** Draw an ellipse outline inscribed in the corner box on the screen-space canvas. */
+private fun DrawScope.drawEllipseOnCanvas(a: Offset, b: Offset, color: ComposeColor, widthPx: Float) {
+    val left = minOf(a.x, b.x)
+    val top = minOf(a.y, b.y)
+    drawOval(
+        color = color,
+        topLeft = Offset(left, top),
+        size = androidx.compose.ui.geometry.Size(kotlin.math.abs(b.x - a.x), kotlin.math.abs(b.y - a.y)),
+        style = Stroke(width = widthPx, join = StrokeJoin.Round),
+    )
+}
+
+/** Draw a text label (multi-line aware) at [anchor] on the screen-space canvas. */
+private fun DrawScope.drawTextOnCanvas(text: String, anchor: Offset, color: ComposeColor, textSizePx: Float) {
+    if (text.isEmpty()) return
+    val paint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        this.color = color.toArgb()
+        style = android.graphics.Paint.Style.FILL
+        this.textSize = textSizePx
+        isFakeBoldText = true
+    }
+    val baseline = anchor.y - paint.fontMetrics.ascent
+    val lineHeight = paint.fontSpacing
+    drawIntoCanvas { canvas ->
+        text.split('\n').forEachIndexed { i, line ->
+            canvas.nativeCanvas.drawText(line, anchor.x, baseline + i * lineHeight, paint)
+        }
     }
 }
 
@@ -1341,11 +1534,12 @@ private fun DrawScope.drawArrowOnCanvas(start: Offset, end: Offset, color: Compo
 }
 
 /**
- * The annotate-mode bottom toolbar (issue #764): tool toggles (Pan/Pen/Arrow),
- * a fixed colour swatch row, Undo, and Submit. One dense row of ui-kit-token
+ * The annotate-mode bottom toolbar (issue #764): tool toggles (Pan/Pen/Arrow/
+ * Rect/Circle/Text), a fixed colour swatch row, Undo, and Submit. ui-kit-token
  * controls; the selected tool/colour gets an accent tint. Submit is enabled only
  * when there is at least one annotation and no submit is in flight.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnnotationToolbar(
     annotationState: ImageAnnotationState,
@@ -1365,15 +1559,25 @@ private fun AnnotationToolbar(
             .padding(horizontal = PocketShellSpacing.sm, vertical = PocketShellSpacing.xs),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
     ) {
+        // Tool row — six tools + the swatch palette. Wrap so every control stays
+        // fully visible/tappable on a narrow phone (#641 reachability).
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+        ) {
+            ToolToggle("Pan", annotationState.tool == AnnotationTool.Pan, FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG) { onSetTool(AnnotationTool.Pan) }
+            ToolToggle("Pen", annotationState.tool == AnnotationTool.Pen, FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG) { onSetTool(AnnotationTool.Pen) }
+            ToolToggle("Arrow", annotationState.tool == AnnotationTool.Arrow, FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG) { onSetTool(AnnotationTool.Arrow) }
+            ToolToggle("Rect", annotationState.tool == AnnotationTool.Rect, FILE_VIEWER_ANNOTATE_TOOL_RECT_TAG) { onSetTool(AnnotationTool.Rect) }
+            ToolToggle("Circle", annotationState.tool == AnnotationTool.Circle, FILE_VIEWER_ANNOTATE_TOOL_CIRCLE_TAG) { onSetTool(AnnotationTool.Circle) }
+            ToolToggle("Text", annotationState.tool == AnnotationTool.Text, FILE_VIEWER_ANNOTATE_TOOL_TEXT_TAG) { onSetTool(AnnotationTool.Text) }
+        }
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
         ) {
-            ToolToggle("Pan", annotationState.tool == AnnotationTool.Pan, FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG) { onSetTool(AnnotationTool.Pan) }
-            ToolToggle("Pen", annotationState.tool == AnnotationTool.Pen, FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG) { onSetTool(AnnotationTool.Pen) }
-            ToolToggle("Arrow", annotationState.tool == AnnotationTool.Arrow, FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG) { onSetTool(AnnotationTool.Arrow) }
-            Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
             ImageAnnotationState.SWATCHES.forEach { argb ->
                 ColorSwatch(argb = argb, selected = annotationState.colorArgb == argb) { onSetColor(argb) }
             }

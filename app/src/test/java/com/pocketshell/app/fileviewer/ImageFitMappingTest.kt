@@ -119,4 +119,43 @@ class ImageFitMappingTest {
             ImageFitMapping.of(100, 100, 0f, 400f)
         }
     }
+
+    /**
+     * #764 v2 — a Rect/Circle is captured as two opposite screen corners, mapped
+     * to source space at commit time. Proves both corners map through the SAME
+     * letterbox transform so the exported box matches the drawn box, and that a
+     * reverse drag (corners swapped) maps to the same source-space pair.
+     */
+    @Test
+    fun rectCornersMapThroughTheLetterboxTransform() {
+        val m = ImageFitMapping.of(sourceWidth = 200, sourceHeight = 100, viewportWidth = 400f, viewportHeight = 400f)
+        // Two screen corners inside the displayed image (offsetY=100, scale=2).
+        val tl = m.screenToSource(40f, 140f)
+        val br = m.screenToSource(360f, 260f)
+        assertEquals(20f, tl.x, 1e-3f)
+        assertEquals(20f, tl.y, 1e-3f)
+        assertEquals(180f, br.x, 1e-3f)
+        assertEquals(80f, br.y, 1e-3f)
+
+        // The shape stroke width converts by the inverse scale, same as Pen/Arrow.
+        assertEquals(4f, m.screenToSourceLength(8f), 1e-4f)
+
+        // Round-trip both corners back to screen space (drawn overlay path).
+        val (tlx, tly) = m.sourceToScreen(tl)
+        val (brx, bry) = m.sourceToScreen(br)
+        assertEquals(40f, tlx, 1e-2f); assertEquals(140f, tly, 1e-2f)
+        assertEquals(360f, brx, 1e-2f); assertEquals(260f, bry, 1e-2f)
+    }
+
+    /** #764 v2 — a Text tap anchor maps from screen to source like any point. */
+    @Test
+    fun textAnchorMapsLikeAnyPoint() {
+        val m = ImageFitMapping.of(sourceWidth = 100, sourceHeight = 200, viewportWidth = 400f, viewportHeight = 400f)
+        // scale=2, offsetX=100. Screen (200, 100) → source (50, 50).
+        val anchor = m.screenToSource(200f, 100f)
+        assertEquals(50f, anchor.x, 1e-3f)
+        assertEquals(50f, anchor.y, 1e-3f)
+        // Text size converts by the inverse scale (48 screen → 24 source).
+        assertEquals(24f, m.screenToSourceLength(48f), 1e-4f)
+    }
 }

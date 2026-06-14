@@ -188,4 +188,13 @@ class ReviewExportTest {
             reviewAttachPrompt("~/inbox/pocketshell/reviews/README.md-20260614-025147.yaml"),
         )
     }
+
+    @Test
+    fun `annotationAttachPrompt references the saved PNG path`() {
+        assertEquals(
+            "Look at the annotated screenshot at " +
+                "~/inbox/pocketshell/annotations/shot-20260614-101010.png",
+            annotationAttachPrompt("~/inbox/pocketshell/annotations/shot-20260614-101010.png"),
+        )
+    }
 }

@@ -125,23 +125,25 @@ def test_read_private_key_reads_and_strips_an_existing_key(
     assert not pem.endswith("\n")
 
 
-def test_read_private_key_empty_file_returns_empty_string_characterization(
+def test_read_private_key_empty_file_raises_friendly_click_error(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Characterization of the CURRENT behaviour: an empty (or whitespace-only)
-    key file is NOT rejected by `_read_private_key` — it returns "" rather than
-    raising.
+    """An existing-but-empty (or whitespace-only) key file is rejected with a
+    friendly `ClickException` naming the path — never a silent "" PEM that would
+    land an empty `privateKeyPem` in the payload.
 
-    `_read_private_key` only guards the missing-path case; an empty existing
-    file falls through `.read_text().strip()` to "". Pinning this makes the gap
-    explicit: if the maintainer wants an empty-key guard, it belongs in
-    production (`_read_private_key`), and THIS assertion is the one that should
-    flip to `pytest.raises(...)`. (No production change here — #777 is
-    test-only.)
+    This was previously a characterization of the un-guarded behaviour (returned
+    "" without raising). The #777 review recommended a small production guard;
+    `_read_private_key` now raises for an empty file, mirroring the
+    missing-file case.
     """
     empty = tmp_path / "id_empty"
     empty.write_text("   \n\t\n")
-    assert _read_private_key(empty) == ""
+    with pytest.raises(click.ClickException) as exc_info:
+        _read_private_key(empty)
+    message = exc_info.value.message
+    assert "private key file is empty" in message
+    assert str(empty) in message
 
 
 def test_build_payload_missing_explicit_key_file_surfaces_friendly_error(

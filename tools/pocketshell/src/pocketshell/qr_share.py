@@ -132,7 +132,10 @@ def _resolve_with_ssh_config(alias: str) -> dict:
 def _read_private_key(path: pathlib.Path) -> str:
     if not path.exists():
         raise click.ClickException(f"key file not found: {path}")
-    return path.read_text().strip()
+    pem = path.read_text().strip()
+    if not pem:
+        raise click.ClickException(f"private key file is empty: {path}")
+    return pem
 
 
 def build_payload(

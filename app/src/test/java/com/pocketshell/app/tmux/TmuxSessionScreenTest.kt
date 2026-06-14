@@ -522,9 +522,9 @@ class TmuxSessionScreenTest {
 
     @Test
     fun tmuxSessionTabStateShowsConversationTabForPresumedAgentWithoutDetection() {
-        // Presumed-agent, no live detection: the Conversation tab EXISTS (it
-        // does not vanish during slow detection), but the active index stays on
-        // Terminal because there is no transcript to switch to yet.
+        // Presumed-agent, no live detection, NOT yet selected: the Conversation
+        // tab EXISTS (it does not vanish during slow detection) and the active
+        // index stays on Terminal because the user hasn't tapped it.
         val state = tmuxSessionTabState(
             currentAgentConversation = null,
             presumedAgent = true,
@@ -533,6 +533,45 @@ class TmuxSessionScreenTest {
         assertEquals(listOf("Terminal", "Conversation"), state.labels)
         assertEquals(0, state.selectedIndex)
         assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateSelectsConversationForPresumedAgentWithoutDetection() {
+        // Issue #778: tapping Conversation on a presumed-agent pane records the
+        // intent as `selectedTab = Conversation` on a detection-less conversation
+        // row. The active index MUST become 1 even though `detection == null` —
+        // the tap is honoured and the placeholder is shown, rather than the tap
+        // being a no-op that leaves the user stuck on Terminal. (Was the
+        // documented #716 limitation, now fixed.)
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = null,
+                selectedTab = SessionTab.Conversation,
+            ),
+            presumedAgent = true,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(1, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateStaysTerminalForNonPresumedConversationSelectionWithoutDetection() {
+        // Defensive: a NON-presumed pane (confirmed shell) must never land on the
+        // Conversation index even if a stale row claims `selectedTab =
+        // Conversation` with no detection — there is no Conversation tab to show.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = null,
+                selectedTab = SessionTab.Conversation,
+            ),
+            presumedAgent = false,
+        )
+
+        assertEquals(listOf("Terminal"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(!state.showsConversationTab)
     }
 
     @Test

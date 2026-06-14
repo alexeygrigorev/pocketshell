@@ -1119,8 +1119,17 @@ public fun TmuxSessionScreen(
             val tabState = tmuxSessionTabState(currentAgentConversation, presumedAgent)
             val onTabSelected: (Int) -> Unit = { index ->
                 if (index == 1) {
+                    // Issue #778: honour a Conversation tap whenever the tab is
+                    // shown — i.e. on a presumed-agent pane (#716), not only once
+                    // live detection has landed. The previous `detection != null`
+                    // gate made the tap a no-op during the slow-detection window
+                    // (the tab was visible but inert). The ViewModel records the
+                    // intent on a detection-less row and the render branch below
+                    // shows a "waiting for agent" placeholder until the transcript
+                    // seeds. Gated on `showsConversationTab` so a confirmed shell
+                    // (no tab) can never reach this path.
                     currentPane
-                        ?.takeIf { agentConversations[it.paneId]?.detection != null }
+                        ?.takeIf { tabState.showsConversationTab }
                         ?.let { pane ->
                         viewModel.selectSessionTab(pane.paneId, SessionTab.Conversation)
                     }
@@ -1352,19 +1361,32 @@ public fun TmuxSessionScreen(
             // terminal pager with no cross-window follow or explanation
             // banner.
             val visibleConversation = currentPane?.paneId?.let { agentConversations[it] }
-            // Whether to render the Conversation *content* (transcript) in place
-            // of the terminal pager. This is the actual content swap, distinct
-            // from whether the Conversation *tab* exists (#716 presumed-agent —
-            // see [tmuxSessionTabState]). A presumed agent with no live
-            // detection has no transcript to show and the ViewModel refuses to
-            // switch its `selectedTab` to Conversation until detection lands, so
-            // this stays terminal-first during the slow-detection window — the
-            // tab is present (composer + agent send-context available), but the
-            // content remains the live terminal until the agent transcript is
-            // ready.
+            // Whether to render the Conversation *content* (real transcript) in
+            // place of the terminal pager. This is the actual content swap,
+            // distinct from whether the Conversation *tab* exists (#716
+            // presumed-agent — see [tmuxSessionTabState]). It still requires a
+            // live detection because the heavyweight [TmuxConversationPane] needs
+            // a real transcript — and keeping this detection-gated also preserves
+            // the #605 Conversation→Terminal swap latch, which keys off the real
+            // pane mounting/unmounting (the lightweight placeholder below never
+            // mounts that pane, so it cannot trigger the same-frame teardown
+            // race).
             val showConversation = currentPane != null &&
                 visibleConversation?.detection != null &&
                 visibleConversation.selectedTab == SessionTab.Conversation
+            // Issue #778: when the user has tapped Conversation on a
+            // presumed-agent pane but live detection has NOT landed yet
+            // (`detection == null`), render a lightweight "waiting for agent"
+            // placeholder INSTEAD of swallowing the tap and staying on the
+            // terminal. The tap is now honoured end-to-end (onClick → VM records
+            // `selectedTab = Conversation` on a detection-less row → this branch
+            // paints the placeholder). The real [TmuxConversationPane]
+            // (`showConversation`) takes over the instant detection seeds. Gated
+            // on `presumedAgent` so a confirmed shell can never show this.
+            val showConversationPlaceholder = currentPane != null &&
+                presumedAgent &&
+                visibleConversation?.detection == null &&
+                visibleConversation?.selectedTab == SessionTab.Conversation
             // Issue #605: hold the heavyweight terminal AndroidView re-attach
             // for exactly one frame on the Conversation → Terminal edge so the
             // leaving conversation pane's selection-toolbar/focus teardown
@@ -1511,6 +1533,13 @@ public fun TmuxSessionScreen(
                             }
                         },
                     )
+                } else if (showConversationPlaceholder) {
+                    // Issue #778: the user tapped Conversation on a presumed-agent
+                    // pane before live detection landed. Render a lightweight
+                    // "waiting for agent" placeholder (no [TmuxConversationPane],
+                    // so no empty-transcript crash and no #605 teardown race). The
+                    // real conversation replaces this the instant detection seeds.
+                    ConversationDetectingPlaceholder()
                 } else if (unifiedPanes.isEmpty()) {
                     EmptyPanesPlaceholder()
                 } else {
@@ -2896,16 +2925,21 @@ internal fun tmuxSessionTabState(
     presumedAgent: Boolean = false,
 ): TmuxSessionTabState {
     // The Conversation tab exists for a live-detected agent OR a presumed
-    // agent (#716). For a presumed agent that has not yet detected, the tab is
-    // present (so it does not flicker away mid-detection) but the active index
-    // can only become Conversation once a live detection arrives, because the
-    // ViewModel refuses to switch to the Conversation tab while
-    // `detection == null` (it has no transcript to show yet).
+    // agent (#716). Issue #778: the active index now follows the user's
+    // `selectedTab` choice on ANY pane that shows the Conversation tab — a
+    // presumed agent counts, even before live detection lands. The old gate
+    // required `hasLiveDetection`, which made a Conversation tap a no-op during
+    // the slow-detection window (the tab was drawn but the index could never
+    // become 1). Honouring the presumed-agent selection lets the screen render
+    // a "waiting for agent" placeholder instead of swallowing the tap; the real
+    // transcript replaces it the instant detection seeds. The selection is still
+    // gated on `showsConversationTab` so a confirmed shell (no tab) can never
+    // land on the Conversation index from a stale row.
     val hasLiveDetection = currentAgentConversation?.detection != null
     val showsConversationTab = hasLiveDetection || presumedAgent
     return TmuxSessionTabState(
         labels = if (showsConversationTab) listOf("Terminal", "Conversation") else listOf("Terminal"),
-        selectedIndex = if (hasLiveDetection &&
+        selectedIndex = if (showsConversationTab &&
             currentAgentConversation?.selectedTab == SessionTab.Conversation
         ) {
             1
@@ -3193,6 +3227,10 @@ internal const val TMUX_SESSION_DRAWER_CLOSE_TAG = "tmux:session-drawer:close"
 internal const val TMUX_SESSION_DRAWER_CREATE_TAG = "tmux:session-drawer:create"
 internal const val TMUX_SESSION_DRAWER_REFRESH_TAG = "tmux:session-drawer:refresh"
 internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
+
+// Issue #778: test tag on the "waiting for agent" placeholder shown when the
+// user taps Conversation on a presumed-agent pane before live detection lands.
+internal const val TMUX_CONVERSATION_DETECTING_TAG = "tmux:conversation:detecting"
 
 // Issue #423: actionable terminal-surface error state. Shown for a pane
 // whose local Termux surface failed to recover after a recovery storm
@@ -3763,6 +3801,37 @@ internal fun FailedConnectionRow(
                 Text("Tap to reconnect")
             }
         }
+    }
+}
+
+/**
+ * Issue #778: lightweight Conversation-tab placeholder shown when the user has
+ * tapped Conversation on a presumed-agent pane (#716) before live agent
+ * detection has landed (`detection == null`). It honours the tap — the view
+ * switches to the Conversation surface immediately — while being honest that the
+ * transcript is not ready yet. The real [TmuxConversationPane] replaces this the
+ * instant detection seeds a conversation row. Deliberately does NOT mount
+ * [TmuxConversationPane] (which assumes a real detection/transcript), so there
+ * is no empty-state crash and no #605 swap-latch interaction.
+ *
+ * `internal` so the #778 rendered-UI regression test
+ * ([com.pocketshell.app.conversation.ConversationDetectingPlaceholderRenderTest])
+ * can mount the REAL production placeholder and assert it is displayed when the
+ * Conversation tap lands before detection.
+ */
+@Composable
+internal fun ConversationDetectingPlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(color = PocketShellColors.Background)
+            .testTag(TMUX_CONVERSATION_DETECTING_TAG),
+        contentAlignment = Alignment.Center,
+    ) {
+        LoadingIndicator.Spinner(
+            size = SpinnerSize.Medium,
+            label = "Waiting for agent…",
+        )
     }
 }
 

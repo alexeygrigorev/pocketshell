@@ -8555,16 +8555,61 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
-        val before = _agentConversations.value[paneId] ?: return
-        if (tab == SessionTab.Conversation && before.detection == null) return
+        // Issue #778: honour a Conversation tap on a presumed-agent pane even
+        // when live detection has not landed yet (`detection == null`). The
+        // Conversation tab is only ever drawn for a presumed-agent pane (#716),
+        // so a tap reaching here is a deliberate user intent to view the agent
+        // surface; swallowing it (the old `detection == null` early-return) left
+        // the user stuck on Terminal during the slow-detection window — the
+        // exact no-op #778 reports. We now record the intent as
+        // `selectedTab = Conversation` on a detection-less row, and the screen
+        // renders a "waiting for agent" placeholder until detection seeds the
+        // real transcript. A Terminal tap is unconditional as before.
+        //
+        // The row may not exist yet for a freshly-attached presumed-agent pane
+        // with no remembered status, so a Conversation tap seeds a placeholder
+        // row (detection still null) rather than returning early. A Terminal tap
+        // on a missing row is still a no-op (there is no agent surface to leave).
+        // We only seed for a LIVE pane (one present in `paneRows`): a tap that
+        // names a genuinely unknown pane id stays a no-op.
+        val existing = _agentConversations.value[paneId]
+        if (existing == null) {
+            if (tab != SessionTab.Conversation) return
+            if (!paneRows.containsKey(paneId)) return
+            setAgentConversation(
+                paneId,
+                AgentConversationUiState(
+                    detection = null,
+                    events = emptyList(),
+                    selectedTab = SessionTab.Conversation,
+                    syncStatus = AgentConversationSyncStatus.Live,
+                ),
+            )
+            DiagnosticEvents.record(
+                "action",
+                "session_tab_select",
+                "mode" to "tmux",
+                "paneId" to paneId,
+                "tab" to tab.name,
+                "hasConversation" to false,
+            )
+            ConversationDiagnostics.recordTabSwitch(
+                mode = "tmux",
+                paneId = paneId,
+                fromTab = SessionTab.Terminal.name,
+                toTab = tab.name,
+                hasConversation = false,
+                eventCount = 0,
+                syncStatus = AgentConversationSyncStatus.Live.name,
+            )
+            rememberAgentStatusForPane(paneId)
+            return
+        }
+        val before = existing
         val changed = before.selectedTab != tab
         if (changed) {
             updateAgentConversation(paneId) { current ->
-                if (tab == SessionTab.Conversation && current.detection == null) {
-                    current
-                } else {
-                    current.copy(selectedTab = tab)
-                }
+                current.copy(selectedTab = tab)
             }
         }
         if (changed) {

@@ -5446,6 +5446,48 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun selectingConversationTabOnPresumedAgentWithoutDetectionSeedsPlaceholderRow() = runTest(scheduler) {
+        // Issue #778: tapping Conversation on a live presumed-agent pane that has
+        // no conversation row yet (no live detection, no remembered status) must
+        // NOT be a no-op. It seeds a detection-less placeholder row with
+        // `selectedTab = Conversation` so the screen switches to the Conversation
+        // surface (placeholder) instead of staying stuck on Terminal. The real
+        // transcript replaces this when detection lands.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        assertNull(vm.agentConversations.value["%0"])
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+
+        val row = vm.agentConversations.value["%0"]
+        assertNotNull(row)
+        assertEquals(SessionTab.Conversation, row!!.selectedTab)
+        assertNull(row.detection)
+    }
+
+    @Test
+    fun selectingConversationTabOnExistingDetectionlessRowSwitchesToConversation() = runTest(scheduler) {
+        // Issue #778: a presumed-agent pane that already has a detection-less row
+        // (seeded by an earlier tap) honours a Conversation tap — it switches to
+        // Conversation even though `detection == null`, rather than swallowing it.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        // Seed a detection-less Conversation row via the seed-on-tap path, then
+        // flip back to Terminal so we can re-assert the Conversation switch.
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+        assertEquals(SessionTab.Terminal, vm.agentConversations.value["%0"]!!.selectedTab)
+        assertNull(vm.agentConversations.value["%0"]!!.detection)
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+
+        assertEquals(SessionTab.Conversation, vm.agentConversations.value["%0"]!!.selectedTab)
+        assertNull(vm.agentConversations.value["%0"]!!.detection)
+    }
+
+    @Test
     fun selectingTmuxConversationAndTerminalTabsRecordsExplicitDiagnostics() = runTest(scheduler) {
         val diagnostics = installRecordingDiagnosticSink()
         try {

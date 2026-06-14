@@ -350,6 +350,143 @@ class AgentConversationReconnectDockerTest {
         }
     }
 
+    /**
+     * Issue #778 — tapping the Conversation tab must NOT be a no-op while live
+     * agent detection is still null.
+     *
+     * The maintainer hit this on a real Claude session: the Conversation tab is
+     * drawn for every tmux pane (#716 presumed-agent), but the tap that switches
+     * to it used to be hard-gated on live detection being non-null, so during the
+     * slow/missing-detection window the tap did literally nothing and the view
+     * stayed on Terminal.
+     *
+     * This drives the production [TmuxSessionViewModel] against the real Docker
+     * `agents` fixture using a *plain shell* tmux session (cwd in the writable
+     * home dir — no `/workspace` dependency, which the agents image does not
+     * provision). A plain shell pane is the worst case for #778: it is
+     * presumed-agent at the screen layer but `agentForWindow` stays null
+     * forever, so the OLD code would have swallowed the Conversation tap
+     * indefinitely. We assert the tap is now honoured end-to-end: the VM records
+     * `selectedTab = Conversation` on a detection-less row (the state that drives
+     * the "Waiting for agent…" placeholder), and `agentForWindow` stays null
+     * (proving we exercised the no-detection placeholder path, not the
+     * real-transcript path).
+     */
+    @Test
+    fun conversationTapIsHonouredBeforeDetectionLands(): Unit = runBlocking {
+        Assume.assumeFalse(
+            "issue-778 connected tap evidence is local-only; CI coverage is the unit layer",
+            TerminalTestTimeouts.isRunningOnCi(),
+        )
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val keyPath = writeKeyFile(key)
+        val sessionName = "issue778-tap-${System.currentTimeMillis().toString().takeLast(8)}"
+        // A plain shell pane in the writable home dir — no agent, no /workspace.
+        val cwd = "/home/$DEFAULT_USER"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} " +
+                        "-c ${shellQuote(cwd)}",
+                )
+                appendLine("sleep 1")
+                appendLine("tmux list-panes -t ${shellQuote(sessionName)} -F '#{pane_id} #{pane_tty} #{pane_current_command}'")
+            },
+        )
+
+        val vm = TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+            runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+        )
+
+        try {
+            vm.connect(
+                hostId = 778L,
+                hostName = "Issue778 Docker",
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                keyPath = keyPath,
+                passphrase = null,
+                sessionName = sessionName,
+            )
+
+            waitForStatus<TmuxSessionViewModel.ConnectionStatus.Connected>(vm, "issue778 connect")
+            val panes = waitForPanes(vm, "issue778 attach panes")
+            val windowId = panes.first().windowId
+            val paneId = panes.first { it.windowId == windowId }.paneId
+            stamp("issue778_attached window=$windowId pane=$paneId")
+
+            // Sanity: this is a plain shell pane — no live agent detection.
+            // (The OLD code keyed the Conversation switch on this being non-null,
+            // so the tap would have been a no-op here, forever.)
+            assertEquals(
+                "plain shell pane must have no live agent detection",
+                null,
+                vm.agentForWindow(windowId),
+            )
+
+            // The user taps Conversation BEFORE any detection lands. This is the
+            // exact #778 gesture that used to be swallowed.
+            vm.selectSessionTab(paneId, SessionTab.Conversation)
+
+            // CORE ASSERTION: the tap is honoured — the VM records the
+            // Conversation intent on a detection-less row (placeholder state),
+            // instead of leaving the user stuck on Terminal.
+            waitForSelectedTab(vm, paneId, SessionTab.Conversation)
+            val row = vm.agentConversations.value[paneId]
+            assertNotNull(
+                "Conversation tap must seed a conversation row even without detection " +
+                    "(pane=$paneId); conversations=${vm.agentConversations.value.keys}",
+                row,
+            )
+            assertEquals(
+                "tap must switch to Conversation, not stay on Terminal (the #778 no-op)",
+                SessionTab.Conversation,
+                row!!.selectedTab,
+            )
+            assertEquals(
+                "the row must still be detection-less (placeholder, not real transcript)",
+                null,
+                row.detection,
+            )
+            assertEquals(
+                "agentForWindow must stay null — we exercised the placeholder path",
+                null,
+                vm.agentForWindow(windowId),
+            )
+            stamp("issue778_tap_honoured selectedTab=${row.selectedTab} detection=${row.detection}")
+
+            writeText(
+                "issue778-tap-summary.txt",
+                buildString {
+                    appendLine("scenario=conversation-tap-honoured-before-detection (#778)")
+                    appendLine("session_name=$sessionName")
+                    appendLine("window_id=$windowId")
+                    appendLine("pane_id=$paneId")
+                    appendLine("pane_kind=plain-shell (no agent, presumed-agent at screen layer)")
+                    appendLine("agent_for_window=null")
+                    appendLine("tapped_tab=Conversation")
+                    appendLine("selected_tab_after_tap=${row.selectedTab}")
+                    appendLine("detection_after_tap=${row.detection}")
+                    appendLine("tap_was_no_op=false")
+                    appendLine("stamps:")
+                    stamps.forEach { appendLine("  $it") }
+                },
+            )
+        } finally {
+            vm.clearForTest()
+        }
+    }
+
     private suspend inline fun <reified T : TmuxSessionViewModel.ConnectionStatus> waitForStatus(
         vm: TmuxSessionViewModel,
         label: String,

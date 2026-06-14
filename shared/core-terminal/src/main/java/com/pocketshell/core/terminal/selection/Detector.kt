@@ -121,6 +121,14 @@ sealed class TerminalMatch {
 
     /** Error-like text (stack frame, exception keyword, traceback marker). */
     data class Error(override val value: String) : TerminalMatch()
+
+    /**
+     * Issue #770: a slash-command for the pane's detected engine (e.g. Claude
+     * Code's `/clear`) that the agent itself rendered in a hint line. Tapping it
+     * opens the prompt composer pre-filled with the command. The [value] is the
+     * command verbatim, including the leading `/`.
+     */
+    data class EngineCommand(override val value: String) : TerminalMatch()
 }
 
 /**

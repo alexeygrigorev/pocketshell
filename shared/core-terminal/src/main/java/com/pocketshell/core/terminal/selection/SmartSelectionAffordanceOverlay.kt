@@ -202,6 +202,80 @@ public fun FilePathOverlay(
     }
 }
 
+/**
+ * Issue #770: paints a cyan underline under every tappable engine command the
+ * [findVisibleEngineCommands] scanner reports on the visible viewport, and keeps
+ * the host's [EngineCommandRegion] snapshot in sync for hit-testing. Like
+ * [FilePathOverlay], the actual tap routing happens in the View's gesture
+ * pipeline via
+ * [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onTapMaybeUrl].
+ *
+ * [knownCommands] is the set of valid command strings for the pane's detected
+ * engine, supplied by the app from `AgentCommandCatalog`; an empty set scans
+ * nothing.
+ */
+@Composable
+public fun EngineCommandOverlay(
+    view: TerminalView?,
+    renderRequests: Flow<Unit>,
+    knownCommands: Set<String>,
+    viewportChangeKey: Any? = Unit,
+    onEngineCommandsChanged: (List<EngineCommandRegion>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var commands by remember { mutableStateOf<List<EngineCommandRegion>>(emptyList()) }
+    val latestOnCommandsChanged by rememberUpdatedState(onEngineCommandsChanged)
+
+    LaunchedEffect(view, renderRequests, viewportChangeKey, knownCommands) {
+        if (view == null) {
+            latestOnCommandsChanged(emptyList())
+            return@LaunchedEffect
+        }
+        val initial = findVisibleEngineCommands(view, knownCommands)
+        commands = initial
+        latestOnCommandsChanged(initial)
+        renderRequests.collect {
+            val fresh = findVisibleEngineCommands(view, knownCommands)
+            if (fresh != commands) {
+                commands = fresh
+                latestOnCommandsChanged(fresh)
+            }
+        }
+    }
+
+    val regions = remember(commands) {
+        commands.map { region ->
+            TerminalMatchRegion(
+                match = TerminalMatch.EngineCommand(region.command),
+                row = region.row,
+                startCol = region.startCol,
+                endColExclusive = region.endColExclusive,
+            )
+        }
+    }
+
+    Layout(
+        content = {},
+        modifier = modifier.drawBehind {
+            for (segment in smartSelectionAffordanceSegments(view, regions, size.width, size.height)) {
+                drawRect(
+                    color = segment.color,
+                    topLeft = Offset(segment.left, segment.top),
+                    size = Size(
+                        width = segment.right - segment.left,
+                        height = segment.thicknessPx,
+                    ),
+                )
+            }
+        },
+    ) { _, constraints ->
+        layout(
+            constraints.maxWidth.coerceAtLeast(0),
+            constraints.maxHeight.coerceAtLeast(0),
+        ) {}
+    }
+}
+
 internal data class SmartSelectionAffordanceSegment(
     val match: TerminalMatch,
     val left: Float,
@@ -261,11 +335,18 @@ internal fun affordanceStyleFor(match: TerminalMatch): SmartSelectionAffordanceS
         is TerminalMatch.Url -> SmartSelectionAffordanceStyle(URL_UNDERLINE_THICKNESS_PX, URL_AFFORDANCE_COLOR)
         is TerminalMatch.Path -> SmartSelectionAffordanceStyle(HAIRLINE_THICKNESS_PX, PATH_AFFORDANCE_COLOR)
         is TerminalMatch.Error -> SmartSelectionAffordanceStyle(HAIRLINE_THICKNESS_PX, ERROR_AFFORDANCE_COLOR)
+        // Issue #770: engine commands get the same cyan underline weight as a
+        // URL so a tappable `/clear` reads as a clear affordance (it routes to
+        // the composer, not the browser), distinct from the quieter path/error
+        // hairlines.
+        is TerminalMatch.EngineCommand ->
+            SmartSelectionAffordanceStyle(URL_UNDERLINE_THICKNESS_PX, ENGINE_COMMAND_AFFORDANCE_COLOR)
     }
 
 private val URL_AFFORDANCE_COLOR = Color(0xFF22D3EE)
 private val PATH_AFFORDANCE_COLOR = Color(0x99E6EDF3)
 private val ERROR_AFFORDANCE_COLOR = Color(0x66E6EDF3)
+private val ENGINE_COMMAND_AFFORDANCE_COLOR = Color(0xFFA371F7)
 
 /** Thickness of the underline drawn beneath each URL region, in device pixels. */
 internal const val URL_UNDERLINE_THICKNESS_PX: Float = 2f

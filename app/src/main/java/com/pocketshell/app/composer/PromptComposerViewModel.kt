@@ -493,6 +493,33 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #770: pre-fill the composer with an engine command the user tapped
+     * in the terminal (e.g. Claude Code's `/clear`). The command is laid in as
+     * the leading slash token exactly like an autocomplete pick — if the draft
+     * already starts with a `/`-token it is REPLACED, otherwise the command is
+     * prepended and any text the user already typed is preserved after it. The
+     * sheet's [TextFieldValue] re-sync places the caret at the end of the draft,
+     * so the user lands ready to review and Send. A blank [command] is a no-op.
+     *
+     * This mirrors [SlashCommandAutocomplete.insertCommandText] at the
+     * draft-string level so the tap path and the dropdown pick share one
+     * insert contract (the issue's "reuse the #767 insert path" requirement).
+     */
+    public fun prefillEngineCommand(command: String) {
+        val trimmed = command.trim()
+        if (trimmed.isEmpty()) return
+        val existing = _uiState.value.draft
+        val tokenEnd = if (existing.startsWith("/")) {
+            existing.indexOfFirst { it.isWhitespace() }.let { if (it < 0) existing.length else it }
+        } else {
+            0
+        }
+        val trailing = existing.substring(tokenEnd)
+        onDraftChange(trimmed + trailing)
+        DiagnosticEvents.record("action", "engine_command_tapped_into_composer")
+    }
+
+    /**
      * Issue #544/#566: remove a single staged attachment tile by its remote path.
      * The draft text is untouched; removing every tile leaves the prompt
      * exactly as the user typed it, so the "Attached files:" suffix is only

@@ -25,6 +25,8 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pocketshell.core.terminal.selection.EngineCommandOverlay
+import com.pocketshell.core.terminal.selection.EngineCommandRegion
 import com.pocketshell.core.terminal.selection.FilePathOverlay
 import com.pocketshell.core.terminal.selection.FilePathRegion
 import com.pocketshell.core.terminal.selection.SelectionOverlay
@@ -33,6 +35,7 @@ import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatchRegion
 import com.pocketshell.core.terminal.selection.UrlRegion
 import com.pocketshell.core.terminal.selection.findVisibleUrls
+import com.pocketshell.core.terminal.selection.hitTestEngineCommand
 import com.pocketshell.core.terminal.selection.hitTestFilePath
 import com.pocketshell.core.terminal.selection.hitTestUrl
 import com.termux.terminal.TextStyle
@@ -223,6 +226,14 @@ fun TerminalSurface(
     // resolved by the host against the session cwd) is delivered here. When
     // null, file-path detection is off and only URLs are tappable.
     onFilePathTap: ((String) -> Unit)? = null,
+    // Issue #770: the set of valid slash-commands for the pane's detected engine
+    // (from `AgentCommandCatalog`). When non-empty AND [onEngineCommandTap] is
+    // non-null, any of these the agent rendered in the terminal become tappable;
+    // a tap delivers the command verbatim (e.g. `/clear`) here so the host can
+    // open the composer pre-filled with it. An empty set or a null callback
+    // disables engine-command detection entirely.
+    engineCommands: Set<String> = emptySet(),
+    onEngineCommandTap: ((String) -> Unit)? = null,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
@@ -348,7 +359,11 @@ fun TerminalSurface(
     // session can render different URL sets at different sizes.
     var visibleUrls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
     var visibleFilePaths by remember { mutableStateOf<List<FilePathRegion>>(emptyList()) }
+    var visibleEngineCommands by remember { mutableStateOf<List<EngineCommandRegion>>(emptyList()) }
     var visibleMatchRegions by remember { mutableStateOf<List<TerminalMatchRegion>>(emptyList()) }
+    // Issue #770: engine-command detection is active only when the host both
+    // supplies a tap sink and a non-empty command set for the detected engine.
+    val engineCommandsEnabled = onEngineCommandTap != null && engineCommands.isNotEmpty()
 
     LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick) {
         val view = terminalView
@@ -384,15 +399,27 @@ fun TerminalSurface(
     // in view-local pixels and returns true if the tap landed on a URL —
     // PocketShellTerminalViewClient.onSingleTapUp then lets the host handle
     // that gesture and suppresses the plain terminal tap fall-through.
-    DisposableEffect(viewClient, terminalView, visibleUrls, visibleFilePaths, effectiveUrlTap, onFilePathTap) {
+    val engineCommandTap = if (engineCommandsEnabled) onEngineCommandTap else null
+    DisposableEffect(
+        viewClient,
+        terminalView,
+        visibleUrls,
+        visibleFilePaths,
+        visibleEngineCommands,
+        effectiveUrlTap,
+        onFilePathTap,
+        engineCommandTap,
+    ) {
         val view = terminalView
         val tap = effectiveUrlTap
-        if (view == null || (tap == null && onFilePathTap == null)) {
+        if (view == null || (tap == null && onFilePathTap == null && engineCommandTap == null)) {
             viewClient.onTapMaybeUrl = null
         } else {
             val urlsSnapshot = visibleUrls
             val pathsSnapshot = visibleFilePaths
+            val commandsSnapshot = visibleEngineCommands
             val pathTap = onFilePathTap
+            val cmdTap = engineCommandTap
             viewClient.onTapMaybeUrl = { x, y ->
                 // URLs first: a URL's `/path` tail is already excluded from
                 // file-path detection, but keeping URL precedence here is
@@ -407,7 +434,19 @@ fun TerminalSurface(
                         pathTap?.invoke(pathHit.path)
                         true
                     } else {
-                        false
+                        // Issue #770: an engine command (`/clear`) the agent
+                        // rendered → open the composer pre-filled with it.
+                        val cmdHit = if (cmdTap != null) {
+                            hitTestEngineCommand(view, commandsSnapshot, x, y)
+                        } else {
+                            null
+                        }
+                        if (cmdHit != null) {
+                            cmdTap?.invoke(cmdHit.command)
+                            true
+                        } else {
+                            false
+                        }
                     }
                 }
             }
@@ -494,6 +533,16 @@ fun TerminalSurface(
                     renderRequests = state.renderRequests,
                     viewportChangeKey = viewportTick,
                     onFilePathsChanged = { visibleFilePaths = it },
+                )
+            }
+            // Issue #770: tappable engine-command affordance + hit-test snapshot.
+            if (engineCommandsEnabled) {
+                EngineCommandOverlay(
+                    view = terminalView,
+                    renderRequests = state.renderRequests,
+                    knownCommands = engineCommands,
+                    viewportChangeKey = viewportTick,
+                    onEngineCommandsChanged = { visibleEngineCommands = it },
                 )
             }
         },

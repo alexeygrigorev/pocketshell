@@ -141,6 +141,7 @@ import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
+import com.pocketshell.app.agentcommands.AgentCommandCatalog
 import com.pocketshell.app.agentcommands.AgentCommandSheet
 import com.pocketshell.app.agentcommands.SessionControlAction
 import com.pocketshell.app.snippets.SnippetKind
@@ -650,6 +651,18 @@ public fun TmuxSessionScreen(
     // agent pane in the current attach.
     val paletteAgent: AgentKind? = liveAgentForPane
         ?: currentPaneId?.let { stickyAgentForPane[it] }
+
+    // Issue #770: the set of engine slash-commands the terminal should make
+    // tappable for the visible pane. Sourced verbatim from [AgentCommandCatalog]
+    // for the detected/sticky engine — so only commands that actually exist for
+    // THIS engine (e.g. Claude Code's `/clear`) are surfaced, and a plain shell
+    // pane (null agent) yields an empty set, disabling the affordance. Tapping
+    // one opens the composer pre-filled with it (see [onEngineCommandTap] below).
+    val engineCommandSet: Set<String> = remember(paletteAgent) {
+        paletteAgent?.let { agent ->
+            AgentCommandCatalog.commandsFor(agent).map { it.command }.toSet()
+        } ?: emptySet()
+    }
 
     // Issue #716 (Slice A): default to presumed-agent during detection
     // uncertainty so the composer / Conversation tab / agent-aware chips never
@@ -1619,6 +1632,20 @@ public fun TmuxSessionScreen(
                                 onFilePathTap = { path ->
                                     val cwd = cwdForDetectedFilePath(path, pane.cwd)
                                     onOpenFile(path, cwd)
+                                },
+                                // Issue #770: engine slash-commands the agent
+                                // rendered (e.g. Claude Code's `/clear`) become
+                                // tappable. Tapping one pre-fills the prompt
+                                // composer with it (caret ready, leading slash
+                                // token) and opens the composer so the user
+                                // reviews + taps Send — instead of nothing
+                                // happening. The command set is the catalog for
+                                // the visible pane's detected engine; a shell
+                                // pane has an empty set and the affordance is off.
+                                engineCommands = engineCommandSet,
+                                onEngineCommandTap = { command ->
+                                    promptComposerViewModel.prefillEngineCommand(command)
+                                    showMicSheet = true
                                 },
                                 modifier = Modifier
                                     .fillMaxSize()

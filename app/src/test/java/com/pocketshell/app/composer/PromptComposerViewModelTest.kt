@@ -279,6 +279,62 @@ class PromptComposerViewModelTest {
         }
     }
 
+    // -- #770: tap a rendered engine command -> composer pre-filled ----------
+
+    @Test
+    fun prefillEngineCommandSetsTheDraftToTheCommand() {
+        val vm = newVm()
+        vm.prefillEngineCommand("/clear")
+        assertEquals("/clear", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun prefillEngineCommandReplacesAnExistingLeadingSlashToken() {
+        val vm = newVm()
+        vm.onDraftChange("/comp")
+        vm.prefillEngineCommand("/clear")
+        assertEquals("/clear", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun prefillEngineCommandPreservesTrailingTextAfterTheSlashToken() {
+        val vm = newVm()
+        vm.onDraftChange("/old keep this part")
+        vm.prefillEngineCommand("/clear")
+        assertEquals("/clear keep this part", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun prefillEngineCommandPrependsWhenDraftHasNoLeadingSlash() {
+        val vm = newVm()
+        vm.onDraftChange("already typed")
+        vm.prefillEngineCommand("/clear")
+        assertEquals("/clearalready typed", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun prefillEngineCommandIgnoresBlank() {
+        val vm = newVm()
+        vm.onDraftChange("keep me")
+        vm.prefillEngineCommand("   ")
+        assertEquals("keep me", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun prefillEngineCommandRecordsDiagnostic() {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            vm.prefillEngineCommand("/clear")
+            assertEquals(
+                listOf("engine_command_tapped_into_composer"),
+                diagnostics.events.map { it.name },
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
     @Test
     fun micTapInIdleStartsRecording() = runTest {
         val mic = FakeMicCapture()

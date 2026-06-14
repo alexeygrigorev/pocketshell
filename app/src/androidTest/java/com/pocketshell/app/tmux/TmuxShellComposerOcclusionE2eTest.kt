@@ -191,29 +191,27 @@ class TmuxShellComposerOcclusionE2eTest {
         summaryLines += "keyboard_up_ime_top_px=$imeTopPx"
         summaryLines += "keyboard_up_root=$rootBoundsKbUp"
 
-        // The IME hotkey accessory (KeyBar) is shown when the keyboard is
-        // up. Its bottom edge must sit at or above the keyboard's top edge
-        // — otherwise the controls are wedged UNDER the keyboard, which is
-        // the reported symptom.
+        // Issue #755 (PR2, D22 hard-cut): the terminal hotkey KeyBar no longer
+        // lives on the raw terminal surface (where it was OCCLUDED by the
+        // keyboard). It moved INTO the inset-anchored composer column. So raising
+        // the raw terminal IME directly (the `show keyboard` chip) no longer
+        // surfaces a key bar here — there is no terminal-surface accessory to be
+        // wedged under the keyboard. The keyboard-up reachability of the relocated
+        // bar is covered by `PromptComposerKeyBarImeReachabilityTest` (real sheet
+        // + real IME geometry). Here we assert the hard-cut: no key bar on the
+        // terminal surface with the IME up.
         val keyBarBottomScreenPx = bottomEdgeOnScreenPx(TMUX_KEY_BAR_TAG)
-        summaryLines += "keyboard_up_keybar_bottom_px=$keyBarBottomScreenPx"
+        summaryLines += "keyboard_up_keybar_present=${keyBarBottomScreenPx >= 0}"
 
         // Capture + persist the authoritative on-screen state BEFORE the
-        // assertions so the artifacts exist even when the buggy baseline
-        // trips the occlusion assertion.
+        // assertions so the artifacts exist regardless of the outcome.
         captureFullDevice("02-keyboard-up")
         writeSummary()
 
         assertTrue(
-            "IME accessory key bar must be present when the keyboard is up",
-            keyBarBottomScreenPx >= 0,
-        )
-        // Allow a 2px slack for sub-pixel rounding between the Compose
-        // bounds (root-relative, converted to screen) and the IME inset.
-        assertTrue(
-            "the keyboard-up accessory must sit ABOVE the soft keyboard, not under it; " +
-                "keyBarBottomScreenPx=$keyBarBottomScreenPx imeTopPx=$imeTopPx",
-            keyBarBottomScreenPx <= imeTopPx + 2,
+            "After #755 the key bar is NOT on the raw terminal surface; it lives " +
+                "in the composer. keyBarBottomScreenPx=$keyBarBottomScreenPx",
+            keyBarBottomScreenPx < 0,
         )
         Unit
     }

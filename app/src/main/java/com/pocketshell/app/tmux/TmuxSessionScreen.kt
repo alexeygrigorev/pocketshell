@@ -1630,32 +1630,17 @@ public fun TmuxSessionScreen(
                 // Prompt Composer sheet (state persists in the composer
                 // ViewModel across session switches), so the terminal controls
                 // never receive the staged-attachment list.
+                // Issue #755 (PR2): the key-bar callbacks (`onKey`,
+                // `modifierStates`, `onModifierStateChange`, `keyBarExpanded`)
+                // moved with the bar into the composer call site below — the bar
+                // is now built there and passed into [PromptComposerSheet]'s
+                // inset-anchored `keyBar` slot. This surface only renders the
+                // keyboard-DOWN chip band now.
                 TmuxTerminalBottomControls(
                     isImeVisible = isImeVisible,
                     showConversation = showConversation,
                     sessionLive = sessionLive,
                     isAgentPane = isAgentPane,
-                    keyBarExpanded = keyBarExpanded,
-                    onKeyBarExpandedChange = { keyBarExpanded = it },
-                    onKey = { binding ->
-                        // Issue #677: the `^B` key sends the raw Ctrl-B byte
-                        // (0x02) straight through [sendControlInputToPane] —
-                        // the same public send path the `^C`/`^D` keys use —
-                        // rather than routing through `onKeyBarKey`, so the
-                        // terminal VM (being rewritten by #687) does not need
-                        // a new `when (label)` arm. Each tap is an independent
-                        // send, so a rapid double-tap sends `0x02 0x02` (Claude
-                        // Code's "ctrl-b ctrl-b to background") with no throttle.
-                        if (binding.label == TmuxKeyBarCtrlBLabel) {
-                            viewModel.sendControlInputToPane(pane.paneId, TmuxCtrlBByte)
-                        } else {
-                            viewModel.onKeyBarKey(pane.paneId, binding.label)
-                        }
-                    },
-                    modifierStates = mapOf(TmuxCtrlModifierLabel to ctrlModifierState),
-                    onModifierStateChange = { binding, state ->
-                        viewModel.onKeyBarModifierState(binding.label, state)
-                    },
                     onChipTap = { chip ->
                         // Agent slash commands are opened through the primary
                         // bottom-control affordance, not the scrollable chip
@@ -2019,8 +2004,73 @@ public fun TmuxSessionScreen(
         // write-bytes path.
         val viewingConversation = currentAgentConversation?.detection != null &&
             currentAgentConversation.selectedTab == SessionTab.Conversation
+        // Issue #755: the terminal hotkey key bar now rides INSIDE the composer's
+        // inset-anchored column (PR2 of the composer redesign), so it can never be
+        // occluded by the soft keyboard the way it was on the separate
+        // `TmuxTerminalBottomControls` surface. The bar is a *terminal* accessory
+        // (each tap writes a control byte / Enter to the focused pane), so it is
+        // shown on the Terminal tab only — never the Conversation (agent) tab,
+        // where there is no raw pane to receive control bytes. The agent-commands
+        // `/` slot is included when an agent is detected (`paletteAgent != null`),
+        // matching the old surface. This builds the EXACT same layout + ⋯/×
+        // expander FSM + per-key routing the old surface used; only WHERE the bar
+        // lives changed.
+        val keyBarPane = currentPane
+        val composerKeyBar: (@Composable () -> Unit)? =
+            if (keyBarPane != null && !viewingConversation) {
+                {
+                    KeyBar(
+                        keys = tmuxKeyBarLayout(
+                            expanded = keyBarExpanded,
+                            includeAgentCommands = paletteAgent != null,
+                        ),
+                        onKey = if (sessionLive) {
+                            { binding ->
+                                when (binding.label) {
+                                    TmuxAgentCommandsKeyLabel -> showAgentCommands = true
+                                    TmuxKeyBarExpandLabel -> {
+                                        DiagnosticEvents.record(
+                                            "action",
+                                            "hotkey_panel_show",
+                                            "mode" to "tmux",
+                                        )
+                                        keyBarExpanded = true
+                                    }
+                                    TmuxKeyBarCollapseLabel -> {
+                                        DiagnosticEvents.record(
+                                            "action",
+                                            "hotkey_panel_hide",
+                                            "mode" to "tmux",
+                                        )
+                                        keyBarExpanded = false
+                                    }
+                                    // Issue #677: `^B` sends the raw Ctrl-B byte
+                                    // (0x02) straight through the control-input
+                                    // path, identical to the old surface.
+                                    TmuxKeyBarCtrlBLabel ->
+                                        viewModel.sendControlInputToPane(
+                                            keyBarPane.paneId,
+                                            TmuxCtrlBByte,
+                                        )
+                                    else -> viewModel.onKeyBarKey(keyBarPane.paneId, binding.label)
+                                }
+                            }
+                        } else {
+                            { _ -> }
+                        },
+                        modifierStates = mapOf(TmuxCtrlModifierLabel to ctrlModifierState),
+                        onModifierStateChange = { binding, state ->
+                            viewModel.onKeyBarModifierState(binding.label, state)
+                        },
+                        modifier = Modifier.testTag(TMUX_KEY_BAR_TAG),
+                    )
+                }
+            } else {
+                null
+            }
         PromptComposerSheet(
             viewModel = promptComposerViewModel,
+            keyBar = composerKeyBar,
             // Issue #746: scope the shared activity-level composer draft to the
             // focused session so a "Not sent" draft authored here never bleeds
             // into another session on a switch.
@@ -5775,13 +5825,19 @@ internal const val TmuxKeyBarCollapseLabel: String = "×"
  * Bottom terminal controls for tmux panes.
  *
  * Issue #588: once the terminal keyboard is up, this area is strictly a
- * terminal-control accessory. It renders only the hotkey/shortcut bar and
- * removes the unified composer mic/chips, Prompt/Command affordances, snippet
- * entry, and any other text-entry surface from the keyboard area. Prompt text
- * belongs in [PromptComposerSheet], opened from the IME-hidden bottom band.
+ * terminal-control accessory. Prompt text belongs in [PromptComposerSheet],
+ * opened from the IME-hidden bottom band.
  *
- * Issue #584 is preserved by keeping the key bar behind [isImeVisible]; when
- * the keyboard is hidden, the normal composer/chip band is shown instead.
+ * Issue #755 (PR2, composer redesign — D22 hard-cut): the terminal hotkey
+ * [com.pocketshell.uikit.components.KeyBar] no longer lives HERE. It was on this
+ * separate, non-inset-anchored surface and was therefore occluded by the soft
+ * keyboard (the v0.4.0 "key bar completely hidden by the keyboard" regression).
+ * It has moved INTO the [PromptComposerSheet]'s inset-anchored column (rendered
+ * via that sheet's `keyBar` slot, wired at the call site in [TmuxSessionScreen]),
+ * where it rides the same IME inset as the rest of the composer and can never be
+ * occluded. So when the keyboard is UP this control area renders NOTHING — the
+ * key bar appears inside the composer above the IME instead. The keyboard-DOWN
+ * chip band ([BottomChipControls]) is unchanged.
  *
  * Issue #673: staged composer attachments are NOT rendered here. They are
  * visible only inside the Prompt Composer sheet; the staged-attachment STATE
@@ -5795,11 +5851,6 @@ internal fun TmuxTerminalBottomControls(
     showConversation: Boolean,
     sessionLive: Boolean,
     isAgentPane: Boolean,
-    keyBarExpanded: Boolean,
-    onKeyBarExpandedChange: (Boolean) -> Unit,
-    onKey: (KeyBinding) -> Unit,
-    modifierStates: Map<String, KeyModifierState> = emptyMap(),
-    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
     onEnterTap: (() -> Unit)?,
@@ -5820,80 +5871,41 @@ internal fun TmuxTerminalBottomControls(
         // all. Staged attachments used to surface here; they now live only
         // inside the Prompt Composer sheet.
         TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> Unit
-        TmuxTerminalKeyboardChromeMode.HiddenImeControls,
-        TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> {
+        // Issue #755 (D22 hard-cut): with the keyboard up on the Terminal tab,
+        // this surface no longer renders the key bar — it moved into the
+        // composer's inset-anchored column (see the kdoc above). Nothing is
+        // rendered here in that state.
+        TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> Unit
+        TmuxTerminalKeyboardChromeMode.HiddenImeControls -> {
             Column(
                 modifier = modifier
                     .fillMaxWidth()
                     .heightIn(min = SessionBottomControlsMinHeight)
                     .background(color = PocketShellColors.Surface),
             ) {
-                if (chromeMode == TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys) {
-                    KeyBar(
-                        keys = tmuxKeyBarLayout(
-                            expanded = keyBarExpanded,
-                            includeAgentCommands = onAgentCommandsTap != null,
-                        ),
-                        onKey = if (sessionLive) {
-                            { binding ->
-                                // Issue #458: the `⋯` / `×` slot toggles the
-                                // expander locally; it is never a keystroke.
-                                // All other taps route to the pane.
-                                when (binding.label) {
-                                    TmuxAgentCommandsKeyLabel -> onAgentCommandsTap?.invoke()
-                                    TmuxKeyBarExpandLabel -> {
-                                        DiagnosticEvents.record(
-                                            "action",
-                                            "hotkey_panel_show",
-                                            "mode" to "tmux",
-                                        )
-                                        onKeyBarExpandedChange(true)
-                                    }
-                                    TmuxKeyBarCollapseLabel -> {
-                                        DiagnosticEvents.record(
-                                            "action",
-                                            "hotkey_panel_hide",
-                                            "mode" to "tmux",
-                                        )
-                                        onKeyBarExpandedChange(false)
-                                    }
-                                    else -> onKey(binding)
-                                }
-                            }
-                        } else {
-                            { _ -> }
-                        },
-                        modifierStates = modifierStates,
-                        onModifierStateChange = onModifierStateChange,
-                        modifier = Modifier
-                            .heightIn(min = SessionBottomControlsMinHeight)
-                            .testTag(TMUX_KEY_BAR_TAG),
-                    )
-                } else {
-                    BottomChipControls(
-                        chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
-                        onChipTap = onChipTap,
-                        onDictateTap = onDictateTap,
-                        onAgentCommandsTap = onAgentCommandsTap,
-                        onEnterTap = if (!showConversation) onEnterTap else null,
-                        onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
-                        onAddSnippetTap = onAddSnippetTap,
-                        agentCommandsLabel = AgentCommandsChip,
-                        addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                        addSnippetIcon = SnippetsChipIcon,
-                        // Project navigation on tmux panes is a separate
-                        // follow-up — see #123 notes on per-pane cwd /
-                        // project-root wiring.
-                        onProjectNavigationTap = null,
-                        // Issue #628: toggle chip for switching back to
-                        // the previous tmux session. Only shown when
-                        // previousSessionName differs from the current
-                        // session and a callback is provided.
-                        previousSessionName = previousSessionName,
-                        onTogglePreviousSession = onTogglePreviousSession,
-                        inputEnabled = sessionLive,
-                    )
-                }
+                BottomChipControls(
+                    chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
+                    onChipTap = onChipTap,
+                    onDictateTap = onDictateTap,
+                    onAgentCommandsTap = onAgentCommandsTap,
+                    onEnterTap = if (!showConversation) onEnterTap else null,
+                    onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
+                    onAddSnippetTap = onAddSnippetTap,
+                    agentCommandsLabel = AgentCommandsChip,
+                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+                    addSnippetIcon = SnippetsChipIcon,
+                    // Project navigation on tmux panes is a separate
+                    // follow-up — see #123 notes on per-pane cwd /
+                    // project-root wiring.
+                    onProjectNavigationTap = null,
+                    // Issue #628: toggle chip for switching back to
+                    // the previous tmux session. Only shown when
+                    // previousSessionName differs from the current
+                    // session and a callback is provided.
+                    previousSessionName = previousSessionName,
+                    onTogglePreviousSession = onTogglePreviousSession,
+                    inputEnabled = sessionLive,
+                )
             }
         }
     }

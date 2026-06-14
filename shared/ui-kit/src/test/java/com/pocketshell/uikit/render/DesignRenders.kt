@@ -1691,6 +1691,153 @@ class DesignRenders {
     }
 
     /**
+     * Issue #755: the terminal hotkey [KeyBar] relocated INTO the composer's
+     * inset-anchored column, as the sticky row directly ABOVE the action
+     * controls (the #765 layout, now with a key bar). With the keyboard up the
+     * key bar rides the same IME inset as the rest of the composer and can never
+     * be occluded (the v0.4.0 "key bar completely hidden by the keyboard"
+     * regression this fixes).
+     *
+     * Caveat (#555): the real `SheetContent` lives in `:app`, which this ui-kit
+     * harness cannot import, so this is a STATIC visual mirror of the intended
+     * layout — header, draft, then [KeyBar], then the action row, all above the
+     * soft-keyboard stand-in. The emulator keyboard-up screenshot
+     * (`PromptComposerKeyBarImeReachabilityTest`) is the acceptance.
+     */
+    @Test
+    fun composerWithKeyBarAboveKeyboard() = render("composer-with-key-bar-above-keyboard") {
+        Spacer(Modifier.height(220.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "Prompt Composer",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketShellColors.Text,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(PocketShellColors.SurfaceElev, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "×", color = PocketShellColors.TextSecondary, fontSize = 20.sp)
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(96.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                    .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            ) {
+                Text(
+                    text = "git status --short",
+                    color = PocketShellColors.Text,
+                    fontSize = 14.sp,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            // Issue #755: the relocated key bar — sticky row directly above the
+            // action controls, riding the composer's IME inset.
+            KeyBar(
+                keys = listOf(
+                    KeyBinding("Esc", KeyKind.Regular),
+                    KeyBinding("Ctrl", KeyKind.Modifier),
+                    KeyBinding("^C", KeyKind.Regular),
+                    KeyBinding("⏎", KeyKind.Regular),
+                    KeyBinding("^D", KeyKind.Regular),
+                    KeyBinding("Tab", KeyKind.Regular),
+                    KeyBinding("⋯", KeyKind.Regular),
+                ),
+                onKey = {},
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
+                    }
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "{ }",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Row(
+                    modifier = Modifier
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Text(
+                        text = "Send",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(PocketShellColors.Accent, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
+                }
+            }
+        }
+        // Soft-keyboard stand-in so "key bar sits above the keyboard" reads.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(240.dp)
+                .background(Color(0xFF202124)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "soft keyboard (system IME)",
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+            )
+        }
+    }
+
+    /**
      * #704: compact transcript tool-call rows. ui-kit cannot import the
      * app-level `ConversationToolCallChatCard`, so this replicates its layout
      * with the SAME design tokens (post-#704 compact: 6dp vertical padding,

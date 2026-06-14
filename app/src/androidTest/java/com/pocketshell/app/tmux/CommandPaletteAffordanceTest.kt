@@ -30,6 +30,7 @@ import com.pocketshell.app.agentcommands.agentCommandRowTag
 import com.pocketshell.app.agentcommands.agentCommandSendChipTag
 import com.pocketshell.app.voice.SESSION_AGENT_COMMANDS_CHIP_TAG
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
@@ -97,9 +98,6 @@ class CommandPaletteAffordanceTest {
                         showConversation = false,
                         sessionLive = true,
                         isAgentPane = true,
-                        keyBarExpanded = false,
-                        onKeyBarExpandedChange = {},
-                        onKey = {},
                         onChipTap = {},
                         onDictateTap = {},
                         onEnterTap = {},
@@ -144,27 +142,26 @@ class CommandPaletteAffordanceTest {
     @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
     @Test
     fun agentImeKeybarCommandControlOpensSheet() {
+        // Issue #755 (PR2, D22 hard-cut): the terminal hotkey key bar moved OUT
+        // of `TmuxTerminalBottomControls` and INTO the composer's inset-anchored
+        // column. On an agent pane the bar prepends the `/` slash-commands slot
+        // (`tmuxKeyBarLayout(includeAgentCommands = true)`), and the screen wires
+        // that slot to open the AgentCommandSheet. This mounts the SAME key-bar
+        // layout the composer now renders and asserts the `/` slot opens the
+        // sheet — the routing the composer-hosted bar performs.
         var sheetOpen = false
         compose.setContent {
             PocketShellTheme {
                 var open by remember { mutableStateOf(false) }
-                TmuxTerminalBottomControls(
-                    isImeVisible = true,
-                    showConversation = false,
-                    sessionLive = true,
-                    isAgentPane = true,
-                    keyBarExpanded = false,
-                    onKeyBarExpandedChange = {},
-                    onKey = {},
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = null,
-                    onAgentCommandsTap = {
-                        sheetOpen = true
-                        open = true
+                KeyBar(
+                    keys = tmuxKeyBarLayout(expanded = false, includeAgentCommands = true),
+                    onKey = { binding ->
+                        if (binding.label == TmuxAgentCommandsKeyLabel) {
+                            sheetOpen = true
+                            open = true
+                        }
                     },
+                    modifier = Modifier.testTag(TMUX_KEY_BAR_TAG),
                 )
                 if (open) {
                     AgentCommandSheet(
@@ -204,9 +201,6 @@ class CommandPaletteAffordanceTest {
                         showConversation = false,
                         sessionLive = true,
                         isAgentPane = false,
-                        keyBarExpanded = false,
-                        onKeyBarExpandedChange = {},
-                        onKey = {},
                         onChipTap = {},
                         onDictateTap = {},
                         onEnterTap = {},

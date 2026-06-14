@@ -17,6 +17,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
@@ -128,31 +129,21 @@ class TmuxKeyboardPanLayoutTest {
 
     @Test
     fun tmuxImeAccessoryKeepsUsableHeight() {
+        // Issue #755 (PR2, D22 hard-cut): the terminal hotkey key bar moved out
+        // of `TmuxTerminalBottomControls` (which the keyboard occluded) and INTO
+        // the composer's inset-anchored column. This guards that the bar layout
+        // itself — the SAME `tmuxKeyBarLayout` the composer now renders — keeps a
+        // usable tap height and is not crushed to a thin strip.
         compose.setContent {
             PocketShellTheme {
-                TmuxTerminalBottomControls(
-                    isImeVisible = true,
-                    showConversation = false,
-                    sessionLive = true,
-                    isAgentPane = false,
-                    keyBarExpanded = false,
-                    onKeyBarExpandedChange = {},
+                KeyBar(
+                    keys = tmuxKeyBarLayout(expanded = false),
                     onKey = {},
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = {},
-                    modifier = Modifier.testTag(TMUX_BOTTOM_CONTROLS_TAG),
+                    modifier = Modifier.testTag(TMUX_KEY_BAR_TAG),
                 )
             }
         }
 
-        val height = compose
-            .onNodeWithTag(TMUX_BOTTOM_CONTROLS_TAG)
-            .fetchSemanticsNode()
-            .boundsInRoot
-            .height
         val keyBarHeight = compose
             .onNodeWithTag(TMUX_KEY_BAR_TAG)
             .fetchSemanticsNode()
@@ -160,11 +151,7 @@ class TmuxKeyboardPanLayoutTest {
             .height
 
         assertTrue(
-            "tmux IME accessory controls must not collapse to a thin strip",
-            height >= 56f,
-        )
-        assertTrue(
-            "tmux IME keybar itself must stay visible and usable",
+            "tmux keybar itself must stay visible and usable",
             keyBarHeight >= 56f,
         )
     }
@@ -180,7 +167,6 @@ class TmuxKeyboardPanLayoutTest {
     private companion object {
         const val TERMINAL_REGION_TAG = "tmux:pan-test:terminal-region"
         const val KEYBAR_TAG = "tmux:pan-test:keybar"
-        const val TMUX_BOTTOM_CONTROLS_TAG = "tmux:pan-test:bottom-controls"
     }
 
     @androidx.compose.runtime.Composable

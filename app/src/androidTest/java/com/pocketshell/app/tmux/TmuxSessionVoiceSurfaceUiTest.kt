@@ -61,8 +61,15 @@ class TmuxSessionVoiceSurfaceUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun tmuxKeyboardOpenAccessoryNeverRendersStagedAttachmentGrid() {
-        val keyTaps = mutableListOf<String>()
+    fun tmuxKeyboardOpenTerminalSurfaceRendersNothing() {
+        // Issue #755 (PR2, D22 hard-cut): with the soft keyboard UP on the
+        // Terminal tab, this bottom-controls surface now renders NOTHING — the
+        // terminal hotkey KeyBar moved INTO the composer's inset-anchored column
+        // (so it rides the IME inset and is never occluded). The old surface used
+        // to render the KeyBar here, on a non-inset-anchored surface the keyboard
+        // hid (the v0.4.0 occlusion regression). This guards the hard-cut: no
+        // KeyBar, no attachment grid, no chip band when the IME is up on a
+        // terminal pane.
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
@@ -70,47 +77,33 @@ class TmuxSessionVoiceSurfaceUiTest {
                     showConversation = false,
                     sessionLive = true,
                     isAgentPane = false,
-                    keyBarExpanded = false,
-                    onKeyBarExpandedChange = {},
-                    onKey = { keyTaps += it.label },
                     onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = {},
                     onShowKeyboardTap = {},
                     onAddSnippetTap = {},
+                    modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
                 )
             }
         }
 
-        // Issue #673: staged composer attachments are NEVER rendered in the
-        // tmux terminal accessory. #669 previously asserted the in-session grid
-        // was visible/removable while typing; the maintainer reversed that —
-        // attachments belong only inside the Prompt Composer sheet. The
-        // terminal accessory shows the hotkey row, no attachment grid.
+        // The surface renders nothing in this state (no container, no key bar).
+        compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertDoesNotExist()
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithText("^C").assertDoesNotExist()
+        compose.onNodeWithText(TmuxKeyBarEnterLabel).assertDoesNotExist()
+        compose.onNodeWithText("Tab").assertDoesNotExist()
+
+        // Issue #673: still no staged composer attachment grid in the session
+        // bottom area.
         compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
 
-        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
-        compose.onNodeWithText("^C").assertIsDisplayed()
-        compose.onNodeWithText(TmuxKeyBarEnterLabel)
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-        compose.onNodeWithText("^D").assertIsDisplayed()
-        compose.onNodeWithText("Tab").assertIsDisplayed()
-
+        // None of the keyboard-down chip affordances appear with the IME up.
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
-        compose.onNodeWithText("show keyboard").assertDoesNotExist()
-        compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
-        compose.onNodeWithText("Prompt").assertDoesNotExist()
-        compose.onNodeWithText("Command").assertDoesNotExist()
-        compose.onNodeWithText("Ready").assertDoesNotExist()
-        compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
-
-        assertEquals(listOf("Esc", TmuxKeyBarEnterLabel), keyTaps)
     }
 
     @Test
@@ -122,9 +115,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                     showConversation = true,
                     sessionLive = true,
                     isAgentPane = true,
-                    keyBarExpanded = false,
-                    onKeyBarExpandedChange = {},
-                    onKey = {},
                     onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = {},
@@ -160,9 +150,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                     showConversation = true,
                     sessionLive = true,
                     isAgentPane = true,
-                    keyBarExpanded = false,
-                    onKeyBarExpandedChange = {},
-                    onKey = {},
                     onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = {},
@@ -202,9 +189,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                     sessionLive = true,
                     // Shell (non-agent) pane — the regression case from #641.
                     isAgentPane = false,
-                    keyBarExpanded = false,
-                    onKeyBarExpandedChange = {},
-                    onKey = {},
                     onChipTap = {},
                     onDictateTap = { dictateTaps++ },
                     onEnterTap = { enterTaps++ },
@@ -350,9 +334,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                     showConversation = false,
                     sessionLive = true,
                     isAgentPane = true,
-                    keyBarExpanded = false,
-                    onKeyBarExpandedChange = {},
-                    onKey = { keyTaps += it.label },
                     onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = { enterTaps++ },
@@ -442,9 +423,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                         showConversation = false,
                         sessionLive = true,
                         isAgentPane = true,
-                        keyBarExpanded = false,
-                        onKeyBarExpandedChange = {},
-                        onKey = {},
                         onChipTap = {},
                         onDictateTap = { composerOpen = true },
                         onEnterTap = {},

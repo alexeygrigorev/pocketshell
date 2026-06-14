@@ -480,7 +480,66 @@ public class TmuxSessionViewModel @Inject constructor(
             // the controller's (now real-flow-driven) state — the controller is the
             // single status source, exactly as the deleted mirror feeds re-projected.
             onControllerTransition = { projectStatusFromController() },
+            // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. Under the NEW path, suppress the
+            // driver's TransportDropped submission while the app is BACKGROUNDED — that
+            // drop is inside the App-level background-grace window (#450), the SOLE grace
+            // authority. Acting on it would collapse the controller to Unreachable while
+            // backgrounded, so the next within-grace foreground returns to a disconnect
+            // band (the #635 regression). Recovery is deferred to the within-grace
+            // foreground heal ([launchForegroundHealWithinGrace]) — the single owner.
+            suppressTransportDrops = { shouldSuppressTransportDropsForSingleGraceOwner() },
         ).also { it.start() }
+
+    /**
+     * EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER suppression predicate the
+     * [ConnectionEffectDriver] consults before submitting a `TransportDropped`. True
+     * only on the NEW path while the app is BACKGROUNDED. Implemented as a method (not
+     * an inline field read) so the field-initialization order is irrelevant: the driver
+     * is constructed and started BEFORE [connectionPathIsNew]/[appActive] are
+     * initialized, and a control-channel drop can never arrive before a connection
+     * exists, so a null-safe read defaulting to "do not suppress" is correct for the
+     * pre-init window.
+     */
+    private fun shouldSuppressTransportDropsForSingleGraceOwner(): Boolean {
+        @Suppress("UNNECESSARY_SAFE_CALL")
+        val isNew = connectionPathIsNew?.value ?: return false
+        if (!isNew) return false
+        // The app is backgrounded at the PROCESS level (ProcessLifecycle below STARTED).
+        // We deliberately do NOT use [appActive] here: within the App-level background
+        // grace window the `-CC` connection is held and `onAppBackgrounded()` (which
+        // flips `appActive`) is NEVER called, so `appActive` stays true across a
+        // within-grace background. The ProcessLifecycle state is the true "is the user
+        // looking at the app" signal that flips at `ON_STOP` regardless of grace, so it
+        // correctly identifies the within-grace background where a `-CC` drop must be
+        // deferred to the single grace owner.
+        return isProcessBackgroundedForGraceOwner()
+    }
+
+    /**
+     * EPIC #687 P2 (J1/#635): true when the app is backgrounded at the PROCESS level
+     * ([ProcessLifecycleOwner] below STARTED) — the within-grace-or-beyond background
+     * window during which the single grace owner (the App-level grace window) governs
+     * connection recovery. Unlike [isProcessForegroundForCleared] this is NOT gated by
+     * the screen-started flag: a backgrounded process is backgrounded even if the
+     * session screen's `onStop` debounce has not yet fired. Falls back to `!appActive`
+     * if the ProcessLifecycle read fails (defensive — never throws into the driver).
+     */
+    private fun isProcessBackgroundedForGraceOwner(): Boolean {
+        // An explicit test override is authoritative.
+        processForegroundForClearedOverrideForTest?.let { return !it }
+        // ProcessLifecycle's `INITIALIZED` is the never-started JVM/unit-test default —
+        // it is NOT a real background. Only a process that was started and has since
+        // dropped below STARTED (a genuine `ON_STOP`) counts as backgrounded. In a JVM
+        // unit test where `ProcessLifecycleOwner` is never driven, the state is
+        // `INITIALIZED`, so this correctly reports "not backgrounded" and the inline
+        // screen-stopped paths keep their behavior; on a real device after `ON_STOP`
+        // the state is `CREATED` (< STARTED, but past INITIALIZED) → backgrounded.
+        val state = runCatching {
+            ProcessLifecycleOwner.get().lifecycle.currentState
+        }.getOrNull() ?: return !appActive
+        if (state == Lifecycle.State.INITIALIZED) return false
+        return !state.isAtLeast(Lifecycle.State.STARTED)
+    }
 
     /**
      * EPIC #687 Phase 1 (P1) — the session-screen identity/reveal reducer
@@ -1884,6 +1943,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
     private var foregroundReattachReseedForTest: (() -> Unit)? = null
+    // EPIC #687 P2 (J1/#635): test seam for the within-grace foreground SILENT heal
+    // of a socket dropped while backgrounded (the NEW-path single-grace-owner path).
+    private var foregroundHealWithinGraceForTest: (() -> Unit)? = null
     private var processForegroundForClearedOverrideForTest: Boolean? = null
     private var latestConnectIntent: ConnectIntent? = null
     private var connectGeneration: Long = 0L
@@ -2147,6 +2209,25 @@ public class TmuxSessionViewModel @Inject constructor(
             foregroundReattachReseedForTest?.invoke() ?: launchForegroundReattachReseed()
             return
         }
+        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER under the NEW path. The App-level
+        // background-grace window (#450) is the SOLE grace authority — when it reports
+        // `resumedWithinGrace=true`, a within-grace foreground must stay CALM (no
+        // Reconnecting/Disconnected/Connecting/Attaching band or overlay) EVEN WHEN the
+        // `-CC` socket dropped while backgrounded (WiFi→cellular handoff / Doze). The
+        // reseed-only fast path above declines in that case (the dropped socket killed
+        // the warm lease / flipped the status off Connected / paused the passive
+        // auto-reconnect), so without this branch the foreground would fall into the
+        // reconnect ladder and paint the maintainer's scary band — the #635 regression.
+        // Instead we SILENTLY heal the dropped channel within grace: re-open a fresh
+        // `-CC` control client over a freshly-acquired lease and reseed, with NO band
+        // and NO overlay. The inline passive-disconnect grace clock that fired while
+        // backgrounded is disabled under NEW (see [handlePassiveClientDisconnect]), so
+        // there is no competing second clock — this within-grace foreground heal is the
+        // single owner of the within-grace recovery decision on the NEW branch.
+        if (resumedWithinGrace && connectionPathIsNew.value) {
+            foregroundHealWithinGraceForTest?.invoke() ?: launchForegroundHealWithinGrace()
+            return
+        }
         // EPIC #687 slice 1c-iii: observe-only — the single grace predicate in the
         // shadow controller decides reattach-vs-reconnect; it drives nothing.
         connectionControllerShadow.observeForeground()
@@ -2242,6 +2323,108 @@ public class TmuxSessionViewModel @Inject constructor(
             // the SAME live client (no handshake). The per-pane seed success also fires
             // the controller's SeedLanded feedback (idempotent once already Live).
             reseedBlankVisiblePanes(guard)
+        }
+    }
+
+    /**
+     * EPIC #687 P2 (J1/#635): the within-grace foreground SILENT heal of a `-CC` socket
+     * that DROPPED while backgrounded (WiFi→cellular handoff / Doze). This is the
+     * NEW-path single-grace-owner recovery: the App-level grace window (#450) reported
+     * `resumedWithinGrace=true`, so the user must NOT see a reconnect band — but the
+     * reseed-only fast path declined because the dropped socket killed the warm lease
+     * (and the inline passive disconnect that fired while backgrounded paused the
+     * auto-reconnect + set [ConnectionStatus.Unreachable]). So there is nothing live to
+     * reseed: we re-open a fresh `-CC` control client over a freshly-acquired lease and
+     * reseed the panes, SILENTLY — NO band, NO "Attaching…"/"Connecting" overlay. The
+     * controller is moved Reattaching → Live, so the displayed status stays the calm
+     * `Connected` throughout.
+     *
+     * This NEVER calls [connect] (which would raise the Connecting overlay / scary
+     * band); it reuses the existing [silentlyReconnectTransportAfterPassiveDisconnect]
+     * heal primitive — the same fresh-transport reattach the inline passive grace clock
+     * used, but now driven by the single grace owner instead of a competing second
+     * clock (the inline clock is disabled under NEW while backgrounded; see
+     * [handlePassiveClientDisconnect]).
+     */
+    private fun launchForegroundHealWithinGrace() {
+        val target = activeTarget ?: pausedAutoReconnect?.target ?: pendingReattach?.target
+        if (target == null) {
+            // No target to heal against — fall back to the normal foreground decision so
+            // a genuinely orphaned foreground still does the right (non-grace) thing.
+            connectionControllerShadow.observeForeground()
+            when (reduceConnection(ConnectionEvent.Foreground)) {
+                ConnectionDecision.ReplayPendingReattach -> replayPendingReattach()
+                ConnectionDecision.ResumePausedReconnect ->
+                    pausedAutoReconnect?.let { resumePausedAutoReconnect(it) }
+                else -> Unit
+            }
+            projectStatusFromController()
+            return
+        }
+        // The passive disconnect that fired while backgrounded must NOT keep us in a
+        // paused/Unreachable surface — the single grace owner is healing it now. Clear
+        // the inline passive bookkeeping so it cannot race or paint a band.
+        pausedAutoReconnect = null
+        passiveDisconnectGraceJob?.cancel()
+        passiveDisconnectGraceJob = null
+        activeTarget = target
+        connectingTarget = null
+        Log.i(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-foreground-heal-within-grace generation=$connectGeneration " +
+                targetLogFields(target),
+        )
+        ReconnectCauseTrail.record(
+            stage = "foreground_reattach",
+            outcome = "silent_heal_within_grace",
+            cause = "within_grace_foreground_socket_drop",
+            trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "foreground_reattach",
+            "source" to "app_lifecycle",
+            "outcome" to "silent_heal_within_grace",
+            "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
+            "generation" to connectGeneration,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+        )
+        // Keep the displayed status CALM while we heal: the within-grace foreground is a
+        // ride-through, not a reconnect. Promote the controller back toward Live so the
+        // header indicator never shows Reconnecting/Disconnected during the heal.
+        connectionControllerShadow.observeForegroundReattachLive()
+        projectStatusFromController()
+        viewModelScope.launch {
+            // Re-open a fresh `-CC` control client over a freshly-acquired lease and
+            // reseed — SILENTLY (the primitive never raises the Connecting overlay or a
+            // band; on success it sets [ConnectionStatus.Live] and reseeds every visible
+            // pane). `clientRef` may be null (the passive path unregistered it); the
+            // primitive's staleClient is nullable and used only for the close()/restore.
+            val recovered = silentlyReconnectTransportAfterPassiveDisconnect(
+                staleClient = clientRef,
+                target = target,
+                timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+            )
+            if (!recovered) {
+                // The within-grace silent heal could not re-open the channel in time.
+                // Fall back to the normal auto-reconnect ladder — still SILENT (no manual
+                // "Tap Reconnect" band): [scheduleAutoReconnect] walks the calm
+                // Reconnecting ladder. The single-grace-owner contract requires the
+                // band-free within-grace ride-through when the heal succeeds; an honest
+                // failure to re-reach the host still surfaces through the calm reconnect
+                // path, not a scary disconnect band.
+                scheduleAutoReconnect(
+                    target = target,
+                    reason = "Reattaching to ${target.user}@${target.host}:${target.port}.",
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                )
+            }
         }
     }
 
@@ -5047,6 +5230,52 @@ public class TmuxSessionViewModel @Inject constructor(
         val current = inlineConnectionStatus as? ConnectionStatus.Connected ?: return
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
+        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER under the NEW path. A passive
+        // `-CC` drop that arrives while the app is BACKGROUNDED is, by construction,
+        // inside the App-level background-grace window (#450) — that window is the SOLE
+        // grace authority on the NEW branch. Running the inline passive grace clock here
+        // (the 60s silent-reattach loop OR pause→Unreachable) would be a SECOND,
+        // competing grace clock — the blueprint's #1 risk and the literal cause of the
+        // #635 spurious-band regression: it pauses the auto-reconnect + sets Unreachable,
+        // which then makes the within-grace foreground gate decline and fall into the
+        // reconnect ladder (the scary band). So under NEW we DISABLE the inline grace
+        // path while backgrounded entirely: just record the drop and DEFER all recovery
+        // to the single grace owner — the within-grace foreground heal
+        // ([launchForegroundHealWithinGrace]) on the next foreground, which silently
+        // re-opens the channel and reseeds with no band. (Beyond-grace teardown already
+        // ran the clean detach; that foreground is `resumedWithinGrace=false` and takes
+        // the normal reconnect path, unaffected.) The OLD path keeps the verbatim inline
+        // grace behavior below — single-owner per branch, no double-drive.
+        //
+        // NOTE: we gate on the PROCESS-backgrounded signal, NOT `appActive`: within the
+        // App-level grace window the connection is held and `onAppBackgrounded()` (which
+        // flips `appActive`) is never called, so `appActive` stays true across a
+        // within-grace background. [isProcessBackgroundedForGraceOwner] flips at `ON_STOP`
+        // regardless of grace, correctly identifying the within-grace background.
+        if (connectionPathIsNew.value && isProcessBackgroundedForGraceOwner()) {
+            DiagnosticEvents.record(
+                "connection",
+                "passive_disconnect_deferred_to_grace_owner",
+                "source" to "tmux_client_disconnected",
+                "cause" to "backgrounded_within_grace_single_owner",
+                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
+                "hostId" to target?.hostId,
+                "host" to target?.host,
+                "session" to target?.sessionName,
+                "clientHash" to System.identityHashCode(client),
+                "generation" to connectGeneration,
+            )
+            ReconnectCauseTrail.record(
+                stage = "handlePassiveClientDisconnect",
+                outcome = "deferred_to_grace_owner",
+                cause = "backgrounded_new_path_single_owner",
+                trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+                "hostId" to target?.hostId,
+                "generation" to connectGeneration,
+                "clientHash" to System.identityHashCode(client),
+            )
+            return
+        }
         // EPIC #687 slice 1c-iv-b-B2 (#742): the controller's TransportDropped input
         // is now driver-fed from the REAL [CurrentClientTmuxPort.disconnected] oracle
         // (the SAME `TmuxClient.disconnected` true-edge this passive-disconnect path
@@ -5413,7 +5642,11 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private suspend fun silentlyReconnectTransportAfterPassiveDisconnect(
-        staleClient: TmuxClient,
+        // Nullable (EPIC #687 P2): the within-grace foreground heal may have no stale
+        // client handle to close (the passive path already unregistered it). The
+        // primitive uses [staleClient] only for the close() round-trip and the
+        // restore-on-failure, both null-safe.
+        staleClient: TmuxClient?,
         target: ConnectionTarget,
         timeoutMs: Long,
     ): Boolean {
@@ -5437,7 +5670,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
                 disconnectedJob = null
-                runCatching { staleClient.close() }
+                runCatching { staleClient?.close() }
                 leaseRef = lease
                 sessionRef = session
                 clientRef = newClient

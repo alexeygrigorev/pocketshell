@@ -237,6 +237,21 @@ JOURNEY_CLASSES=(
   # GREEN. Uses ONLY the deterministic agents:2222 fixture (no toxiproxy, no
   # assumeFalse(isRunningOnCi())), so it belongs in this per-push subset.
   "$FQCN_PREFIX.SwitchStaleCaptureSessionBodyJourneyE2eTest"
+  # ADDED (epic #687 Phase 2 / P2 — the device-truth gate J1, #635): a
+  # background→foreground WITHIN grace where the `-CC` socket DROPPED while
+  # backgrounded (WiFi→cellular handoff / Doze modelled by a `kill -9` of the
+  # app's own sshd worker from a sidecar session) must RE-SEED the pane with the
+  # prior content and surface NO Reconnecting/Disconnected/Connecting/Attaching
+  # band or overlay. RED on the unfixed/OLD path (the dropped socket makes the
+  # within-grace reseed gate decline — dead lease / paused passive — so the
+  # foreground falls into the reconnect ladder and paints a band); the P2
+  # single-grace-owner fix (under NEW the App-level within-grace window is the
+  # SOLE grace owner — the inline passive grace clock is disabled while
+  # backgrounded, and a within-grace foreground SILENTLY heals the dropped channel
+  # then reseeds) flips it GREEN. Uses ONLY the deterministic agents:2222 fixture
+  # (the kill is a CI-compatible sidecar `kill -9`, no toxiproxy), and does NOT
+  # self-skip on CI, so it belongs in this per-push subset.
+  "$FQCN_PREFIX.WithinGraceSocketDropForegroundJourneyE2eTest"
 )
 
 echo "=========================================================="

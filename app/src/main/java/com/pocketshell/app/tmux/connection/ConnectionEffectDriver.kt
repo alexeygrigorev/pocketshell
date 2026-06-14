@@ -126,6 +126,20 @@ class ConnectionEffectDriver(
     private val backgroundedEffect: () -> Unit = {},
     private val foregroundReattachEffect: () -> Unit = {},
     private val onControllerTransition: () -> Unit = {},
+    // EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER gate. When this returns true, the
+    // driver SUPPRESSES the `TransportDropped` submission for a control-channel drop —
+    // i.e. it does NOT walk the controller down the reconnect ladder. The VM supplies
+    // `{ connectionPathIsNew && !appActive }`: under the NEW path a `-CC` drop that
+    // arrives while the app is BACKGROUNDED is, by construction, inside the App-level
+    // background-grace window (#450), which is the SOLE grace authority. Acting on it
+    // here would be a SECOND, competing grace clock that collapses the controller to
+    // Unreachable while backgrounded — the literal cause of the #635 spurious band on
+    // the next within-grace foreground. Suppressing it leaves recovery entirely to the
+    // single grace owner (the within-grace foreground heal). Default `{ false }` keeps
+    // the prior always-submit behavior for the observe-only test harness and the OLD
+    // path. The lease `Up`/`TransportLive` feed is NEVER suppressed (a healthy
+    // re-`Connected` must always promote the controller).
+    private val suppressTransportDrops: () -> Boolean = { false },
     private val sink: (String) -> Unit = { line -> Log.i(TAG, line) },
 ) {
     private val jobs = mutableListOf<Job>()
@@ -208,7 +222,19 @@ class ConnectionEffectDriver(
             // a drop to a live-ish state (no-op from Idle/Backgrounded/Gone/Unreachable),
             // reproducing the old `Connected` gate without re-reading inline VM state.
             if (isDisconnected) {
-                submitTransport(ConnectionEvent.TransportDropped(reason = "control_channel_disconnected"))
+                // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. Suppress the drop submission
+                // while the app is backgrounded under the NEW path — the App-level grace
+                // window owns recovery. Without this the controller is walked Live → …
+                // → Unreachable while backgrounded, and the next within-grace foreground
+                // returns to a (controller-projected) disconnect band. Deferring leaves
+                // the channel-heal to the within-grace foreground (the single owner).
+                if (suppressTransportDrops()) {
+                    record(Observation.DropSuppressed)
+                } else {
+                    submitTransport(
+                        ConnectionEvent.TransportDropped(reason = "control_channel_disconnected"),
+                    )
+                }
             }
         }
     }
@@ -264,6 +290,16 @@ class ConnectionEffectDriver(
         /** A [TmuxPort.disconnected] oracle edge. */
         data class Disconnected(val isDisconnected: Boolean) : Observation {
             override fun logLine(): String = "tmux.disconnected=$isDisconnected"
+        }
+
+        /**
+         * EPIC #687 P2 (J1/#635): a control-channel drop the driver SUPPRESSED under the
+         * single-grace-owner gate (backgrounded under the NEW path). Recorded for the
+         * characterization test; the controller is intentionally NOT walked down the
+         * reconnect ladder — recovery is deferred to the within-grace foreground heal.
+         */
+        data object DropSuppressed : Observation {
+            override fun logLine(): String = "tmux.disconnected=true SUPPRESSED (single-grace-owner)"
         }
 
         /** A [TransportPort.transportEvents] lease up/down edge. */

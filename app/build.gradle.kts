@@ -65,8 +65,8 @@ android {
         applicationId = "com.pocketshell.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 47
-        versionName = "0.4.0"
+        versionCode = 48
+        versionName = "0.4.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

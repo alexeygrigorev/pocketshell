@@ -225,6 +225,18 @@ JOURNEY_CLASSES=(
   # regression cannot silently return. It lives under com.pocketshell.app.composer,
   # not the proof prefix, so it carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerDiscardE2eTest"
+  # ADDED (epic #687 Phase 1 / P1 — the device-truth gate J3, #686/#658): switch
+  # A→B while session A keeps STREAMING (a late/stale capture from A races the
+  # switch) must show B in the rendered PANE BODY + header label and paint NO
+  # stray SessionBoundaryDivider(sessionName=A). Asserts the pane body (the
+  # rendered terminal transcript), NOT header text nodes only — the header-only
+  # #686 test misses the maintainer's wrong-session-on-switch bug. RED on the
+  # unfixed code (the pager still paints A's panes after the switch to B); the
+  # P1 screen-keyed-to-target-sessionId fix (default-NEW connection path drives
+  # the RevealStateMachine, panes/divider keyed to the target session) flips it
+  # GREEN. Uses ONLY the deterministic agents:2222 fixture (no toxiproxy, no
+  # assumeFalse(isRunningOnCi())), so it belongs in this per-push subset.
+  "$FQCN_PREFIX.SwitchStaleCaptureSessionBodyJourneyE2eTest"
 )
 
 echo "=========================================================="

@@ -34,6 +34,34 @@ enum class VoiceTranscriptionProvider {
 }
 
 /**
+ * Which connection manager drives the in-session open / switch / reveal path
+ * (EPIC #687, the connection-core rewrite).
+ *
+ * [New] (default) routes the session screen's reveal through the new
+ * `:shared:core-connection` `ConnectionController` + `RevealStateMachine`, so the
+ * rendered screen state is a pure function of the TARGET session id: a late /
+ * stale frame from the previous session can never paint (fixes the
+ * wrong-session-on-switch report, #686/#658).
+ *
+ * [Old] is the maintainer's on-device SAFETY FALLBACK: it preserves EXACTLY the
+ * previous inline reveal path (`switchHidesTerminal`), so if the new manager
+ * breaks while dogfooding the maintainer can flip back to the old behaviour from
+ * the in-app settings WITHOUT a rebuild, and keep using the app.
+ *
+ * This is a DELIBERATE, maintainer-authorized TEMPORARY user-facing toggle for
+ * the risky connection rewrite — the sanctioned exception to D22 ("no settings
+ * flag for old behaviour"). It is removed together with the old inline path in
+ * #766 after on-device verification.
+ */
+enum class ConnectionPath {
+    /** The new `ConnectionController` / `RevealStateMachine` reveal path (default). */
+    New,
+
+    /** The previous inline `switchHidesTerminal` reveal path (safety fallback). */
+    Old,
+}
+
+/**
  * Snapshot of all PocketShell user-tunable settings exposed by the
  * settings surface introduced in issue #112.
  *
@@ -127,6 +155,15 @@ data class AppSettings(
      * in-app JSONL log that can be shared manually from Settings.
      */
     val diagnosticsRecordingEnabled: Boolean = DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
+    /**
+     * EPIC #687: which connection manager drives the in-session open/switch/reveal
+     * path. Defaults to [ConnectionPath.New] (the new `ConnectionController` /
+     * `RevealStateMachine` reveal keyed to the target session id). The maintainer
+     * can flip to [ConnectionPath.Old] (the previous inline `switchHidesTerminal`
+     * reveal) ON-DEVICE, without a rebuild, as a safety fallback while dogfooding
+     * the rewrite. Removed with the old path in #766.
+     */
+    val connectionPath: ConnectionPath = DEFAULT_CONNECTION_PATH,
 ) {
     companion object {
         const val MIN_TERMINAL_FONT_SP: Float = 10f
@@ -278,6 +315,13 @@ data class AppSettings(
         // no always-on fallback branch anywhere).
         const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = false
         const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
+
+        /**
+         * EPIC #687: fresh installs default to the NEW `ConnectionController` /
+         * `RevealStateMachine` reveal path (the wrong-session-on-switch fix). The
+         * [ConnectionPath.Old] inline-fallback is opt-in from Settings only.
+         */
+        val DEFAULT_CONNECTION_PATH: ConnectionPath = ConnectionPath.New
 
         const val BACKGROUND_GRACE_30_SECONDS_MS: Long = 30_000L
         const val DEFAULT_BACKGROUND_GRACE_MILLIS: Long = 60_000L

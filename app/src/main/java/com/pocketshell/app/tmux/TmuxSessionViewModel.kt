@@ -52,6 +52,9 @@ import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.hostKeyFor
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.RevealState
+import com.pocketshell.core.connection.RevealStateMachine
+import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
@@ -478,6 +481,140 @@ public class TmuxSessionViewModel @Inject constructor(
             // single status source, exactly as the deleted mirror feeds re-projected.
             onControllerTransition = { projectStatusFromController() },
         ).also { it.start() }
+
+    /**
+     * EPIC #687 Phase 1 (P1) — the session-screen identity/reveal reducer
+     * ([RevealStateMachine]). The rendered screen state is a pure function of the
+     * TARGET session id: the screen renders strictly from [revealState], so a
+     * late / stale frame from the previous session can NEVER paint (the
+     * wrong-session-on-switch fix, #686/#658).
+     *
+     * It is fed exactly three projection sources, all id-keyed:
+     *  1. [RevealStateMachine.navigate] — the nav-route target `(targetId, name)`,
+     *     supplied at every `connect()` so the header shows the target name
+     *     immediately (and the reducer clears the leaving target's panes).
+     *  2. [RevealStateMachine.onConnectionState] — the controller's
+     *     [ConnectionController.state] (collected in [driveRevealStateMachine]),
+     *     the single connection-lifecycle source.
+     *  3. [RevealStateMachine.onSeed] — id-tagged active-pane captures fed at the
+     *     EXISTING seed-landing point ([seedPaneFromCaptureOnce]).
+     *
+     * The machine itself owns NO transport / jobs / leases — only the projection.
+     * The view consumes [revealState] ONLY when the connection-path toggle is
+     * [com.pocketshell.app.settings.ConnectionPath.New]; under
+     * [com.pocketshell.app.settings.ConnectionPath.Old] the screen renders the
+     * previous inline `switchHidesTerminal` path verbatim (single-owner per
+     * branch — no double-drive: the inline `switchHidesTerminal` flow is simply
+     * not read on the NEW branch).
+     */
+    private val revealStateMachine: RevealStateMachine = RevealStateMachine()
+
+    private val _revealState: MutableStateFlow<RevealState> =
+        MutableStateFlow(RevealState.Idle)
+
+    /**
+     * EPIC #687 P1: the id-keyed reveal projection the session screen renders from
+     * under the NEW connection path. Mirrors [RevealStateMachine.state].
+     */
+    public val revealState: StateFlow<RevealState> = _revealState.asStateFlow()
+
+    /**
+     * EPIC #687 P1: true when the user-facing connection-path toggle selects the
+     * NEW [ConnectionController]/[RevealStateMachine] reveal (the default). The
+     * session screen keys its reveal source off this — NEW renders [revealState],
+     * OLD renders the previous inline `switchHidesTerminal` path. Persisted in
+     * [com.pocketshell.app.settings.SettingsRepository]; when the repository is
+     * absent (unit-test constructors) it defaults to NEW so the new path is the
+     * tested default.
+     */
+    public val connectionPathIsNew: StateFlow<Boolean> =
+        settingsRepository?.settings?.let { settings ->
+            MutableStateFlow(
+                settings.value.connectionPath == com.pocketshell.app.settings.ConnectionPath.New,
+            ).also { flow ->
+                viewModelScope.launch {
+                    settings.collect { snapshot ->
+                        flow.value =
+                            snapshot.connectionPath == com.pocketshell.app.settings.ConnectionPath.New
+                    }
+                }
+            }
+        } ?: MutableStateFlow(true)
+
+    /**
+     * EPIC #687 P1: pump the controller's [ConnectionController.state] into the
+     * [RevealStateMachine] and mirror the machine's [RevealState] onto
+     * [_revealState]. The machine drops any state for a non-current target (the
+     * drop-by-id rule), so a late lifecycle event from a superseded switch never
+     * moves the reveal. Started once, here, in [viewModelScope].
+     */
+    private fun driveRevealStateMachine() {
+        viewModelScope.launch {
+            connectionControllerShadow.connectionController.state.collect { state ->
+                revealStateMachine.onConnectionState(state)
+                _revealState.value = revealStateMachine.state.value
+            }
+        }
+    }
+
+    init {
+        driveRevealStateMachine()
+    }
+
+    /**
+     * EPIC #687 P1: announce the nav-route target to the [RevealStateMachine] so
+     * the header shows the target name immediately and the leaving target's panes
+     * are cleared. Called from [connect] before any coroutine runs, so the reveal
+     * supersedes synchronously and the screen can never observe `(old panes, new
+     * id)`.
+     */
+    private fun navigateRevealTo(target: ConnectionTarget) {
+        revealStateMachine.navigate(shadowSessionId(target), target.sessionName)
+        _revealState.value = revealStateMachine.state.value
+    }
+
+    /**
+     * EPIC #687 P1: feed an id-tagged active-pane [Seed] to the
+     * [RevealStateMachine] at the existing seed-landing point. The frame content
+     * is the captured pane transcript; the machine reveals [RevealState.Live] only
+     * for the CURRENT target and drops a seed for any superseded target (the AC-3
+     * never-paint-a-non-target-seed invariant). [frame] non-empty drives the
+     * reveal; empty keeps it loading (never-reveal-black).
+     */
+    private fun offerRevealSeed(paneId: String, frame: String) {
+        val target = activeTarget ?: connectingTarget ?: return
+        revealStateMachine.onSeed(
+            Seed(targetId = shadowSessionId(target), paneId = paneId, frame = frame),
+        )
+        _revealState.value = revealStateMachine.state.value
+    }
+
+    /**
+     * EPIC #687 P1: promote the reveal to [RevealState.Live] for the CURRENT target
+     * at the inline "active pane revealed" moments — the points where the inline
+     * path clears `_switchHidesTerminal` because the target's own pane is shown.
+     * This covers the WARM-CACHE switch (and the fast-switch/cold reveal) where no
+     * fresh `capture-pane` re-fires for an already-cached pane, so [offerRevealSeed]
+     * alone would never land a seed and the NEW-path reveal gate would stay held
+     * (the surface would never mount). Feeds the reveal machine a non-empty seed for
+     * the target's active pane id; the machine drops it if the target is no longer
+     * current (drop-by-id), so a superseded reveal never promotes the wrong session.
+     * The seed FRAME is a non-empty sentinel — the screen renders the VM's own
+     * `unifiedPanes` for the target, not the reveal machine's frame, so only the
+     * Hold→Reveal gate matters here.
+     */
+    private fun promoteRevealLiveForActiveTarget() {
+        val target = activeTarget ?: connectingTarget ?: return
+        val activePaneId = _panes.value.firstOrNull()?.paneId ?: return
+        revealStateMachine.onSeed(
+            Seed(
+                targetId = shadowSessionId(target),
+                paneId = activePaneId,
+                frame = REVEAL_LIVE_SENTINEL_FRAME,
+            ),
+        )
+        _revealState.value = revealStateMachine.state.value
+    }
 
     /**
      * The opaque [HostKey] / [SessionId] the shadow bridge keys on, derived from
@@ -1117,6 +1254,13 @@ public class TmuxSessionViewModel @Inject constructor(
             trigger = effectiveTrigger,
             generation = generation,
         )
+        // EPIC #687 P1: announce the nav-route target to the reveal state machine
+        // SYNCHRONOUSLY at the accepted-connect moment (before any coroutine runs).
+        // This supersedes whatever was showing — the header flips to the target
+        // name and the leaving target's panes are cleared — so under the NEW
+        // connection path the screen can never paint `(old session's panes, new
+        // target id)`, the wrong-session-on-switch race (#686/#658).
+        navigateRevealTo(target)
 
         // Issue #145: deterministic reconnect-loop signal. Every accepted
         // connect attempt increments a process-wide counter and emits a
@@ -3200,6 +3344,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // frame to hide here; clear the gate defensively in case a prior
         // in-flight fast switch had set it.
         _switchHidesTerminal.value = false
+        // EPIC #687 P1: the warm cache-hit reveals the target's own pane WITHOUT a
+        // fresh capture, so promote the reveal machine to Live for the target here
+        // (otherwise the NEW-path reveal gate would stay held and the surface would
+        // never mount on a switch back to a cached session).
+        promoteRevealLiveForActiveTarget()
         setConnectionState(
             ConnectionState.Live(
                 target.host,
@@ -3528,6 +3677,10 @@ public class TmuxSessionViewModel @Inject constructor(
             // seeded panes rather than staying on the loading placeholder — but
             // only when the active pane actually has content (#693).
             _switchHidesTerminal.value = !activePaneSeeded
+            // EPIC #687 P1: when the active pane is seeded non-blank, the inline path
+            // reveals the target's surface — promote the reveal machine to Live for
+            // the target so the NEW-path reveal gate releases in lockstep.
+            if (activePaneSeeded) promoteRevealLiveForActiveTarget()
             setConnectionState(
                 ConnectionState.Live(
                     target.host,
@@ -3928,6 +4081,10 @@ public class TmuxSessionViewModel @Inject constructor(
             // overlay raised and hand off to [armConnectedBlankWatchdog] so the
             // user sees a calm "Attaching…" rather than a black Connected pane.
             _switchHidesTerminal.value = !activePaneSeeded
+            // EPIC #687 P1: the fast-switch reveal shows the target's seeded pane —
+            // promote the reveal machine to Live for the target so the NEW-path reveal
+            // gate releases in the same mutation (never holds on a warm switch).
+            if (activePaneSeeded) promoteRevealLiveForActiveTarget()
             setConnectionState(
                 ConnectionState.Live(
                     target.host,
@@ -7425,6 +7582,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // TransportLive feedback this is how the shadow controller reaches Live from
         // genuine signals (the active-pane landing promotes Attaching → Live).
         observeSeedLandedInShadow(pane.paneId)
+        // EPIC #687 P1: feed the id-tagged active-pane seed to the reveal state
+        // machine at the SAME landing point. The captured `output` is non-empty
+        // here (guarded above), so this reveals RevealState.Live ONLY for the
+        // CURRENT target; a seed for a superseded target is dropped by id (never
+        // paints the wrong session). FIRE-AND-OBSERVE after the existing side
+        // effects — no write-path control-flow change.
+        offerRevealSeed(pane.paneId, response.output.joinToString(separator = "\n"))
         if (recordMilestone) {
             activeAttachMilestone?.let { milestone ->
                 if (!milestone.firstCaptureReadyLogged) {
@@ -11271,6 +11435,16 @@ internal const val SEED_SCROLLBACK_LINES: Int = 200
  * short so a genuinely-black pane heals within a blink on a live connection.
  */
 internal const val BLANK_PANE_RESEED_DELAY_MS: Long = 350L
+
+/**
+ * EPIC #687 P1: a non-empty sentinel frame used to promote the reveal machine to
+ * [com.pocketshell.core.connection.RevealState.Live] at the inline
+ * "active pane revealed" moments (warm-cache / fast-switch reveal) where no fresh
+ * `capture-pane` re-fires. The screen renders the VM's own panes, so the frame
+ * content is irrelevant — only the non-emptiness (which flips the reveal gate from
+ * Hold to Reveal for the current target) matters.
+ */
+private const val REVEAL_LIVE_SENTINEL_FRAME: String = "reveal-live"
 
 /**
  * Issue #693/#662: how many times [seedPaneFromCapture] re-issues a

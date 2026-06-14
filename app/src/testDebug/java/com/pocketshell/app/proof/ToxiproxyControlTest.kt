@@ -10,6 +10,8 @@ class ToxiproxyControlTest {
         val transport = RecordingTransport()
         ToxiproxyControl(baseUrl = "http://unused", transport = transport).reset()
 
+        // reset() has an ordering contract: the stale proxy MUST be DELETEd
+        // before the fresh one is POSTed, so this stays an ordered assertion.
         assertEquals(
             listOf(
                 RecordedRequest("DELETE", "/proxies/agents_ssh", null),
@@ -28,8 +30,11 @@ class ToxiproxyControlTest {
         val transport = RecordingTransport()
         ToxiproxyControl(baseUrl = "http://unused", transport = transport).addBlackhole()
 
+        // The upstream and downstream timeout toxics are independent and
+        // symmetric — their relative order is not part of the contract, so
+        // assert the set of requests rather than an ordered list.
         assertEquals(
-            listOf(
+            setOf(
                 RecordedRequest(
                     "POST",
                     "/proxies/agents_ssh/toxics",
@@ -41,7 +46,7 @@ class ToxiproxyControlTest {
                     """{"name":"blackhole_downstream","type":"timeout","stream":"downstream","toxicity":1.0,"attributes":{"timeout":0}}""",
                 ),
             ),
-            transport.requests,
+            transport.requests.toSet(),
         )
     }
 
@@ -67,14 +72,18 @@ class ToxiproxyControlTest {
         val transport = RecordingTransport()
         ToxiproxyControl(baseUrl = "http://unused", transport = transport).clearToxics()
 
+        // Every known fault model is DELETEd independently; the deletion order
+        // is not part of the contract, so assert the set of DELETEs. This also
+        // catches a missing toxic regardless of where it lands in the list.
         assertEquals(
-            listOf(
+            setOf(
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/blackhole_upstream", null),
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/blackhole_downstream", null),
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/latency_upstream", null),
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/latency_downstream", null),
+                RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/bandwidth_downstream", null),
             ),
-            transport.requests,
+            transport.requests.toSet(),
         )
     }
 

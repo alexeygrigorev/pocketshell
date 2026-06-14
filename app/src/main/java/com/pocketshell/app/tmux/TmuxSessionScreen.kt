@@ -1614,7 +1614,21 @@ public fun TmuxSessionScreen(
                     // Issue #453: no snippet chip on agent panes — the
                     // composer's `{}` affordance already inserts saved prompts.
                     // Issue #454: shell panes keep the saved-snippet picker.
-                    onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
+                    // Issue #761: gate on the ACTUAL agent signal (live
+                    // detection or the #462 sticky kind), NOT the optimistic
+                    // presumed-agent default. #716's presumed-agent keeps the
+                    // composer surface available on a fresh pane, but it must
+                    // not suppress the snippet chip on a genuine shell pane that
+                    // has never hosted an agent — that suppression is the #761
+                    // bug (the chip was never in the semantics tree on a tmux
+                    // shell). See [tmuxSessionShowsSnippetChip].
+                    onAddSnippetTap = if (
+                        tmuxSessionShowsSnippetChip(
+                            hasHost = hostId != 0L,
+                            hasLiveDetection = currentAgentConversation?.detection != null,
+                            hasStickyAgent = paletteAgent != null,
+                        )
+                    ) {
                         { showSnippetPicker = true }
                     } else null,
                     onAgentCommandsTap = if (paletteAgent != null) {
@@ -2706,6 +2720,39 @@ internal fun tmuxSessionIsAgentPane(
     hasLiveDetection: Boolean,
     presumedAgent: Boolean,
 ): Boolean = hasLiveDetection || presumedAgent
+
+/**
+ * Issue #761 / #454: whether the bottom controls surface the saved-snippet
+ * picker chip (`+ snippet`).
+ *
+ * The snippet chip is a SHELL-pane affordance (#454: "shell panes keep the
+ * saved-snippet picker"); agent panes intentionally omit it because the
+ * composer's `{}` affordance already inserts saved prompts (#453). The chip is
+ * therefore the inverse of being a *known* agent pane.
+ *
+ * Crucially it is gated on the ACTUAL agent signal — live detection OR a sticky
+ * known-agent kind ([paletteAgent]) — NOT on the optimistic presumed-agent
+ * default from #716. #716 makes every freshly-attached tmux pane presumed-agent
+ * so the *composer / conversation surface* never vanishes during the
+ * slow-detection window; but reusing that optimistic flag to gate the snippet
+ * chip suppressed it on EVERY tmux pane, including genuine shells that had
+ * never hosted an agent (the bug behind #761: the `session:add-snippet-chip`
+ * tag was never in the tree on a shell pane). Gating on real agent evidence
+ * keeps the composer available on a fresh pane (#716) while still showing the
+ * snippet chip there until/unless the pane is actually known to be an agent —
+ * symmetric with how the `/ commands` chip is gated on `paletteAgent != null`.
+ *
+ * @param hasHost the visible host is persisted (snippets are host-scoped; a
+ *   transient/zero host id has no snippets to pick).
+ * @param hasLiveDetection a live agent detection landed for this pane.
+ * @param hasStickyAgent a previously-detected agent kind is remembered for this
+ *   pane ([paletteAgent] / #462 sticky resilience).
+ */
+internal fun tmuxSessionShowsSnippetChip(
+    hasHost: Boolean,
+    hasLiveDetection: Boolean,
+    hasStickyAgent: Boolean,
+): Boolean = hasHost && !hasLiveDetection && !hasStickyAgent
 
 internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,

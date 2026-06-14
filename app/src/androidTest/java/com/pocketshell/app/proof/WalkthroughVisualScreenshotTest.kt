@@ -52,6 +52,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -93,7 +94,16 @@ class WalkthroughVisualScreenshotTest {
 
             val hostRowTag = seedWalkthroughHostAndSnippets(key)
             waitForSshFixtureReady(sshKey)
+            // Issue #761: kill any leaked sessions from a prior failed run AND
+            // seed a fresh one. The seeded session is torn down in `finally`
+            // below so it does not accumulate on the shared `agents:2222`
+            // fixture — a long idle-session list (seen at 13→17 across reruns)
+            // pushes the FolderListScreen's New-session LazyColumn row out of
+            // the composed window and flakes the host-detail settle.
+            cleanupLeakedWalkthroughSessions(key)
             prepareRemoteTmuxSession(key, tmuxSessionName)
+
+            try {
 
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
             waitUntilWithDiagnostics(
@@ -195,7 +205,14 @@ class WalkthroughVisualScreenshotTest {
             val sessionProjectPath = "/home/$DEFAULT_USER"
             waitUntilWithDiagnostics(
                 label = "ready host detail screen for $WALKTHROUGH_HOST_NAME",
-                timeoutMillis = 20_000,
+                // Issue #761/#531: this folder-list settle (NavHost route swap +
+                // FolderListScreen recomposition, incl. the new-session FAB) is
+                // a plain Compose recomposition race that overshoots a flat 20 s
+                // on a loaded emulator (4 parallel device runs + Docker). Use
+                // the CI-aware nav ceiling the sibling settles already adopted
+                // so it stays tight enough to surface a real regression while
+                // not flaking under load.
+                timeoutMillis = uiNavigationTimeoutMs(),
                 textProbes = listOf(
                     WALKTHROUGH_HOST_NAME,
                     "Workspace",
@@ -218,7 +235,9 @@ class WalkthroughVisualScreenshotTest {
             }
             waitUntilWithDiagnostics(
                 label = "seeded project row $sessionProjectPath",
-                timeoutMillis = 20_000,
+                // Issue #761/#531: same loaded-emulator recomposition race —
+                // use the CI-aware nav ceiling rather than a flat 20 s.
+                timeoutMillis = uiNavigationTimeoutMs(),
                 textProbes = listOf(
                     WALKTHROUGH_HOST_NAME,
                     "No active sessions",
@@ -284,12 +303,70 @@ class WalkthroughVisualScreenshotTest {
             assertTerminalViewportUncovered()
             WalkthroughScreenshotArtifacts.capture("03-terminal-session-input-controls")
 
+            // Issue #761: the `+ snippet` chip is part of the IME-down bottom
+            // controls (PrimaryChipCluster). After the keyboard clears, the
+            // recomposition into the HiddenImeControls chrome mode can lag the
+            // emulator under load (the giant TmuxSessionScreen composable runs
+            // interpreted — logcat: "Method exceeds compiler instruction
+            // limit"). Wait on the chip's deterministic presence in the
+            // semantics tree before clicking, rather than racing the click
+            // against the recompose.
+            waitUntilWithDiagnostics(
+                label = "snippet chip ($SESSION_ADD_SNIPPET_CHIP_TAG) present",
+                timeoutMillis = uiNavigationTimeoutMs(),
+                tagProbes = listOf(SESSION_ADD_SNIPPET_CHIP_TAG, TMUX_SESSION_SCREEN_TAG),
+            ) {
+                hasTag(SESSION_ADD_SNIPPET_CHIP_TAG)
+            }
             compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG, useUnmergedTree = true).performClick()
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithText("Snippets").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("visual echo").assertExists()
             WalkthroughScreenshotArtifacts.capture("04-snippets")
+            } finally {
+                // Issue #761: tear down the seeded tmux session so it does not
+                // leak onto the shared fixture and bloat the next run's list.
+                runCatching {
+                    withTimeout(20_000) { killRemoteTmuxSession(key, tmuxSessionName) }
+                }
+            }
+        }
+    }
+
+    private suspend fun cleanupLeakedWalkthroughSessions(key: String) {
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                // Kill every prior walkthrough-seeded session (`visual-*`) so a
+                // crashed earlier run cannot leave a long idle-session list.
+                it.exec(
+                    "for s in \$(tmux ls -F '#{session_name}' 2>/dev/null " +
+                        "| grep '^visual-'); do tmux kill-session -t \"\$s\" " +
+                        "2>/dev/null || true; done",
+                )
+            }
+        }
+    }
+
+    private suspend fun killRemoteTmuxSession(key: String, sessionName: String) {
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+            }
         }
     }
 

@@ -21,6 +21,8 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.projects.folderHeaderClickTestTag
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -61,6 +63,9 @@ class SnippetPickerTmuxZOrderDockerTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val HOST_NAME: String = "Issue253 Snippets"
         const val SESSION_NAME: String = "issue253-snippets"
+        // The seeded session is created with `tmux new-session -c /tmp`, so it
+        // is grouped under the `/tmp` folder on the folders-first FolderListScreen.
+        const val SESSION_PROJECT_PATH: String = "/tmp"
         const val ATTACH_TIMEOUT_MS: Long = 30_000
         const val ADD_SNIPPET_CHIP_TAG: String = "session:add-snippet-chip"
     }
@@ -99,12 +104,39 @@ class SnippetPickerTmuxZOrderDockerTest {
         val hostRowTag = persistHostAndSnippets(appContext, key, sshPort)
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes().isNotEmpty()
+            // Issue #761: the first semantics lookup right after launch can race
+            // the system GrantPermissionsActivity transiently occluding the
+            // Compose window on a loaded emulator (PreGrantPermissionsRule grants
+            // best-effort, but a slow first launch of a freshly-installed
+            // suffixed APK can still flash the grant dialog). `fetchSemanticsNodes`
+            // THROWS "No compose hierarchies found" rather than returning empty in
+            // that window, which would abort `waitUntil` on the first poll. Swallow
+            // that transient throw so the wait keeps polling until the host-list
+            // Compose hierarchy is actually attached.
+            compose.waitUntil(timeoutMillis = 30_000) {
+                runCatching {
+                    compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                        .fetchSemanticsNodes().isNotEmpty()
+                }.getOrDefault(false)
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
 
+            // Issue #761: the host row lands on the folders-first FolderListScreen.
+            // The seeded session lives under its cwd folder (`/tmp`, seeded with
+            // `tmux new-session -c /tmp`), which may render COLLAPSED depending on
+            // the #471 auto-expand state. Waiting on the bare session text then
+            // raced: if the folder was collapsed the session row never composed and
+            // the wait timed out. Wait for the folder screen, then toggle the
+            // folder header only while the session is still hidden (settling on
+            // idle each pass) until the row appears — the same robust pattern the
+            // walkthrough visual proof uses.
+            compose.waitUntil(timeoutMillis = ATTACH_TIMEOUT_MS) {
+                runCatching {
+                    compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
+                        .fetchSemanticsNodes().isNotEmpty()
+                }.getOrDefault(false)
+            }
+            expandFolderUntilSessionVisible(SESSION_PROJECT_PATH, SESSION_NAME)
             compose.waitUntil(timeoutMillis = ATTACH_TIMEOUT_MS) {
                 compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
                     .fetchSemanticsNodes().isNotEmpty()
@@ -114,8 +146,14 @@ class SnippetPickerTmuxZOrderDockerTest {
                 .assertIsDisplayed()
 
             // Wait for the bottom chip controls (IME down) to render the
-            // `+ snippet` chip, then open the picker.
-            compose.waitUntil(timeoutMillis = 15_000) {
+            // `+ snippet` chip, then open the picker. Issue #761: the chip is a
+            // shell-pane affordance gated on the ACTUAL agent signal (not the
+            // optimistic presumed-agent default), so it is present on this fresh
+            // tmux shell pane. The wait is generous because the giant
+            // TmuxSessionScreen composable runs interpreted on a loaded
+            // emulator (logcat: "Method exceeds compiler instruction limit"),
+            // so the IME-down recomposition can lag.
+            compose.waitUntil(timeoutMillis = 30_000) {
                 compose.onAllNodesWithTag(ADD_SNIPPET_CHIP_TAG, useUnmergedTree = true)
                     .fetchSemanticsNodes().isNotEmpty()
             }
@@ -138,6 +176,48 @@ class SnippetPickerTmuxZOrderDockerTest {
         }
         Unit
     }
+
+    // Issue #761: ensure the seeded folder ends EXPANDED with its session row
+    // visible, independent of #471's auto-expand starting state. Toggle the
+    // header only while the session is still hidden, settling on idle each pass,
+    // until the row appears or the deadline elapses. Mirrors the walkthrough
+    // visual proof's robust expand helper.
+    private fun expandFolderUntilSessionVisible(projectPath: String, sessionName: String) {
+        val deadline = SystemClock.uptimeMillis() + ATTACH_TIMEOUT_MS
+        compose.waitForIdle()
+        while (!hasText(sessionName) && SystemClock.uptimeMillis() < deadline) {
+            if (!hasTag(folderHeaderClickTestTag(projectPath))) {
+                // Folder header not composed yet — give the list a poll window.
+                runCatching { compose.waitUntil(timeoutMillis = 2_000) { hasText(sessionName) } }
+                continue
+            }
+            runCatching {
+                compose.onNodeWithTag(folderHeaderClickTestTag(projectPath), useUnmergedTree = true)
+                    .performClick()
+                compose.waitForIdle()
+            }
+            if (hasText(sessionName)) return
+            runCatching { compose.waitUntil(timeoutMillis = 2_000) { hasText(sessionName) } }
+        }
+    }
+
+    // Issue #761: `fetchSemanticsNodes` THROWS "No compose hierarchies found"
+    // (rather than returning empty) during a transient screen transition right
+    // after the host-row tap, while the folder screen is still composing. Guard
+    // it so the expand poll keeps looping instead of aborting on that throw.
+    private fun hasText(text: String): Boolean =
+        runCatching {
+            compose.onAllNodesWithText(text, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }.getOrDefault(false)
+
+    private fun hasTag(tag: String): Boolean =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }.getOrDefault(false)
 
     private fun resolveSshPort(): Int =
         InstrumentationRegistry.getArguments()
@@ -197,6 +277,18 @@ class SnippetPickerTmuxZOrderDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    // Issue #761: pre-seed the pocketshell-daemon detection state
+                    // (mirrors WalkthroughVisualScreenshotTest) so the host-detail
+                    // screen renders the FolderListScreen IMMEDIATELY instead of
+                    // gating on a live "Checking setup" SSH probe. That probe was
+                    // the slow/racy step that intermittently kept the folder list
+                    // (and therefore the seeded session row) from composing within
+                    // the wait window.
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellDaemonRunning = true,
+                    pocketshellDaemonEnabled = true,
+                    pocketshellVersionCompatible = true,
                 ),
             )
             db.snippetDao().insert(

@@ -75,13 +75,7 @@ APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerVisualScreenshotTest#capturesAllFourComposerStates"
   "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest#successfulSendDismissesComposerEveryTime"
   "com.pocketshell.app.snippets.SnippetPickerSendButtonsTest#tappingSendWithEnterChip_dispatchesSendWithEnter"
-  # NOTE: SnippetPickerTmuxZOrderDockerTest#snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen
-  # de-scoped from the blocking gate (#761): it fails deterministically (Compose
-  # waitUntil timeout on the +snippet chip) on BOTH main and v0.3.34 — a
-  # pre-existing test gap, NOT a connection/release regression (#749 added it with
-  # its green-run deferred, so this is the first time it ran). The snippet->shell
-  # behaviour is still covered by SnippetPickerSendButtonsTest above. Re-add once
-  # #761 stabilizes the test.
+  "com.pocketshell.app.snippets.SnippetPickerTmuxZOrderDockerTest#snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen"
   "com.pocketshell.app.composer.PromptComposerCancelRecordingTest#discardIsHiddenInIdleAndVisibleInRecording"
   "com.pocketshell.app.composer.PromptComposerSendWhileRecordingTest#sendWhileTranscribingFiresOnlyAfterWhisperSuccess"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias"

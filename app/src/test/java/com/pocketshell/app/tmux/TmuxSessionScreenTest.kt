@@ -575,6 +575,64 @@ class TmuxSessionScreenTest {
         assertTrue(!tmuxSessionIsAgentPane(hasLiveDetection = false, presumedAgent = false))
     }
 
+    // ─── Issue #761 / #454: the snippet chip is a shell-pane affordance ─────
+    // gated on the ACTUAL agent signal, NOT the optimistic presumed-agent. ───
+
+    @Test
+    fun snippetChipShownOnFreshTmuxShellPaneWithNoAgentEvidence() {
+        // The #761 bug: a freshly attached tmux shell pane (host persisted, no
+        // live detection, no sticky agent) is presumed-agent under #716, which
+        // wrongly suppressed the snippet chip. The chip MUST show here — this is
+        // the exact state both failing tests drive (a seeded tmux shell).
+        assertTrue(
+            tmuxSessionShowsSnippetChip(
+                hasHost = true,
+                hasLiveDetection = false,
+                hasStickyAgent = false,
+            ),
+        )
+    }
+
+    @Test
+    fun snippetChipHiddenOnLiveDetectedAgentPane() {
+        // A pane with a live-detected agent is a real agent pane — the snippet
+        // chip is omitted (the composer's `{}` inserts saved prompts, #453).
+        assertTrue(
+            !tmuxSessionShowsSnippetChip(
+                hasHost = true,
+                hasLiveDetection = true,
+                hasStickyAgent = false,
+            ),
+        )
+    }
+
+    @Test
+    fun snippetChipHiddenOnStickyAgentPaneDuringTransientNull() {
+        // A pane that WAS an agent (sticky kind present) but whose live
+        // detection transiently dropped to null is still a known agent pane —
+        // the snippet chip stays hidden (no flicker back to the shell chip).
+        assertTrue(
+            !tmuxSessionShowsSnippetChip(
+                hasHost = true,
+                hasLiveDetection = false,
+                hasStickyAgent = true,
+            ),
+        )
+    }
+
+    @Test
+    fun snippetChipHiddenWithoutPersistedHost() {
+        // Snippets are host-scoped; a transient/zero host id has none to pick,
+        // so the chip is omitted even on an otherwise shell-style pane.
+        assertTrue(
+            !tmuxSessionShowsSnippetChip(
+                hasHost = false,
+                hasLiveDetection = false,
+                hasStickyAgent = false,
+            ),
+        )
+    }
+
     @Test
     fun composerSendRoutesToAgentPayloadForPresumedAgentWithoutDetection() {
         // Criterion (a): a presumed-agent pane (sticky kind, no live detection)

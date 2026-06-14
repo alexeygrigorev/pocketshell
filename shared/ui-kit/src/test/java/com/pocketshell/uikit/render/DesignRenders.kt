@@ -300,6 +300,56 @@ class DesignRenders {
     }
 
     /**
+     * Issues #757 + #750: the two tmux connecting/attach states as the
+     * `TmuxSessionScreen` now renders them. Both are app-only composables
+     * (`EmptyPanesPlaceholder` and `SwitchingLoadingPlaceholder`), so this
+     * fixture reproduces their EXACT body — a full-surface [Box] with a centered
+     * [LoadingIndicator.Spinner] (Medium) + label — so a reviewer can eyeball the
+     * design parity without the emulator.
+     *
+     *  - #757: the "waiting for tmux panes…" connecting state now shows the SAME
+     *    canonical animated spinner instead of static text.
+     *  - #750: the "Attaching…" reattach state shows EXACTLY this one centered
+     *    spinner — the previous thin under-header progress line is gone, so the
+     *    reattach screen no longer shows two indicators at once.
+     */
+    @Test
+    fun tmuxConnectingStates() = render("tmux-connecting-states") {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            LoadingLabel("waiting for tmux panes… (#757 — connecting)")
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .background(color = PocketShellColors.Surface),
+                contentAlignment = Alignment.Center,
+            ) {
+                LoadingIndicator.Spinner(
+                    size = SpinnerSize.Medium,
+                    label = "waiting for tmux panes…",
+                )
+            }
+
+            LoadingLabel("Attaching… (#750 — reattach, single indicator)")
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .background(color = PocketShellColors.Background),
+                contentAlignment = Alignment.Center,
+            ) {
+                LoadingIndicator.Spinner(
+                    size = SpinnerSize.Medium,
+                    label = "Attaching…",
+                )
+            }
+        }
+    }
+
+    /**
      * Issue #756: the canonical [PocketShellButton] — the single shared button
      * the ~142 raw Material `Button`/`TextButton` call sites (and the 9 files
      * that hand-re-declared the same accent `ButtonDefaults.buttonColors` block)

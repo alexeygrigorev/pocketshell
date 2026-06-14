@@ -168,7 +168,9 @@ import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.ConnectionStatus as UiConnectionStatus
@@ -1239,15 +1241,17 @@ public fun TmuxSessionScreen(
                     onCancel = { viewModel.cancelConnect() },
                 )
             }
-            // Issue #437 (slice A): a same-host session switch reuses the
-            // warm SSH transport, so it must NOT show the blanking
-            // full-screen [ConnectingProgressOverlay]. The previous frame
-            // stays painted below; this thin inline bar is the only
-            // affordance, signalling the new control client is attaching
-            // while input remains gated (status != Connected).
-            (status as? ConnectionStatus.Switching)?.let {
-                SwitchingIndicatorRow()
-            }
+            // Issue #750: a same-host session switch ([Switching]) no longer
+            // renders a thin under-header progress line here. During a switch the
+            // terminal surface is always replaced by a centered placeholder —
+            // either the "Attaching…" [SwitchingLoadingPlaceholder]
+            // (switchHidesTerminal) or the "waiting for tmux panes…"
+            // [EmptyPanesPlaceholder] (warm open, panes emptied) — and each of
+            // those now shows the canonical centered spinner (#757). Keeping the
+            // top bar produced the maintainer's reported "two loading indicators"
+            // on the reattach screen, so the centered spinner is the SOLE attach
+            // affordance and the top line is removed. Input stays gated because
+            // [Switching] is not [Connected].
             (status as? ConnectionStatus.Reconnecting)?.let {
                 ReconnectingProgressRow(
                     status = it,
@@ -3250,14 +3254,6 @@ internal const val TMUX_CONNECTING_SLOW_HINT_TAG = "tmux:session:connecting:slow
 internal const val TMUX_CONNECTING_CANCEL_TAG = "tmux:session:connecting:cancel"
 internal const val TMUX_RECONNECTING_RETRY_NOW_TAG = "tmux:session:reconnecting:retry-now"
 
-// Issue #437 (slice A): tag on the unobtrusive inline same-host
-// switch indicator (a thin progress bar above the still-painted
-// terminal frame). Distinct from the full-screen
-// [TMUX_CONNECTING_PROGRESS_TAG] overlay so tests can assert that a
-// same-host switch shows ONLY this inline bar and never the blanking
-// "Connecting" overlay.
-internal const val TMUX_SWITCHING_INDICATOR_TAG = "tmux:session:switching"
-
 // Issue #661: the full-surface "Attaching" loading placeholder shown in place
 // of the terminal during a cross-session switch, so the leaving session's
 // content is never painted while the new session attaches.
@@ -3569,29 +3565,6 @@ internal fun ReconnectingProgressRow(
 }
 
 /**
- * Issue #437 (slice A): the unobtrusive inline indicator shown during a
- * same-host tmux session switch. Unlike [ConnectingProgressOverlay] —
- * which is a full-screen blanking overlay for a genuine first-connect —
- * this is a single thin progress bar that sits above the still-painted
- * previous/cached terminal frame. The user keeps seeing terminal content
- * (no "Connecting" blank) while the new `-CC` control client attaches in
- * the background and the viewport atomically swaps to the new session's
- * panes. Input stays gated until the swap completes because the screen
- * only treats [ConnectionStatus.Connected] as live.
- */
-@Composable
-private fun SwitchingIndicatorRow() {
-    LinearProgressIndicator(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(2.dp)
-            .testTag(TMUX_SWITCHING_INDICATOR_TAG),
-        color = PocketShellColors.Accent,
-        trackColor = PocketShellColors.SurfaceElev,
-    )
-}
-
-/**
  * Issue #145: in-session SSH-disconnect error band.
  *
  * Rendered when [TmuxSessionViewModel.connectionStatus] is
@@ -3668,10 +3641,13 @@ private fun EmptyPanesPlaceholder() {
             .background(color = PocketShellColors.Surface),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "waiting for tmux panes…",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
+        // Issue #757: the "waiting for tmux panes…" connecting state was static
+        // text with no animated affordance, unlike the "Attaching…" placeholder.
+        // Adopt the canonical centered [LoadingIndicator.Spinner] (#756) with the
+        // label slot so this state shows the SAME spinner used everywhere else.
+        LoadingIndicator.Spinner(
+            size = SpinnerSize.Medium,
+            label = "waiting for tmux panes…",
         )
     }
 }
@@ -3693,23 +3669,16 @@ private fun SwitchingLoadingPlaceholder() {
             .testTag(TMUX_SWITCHING_LOADING_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .width(96.dp)
-                    .height(2.dp),
-                color = PocketShellColors.Accent,
-                trackColor = PocketShellColors.SurfaceElev,
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "Attaching…",
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyDense,
-            )
-        }
+        // Issue #750/#756: adopt the canonical centered [LoadingIndicator.Spinner]
+        // with the label slot — the ONE indicator for the attach/reattach state.
+        // The thin under-header [SwitchingIndicatorRow] that previously also
+        // rendered during a [Switching] switch (giving the maintainer's reported
+        // "two loading indicators") is gone; this centered spinner is the sole
+        // attach affordance.
+        LoadingIndicator.Spinner(
+            size = SpinnerSize.Medium,
+            label = "Attaching…",
+        )
     }
 }
 

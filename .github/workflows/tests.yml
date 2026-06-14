@@ -232,8 +232,23 @@ jobs:
       # creates the AVD so the userdata partition always fits, then print the
       # free space so a future disk regression is visible in the log. The `|| true`
       # guards keep the step green if a path is already gone on a newer image.
+      #
+      # Issue #771 (round-3, PROVEN ROOT CAUSE): the original #760 version also
+      # ran
+      #     sudo rm -rf "$AGENT_TOOLSDIRECTORY"   # == /opt/hostedtoolcache
+      # which DELETED the JDK that `actions/setup-java@v5` installs under
+      # `/opt/hostedtoolcache/Java_*` and that `JAVA_HOME` points into
+      # (e.g. /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.19-10/x64).
+      # After that delete, EVERY Java tool died with
+      #     ERROR: JAVA_HOME is set to an invalid directory: …
+      # so the runner's sdkmanager (and the #771 freshly-reinstalled copy)
+      # crashed instantly and the emulator never booted. The cmdline-tools were
+      # never the real problem — the missing JDK was. Fix: prune the OTHER
+      # tool-caches under $AGENT_TOOLSDIRECTORY but PRESERVE the directory the
+      # live JAVA_HOME resolves into, so the active JDK survives.
       - name: Free disk space for the AVD
         run: |
+          set -uo pipefail
           echo "::group::Disk before cleanup"
           df -h /
           echo "::endgroup::"
@@ -242,11 +257,41 @@ jobs:
           sudo rm -rf /opt/ghc /usr/local/.ghcup || true
           sudo rm -rf /usr/local/share/boost || true
           sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          # Prune unused tool-caches under $AGENT_TOOLSDIRECTORY but KEEP the
+          # active JDK that JAVA_HOME depends on (issue #771). Resolve the
+          # top-level tool-cache subdir the live JAVA_HOME lives in (e.g.
+          # `Java_Temurin-Hotspot_jdk`) and exclude exactly that one, so the
+          # exact JDK setup-java installed survives even across version bumps.
+          if [[ -n "${AGENT_TOOLSDIRECTORY:-}" && -d "${AGENT_TOOLSDIRECTORY:-}" ]]; then
+            keep_dir=""
+            if [[ -n "${JAVA_HOME:-}" && "$JAVA_HOME" == "$AGENT_TOOLSDIRECTORY"/* ]]; then
+              # First path segment of JAVA_HOME relative to the tool-cache root.
+              rel="${JAVA_HOME#"$AGENT_TOOLSDIRECTORY"/}"
+              keep_dir="${rel%%/*}"
+            fi
+            echo "Pruning $AGENT_TOOLSDIRECTORY, keeping active JDK dir: '${keep_dir:-<none>}'"
+            if [[ -n "$keep_dir" ]]; then
+              sudo find "$AGENT_TOOLSDIRECTORY" -mindepth 1 -maxdepth 1 \
+                ! -name "$keep_dir" -exec rm -rf {} + || true
+            else
+              # No JAVA_HOME under the tool-cache (unexpected): leave the dir
+              # intact rather than risk deleting the JDK. The deletions above
+              # plus docker prune already free far more than the 9000 MB guard.
+              echo "JAVA_HOME not under \$AGENT_TOOLSDIRECTORY; leaving it intact to protect the JDK."
+            fi
+          fi
           sudo docker image prune -af || true
           echo "::group::Disk after cleanup"
           df -h /
           echo "::endgroup::"
+          # Confirm the active JDK survived the prune (issue #771): a deleted
+          # JAVA_HOME makes every Java tool fail with
+          # "JAVA_HOME is set to an invalid directory" and the emulator never
+          # boots. Fail NOW with an explicit infra classification if it's gone.
+          if [[ -n "${JAVA_HOME:-}" && ! -x "$JAVA_HOME/bin/java" ]]; then
+            echo "::error title=EMULATOR INFRA UNAVAILABLE::JAVA_HOME=$JAVA_HOME has no bin/java after disk cleanup; the JDK was deleted (issue #771 regression guard). This is an infra setup error, not a test failure."
+            exit 1
+          fi
           avail_mb="$(df -m --output=avail / | tail -1 | tr -d ' ')"
           echo "Available on / after cleanup: ${avail_mb} MB"
           # The AVD userdata partition needs ~7372 MB; require a safe margin so

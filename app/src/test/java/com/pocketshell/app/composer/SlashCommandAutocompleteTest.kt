@@ -53,6 +53,43 @@ class SlashCommandAutocompleteTest {
     }
 
     @Test
+    fun `a newline bounds the leading slash token (multi-line composer)`() {
+        // #777 G3: the doc contract says the leading token ends at the FIRST
+        // whitespace — space, tab, OR newline. In a multi-line draft the caret
+        // inside the leading token still yields the token's query, bounded by
+        // the newline (NOT the whole text). "/comp\nmore" with the caret right
+        // after "/comp" → "comp".
+        val value = field("/comp\nmore", caret = 5)
+        assertEquals("comp", SlashCommandAutocomplete.slashQueryFor(value))
+    }
+
+    @Test
+    fun `a tab bounds the leading slash token`() {
+        // The tab is whitespace too: "/comp\tmore" with the caret inside the
+        // leading token yields "comp" — the token stops at the tab.
+        val value = field("/comp\tmore", caret = 5)
+        assertEquals("comp", SlashCommandAutocomplete.slashQueryFor(value))
+    }
+
+    @Test
+    fun `a caret past a newline boundary closes the dropdown`() {
+        // The newline ends the leading token; once the caret moves onto the
+        // SECOND line the dropdown closes (the second line is free text, not a
+        // command filter) — same rule the space case enforces.
+        val value = field("/comp\nmore", caret = 8)
+        assertNull(SlashCommandAutocomplete.slashQueryFor(value))
+    }
+
+    @Test
+    fun `a newline immediately after the slash yields an empty query`() {
+        // "/\nmore" with the caret on the bare slash: the token is just "/",
+        // so the query is empty (the full catalog shows) — the newline bounds
+        // an already-empty token exactly like the bare "/" case.
+        val value = field("/\nmore", caret = 1)
+        assertEquals("", SlashCommandAutocomplete.slashQueryFor(value))
+    }
+
+    @Test
     fun `caret before the slash token end still opens with the bounded query`() {
         // "/compact" with the caret after "/comp" — query is bounded by the token
         // end, not the caret, so it still matches against the whole token.

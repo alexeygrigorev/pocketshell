@@ -52,4 +52,63 @@ class ShellQuotingTest {
         // needed, just the wrapping quotes.
         assertEquals("'a b\$c;d&e`f'", shellSingleQuote("a b\$c;d&e`f"))
     }
+
+    // -- quoteRemotePathForShell: the ~-expanding sibling (#777 G5) ------------
+    //
+    // The path-quoting variant used by the upload / download / listing paths in
+    // RealSshSession. Unlike shellSingleQuote it deliberately leaves a LEADING
+    // bare `~` or `~/` UNQUOTED so the remote shell still expands it to $HOME,
+    // single-quoting only the remainder. These pin the four branches: bare `~`,
+    // `~/`-prefixed, absolute, and the literal-`~` cases a POSIX shell would NOT
+    // expand (mid-word `~`, `~user/...`). Previously only covered indirectly.
+
+    @Test
+    fun bareTildeIsLeftUnquotedSoTheShellExpandsItToHome() {
+        // A bare `~` must stay an unquoted `~` so the shell expands it to $HOME.
+        assertEquals("~", quoteRemotePathForShell("~"))
+    }
+
+    @Test
+    fun tildeSlashPrefixExpandsButTheRemainderIsQuoted() {
+        // `~/a b/c.png` → `~/'a b/c.png'`: the `~/` expands, the rest (which has
+        // a space) is single-quoted so it can't break the command line.
+        assertEquals("~/'a b/c.png'", quoteRemotePathForShell("~/a b/c.png"))
+    }
+
+    @Test
+    fun tildeSlashWithEmptyRemainderStaysExpandable() {
+        // `~/` with nothing after it stays `~/` (still expandable, nothing to
+        // quote) — the empty-remainder branch.
+        assertEquals("~/", quoteRemotePathForShell("~/"))
+    }
+
+    @Test
+    fun absolutePathIsFullySingleQuoted() {
+        // No leading tilde → the whole path is single-quoted exactly like
+        // shellSingleQuote would.
+        assertEquals("'/etc/hosts'", quoteRemotePathForShell("/etc/hosts"))
+    }
+
+    @Test
+    fun namedTildeIsQuotedLiterallyNotExpanded() {
+        // `~user/...` is NOT a bare-`~`/`~/` prefix, so it is quoted literally
+        // (a POSIX shell expands `~user` to that user's home, but we only honour
+        // the bare-`~`-to-$HOME shorthand and quote everything else verbatim).
+        assertEquals("'~user/file'", quoteRemotePathForShell("~user/file"))
+    }
+
+    @Test
+    fun midWordTildeIsQuotedLiterally() {
+        // A `~` that is not the first character is just a literal tilde — the
+        // shell never expands it there, and we single-quote the whole path.
+        assertEquals("'/home/a~b/c'", quoteRemotePathForShell("/home/a~b/c"))
+    }
+
+    @Test
+    fun tildeSlashRemainderWithAnEmbeddedSingleQuoteIsEscaped() {
+        // The remainder after `~/` is run through the same single-quote escape,
+        // so an embedded `'` becomes the canonical close-escape-reopen sequence
+        // — the injection guard still applies past the expandable prefix.
+        assertEquals("~/'o'\\''reilly/x'", quoteRemotePathForShell("~/o'reilly/x"))
+    }
 }

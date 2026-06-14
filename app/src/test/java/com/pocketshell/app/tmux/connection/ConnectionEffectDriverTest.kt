@@ -385,6 +385,138 @@ class ConnectionEffectDriverTest {
         scope.cancel()
     }
 
+    // --- EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER drop-suppression gate ----
+    //
+    // `suppressTransportDrops` is the no-double-drive invariant: when it returns
+    // true (VM supplies `{ connectionPathIsNew && !appActive }`), a control-channel
+    // drop is NOT submitted as `TransportDropped` — the App-level background-grace
+    // window is the SOLE grace authority, so the driver must NOT start a second
+    // competing grace clock that walks the controller Live → … → Unreachable while
+    // backgrounded (the literal cause of the #635 spurious band on the next
+    // within-grace foreground). The default `{ false }` keeps the always-submit
+    // OLD-path behavior. These pin BOTH sides of the gate at gradle-test speed; the
+    // only prior guard was the on-device J1 e2e journey.
+
+    private fun stateNamesOf(driver: ConnectionEffectDriver): List<String> =
+        driver.observations.value
+            .filterIsInstance<ConnectionEffectDriver.Observation.StateTransition>()
+            .map { ConnectionEffectDriver.Observation.nameOf(it.to) }
+
+    @Test
+    fun suppressesTransportDropSubmissionWhenGateIsTrue() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            suppressTransportDrops = { true }, // backgrounded under the NEW path
+        ).also { it.start() }
+
+        // Drive to Live (warm enter: Attaching -> Live).
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
+
+        // A control-channel drop arrives while the gate is true: the driver records
+        // DropSuppressed and does NOT submit TransportDropped, so the controller is
+        // NEVER walked off Live (no Reattaching) — recovery is left to the single
+        // grace owner (the within-grace foreground heal).
+        tmuxPort.disconnectedFlow.emit(true)
+
+        assertTrue(
+            "the suppressed drop must be recorded as DropSuppressed",
+            driver.observations.value.any {
+                it is ConnectionEffectDriver.Observation.DropSuppressed
+            },
+        )
+        // The controller stays Live: NO TransportDropped was submitted, so there is
+        // no Live -> Reattaching transition.
+        assertEquals(
+            "a suppressed drop must NOT walk the controller off Live",
+            listOf("Idle", "Attaching", "Live"),
+            stateNamesOf(driver),
+        )
+        assertTrue(
+            "controller must remain Live (the single grace owner handles recovery)",
+            controller.state.value is ConnectionState.Live,
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun submitsTransportDropWhenGateIsFalse_theDefaultOldPathContract() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        // Default gate `{ false }` (omit the param) — the always-submit OLD-path
+        // behavior the toggle must not silently regress.
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
+
+        // With the gate false the same drop IS submitted: the controller heals
+        // Live -> Reattaching (the silent heal ladder).
+        tmuxPort.disconnectedFlow.emit(true)
+
+        assertTrue(
+            "the drop must NOT be recorded as suppressed when the gate is false",
+            driver.observations.value.none {
+                it is ConnectionEffectDriver.Observation.DropSuppressed
+            },
+        )
+        assertEquals(
+            "an unsuppressed drop walks the controller Live -> Reattaching",
+            listOf("Idle", "Attaching", "Live", "Reattaching"),
+            stateNamesOf(driver),
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun gateTrueStillNeverSuppressesTheLeaseUpTransportLiveFeed() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        // Cold (not warm) so the cold enter parks at Connecting and a real lease
+        // Up edge is what promotes it — proving the Up feed is not gated.
+        val transportPort = InertTransportPort(warm = false)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            suppressTransportDrops = { true }, // gate ON — but it must only gate DROPS
+        ).also { it.start() }
+
+        // Cold enter: not warm -> Connecting.
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        assertEquals(listOf("Idle", "Connecting"), stateNamesOf(driver))
+
+        // A healthy lease Up for the current host is the TransportLive feed; even
+        // with the drop gate ON it is NEVER suppressed — it must still promote the
+        // controller Connecting -> Attaching (a re-Connected lease always un-bands).
+        transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
+
+        assertEquals(
+            "the lease Up / TransportLive feed is never gated by suppressTransportDrops",
+            listOf("Idle", "Connecting", "Attaching"),
+            stateNamesOf(driver),
+        )
+        scope.cancel()
+    }
+
     @Test
     fun observesTransportDropHealThroughReattaching() = runTest {
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))

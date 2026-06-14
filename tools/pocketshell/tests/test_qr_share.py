@@ -26,11 +26,13 @@ import pathlib
 from typing import List
 from unittest.mock import patch
 
+import click
+import pytest
 from click.testing import CliRunner
 
 from pocketshell import qr_share
 from pocketshell.cli import cli
-from pocketshell.qr_share import qr_share_command
+from pocketshell.qr_share import _read_private_key, build_payload, qr_share_command
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +80,88 @@ def test_round_trip_multi_part() -> None:
 def test_envelope_prefix() -> None:
     [single] = qr_share.encode_envelopes("x", id="00112233")
     assert single.startswith("pocketshell.qr.v1?")
+
+
+# ---------------------------------------------------------------------------
+# Private-key reading — friendly errors over raw stack traces (#774 §6, #777 G2).
+#
+# `_read_private_key` is the single point where `qr-share` turns the resolved
+# IdentityFile path into the PEM that lands in the payload's `privateKeyPem`.
+# A bad path must surface as a Click-formatted error (exit 1 with a clear
+# message), never an unhandled `FileNotFoundError` traceback.
+# ---------------------------------------------------------------------------
+
+
+def test_read_private_key_missing_file_raises_friendly_click_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A non-existent key path raises a friendly `ClickException` naming the
+    path — not a raw `FileNotFoundError` / stack trace."""
+    missing = tmp_path / "id_does_not_exist"
+    assert not missing.exists()
+    with pytest.raises(click.ClickException) as exc_info:
+        _read_private_key(missing)
+    # The message is user-facing and points at the offending path so the user
+    # can fix the `--key` / IdentityFile they passed.
+    message = exc_info.value.message
+    assert "key file not found" in message
+    assert str(missing) in message
+
+
+def test_read_private_key_reads_and_strips_an_existing_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An existing key file is read and surrounding whitespace stripped (the
+    PEM lands without a trailing newline in the payload)."""
+    key_path = tmp_path / "id_ed25519"
+    key_path.write_text(
+        "\n-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n\n"
+    )
+    pem = _read_private_key(key_path)
+    assert pem.startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+    assert pem.endswith("-----END OPENSSH PRIVATE KEY-----")
+    # `.strip()` removed the leading/trailing blank lines.
+    assert not pem.startswith("\n")
+    assert not pem.endswith("\n")
+
+
+def test_read_private_key_empty_file_returns_empty_string_characterization(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Characterization of the CURRENT behaviour: an empty (or whitespace-only)
+    key file is NOT rejected by `_read_private_key` — it returns "" rather than
+    raising.
+
+    `_read_private_key` only guards the missing-path case; an empty existing
+    file falls through `.read_text().strip()` to "". Pinning this makes the gap
+    explicit: if the maintainer wants an empty-key guard, it belongs in
+    production (`_read_private_key`), and THIS assertion is the one that should
+    flip to `pytest.raises(...)`. (No production change here — #777 is
+    test-only.)
+    """
+    empty = tmp_path / "id_empty"
+    empty.write_text("   \n\t\n")
+    assert _read_private_key(empty) == ""
+
+
+def test_build_payload_missing_explicit_key_file_surfaces_friendly_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    """End-to-end: `build_payload(--host ... --key <missing>)` propagates the
+    friendly `_read_private_key` error rather than crashing — the path the CLI
+    actually takes when a user points `--key` at a bad file."""
+    missing = tmp_path / "nope_id"
+    with pytest.raises(click.ClickException) as exc_info:
+        build_payload(
+            alias=None,
+            host="prod.example.com",
+            user="ubuntu",
+            port=22,
+            key=str(missing),
+            name="prod",
+            key_name=None,
+        )
+    assert "key file not found" in exc_info.value.message
 
 
 # ---------------------------------------------------------------------------

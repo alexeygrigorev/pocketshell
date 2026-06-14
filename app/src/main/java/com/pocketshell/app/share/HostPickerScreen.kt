@@ -37,8 +37,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SpinnerSize
@@ -604,21 +606,26 @@ private fun TextDispatchDialog(
             // Enable iff at least one host in the user's list has a
             // registered live `tmux -CC` client in
             // [com.pocketshell.app.sessions.ActiveTmuxClients].
-            TextButton(
+            // #756: the more-frequent action → canonical Primary. The
+            // `enabled = hasAttachedSession` paste gate (#193) is preserved
+            // verbatim — Primary still dims to the shared disabled treatment
+            // when no session is attached.
+            PocketShellButton(
+                text = "Paste into session",
                 onClick = onPaste,
+                variant = ButtonVariant.Primary,
                 enabled = hasAttachedSession,
                 modifier = Modifier.testTag(SHARE_TEXT_PASTE_TAG),
-            ) {
-                Text(text = "Paste into session")
-            }
+            )
         },
         dismissButton = {
-            TextButton(
+            // Lower-emphasis affirmative beside the Primary paste → Secondary.
+            PocketShellButton(
+                text = "Save as file",
                 onClick = onSave,
+                variant = ButtonVariant.Secondary,
                 modifier = Modifier.testTag(SHARE_TEXT_SAVE_TAG),
-            ) {
-                Text(text = "Save as file")
-            }
+            )
         },
     )
 }
@@ -666,21 +673,23 @@ private fun PassphraseDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            // #756: the unlock CTA → canonical Primary. The
+            // `enabled = passphrase.isNotEmpty()` gate is preserved verbatim.
+            PocketShellButton(
+                text = "Unlock",
                 onClick = { onSubmit(passphrase.toCharArray()) },
+                variant = ButtonVariant.Primary,
                 enabled = passphrase.isNotEmpty(),
                 modifier = Modifier.testTag(SHARE_PASSPHRASE_SUBMIT_TAG),
-            ) {
-                Text(text = "Unlock")
-            }
+            )
         },
         dismissButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Cancel",
                 onClick = onCancel,
+                variant = ButtonVariant.Text,
                 modifier = Modifier.testTag(SHARE_PASSPHRASE_CANCEL_TAG),
-            ) {
-                Text(text = "Cancel")
-            }
+            )
         },
     )
 }

@@ -22,7 +22,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -38,7 +37,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -139,20 +140,26 @@ fun CostsScreen(
                 )
             },
             confirmButton = {
-                TextButton(
+                // #756: "Clear" permanently deletes the cost log → the canonical
+                // destructive confirm (red text, NOT a filled red slab). Replaces
+                // the ad-hoc accent-coloured TextButton; the destructive intent now
+                // reads from the shared variant instead of a per-call colour.
+                PocketShellButton(
+                    text = "Clear",
                     onClick = {
                         viewModel.clearLog()
                         showClearDialog = false
                     },
+                    variant = ButtonVariant.Destructive,
                     modifier = Modifier.testTag(COSTS_CLEAR_CONFIRM_TAG),
-                ) {
-                    Text("Clear", color = PocketShellColors.Accent)
-                }
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showClearDialog = false }) {
-                    Text("Cancel", color = PocketShellColors.TextSecondary)
-                }
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = { showClearDialog = false },
+                    variant = ButtonVariant.Text,
+                )
             },
             containerColor = PocketShellColors.Surface,
             titleContentColor = PocketShellColors.Text,

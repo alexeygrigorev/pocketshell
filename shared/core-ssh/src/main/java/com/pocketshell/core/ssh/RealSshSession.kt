@@ -195,14 +195,14 @@ internal class RealSshSession(
             try {
                 // -F follows by name, surviving rotation. Quote the path so
                 // weird filenames don't break the shell parsing.
-                val quoted = path.replace("'", "'\\''")
+                val quoted = shellSingleQuote(path)
                 val lineArg = if (fromLineExclusive >= 0) {
                     "-n +${fromLineExclusive + 1}"
                 } else {
                     "-n 0"
                 }
                 cmd = try {
-                    sessionChannel.exec("tail -F $lineArg '$quoted'")
+                    sessionChannel.exec("tail -F $lineArg $quoted")
                 } catch (e: IOException) {
                     // Channel-open / exec race against transport drop —
                     // same recoverable-disconnect story as the
@@ -502,9 +502,9 @@ internal class RealSshSession(
             }
         }
         try {
-            val quoted = remotePath.replace("'", "'\\''")
+            val quoted = shellSingleQuote(remotePath)
             command = try {
-                sessionChannel.exec("cat > '$quoted'")
+                sessionChannel.exec("cat > $quoted")
             } catch (t: Throwable) {
                 throw SshException(
                     "Could not start remote `cat` for upload of $name to $remotePath: ${t.message}",
@@ -709,14 +709,13 @@ internal class RealSshSession(
  * POSIX shell only expands `~` at the start of a word.
  */
 internal fun quoteRemotePathForShell(remotePath: String): String {
-    fun quote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
     return when {
         remotePath == "~" -> "~"
         remotePath.startsWith("~/") -> {
             val rest = remotePath.substring(2)
-            if (rest.isEmpty()) "~/" else "~/" + quote(rest)
+            if (rest.isEmpty()) "~/" else "~/" + shellSingleQuote(rest)
         }
-        else -> quote(remotePath)
+        else -> shellSingleQuote(remotePath)
     }
 }
 

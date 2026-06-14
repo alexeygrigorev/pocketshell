@@ -125,6 +125,79 @@ class FileViewerReviewSubmitTest {
         leaseManager.close()
     }
 
+    /**
+     * Issue #775 finding F1 — the `mkdir -p '<dir>'` directory prefix must be
+     * single-quote-escaped like the upload path, so a `$HOME` that contains a
+     * literal `'` cannot break out of the quotes (defense-in-depth: the input
+     * is the maintainer's own host config, but the whole write chain should be
+     * uniformly escaped). A hostile `$HOME` of `/home/o'reilly` must produce a
+     * `mkdir` command where the quote is neutralised as `'\''`, never a raw
+     * unbalanced `'`.
+     */
+    @Test
+    fun submitEscapesASingleQuoteInTheRemoteHomeForTheMkdirPrefix() = runBlocking {
+        val session = RecordingFileSession(remoteHome = "/home/o'reilly")
+        val leaseManager = SshLeaseManager(
+            connector = CountingConnector(session),
+            idleTtlMillis = 30_000L,
+        )
+        val vm = FileViewerViewModel(context, leaseManager)
+
+        vm.bind(request("/srv/Foo.kt"))
+        vm.state.awaitText()
+        vm.toggleReviewMode()
+        vm.setFileComment("looks good")
+
+        val event = vm.submitAndAwaitEvent("hetzner")
+        assertTrue("expected Success, was $event", event is ReviewSubmitEvent.Success)
+
+        assertEquals("expected exactly one mkdir -p", 1, session.mkdirCommands.size)
+        val mkdir = session.mkdirCommands.first()
+        // The whole directory argument is one fully single-quoted token with the
+        // embedded quote escaped as the canonical close-escape-reopen sequence.
+        assertEquals(
+            "mkdir prefix must be uniformly single-quote-escaped, was: $mkdir",
+            "mkdir -p '/home/o'\\''reilly/inbox/pocketshell/reviews'",
+            mkdir,
+        )
+        // No raw unbalanced single quote that would let the dir prefix break out
+        // of the quotes: every `'` is part of the inert `'\''` escape sequence.
+        assertEquals(
+            "every single quote must be balanced inside the escape, was: $mkdir",
+            0,
+            countUnescapedBreakouts(mkdir),
+        )
+
+        leaseManager.close()
+    }
+
+    @Test
+    fun submitMkdirPrefixIsUnchangedForANormalHome() = runBlocking {
+        val session = RecordingFileSession()
+        val leaseManager = SshLeaseManager(
+            connector = CountingConnector(session),
+            idleTtlMillis = 30_000L,
+        )
+        val vm = FileViewerViewModel(context, leaseManager)
+
+        vm.bind(request("/srv/Foo.kt"))
+        vm.state.awaitText()
+        vm.toggleReviewMode()
+        vm.setFileComment("looks good")
+        vm.submitAndAwaitEvent("hetzner")
+
+        assertEquals("expected exactly one mkdir -p", 1, session.mkdirCommands.size)
+        // No behaviour change for a normal quote-free home: a plain single-quoted
+        // directory token (no `'\''` escapes appear because there's nothing to
+        // escape).
+        assertEquals(
+            "mkdir -p '/home/tester/inbox/pocketshell/reviews'",
+            session.mkdirCommands.first(),
+        )
+
+        leaseManager.close()
+    }
+
     @Test
     fun submitFailureKeepsThePendingCommentsAndReportsTheError() = runBlocking {
         val session = RecordingFileSession(failUpload = true)
@@ -177,6 +250,21 @@ class FileViewerReviewSubmitTest {
     }
 
     // --- helpers ------------------------------------------------------------
+
+    /**
+     * Counts single quotes in [command] that are NOT part of a `'\''`
+     * close-escape-reopen sequence and are not the surrounding token quotes.
+     * A correctly escaped command leaves zero such "breakout" quotes. Used to
+     * assert the `mkdir` prefix can't escape its single-quoted argument.
+     */
+    private fun countUnescapedBreakouts(command: String): Int {
+        // Strip the canonical escape sequence first; any single quote left over
+        // that isn't a balanced wrapping quote would be a breakout.
+        val withoutEscapes = command.replace("'\\''", "")
+        // Remaining quotes must form balanced open/close pairs (even count).
+        val remaining = withoutEscapes.count { it == '\'' }
+        return remaining % 2
+    }
 
     private suspend fun FileViewerViewModel.submitAndAwaitEvent(host: String): ReviewSubmitEvent {
         val captured = java.util.concurrent.atomic.AtomicReference<ReviewSubmitEvent?>(null)
@@ -238,6 +326,7 @@ class FileViewerReviewSubmitTest {
      */
     private class RecordingFileSession(
         private val failUpload: Boolean = false,
+        private val remoteHome: String = "/home/tester",
     ) : SshSession {
         var closed: Boolean = false
         val mkdirCommands = mutableListOf<String>()
@@ -253,7 +342,7 @@ class FileViewerReviewSubmitTest {
                 return ExecResult(stdout = "", stderr = "", exitCode = 0)
             }
             // remoteHomeDirectory(): printf '%s\n' "$HOME"
-            return ExecResult(stdout = "/home/tester\n", stderr = "", exitCode = 0)
+            return ExecResult(stdout = "$remoteHome\n", stderr = "", exitCode = 0)
         }
 
         override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray {

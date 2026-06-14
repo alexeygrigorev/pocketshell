@@ -13,6 +13,7 @@ import com.pocketshell.core.ssh.SshFileNotFoundException
 import com.pocketshell.core.ssh.SshFileTooLargeException
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.shellSingleQuote
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -345,7 +346,7 @@ class FileViewerViewModel @Inject constructor(
                 ?: conventionalRemoteHome(request.username)
                 ?: throw SshException("Couldn't resolve the remote home directory")
             val reviewsDir = "$home/$REVIEWS_SUBDIR"
-            val mk = session.exec("mkdir -p '$reviewsDir'")
+            val mk = session.exec("mkdir -p ${shellSingleQuote(reviewsDir)}")
             if (mk.exitCode != 0) {
                 throw SshException(
                     "Couldn't create $reviewsDir: ${mk.stderr.ifBlank { mk.stdout.trim() }.ifBlank { "exit ${mk.exitCode}" }}",
@@ -483,7 +484,7 @@ class FileViewerViewModel @Inject constructor(
                 ?: conventionalRemoteHome(request.username)
                 ?: throw SshException("Couldn't resolve the remote home directory")
             val dir = "$home/$ANNOTATIONS_SUBDIR"
-            val mk = session.exec("mkdir -p '$dir'")
+            val mk = session.exec("mkdir -p ${shellSingleQuote(dir)}")
             if (mk.exitCode != 0) {
                 throw SshException(
                     "Couldn't create $dir: ${mk.stderr.ifBlank { mk.stdout.trim() }.ifBlank { "exit ${mk.exitCode}" }}",

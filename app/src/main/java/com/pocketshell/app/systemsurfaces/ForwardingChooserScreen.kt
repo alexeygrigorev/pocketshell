@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -40,7 +39,9 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -255,14 +256,19 @@ private fun ForwardingPassphraseDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onOpen, enabled = passphrase.isNotEmpty()) {
-                Text("Open")
-            }
+            PocketShellButton(
+                text = "Open",
+                onClick = onOpen,
+                variant = ButtonVariant.Primary,
+                enabled = passphrase.isNotEmpty(),
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+            )
         },
     )
 }

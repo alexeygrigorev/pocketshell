@@ -9,13 +9,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.theme.PocketShellColors
 
 @Composable
@@ -47,12 +48,12 @@ internal fun ConversationSyncStatusRow(
             fontSize = 12.sp,
         )
         if (onRetry != null && syncStatus.canRetryAgentStream) {
-            TextButton(
+            PocketShellButton(
+                text = "Retry",
                 onClick = onRetry,
+                variant = ButtonVariant.Text,
                 modifier = Modifier.testTag(CONVERSATION_SYNC_RETRY_TAG),
-            ) {
-                Text("Retry")
-            }
+            )
         }
     }
 }

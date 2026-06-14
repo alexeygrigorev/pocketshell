@@ -23,8 +23,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -46,9 +44,11 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -224,17 +224,21 @@ fun SshKeysManagementPane(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    viewModel.deleteKey(target)
-                    pendingDelete = null
-                }) {
-                    Text("Delete", color = PocketShellColors.Red)
-                }
+                PocketShellButton(
+                    text = "Delete",
+                    onClick = {
+                        viewModel.deleteKey(target)
+                        pendingDelete = null
+                    },
+                    variant = ButtonVariant.Destructive,
+                )
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) {
-                    Text("Cancel", color = PocketShellColors.Accent)
-                }
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = { pendingDelete = null },
+                    variant = ButtonVariant.Text,
+                )
             },
             containerColor = PocketShellColors.Surface,
         )
@@ -300,17 +304,13 @@ private fun KeyUnlockPanel(error: String?, inFlight: Boolean, onUnlock: () -> Un
             style = PocketShellType.bodyDense,
         )
         Spacer(modifier = Modifier.height(16.dp))
-        Button(
+        PocketShellButton(
+            text = if (inFlight) "Unlocking..." else "Unlock",
             onClick = onUnlock,
             enabled = !inFlight,
+            variant = ButtonVariant.Primary,
             modifier = Modifier.testTag(SSH_KEYS_UNLOCK_BUTTON_TAG),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = PocketShellColors.Accent,
-                contentColor = PocketShellColors.OnAccent,
-            ),
-        ) {
-            Text(if (inFlight) "Unlocking..." else "Unlock")
-        }
+        )
         error?.let {
             Spacer(modifier = Modifier.height(12.dp))
             Text(text = it, color = PocketShellColors.Red, fontSize = 12.sp)

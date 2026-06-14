@@ -20,8 +20,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,6 +47,8 @@ import com.journeyapps.barcodescanner.DecoratedBarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import com.google.zxing.BarcodeFormat
 import com.pocketshell.app.R
+import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -282,27 +282,20 @@ private fun PermissionDeniedBlock(
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
         if (onRetry != null) {
-            Button(
+            PocketShellButton(
+                text = context.getString(R.string.qr_scanner_permission_retry),
                 onClick = onRetry,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PocketShellColors.Accent,
-                    contentColor = PocketShellColors.OnAccent,
-                ),
+                variant = ButtonVariant.Primary,
                 modifier = Modifier.testTag(QR_SCANNER_PERMISSION_RETRY_TAG),
-            ) {
-                Text(context.getString(R.string.qr_scanner_permission_retry))
-            }
+            )
             Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
         }
-        TextButton(
+        PocketShellButton(
+            text = context.getString(R.string.qr_scanner_fallback_pick_file),
             onClick = onPickFile,
+            variant = ButtonVariant.Text,
             modifier = Modifier.testTag(QR_SCANNER_PICK_FILE_TAG),
-        ) {
-            Text(
-                text = context.getString(R.string.qr_scanner_fallback_pick_file),
-                color = PocketShellColors.Accent,
-            )
-        }
+        )
     }
 }
 
@@ -334,23 +327,18 @@ private fun ErrorBlock(
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
         Row {
-            Button(
+            PocketShellButton(
+                text = context.getString(R.string.qr_scanner_retry),
                 onClick = onRetry,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PocketShellColors.Accent,
-                    contentColor = PocketShellColors.OnAccent,
-                ),
+                variant = ButtonVariant.Primary,
                 modifier = Modifier.testTag(QR_SCANNER_ERROR_RETRY_TAG),
-            ) {
-                Text(context.getString(R.string.qr_scanner_retry))
-            }
+            )
             Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
-            TextButton(onClick = onClose) {
-                Text(
-                    text = context.getString(R.string.qr_scanner_close),
-                    color = PocketShellColors.Accent,
-                )
-            }
+            PocketShellButton(
+                text = context.getString(R.string.qr_scanner_close),
+                onClick = onClose,
+                variant = ButtonVariant.Text,
+            )
         }
     }
 }

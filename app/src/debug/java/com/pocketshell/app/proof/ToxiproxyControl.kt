@@ -45,6 +45,26 @@ class ToxiproxyControl(
         )
     }
 
+    /**
+     * Cap the downstream (server -> client) throughput with the stock toxiproxy
+     * `bandwidth` toxic. [rateKbps] is the sustained rate in kilobytes/second
+     * (toxiproxy's `rate` attribute). Used by the #576 Codex-redraw overflow
+     * proof to make a heavy tmux `-CC` `%output` redraw take longer than the
+     * `TmuxClient` 10 s command-timeout to drain, so an in-flight control
+     * command's `%begin`/`%end` response sits behind the backlog and trips
+     * `FatalClose` -> reader EOF -> reconnect. The bandwidth cap turns that
+     * timing-dependent race into a pinned, deterministic threshold
+     * (`redraw_bytes / rate > commandTimeoutMs`).
+     */
+    fun addBandwidthLimit(rateKbps: Int) {
+        addToxic(
+            name = "bandwidth_downstream",
+            type = "bandwidth",
+            stream = "downstream",
+            attributesJson = """{"rate":$rateKbps}""",
+        )
+    }
+
     fun clearToxics() {
         KNOWN_TOXICS.forEach { name ->
             runCatching { transport.request("DELETE", "/proxies/$PROXY_NAME/toxics/$name", null) }
@@ -62,11 +82,21 @@ class ToxiproxyControl(
     }
 
     private fun createProxy() {
-        transport.request(
-            "POST",
-            "/proxies",
-            """{"name":"$PROXY_NAME","listen":"0.0.0.0:2228","upstream":"agents:22","enabled":true}""",
-        )
+        // Tolerate HTTP 409 "proxy already exists": toxiproxy is a single shared
+        // instance, so when more than one connected lane resets concurrently the
+        // DELETE+POST pair can interleave (one lane's POST lands after another
+        // re-created the proxy). The post-condition of [reset] — an enabled
+        // `agents_ssh` proxy on :2228 — still holds, so a 409 is benign and must
+        // not fail the reset.
+        runCatching {
+            transport.request(
+                "POST",
+                "/proxies",
+                """{"name":"$PROXY_NAME","listen":"0.0.0.0:2228","upstream":"agents:22","enabled":true}""",
+            )
+        }.onFailure { error ->
+            if (error.message?.contains("HTTP 409") != true) throw error
+        }
     }
 
     private fun addToxic(name: String, type: String, stream: String, attributesJson: String) {
@@ -84,6 +114,7 @@ class ToxiproxyControl(
             "blackhole_downstream",
             "latency_upstream",
             "latency_downstream",
+            "bandwidth_downstream",
         )
     }
 }

@@ -78,6 +78,16 @@ NETWORK_FAULT_CLASSES=(
   # hanging indefinitely. Reuses network-fault-proxy:2228 + toxiproxy API:8474
   # (no new fixture).
   "$FQCN_PREFIX.KeepAliveDeadPeerDetectionE2eTest"
+  # Issue #576 / J4: CodexRedrawOverflowReconnectE2eTest is a NetworkFaultProofBase
+  # subclass (toxiproxy bandwidth toxic on 2228/8474). It is a deterministic RED
+  # proof — a heavy Codex alt-screen redraw whose %output backlog can't drain in
+  # the 10 s tmux command-timeout window self-inflicts a FatalClose -> reader EOF
+  # -> reconnect. It FAILS on current main (the bug reproduces) by design, so it
+  # is DELIBERATELY NOT in this run-list yet: enrolling a known-RED test would make
+  # nightly red. The P4 connection-core production fix (command-deadline accounting
+  # / FatalClose policy) flips it GREEN, and THAT PR uncomments the line below to
+  # enroll it as the standing nightly regression guard.
+  # "$FQCN_PREFIX.CodexRedrawOverflowReconnectE2eTest"
 )
 
 # The bootstrap setup-scenario class (opt-in via pocketshellBootstrapScenarios).

@@ -1,9 +1,11 @@
 package com.pocketshell.uikit.components
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -14,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * The enumerated variant set for [PocketShellButton] (#756).
@@ -72,10 +75,22 @@ enum class ButtonVariant {
  * a button that needs an icon + label or other custom row content (it still
  * inherits the variant container/shape/disabled treatment).
  *
+ * [compact] is the dense affordance (#756, compact-variant batch): an inline
+ * action sitting inside a banner / dialog / dense card row — `Dismiss`, `Retry`,
+ * `Update`, `Copy keys from…` — where the default ~14sp button label and tall
+ * Material touch padding would dominate the dense block. It paints the SAME
+ * variant colour / shape / disabled grammar, only at the [PocketShellType.bodyDense]
+ * (13sp) rung with tighter content padding, so the 6 screens that hand-rolled
+ * raw `TextButton`s at `labelSmall`/`bodyDense`/`12.sp` converge onto the canonical
+ * component without changing their look. Existing (non-compact) call sites are
+ * untouched: [compact] defaults to false.
+ *
  * @param text the button label (the common case).
  * @param onClick invoked on tap when [enabled].
  * @param variant which enumerated [ButtonVariant] treatment to paint.
  * @param enabled when false, the button is non-interactive and dimmed.
+ * @param compact when true, render the dense inline treatment (smaller label +
+ *   tighter padding) for banner/dialog/dense-row actions.
  */
 @Composable
 fun PocketShellButton(
@@ -84,15 +99,18 @@ fun PocketShellButton(
     modifier: Modifier = Modifier,
     variant: ButtonVariant = ButtonVariant.Primary,
     enabled: Boolean = true,
+    compact: Boolean = false,
 ) {
     PocketShellButton(
         onClick = onClick,
         modifier = modifier,
         variant = variant,
         enabled = enabled,
+        compact = compact,
     ) {
         Text(
             text = text,
+            style = if (compact) PocketShellType.bodyDense else LocalTextStyle.current,
             fontWeight = if (variant == ButtonVariant.Primary) FontWeight.SemiBold else FontWeight.Medium,
         )
     }
@@ -101,7 +119,9 @@ fun PocketShellButton(
 /**
  * [PocketShellButton] with a custom [content] slot (icon + label, etc.). Use the
  * `text` overload above for the common label-only case. The variant's container,
- * shape, and disabled treatment still apply.
+ * shape, and disabled treatment still apply. [compact] applies the same dense
+ * padding/height as the `text` overload; supply a [PocketShellType.bodyDense]-sized
+ * label inside [content] to match.
  */
 @Composable
 fun PocketShellButton(
@@ -109,9 +129,14 @@ fun PocketShellButton(
     modifier: Modifier = Modifier,
     variant: ButtonVariant = ButtonVariant.Primary,
     enabled: Boolean = true,
+    compact: Boolean = false,
     content: @Composable RowScope.() -> Unit,
 ) {
     val semantic = LocalPocketShellSemantic.current
+    // Compact actions trim the tall default touch padding so the dense inline
+    // action sits flush in a banner/dialog row; the standard variants keep
+    // Material's default content padding untouched.
+    val contentPadding = if (compact) CompactContentPadding else null
     when (variant) {
         ButtonVariant.Primary -> {
             Button(
@@ -119,6 +144,7 @@ fun PocketShellButton(
                 modifier = modifier,
                 enabled = enabled,
                 shape = ButtonShape,
+                contentPadding = contentPadding ?: ButtonDefaults.ContentPadding,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = semantic.accent,
                     contentColor = PocketShellColors.OnAccent,
@@ -139,6 +165,7 @@ fun PocketShellButton(
                 modifier = modifier,
                 enabled = enabled,
                 shape = ButtonShape,
+                contentPadding = contentPadding ?: ButtonDefaults.ContentPadding,
                 border = if (enabled) {
                     BorderStroke(1.dp, semantic.accentDim)
                 } else {
@@ -160,6 +187,7 @@ fun PocketShellButton(
                 modifier = modifier,
                 enabled = enabled,
                 shape = ButtonShape,
+                contentPadding = contentPadding ?: ButtonDefaults.TextButtonContentPadding,
                 colors = ButtonDefaults.textButtonColors(
                     contentColor = PocketShellColors.TextSecondary,
                     disabledContentColor = PocketShellColors.TextMuted,
@@ -176,6 +204,7 @@ fun PocketShellButton(
                 modifier = modifier,
                 enabled = enabled,
                 shape = ButtonShape,
+                contentPadding = contentPadding ?: ButtonDefaults.TextButtonContentPadding,
                 colors = ButtonDefaults.textButtonColors(
                     contentColor = semantic.statusError,
                     disabledContentColor = PocketShellColors.TextMuted,
@@ -193,3 +222,12 @@ fun PocketShellButton(
  * so there is a single source of truth for the radius.
  */
 private val ButtonShape = PocketShellShapes.small
+
+/**
+ * Tighter content padding for the [compact] affordance. Trims Material's default
+ * tall touch padding so a dense inline action (banner Dismiss/Retry, dialog
+ * Update, "Copy keys from…") sits flush in its row instead of dominating it,
+ * matching the look of the raw `TextButton`s the 6 dense screens previously
+ * hand-rolled. Horizontal stays modest so the label still has breathing room.
+ */
+private val CompactContentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)

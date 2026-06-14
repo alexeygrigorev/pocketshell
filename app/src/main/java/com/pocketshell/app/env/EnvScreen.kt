@@ -28,7 +28,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -212,9 +211,12 @@ private fun EnvBanner(message: String, onDismiss: () -> Unit) {
             style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
-        }
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            variant = ButtonVariant.Text,
+            compact = true,
+        )
     }
 }
 
@@ -271,9 +273,13 @@ private fun EnvKeyList(
         }
         if (canCopy) {
             item {
-                TextButton(onClick = onCopyFrom, modifier = Modifier.testTag(ENV_COPY_FROM_TAG)) {
-                    Text("Copy keys from another folder", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
-                }
+                PocketShellButton(
+                    text = "Copy keys from another folder",
+                    onClick = onCopyFrom,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(ENV_COPY_FROM_TAG),
+                )
             }
         }
         if (keys.isEmpty()) {

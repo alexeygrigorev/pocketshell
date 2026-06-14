@@ -18,7 +18,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,8 +33,10 @@ import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.ProgressBar
@@ -370,16 +371,13 @@ fun UsageWarningBanner(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
-        TextButton(
+        PocketShellButton(
+            text = "Dismiss",
             onClick = onDismiss,
+            variant = ButtonVariant.Text,
+            compact = true,
             modifier = Modifier.testTag(usageBannerDismissTagFor(provider.provider)),
-        ) {
-            Text(
-                text = "Dismiss",
-                color = PocketShellColors.TextSecondary,
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
+        )
     }
 }
 

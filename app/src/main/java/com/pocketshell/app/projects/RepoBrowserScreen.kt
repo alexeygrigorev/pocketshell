@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -346,12 +345,13 @@ private fun ActionErrorBanner(message: String, onDismiss: () -> Unit) {
             style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
-        TextButton(
+        PocketShellButton(
+            text = "Dismiss",
             onClick = onDismiss,
+            variant = ButtonVariant.Destructive,
+            compact = true,
             modifier = Modifier.testTag(REPO_BROWSER_ACTION_ERROR_DISMISS_TAG),
-        ) {
-            Text("Dismiss", color = PocketShellColors.Red, style = MaterialTheme.typography.labelSmall)
-        }
+        )
     }
 }
 

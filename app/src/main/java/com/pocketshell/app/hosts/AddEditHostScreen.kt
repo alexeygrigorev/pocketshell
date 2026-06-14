@@ -26,7 +26,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -407,17 +406,13 @@ private fun FormHeader(
         },
         trailing = {
             if (onScanQr != null) {
-                TextButton(
+                PocketShellButton(
+                    text = "Scan QR",
                     onClick = onScanQr,
+                    variant = ButtonVariant.Text,
+                    compact = true,
                     modifier = Modifier.testTag(ADD_HOST_SCAN_QR_TAG),
-                ) {
-                    Text(
-                        text = "Scan QR",
-                        color = PocketShellColors.Accent,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+                )
             }
         },
     )

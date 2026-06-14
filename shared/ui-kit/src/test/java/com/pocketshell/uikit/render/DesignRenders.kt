@@ -406,6 +406,64 @@ class DesignRenders {
         }
     }
 
+    /**
+     * Issue #756 (compact-variant batch): the dense `compact = true` affordance —
+     * the inline banner / dialog / dense-row action (`Dismiss`, `Retry`, `Update`,
+     * `Copy keys from…`) that the 6 custom-typography screens previously hand-rolled
+     * as raw `TextButton`s at `labelSmall`/`bodyDense`/`12.sp`.
+     *
+     * This fixture sits the compact treatment NEXT TO the standard one for each
+     * variant so a reviewer can eyeball that compact keeps the SAME variant
+     * colour/shape/disabled grammar, only at the smaller `bodyDense` (13sp) rung
+     * with tighter padding — and that the standard (non-compact) buttons above are
+     * visually unchanged. The bottom row reproduces a real migrated banner
+     * (`message … Dismiss`) the way EnvScreen / HostListScreen now compose it.
+     */
+    @Test
+    fun pocketShellButtonsCompact() = render("pocketshell-buttons-compact") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            ButtonRowLabelled("Text — standard vs compact") {
+                PocketShellButton(text = "Dismiss", onClick = {}, variant = ButtonVariant.Text)
+                PocketShellButton(text = "Dismiss", onClick = {}, variant = ButtonVariant.Text, compact = true)
+                PocketShellButton(
+                    text = "Dismiss",
+                    onClick = {},
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    enabled = false,
+                )
+            }
+            ButtonRowLabelled("Destructive — standard vs compact") {
+                PocketShellButton(text = "Dismiss", onClick = {}, variant = ButtonVariant.Destructive)
+                PocketShellButton(text = "Dismiss", onClick = {}, variant = ButtonVariant.Destructive, compact = true)
+            }
+            ButtonRowLabelled("Primary / Secondary — compact") {
+                PocketShellButton(text = "Update", onClick = {}, variant = ButtonVariant.Primary, compact = true)
+                PocketShellButton(text = "Browse", onClick = {}, variant = ButtonVariant.Secondary, compact = true)
+            }
+
+            LoadingLabel("Migrated banner — message + compact Text actions")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Couldn't check for updates (timeout)",
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyDense,
+                    modifier = Modifier.weight(1f),
+                )
+                PocketShellButton(text = "Retry", onClick = {}, variant = ButtonVariant.Text, compact = true)
+                PocketShellButton(text = "Dismiss", onClick = {}, variant = ButtonVariant.Text, compact = true)
+            }
+        }
+    }
+
     /** A labelled row pairing an enabled + disabled button for [pocketShellButtons]. */
     @Composable
     private fun ButtonRowLabelled(label: String, buttons: @Composable RowScope.() -> Unit) {

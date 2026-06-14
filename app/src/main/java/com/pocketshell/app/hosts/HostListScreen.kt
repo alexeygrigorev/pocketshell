@@ -28,7 +28,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -1409,9 +1408,12 @@ internal fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {
             style = PocketShellTypography.labelSmall,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
-        }
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            variant = ButtonVariant.Text,
+            compact = true,
+        )
     }
 }
 
@@ -1442,15 +1444,19 @@ internal fun UpdateCheckFailedBanner(
             style = PocketShellTypography.labelSmall,
             modifier = Modifier.weight(1f),
         )
-        TextButton(
+        PocketShellButton(
+            text = "Retry",
             onClick = onRetry,
+            variant = ButtonVariant.Text,
+            compact = true,
             modifier = Modifier.testTag(HOST_LIST_UPDATE_CHECK_RETRY_TAG),
-        ) {
-            Text("Retry", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
-        }
-        TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.TextSecondary, style = PocketShellTypography.labelSmall)
-        }
+        )
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            variant = ButtonVariant.Text,
+            compact = true,
+        )
     }
 }
 
@@ -1492,23 +1498,28 @@ internal fun AppUpdateWarningBanner(
             modifier = Modifier.weight(1f),
         )
         if (onUpdate != null) {
-            TextButton(
+            PocketShellButton(
+                text = "Update",
                 onClick = onUpdate,
+                variant = ButtonVariant.Text,
+                compact = true,
                 modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
-            ) {
-                Text("Update", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
-            }
+            )
         } else if (warning.releaseResolutionFailure != null) {
-            TextButton(
+            PocketShellButton(
+                text = "Retry",
                 onClick = onRetry,
+                variant = ButtonVariant.Text,
+                compact = true,
                 modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
-            ) {
-                Text("Retry", color = PocketShellColors.Accent, style = PocketShellTypography.labelSmall)
-            }
+            )
         }
-        TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.TextSecondary, style = PocketShellTypography.labelSmall)
-        }
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            variant = ButtonVariant.Text,
+            compact = true,
+        )
     }
 }
 

@@ -258,6 +258,77 @@ jobs:
             exit 1
           fi
 
+      # Issue #771: since 2026-06-13 the job died inside the emulator-runner
+      # action's OWN "Install Android SDK" step — `yes | sdkmanager --licenses`
+      # exited 1 BEFORE any AVD/emulator started (the later "could not connect to
+      # TCP port 5554" is just the action's cleanup handler, not a boot failure).
+      # This is a GitHub hosted-runner SDK-install/license flake we don't control
+      # via the action (the floating `v2` tag has NOT moved since v2.37.0 in
+      # March, so it is not an action regression). Harden the hosted SDK install
+      # BEFORE the action runs so the action's internal `sdkmanager --licenses`
+      # is a no-op against an already-accepted, already-warmed SDK:
+      #   * ensure cmdline-tools + sdkmanager are on PATH (the hosted image ships
+      #     them under $ANDROID_SDK_ROOT/cmdline-tools/latest/bin),
+      #   * accept ALL licenses in a retry loop (transient network/license-cache
+      #     failures are the documented failure mode here),
+      #   * pre-install the exact packages the action would otherwise fetch
+      #     (platform-tools, platforms;android-34, the api-34 google_apis x86_64
+      #     system image) with retries, so the action's install step finds them
+      #     present and cannot fail on a fresh download.
+      # The trailing `true` only guards the convenience step: if it still cannot
+      # accept here, the action's own license step remains the authoritative gate
+      # and a genuine boot/test failure still reddens the job via the classifier
+      # below. We never `exit 0` on a real test failure (no #636/#638 false-green).
+      - name: Pre-accept Android SDK licenses + warm up SDK (robust, issue #771)
+        run: |
+          set -u
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "Using SDK_ROOT=$SDK_ROOT"
+          SDKMANAGER=""
+          for cand in \
+            "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "$SDK_ROOT/cmdline-tools/bin/sdkmanager" \
+            "$(command -v sdkmanager 2>/dev/null || true)"; do
+            if [[ -n "$cand" && -x "$cand" ]]; then SDKMANAGER="$cand"; break; fi
+          done
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "::warning title=sdkmanager not found::Could not locate sdkmanager under $SDK_ROOT; leaving license/install to the emulator-runner action."
+            exit 0
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+
+          accept_licenses() {
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null 2>&1
+          }
+          echo "::group::Accept SDK licenses (retry x5)"
+          ok=""
+          for attempt in 1 2 3 4 5; do
+            if accept_licenses; then ok="yes"; echo "Licenses accepted on attempt $attempt"; break; fi
+            echo "License acceptance attempt $attempt failed; retrying in 5s..."
+            sleep 5
+          done
+          if [[ -z "$ok" ]]; then
+            echo "::warning title=License pre-accept could not complete::Falling back to the action's internal license step; a real failure will still redden the job."
+          fi
+          echo "::endgroup::"
+
+          install_pkgs() {
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+              "platform-tools" \
+              "platforms;android-34" \
+              "system-images;android-34;google_apis;x86_64" > /dev/null 2>&1
+          }
+          echo "::group::Warm up SDK packages (retry x3)"
+          for attempt in 1 2 3; do
+            if install_pkgs; then echo "SDK packages installed/verified on attempt $attempt"; break; fi
+            echo "SDK warm-up attempt $attempt failed; retrying in 10s..."
+            sleep 10
+          done
+          echo "::endgroup::"
+          # Convenience step — never let it redden the job; the action + classifier
+          # remain the authoritative gate.
+          true
+
       - name: Build SSH base image
         run: docker compose -f tests/docker/docker-compose.yml build sshd
 
@@ -309,7 +380,12 @@ jobs:
       - name: Run load-bearing journey subset on the emulator
         id: journey
         continue-on-error: true
-        uses: reactivecircus/android-emulator-runner@v2
+        # Issue #771: pin to the v2.37.0 commit (the floating `v2` tag currently
+        # resolves here) so a future surprise bump of the tag can't silently
+        # change SDK-install behaviour under us. Today's red was the GitHub
+        # hosted-runner SDK/license install (handled by the pre-accept step
+        # above), NOT an action regression — this pin is hygiene, not the fix.
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: 34
           target: google_apis
@@ -329,7 +405,8 @@ jobs:
         id: journey_retry
         if: steps.journey.outcome == 'failure'
         continue-on-error: true
-        uses: reactivecircus/android-emulator-runner@v2
+        # Issue #771: same v2.37.0 pin as the first attempt (see note above).
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: 34
           target: google_apis

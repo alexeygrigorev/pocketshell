@@ -26,6 +26,22 @@ from pocketshell.cli import main
 
 
 @pytest.fixture(autouse=True)
+def _agent_binary_on_path(monkeypatch):
+    """Pretend the agent CLI is on PATH for every test by default.
+
+    ``launch_agent`` now preflights ``shutil.which(argv[0])`` (#774 §3) and
+    exits 127 when the binary is missing. The exec-shape tests inject a fake
+    ``execvpe`` precisely to assume the binary exists, so without this the
+    suite would become host-PATH dependent (e.g. ``opencode`` not installed
+    on CI). The dedicated missing-binary test overrides this with
+    ``which -> None``.
+    """
+    monkeypatch.setattr(
+        agents.shutil, "which", lambda name, *a, **k: f"/usr/bin/{name}"
+    )
+
+
+@pytest.fixture(autouse=True)
 def _restore_cwd():
     """Restore the working directory after each test.
 
@@ -435,6 +451,58 @@ def test_launch_agent_missing_dir_exits_two():
             execvpe=lambda *a: None,
         )
     assert exc.value.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# Missing agent binary -> friendly 127 (issue #774 §3)
+#
+# Before the fix, a missing `claude`/`codex`/`opencode` let os.execvpe raise
+# a raw FileNotFoundError + Python traceback to the SSH client. The preflight
+# must instead emit the same friendly 127 + install hint every other
+# subcommand uses, and must NOT chdir or call execvpe.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", agents.AGENT_KINDS)
+def test_launch_agent_missing_binary_exits_127(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(agents.shutil, "which", lambda *a, **k: None)
+    called = {"execvpe": False}
+
+    def fake_execvpe(*args, **kwargs):  # pragma: no cover - must not run
+        called["execvpe"] = True
+
+    cwd_before = os.getcwd()
+    with pytest.raises(click.exceptions.Exit) as exc:
+        agents.launch_agent(
+            _FakeCtx(),
+            kind,
+            str(tmp_path),
+            skip_permissions=True,
+            config_dir=None,
+            execvpe=fake_execvpe,
+        )
+    assert exc.value.exit_code == 127
+    # Preflight fired before the side effects: no chdir into the folder, and
+    # the exec was never attempted (so no raw FileNotFoundError traceback).
+    assert called["execvpe"] is False
+    assert os.getcwd() == cwd_before
+
+
+def test_cli_agent_missing_binary_exits_127(tmp_path, monkeypatch, capsys):
+    """End-to-end: the CLI returns 127 + a friendly stderr hint, not a
+    traceback, when the agent binary is absent.
+    """
+    monkeypatch.setattr(agents.shutil, "which", lambda *a, **k: None)
+
+    def fake_execvpe(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("execvpe should not be reached on missing binary")
+
+    monkeypatch.setattr(agents.os, "execvpe", fake_execvpe)
+    rc = main(["agent", "opencode", "--dir", str(tmp_path)])
+    assert rc == 127
+    stderr = capsys.readouterr().err
+    assert "opencode" in stderr
+    assert "not installed" in stderr
 
 
 # ---------------------------------------------------------------------------

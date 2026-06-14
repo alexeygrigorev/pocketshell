@@ -658,3 +658,160 @@ def test_engine_choice_is_case_insensitive(fake_home: Path) -> None:
     assert result.exit_code == 0, result.output
     expected = "".join(json.dumps(e, sort_keys=True) + "\n" for e in events)
     assert result.output == expected
+
+
+# ----- path-traversal containment (issue #774 §2) --------------------
+#
+# `--session` / `--cwd` are app-supplied over SSH. Before #774 the raw
+# value was joined straight into a Path, so a `..`-laden session or cwd
+# escaped the per-engine log root and `agent-log` could `tail` any
+# `*.jsonl`-suffixed file the host user could read. These tests pin the
+# containment guard: a traversal MUST NOT resolve to a file outside the
+# intended root, even when that file physically exists.
+#
+# Each test plants a REAL secret `.jsonl` at the exact location the
+# unguarded resolver would escape to (outside the per-engine root but
+# inside the hermetic `fake_home` tmp dir), so on the unfixed code the
+# resolver genuinely returns it (red) and after the fix it is contained
+# (green).
+
+
+def _write_secret_jsonl(path: Path) -> Path:
+    """Create a real `.jsonl` exfil target at ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"role": "user", "text": "TOP-SECRET"}\n', encoding="utf-8")
+    return path
+
+
+def test_claude_session_traversal_with_cwd_is_rejected(fake_home: Path) -> None:
+    """`--cwd /x --session ../../../escape` must not escape the root.
+
+    From `<home>/.claude/projects/-x/`, three `../` segments climb back to
+    `<home>` (== fake_home), where a real secret is planted. The unguarded
+    resolver returns it; the guard must refuse.
+    """
+    # The encoded-cwd project dir must physically exist so the literal
+    # (unresolved) `..` path is reachable by `is_file()`.
+    proj = fake_home / ".claude" / "projects" / "-x"
+    proj.mkdir(parents=True)
+    secret = _write_secret_jsonl(fake_home / "escape.jsonl")
+    traversal = "../../../escape"  # lands at <home>/escape.jsonl
+
+    # Demonstrate the file is genuinely reachable by raw path-join (so the
+    # guard, not a missing file, is what blocks it).
+    raw = proj / f"{traversal}.jsonl"
+    assert raw.resolve() == secret.resolve()
+    assert raw.is_file()
+
+    assert agent_log_module._resolve_claude_path(traversal, "/x") is None
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["--engine", "claude", "--session", traversal, "--cwd", "/x"],
+    )
+    assert result.exit_code == 66, result.output
+    assert "TOP-SECRET" not in result.output
+
+
+def test_claude_session_traversal_without_cwd_is_rejected(fake_home: Path) -> None:
+    """The no-`--cwd` scan path joins the raw session under each project
+    dir; a `..` chain must be refused there too.
+    """
+    # A real project dir must exist for the scan loop to iterate.
+    proj = fake_home / ".claude" / "projects" / "-real"
+    proj.mkdir(parents=True)
+    secret = _write_secret_jsonl(fake_home / "escape2.jsonl")
+    # From <home>/.claude/projects/-real/, three ../ reach <home>.
+    traversal = "../../../escape2"
+    raw = proj / f"{traversal}.jsonl"
+    assert raw.resolve() == secret.resolve() and raw.is_file()
+
+    assert agent_log_module._resolve_claude_path(traversal, None) is None
+
+
+def test_codex_session_traversal_is_rejected(fake_home: Path) -> None:
+    """Codex `rglob`s its tree by the session filename; a `..`-laden name
+    still resolves to a traversal path, so it must be contained.
+    """
+    sessions = fake_home / ".codex" / "sessions"
+    sessions.mkdir(parents=True)
+    secret = _write_secret_jsonl(fake_home / "codexescape.jsonl")
+    # From <home>/.codex/sessions/, two ../ reach <home>.
+    traversal = "../../codexescape"
+    # rglob genuinely surfaces the traversal target on the unfixed code.
+    matches = list(sessions.rglob(f"{traversal}.jsonl"))
+    assert matches and matches[0].resolve() == secret.resolve()
+
+    assert agent_log_module._resolve_codex_path(traversal) is None
+
+
+def test_opencode_session_traversal_is_rejected(fake_home: Path) -> None:
+    """OpenCode joins `--session` directly under its root; a `..` chain
+    must not escape `~/.local/share/opencode/`.
+    """
+    root = fake_home / ".local" / "share" / "opencode"
+    root.mkdir(parents=True)
+    secret = _write_secret_jsonl(fake_home / "ocescape.jsonl")
+    # From <home>/.local/share/opencode/, three ../ reach <home>.
+    traversal = "../../../ocescape"
+    raw = root / f"{traversal}.jsonl"
+    assert raw.resolve() == secret.resolve() and raw.is_file()
+
+    assert agent_log_module._resolve_opencode_path(traversal) is None
+
+
+def test_claude_cwd_traversal_is_rejected(fake_home: Path) -> None:
+    """A `..`-laden `--cwd` must not escape the projects root.
+
+    `_encode_claude_cwd` only rewrites `/` -> `-`, leaving `..` segments
+    intact, so an unguarded `--cwd` chain `resolve()`s above the root.
+    """
+    # encoded cwd "-..-..-..-.." => projects/-..-..-..-../<session>.jsonl
+    secret = _write_secret_jsonl(fake_home / ".claude" / "viacwd.jsonl")
+    # cwd "/../../../.." encodes to "-..-..-..-..": from projects/ that dir
+    # walks up to <home>/.claude where the secret sits.
+    resolved = agent_log_module._resolve_claude_path("viacwd", "/../../../..")
+    # On the unfixed code this could surface the planted secret; the guard
+    # must return None.
+    assert resolved is None
+    assert secret.is_file()
+
+
+def test_absolute_session_is_rejected(fake_home: Path, tmp_path: Path) -> None:
+    """An absolute `--session` path must be refused for every engine.
+
+    `Path(root) / "/etc/foo.jsonl"` discards `root` entirely in pathlib,
+    so without a guard an absolute session reads straight off the host fs.
+    """
+    outside = tmp_path.parent / "abs_secret.jsonl"
+    secret = _write_secret_jsonl(outside)
+    abs_session = str(secret)  # absolute, ends in .jsonl, real file
+    assert secret.is_file()
+    assert agent_log_module._resolve_claude_path(abs_session, "/x") is None
+    assert agent_log_module._resolve_codex_path(abs_session) is None
+    assert agent_log_module._resolve_opencode_path(abs_session) is None
+
+
+def test_legitimate_session_through_symlinked_home_still_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real home reached via a symlink must still resolve (top risk a).
+
+    The containment check `resolve()`s both sides, so a symlinked home
+    does not falsely trip the guard for a legitimate in-root session.
+    """
+    real_home = tmp_path / "real_home"
+    real_home.mkdir()
+    link_home = tmp_path / "link_home"
+    link_home.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: link_home))
+
+    session = "legit"
+    events = _sample_events("legit")
+    log_path = real_home / ".claude" / "projects" / "-home-uc" / f"{session}.jsonl"
+    _write_jsonl(log_path, events)
+
+    resolved = agent_log_module._resolve_claude_path(session, "/home/uc")
+    assert resolved is not None
+    assert resolved.resolve() == log_path.resolve()

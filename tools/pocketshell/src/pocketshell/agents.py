@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -327,6 +328,21 @@ def seed_claude_trust(config_path: Path, directory: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _agent_missing_message(kind: str) -> str:
+    """Friendly install hint shown when the agent CLI is not on PATH.
+
+    Mirrors the missing-binary wording used by ``pocketshell.sessions`` /
+    ``pocketshell.usage`` / ``pocketshell.jobs`` so the user sees a
+    consistent ``127`` + install-hint message whichever subcommand
+    surfaces the failure first, instead of a raw ``FileNotFoundError``
+    traceback from ``os.execvpe``.
+    """
+    return (
+        f"pocketshell: `{kind}` is not installed on this host (not on PATH). "
+        f"Install the {kind} CLI and re-run."
+    )
+
+
 def _resolve_dir(ctx: click.Context, directory: str) -> Path:
     """Expand ``directory`` and require it to be an existing folder."""
     path = Path(os.path.expanduser(directory))
@@ -376,6 +392,16 @@ def launch_agent(
         extra_env=extra_env,
     )
     argv = build_argv(kind, skip_permissions=skip_permissions)
+
+    # Preflight: confirm the agent CLI is on PATH *before* os.chdir + exec.
+    # Without this, a missing `claude`/`codex`/`opencode` makes os.execvpe
+    # raise FileNotFoundError and dump a raw Python traceback to the SSH
+    # client. Emit the same friendly 127 + install hint every other
+    # subcommand uses instead (#774 §3).
+    if shutil.which(argv[0]) is None:
+        click.echo(_agent_missing_message(kind), err=True)
+        ctx.exit(127)
+        return
 
     # Run from the folder so the agent's cwd is correct.
     os.chdir(resolved_dir)

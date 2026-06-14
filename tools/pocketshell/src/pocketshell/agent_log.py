@@ -129,6 +129,36 @@ def _encode_claude_cwd(cwd: str) -> str:
     return trimmed.replace("/", "-")
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    """True when ``path`` is ``root`` or a descendant, after resolving both.
+
+    Mirrors ``prune_attachments._is_within`` / the ``repos.safe_clone_target``
+    containment pattern used elsewhere in this package. Both sides are
+    ``resolve()``-d first so a legitimately symlinked HOME (e.g. ``/home`` ->
+    ``/data/home``) does not falsely trip the guard — only genuine traversal
+    *out* of the per-engine root is rejected.
+    """
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _contained_candidate(candidate: Path, root: Path) -> Optional[Path]:
+    """Return ``candidate`` only if it is a regular file inside ``root``.
+
+    The single choke point that closes the ``--session`` / ``--cwd`` path
+    traversal (#774 §2): an app-supplied name carrying ``..`` segments or an
+    absolute component is rejected because the resolved candidate escapes the
+    per-engine log root. ``.jsonl`` suffix + "is a regular file" remain
+    necessary but are no longer the *only* fence.
+    """
+    if not _is_within(candidate, root):
+        return None
+    return candidate if candidate.is_file() else None
+
+
 def _ensure_jsonl_suffix(session: str) -> str:
     """Append ``.jsonl`` if the caller passed a bare session id.
 
@@ -157,15 +187,16 @@ def _resolve_claude_path(session: str, cwd: Optional[str]) -> Optional[Path]:
     root = _claude_projects_root()
     if cwd is not None:
         candidate = root / _encode_claude_cwd(cwd) / filename
-        return candidate if candidate.is_file() else None
+        return _contained_candidate(candidate, root)
     if not root.is_dir():
         return None
     for project_dir in sorted(root.iterdir()):
         if not project_dir.is_dir():
             continue
         candidate = project_dir / filename
-        if candidate.is_file():
-            return candidate
+        contained = _contained_candidate(candidate, root)
+        if contained is not None:
+            return contained
     return None
 
 
@@ -182,10 +213,12 @@ def _resolve_codex_path(session: str) -> Optional[Path]:
         return None
     # ``Path.rglob`` returns matches in directory-walk order; the codex
     # tree is shallow (year/month/day/file) so this is cheap even with
-    # months of history.
+    # months of history. A ``..``-laden session name can make rglob surface
+    # a traversal path, so each candidate is still containment-checked.
     for candidate in root.rglob(filename):
-        if candidate.is_file():
-            return candidate
+        contained = _contained_candidate(candidate, root)
+        if contained is not None:
+            return contained
     return None
 
 
@@ -201,7 +234,7 @@ def _resolve_opencode_path(session: str) -> Optional[Path]:
     if not root.is_dir():
         return None
     candidate = root / filename
-    return candidate if candidate.is_file() else None
+    return _contained_candidate(candidate, root)
 
 
 def _resolve_log_path(

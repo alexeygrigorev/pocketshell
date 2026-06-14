@@ -23,15 +23,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -53,8 +50,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
@@ -689,16 +688,12 @@ private fun ErrorPanel(
                         .padding(horizontal = PocketShellDensity.rowPadH),
                     horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
                 ) {
-                    TextButton(
+                    PocketShellButton(
+                        text = "Retry",
                         onClick = onRetry,
+                        variant = ButtonVariant.Text,
                         modifier = Modifier.testTag(GIT_HISTORY_RETRY_TAG),
-                    ) {
-                        Text(
-                            "Retry",
-                            color = PocketShellColors.Accent,
-                            style = PocketShellType.bodyDense,
-                        )
-                    }
+                    )
                 }
             }
         }
@@ -805,24 +800,17 @@ private fun CreateIssueSheet(
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
-                TextButton(
+                PocketShellButton(
+                    text = "Cancel",
                     onClick = onDismiss,
+                    variant = ButtonVariant.Text,
                     enabled = !submitting,
                     modifier = Modifier.testTag(GIT_CREATE_ISSUE_CANCEL_TAG),
-                ) {
-                    Text(
-                        "Cancel",
-                        color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.bodyDense,
-                    )
-                }
-                Button(
+                )
+                PocketShellButton(
                     onClick = { onSubmit(title.trim(), body.trim()) },
+                    variant = ButtonVariant.Primary,
                     enabled = !submitting && title.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = PocketShellColors.Accent,
-                        contentColor = PocketShellColors.Background,
-                    ),
                     modifier = Modifier
                         .weight(1f)
                         .testTag(GIT_CREATE_ISSUE_SUBMIT_TAG),
@@ -861,16 +849,12 @@ private fun CreateIssueSuccess(
         )
     }
     Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
-        TextButton(
+        PocketShellButton(
+            text = "Done",
             onClick = onClose,
+            variant = ButtonVariant.Text,
             modifier = Modifier.testTag(GIT_CREATE_ISSUE_CANCEL_TAG),
-        ) {
-            Text(
-                "Done",
-                color = PocketShellColors.Accent,
-                style = PocketShellType.bodyDense,
-            )
-        }
+        )
     }
 }
 

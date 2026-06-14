@@ -47,10 +47,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.SpinnerSize
@@ -236,9 +238,12 @@ private fun EnvErrorPanel(message: String, onRetry: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(text = message, color = PocketShellColors.Text, style = MaterialTheme.typography.bodyMedium)
-        TextButton(onClick = onRetry, modifier = Modifier.testTag(ENV_RETRY_TAG)) {
-            Text("Retry", color = PocketShellColors.Accent)
-        }
+        PocketShellButton(
+            text = "Retry",
+            onClick = onRetry,
+            variant = ButtonVariant.Text,
+            modifier = Modifier.testTag(ENV_RETRY_TAG),
+        )
     }
 }
 
@@ -407,16 +412,16 @@ private fun AddKeyDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = !busy,
+            PocketShellButton(
+                text = "Save",
                 onClick = { onConfirm(key, value, target) },
+                variant = ButtonVariant.Primary,
+                enabled = !busy,
                 modifier = Modifier.testTag(ENV_ADD_CONFIRM_TAG),
-            ) {
-                Text("Save", color = PocketShellColors.Accent)
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel", color = PocketShellColors.TextSecondary) }
+            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
         },
         containerColor = PocketShellColors.Surface,
     )
@@ -542,17 +547,15 @@ private fun CopyFromFolderSheet(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onDismiss) {
-                    Text("Cancel", color = PocketShellColors.TextSecondary)
-                }
+                PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
                 if (source != null) {
-                    TextButton(
-                        enabled = checked.isNotEmpty(),
+                    PocketShellButton(
+                        text = "Copy ${checked.size}",
                         onClick = { onConfirm(source.path, checked.toList(), target) },
+                        variant = ButtonVariant.Primary,
+                        enabled = checked.isNotEmpty(),
                         modifier = Modifier.testTag(ENV_COPY_CONFIRM_TAG),
-                    ) {
-                        Text("Copy ${checked.size}", color = PocketShellColors.Accent)
-                    }
+                    )
                 }
             }
         }

@@ -36,8 +36,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SpinnerSize
@@ -280,9 +282,12 @@ private fun RepoErrorPanel(message: String, onRetry: () -> Unit) {
             color = PocketShellColors.Text,
             style = PocketShellType.bodyDense,
         )
-        TextButton(onClick = onRetry, modifier = Modifier.testTag(REPO_BROWSER_RETRY_TAG)) {
-            Text("Retry", color = PocketShellColors.Accent)
-        }
+        PocketShellButton(
+            text = "Retry",
+            onClick = onRetry,
+            variant = ButtonVariant.Text,
+            modifier = Modifier.testTag(REPO_BROWSER_RETRY_TAG),
+        )
     }
 }
 

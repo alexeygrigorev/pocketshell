@@ -21,8 +21,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -47,9 +45,11 @@ import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -161,7 +161,8 @@ public fun SnippetsScreen(
                     .padding(horizontal = 16.dp)
                     .padding(bottom = 12.dp),
             ) {
-                Button(
+                PocketShellButton(
+                    text = addButtonTextForTab(selectedTab),
                     onClick = {
                         if (selectedTab == SnippetLibraryTab.Macros) {
                             showAddTemplateDialog = true
@@ -169,17 +170,9 @@ public fun SnippetsScreen(
                             showAddDialog = true
                         }
                     },
+                    variant = ButtonVariant.Primary,
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = PocketShellColors.Accent,
-                        contentColor = PocketShellColors.OnAccent,
-                    ),
-                ) {
-                    Text(
-                        text = addButtonTextForTab(selectedTab),
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+                )
             }
 
             error?.let { msg ->
@@ -368,17 +361,21 @@ public fun SnippetsScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    viewModel.deleteSnippet(target)
-                    pendingDelete = null
-                }) {
-                    Text("Delete", color = PocketShellColors.Red)
-                }
+                PocketShellButton(
+                    text = "Delete",
+                    onClick = {
+                        viewModel.deleteSnippet(target)
+                        pendingDelete = null
+                    },
+                    variant = ButtonVariant.Destructive,
+                )
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) {
-                    Text("Cancel", color = PocketShellColors.Accent)
-                }
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = { pendingDelete = null },
+                    variant = ButtonVariant.Text,
+                )
             },
             containerColor = PocketShellColors.Surface,
         )
@@ -395,17 +392,21 @@ public fun SnippetsScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    commandTemplatesViewModel.deleteTemplate(target)
-                    pendingTemplateDelete = null
-                }) {
-                    Text("Delete", color = PocketShellColors.Red)
-                }
+                PocketShellButton(
+                    text = "Delete",
+                    onClick = {
+                        commandTemplatesViewModel.deleteTemplate(target)
+                        pendingTemplateDelete = null
+                    },
+                    variant = ButtonVariant.Destructive,
+                )
             },
             dismissButton = {
-                TextButton(onClick = { pendingTemplateDelete = null }) {
-                    Text("Cancel", color = PocketShellColors.Accent)
-                }
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = { pendingTemplateDelete = null },
+                    variant = ButtonVariant.Text,
+                )
             },
             containerColor = PocketShellColors.Surface,
         )
@@ -733,24 +734,15 @@ internal fun SnippetAddDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Save",
                 onClick = { onSave(body, kind) },
+                variant = ButtonVariant.Primary,
                 enabled = body.isNotBlank(),
-            ) {
-                Text(
-                    text = "Save",
-                    color = if (body.isNotBlank()) {
-                        PocketShellColors.Accent
-                    } else {
-                        PocketShellColors.TextMuted
-                    },
-                )
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,
@@ -831,27 +823,18 @@ internal fun SnippetEditorDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Save",
                 onClick = {
                     val normalised = label.trim().ifEmpty { null }
                     onSave(normalised, body, kind)
                 },
+                variant = ButtonVariant.Primary,
                 enabled = body.isNotBlank(),
-            ) {
-                Text(
-                    text = "Save",
-                    color = if (body.isNotBlank()) {
-                        PocketShellColors.Accent
-                    } else {
-                        PocketShellColors.TextMuted
-                    },
-                )
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,
@@ -897,18 +880,14 @@ internal fun SnippetRenameDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = {
-                    onSave(label.trim().ifEmpty { null })
-                },
-            ) {
-                Text(text = "Save", color = PocketShellColors.Accent)
-            }
+            PocketShellButton(
+                text = "Save",
+                onClick = { onSave(label.trim().ifEmpty { null }) },
+                variant = ButtonVariant.Primary,
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,
@@ -969,20 +948,15 @@ internal fun CommandTemplateEditorDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Save",
                 onClick = { onSave(label, commands) },
+                variant = ButtonVariant.Primary,
                 enabled = ready,
-            ) {
-                Text(
-                    text = "Save",
-                    color = if (ready) PocketShellColors.Accent else PocketShellColors.TextMuted,
-                )
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,

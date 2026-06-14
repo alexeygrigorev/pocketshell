@@ -8599,25 +8599,6 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #554 test seam: seed [agentSessionMemory] without the SSH/JSONL
-     * round-trip so tests can assert the optimistic-reconnect reconciliation.
-     */
-    internal fun rememberAgentForTest(
-        windowId: String,
-        detection: AgentDetection,
-        wasOnConversation: Boolean,
-    ) {
-        val target = activeTarget ?: return
-        agentSessionMemory.remember(
-            hostId = target.hostId,
-            sessionName = target.sessionName,
-            windowId = windowId,
-            detection = detection,
-            wasOnConversation = wasOnConversation,
-        )
-    }
-
-    /**
      * Issue #554 test seam: drive the null-detection reconciliation directly
      * (the path [startAgentDetectionForPane] takes when live detection comes
      * back null) without standing up the SSH/JSONL detection round-trip.

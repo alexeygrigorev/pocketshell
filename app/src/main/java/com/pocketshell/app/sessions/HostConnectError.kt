@@ -153,11 +153,3 @@ private fun formatDetails(chain: List<Throwable>): String {
         if (message != null) "${t.javaClass.name}: $message" else t.javaClass.name
     }
 }
-
-/**
- * Convenience overload that pre-folds [SshException] wrapping. Useful
- * when callers already discarded the wrapper.
- */
-@Suppress("unused")
-fun summarizeConnectError(error: SshException): HostConnectErrorSummary =
-    summarizeConnectError(error as Throwable)

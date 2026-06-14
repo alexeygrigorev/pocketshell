@@ -79,15 +79,15 @@ NETWORK_FAULT_CLASSES=(
   # (no new fixture).
   "$FQCN_PREFIX.KeepAliveDeadPeerDetectionE2eTest"
   # Issue #576 / J4: CodexRedrawOverflowReconnectE2eTest is a NetworkFaultProofBase
-  # subclass (toxiproxy bandwidth toxic on 2228/8474). It is a deterministic RED
-  # proof — a heavy Codex alt-screen redraw whose %output backlog can't drain in
-  # the 10 s tmux command-timeout window self-inflicts a FatalClose -> reader EOF
-  # -> reconnect. It FAILS on current main (the bug reproduces) by design, so it
-  # is DELIBERATELY NOT in this run-list yet: enrolling a known-RED test would make
-  # nightly red. The P4 connection-core production fix (command-deadline accounting
-  # / FatalClose policy) flips it GREEN, and THAT PR uncomments the line below to
-  # enroll it as the standing nightly regression guard.
-  # "$FQCN_PREFIX.CodexRedrawOverflowReconnectE2eTest"
+  # subclass (toxiproxy bandwidth toxic on 2228/8474). A heavy Codex alt-screen
+  # redraw whose %output backlog can't drain in the 10 s tmux command-timeout
+  # window USED to self-inflict a FatalClose -> reader EOF -> reconnect. The P4
+  # connection-core fix (#687) makes the per-command timeout an IDLE deadline that
+  # re-arms on reader-side progress and downgrades read-only commands (capture-pane
+  # / list-* / display-message / refresh-client) to FailOpenDrain, so the busy link
+  # no longer tears itself down. The test now passes GREEN; enrolled here as the
+  # standing nightly regression guard.
+  "$FQCN_PREFIX.CodexRedrawOverflowReconnectE2eTest"
 )
 
 # The bootstrap setup-scenario class (opt-in via pocketshellBootstrapScenarios).

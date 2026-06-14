@@ -7,12 +7,16 @@ import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.core.tmux.protocol.ControlEventStream
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +28,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -371,10 +376,70 @@ internal interface CommandTimeoutGate {
     companion object {
         private val NOOP_CHECKPOINT = Checkpoint { }
 
-        val RealTime: CommandTimeoutGate = object : CommandTimeoutGate {
-            override suspend fun <T> run(timeoutMs: Long, body: suspend (Checkpoint) -> T): T? =
-                withTimeoutOrNull(timeoutMs) { body(NOOP_CHECKPOINT) }
-        }
+        /**
+         * Issue #576 (P4): the production gate is an **idle/inactivity**
+         * deadline, not a fixed wall-clock one. [timeoutMs] is the maximum
+         * tolerated *silence* on the control channel: the deadline re-arms
+         * whenever [readerActivityNanos] advances (the reader parsed another
+         * event), so the gate fires only after [timeoutMs] elapses with NO
+         * reader-side progress. A heavy `%output` redraw backlog keeps the
+         * reader continuously busy, so a command waiting behind it never
+         * self-inflicts a timeout while bytes are still flowing — fixing the
+         * #576 "busy link tears down a healthy session" regression.
+         *
+         * Crucially the signal is **reader-side** progress only: a blackholed
+         * / dead peer parses zero events, so [readerActivityNanos] stalls and
+         * the deadline fires exactly as a fixed timeout would. Dead-peer
+         * detection (sshj keepalive, a separate layer) is therefore unaffected
+         * — this gate cannot mask a genuinely silent channel.
+         *
+         * @param readerActivityNanos supplies the latest reader-progress
+         *   timestamp (`System.nanoTime()` units). Read on each poll tick.
+         */
+        fun realTime(readerActivityNanos: () -> Long): CommandTimeoutGate =
+            object : CommandTimeoutGate {
+                override suspend fun <T> run(timeoutMs: Long, body: suspend (Checkpoint) -> T): T? =
+                    coroutineScope {
+                        val bodyDeferred = async(start = CoroutineStart.UNDISPATCHED) {
+                            body(NOOP_CHECKPOINT)
+                        }
+                        // Idle-deadline watchdog: sleep until the deadline, and
+                        // if reader activity advanced while we slept, re-arm
+                        // from the new activity timestamp instead of firing.
+                        // The body wins the race if the response arrives first.
+                        val watchdog = async {
+                            val timeoutNanos = timeoutMs * 1_000_000L
+                            // Poll granularity: bounded so we re-check activity
+                            // periodically rather than oversleeping a full
+                            // window past the last byte. Small relative to
+                            // timeoutMs, capped so tiny timeouts still tick.
+                            val tickMs = (timeoutMs / 10).coerceIn(1L, 250L)
+                            while (true) {
+                                val idleNanos = System.nanoTime() - readerActivityNanos()
+                                if (idleNanos >= timeoutNanos) return@async
+                                val remainingNanos = timeoutNanos - idleNanos
+                                val sleepMs = (remainingNanos / 1_000_000L)
+                                    .coerceIn(1L, tickMs)
+                                delay(sleepMs)
+                            }
+                        }
+                        try {
+                            select {
+                                bodyDeferred.onAwait { result ->
+                                    watchdog.cancel()
+                                    result
+                                }
+                                watchdog.onAwait {
+                                    bodyDeferred.cancel()
+                                    null
+                                }
+                            }
+                        } finally {
+                            watchdog.cancel()
+                            bodyDeferred.cancel()
+                        }
+                    }
+            }
     }
 }
 
@@ -423,14 +488,33 @@ internal class RealTmuxClient(
     // for a session killed elsewhere, so a gone session is never resurrected.
     private val createIfMissing: Boolean = true,
     private val commandTimeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
-    // Issue #676: seam for the per-command response timeout. Production uses
-    // the real wall-clock gate ([CommandTimeoutGate.RealTime]); unit tests
-    // inject a deterministic gate so the timeout fires exactly when the test
-    // releases it instead of racing a tight wall-clock window against the
-    // runner's scheduler load. Default keeps production behaviour identical to
-    // a bare `withTimeoutOrNull(commandTimeoutMs)`.
-    private val commandTimeoutGate: CommandTimeoutGate = CommandTimeoutGate.RealTime,
+    // Issue #676 / #576 (P4): seam for the per-command response timeout. When
+    // left null, production wires the real idle-deadline gate
+    // ([CommandTimeoutGate.realTime]) keyed on reader-side activity, so the
+    // deadline fires only after the control channel has been *silent* for
+    // [commandTimeoutMs] — a busy-but-alive redraw backlog keeps re-arming it
+    // and never self-inflicts a close. Unit tests inject a deterministic gate
+    // so the timeout fires exactly when the test releases it instead of racing
+    // a tight wall-clock window against the runner's scheduler load.
+    commandTimeoutGate: CommandTimeoutGate? = null,
 ) : TmuxClient {
+    // Issue #576 (P4): monotonic counter of the last reader-side event the
+    // control-mode reader parsed (any `%begin`/`%end`/`%error`/`%output`).
+    // The idle-deadline gate re-arms whenever this advances, so a command
+    // waiting behind a heavy `%output` backlog only times out when bytes
+    // genuinely STOP flowing — not merely because 10 s of wall-clock elapsed
+    // while the reader was still busy draining. Keyed strictly on reader-side
+    // progress (NOT local write completion) so a blackholed link — which sends
+    // zero bytes — still fires the deadline and surfaces the real drop.
+    @Volatile
+    private var lastReaderActivityNanos: Long = System.nanoTime()
+
+    // Issue #676 / #576 (P4): the active gate. Resolved here (not as a default
+    // constructor arg) because the production idle gate needs a reference to
+    // this instance's [lastReaderActivityNanos], which isn't available at the
+    // constructor-default evaluation point.
+    private val commandTimeoutGate: CommandTimeoutGate =
+        commandTimeoutGate ?: CommandTimeoutGate.realTime { lastReaderActivityNanos }
     private val clientId: Long = NEXT_CLIENT_ID.incrementAndGet()
     private val clientHash: Int = System.identityHashCode(this)
 
@@ -1248,6 +1332,15 @@ internal class RealTmuxClient(
 
         try {
             stream.events(lines).collect { event ->
+                // Issue #576 (P4): record reader-side progress on EVERY parsed
+                // control event. The idle-deadline command gate re-arms off
+                // this, so a command waiting behind a long `%output` backlog
+                // does not self-inflict a fatal timeout while the link is
+                // observably still delivering bytes. This is the "busy ≠ dead"
+                // distinguisher: a blackholed link parses no events, so the
+                // counter stalls and the deadline still fires (dead-peer
+                // detection is unaffected).
+                lastReaderActivityNanos = System.nanoTime()
                 when (event) {
                     is ControlEvent.Begin -> {
                         val match = synchronized(responseCorrelationLock) {
@@ -1525,8 +1618,33 @@ internal class RealTmuxClient(
         private fun commandKind(command: String): String =
             command.trim().substringBefore(' ').ifBlank { "unknown" }
 
+        /**
+         * Issue #576 (P4): read-only / idempotent control commands whose late
+         * reply means "the answer is slow," NOT "the transport is dead." On a
+         * timeout these must fail OPEN (drain the late response, throw a
+         * recoverable exception to the caller) instead of tearing down the
+         * control channel. Defense-in-depth behind the idle-deadline gate: even
+         * if one of these did time out on a genuinely slow-but-alive link, it
+         * no longer self-inflicts an EOF + reconnect band.
+         *
+         * The structural / state-mutating remainder (e.g. `new-session`,
+         * `attach-session`) stays [CommandTimeoutMode.FatalClose] — a lost
+         * reply there genuinely desyncs the control channel, so a close is the
+         * conservative response.
+         */
+        private val FAIL_OPEN_COMMAND_KINDS = setOf(
+            "send-keys",
+            "capture-pane",
+            "display-message",
+            "refresh-client",
+            "list-panes",
+            "list-windows",
+            "list-sessions",
+            "list-clients",
+        )
+
         private fun timeoutModeForCommand(command: String): CommandTimeoutMode =
-            if (commandKind(command) == "send-keys") {
+            if (commandKind(command) in FAIL_OPEN_COMMAND_KINDS) {
                 CommandTimeoutMode.FailOpenDrain
             } else {
                 CommandTimeoutMode.FatalClose

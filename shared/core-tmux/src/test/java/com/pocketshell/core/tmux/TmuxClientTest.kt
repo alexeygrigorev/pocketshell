@@ -1246,6 +1246,70 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `capture-pane sendCommand timeout fails open and does not close client (issue 576 P4)`() = runBlocking {
+        // Issue #576 (P4): read-only capture-pane is now classified FailOpenDrain,
+        // so a late reply (e.g. behind a heavy redraw backlog) must NOT tear down
+        // the control channel — it throws a recoverable exception to the caller
+        // instead of self-inflicting an EOF + reconnect band.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        val diagnosticEvents = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        installDiagnosticsForClient(
+            client,
+            setOf("tmux_client_command_timeout", "tmux_client_reader_exit"),
+            diagnosticEvents,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val sent = scope.async { runCatching { client.sendCommand("capture-pane -p") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "capture-pane -p\n") { yield(); delay(10) }
+            }
+            // Primary response timeout, then the fail-open late-drain timeout.
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
+
+            assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify the command kind",
+                ex.message?.contains("tmux command `capture-pane` timed out") == true,
+            )
+            assertFalse("capture-pane timeout must NOT close the shell (#576 P4)", shell.closed)
+            assertFalse(
+                "capture-pane timeout must NOT trip the disconnected latch (#576 P4)",
+                client.disconnected.value,
+            )
+
+            val timeout = diagnosticEvents.first { it.first == "tmux_client_command_timeout" }.second
+            assertEquals("capture-pane", timeout["commandKind"])
+            assertEquals("fail-open", timeout["timeoutMode"])
+            assertTrue(
+                "capture-pane timeout must NOT emit a reader exit",
+                diagnosticEvents.none { it.first == "tmux_client_reader_exit" },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `non send-keys sendCommand timeout closes client and fails visibly`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

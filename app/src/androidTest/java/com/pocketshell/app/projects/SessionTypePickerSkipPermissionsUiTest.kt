@@ -82,10 +82,14 @@ class SessionTypePickerSkipPermissionsUiTest {
         compose.waitForIdle()
         assertTrue(lastChoice?.skipPermissions == true)
         assertTrue(lastChoice?.agent == AgentCli.Claude)
-        // Claude launches env-stripped (issue #627): `env -u … claude …`.
+        // Post-#627/#703 hard-cut (D22): the app emits the short server-side
+        // wrapper line, NOT the old inline `env -u … claude --dangerously…`.
+        // Skip-permissions defaults ON in the wrapper, so no extra flag.
         val skipOnCommand = lastChoice?.startCommand()
-        assertTrue(skipOnCommand?.startsWith("env -u ") == true)
-        assertTrue(skipOnCommand?.endsWith(" claude --dangerously-skip-permissions") == true)
+        assertTrue(
+            "expected short wrapper, got: $skipOnCommand",
+            skipOnCommand == "pocketshell agent claude --dir '/home/alexey/git/pocketshell'",
+        )
 
         // Switch to OpenCode -> the checkbox is hidden (no-op for OpenCode).
         compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG).performClick()
@@ -114,10 +118,14 @@ class SessionTypePickerSkipPermissionsUiTest {
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
         compose.waitForIdle()
         assertTrue(lastChoice?.skipPermissions == false)
-        // Claude launches env-stripped (issue #627): `env -u … claude` (no flag).
+        // Post-#627/#703 hard-cut (D22): the short wrapper line carries an
+        // explicit `--no-skip-permissions` when the box is unticked. No inline
+        // `env -u … claude`.
         val bareCommand = lastChoice?.startCommand()
-        assertTrue(bareCommand?.startsWith("env -u ") == true)
-        assertTrue(bareCommand?.endsWith(" claude") == true)
+        assertTrue(
+            "expected short wrapper with --no-skip-permissions, got: $bareCommand",
+            bareCommand == "pocketshell agent claude --dir '/srv/app' --no-skip-permissions",
+        )
     }
 
     @Test

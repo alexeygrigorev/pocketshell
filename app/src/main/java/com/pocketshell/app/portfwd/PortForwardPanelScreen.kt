@@ -16,14 +16,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -50,10 +48,12 @@ import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.terminal.ui.openUrlWithFallback
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
@@ -615,15 +615,10 @@ private fun ErrorBanner(error: String) {
 @Composable
 private fun EmptyScanningState(modifier: Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(modifier = Modifier.size(32.dp))
-            Spacer(Modifier.height(PocketShellSpacing.sm))
-            Text(
-                "Scanning ports...",
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyDense,
-            )
-        }
+        LoadingIndicator.Spinner(
+            size = SpinnerSize.Medium,
+            label = "Scanning ports...",
+        )
     }
 }
 

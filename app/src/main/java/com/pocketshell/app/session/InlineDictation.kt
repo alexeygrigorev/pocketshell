@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,6 +48,8 @@ import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperException
 import com.pocketshell.uikit.components.KeyBar
+import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -919,7 +920,7 @@ public class InlineDictationViewModel @Inject constructor(
  *    fill with accent border and an accent glyph. Same active-state
  *    treatment as a sticky modifier in [KeyBar] for visual consistency.
  *  - [InlineDictationViewModel.RecordingState.Transcribing] — surface-elev
- *    fill with a small in-place [CircularProgressIndicator] replacing
+ *    fill with a small in-place [LoadingIndicator.Spinner] replacing
  *    the mic glyph. No FAB-style spinner; we keep everything within the
  *    bar's 38dp height.
  *
@@ -1188,12 +1189,9 @@ private fun InlineMicSlot(
         contentAlignment = Alignment.Center,
     ) {
         if (state == InlineDictationViewModel.RecordingState.Transcribing) {
-            CircularProgressIndicator(
-                modifier = Modifier
-                    .size(16.dp)
-                    .testTag(INLINE_DICTATION_TRANSCRIBING_TAG),
-                color = PocketShellColors.Accent,
-                strokeWidth = 2.dp,
+            LoadingIndicator.Spinner(
+                modifier = Modifier.testTag(INLINE_DICTATION_TRANSCRIBING_TAG),
+                size = SpinnerSize.Small,
             )
         } else if (state == InlineDictationViewModel.RecordingState.Recording) {
             InlineMicWaveform(amplitude = amplitude)

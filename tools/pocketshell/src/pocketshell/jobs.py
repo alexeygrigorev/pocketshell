@@ -64,7 +64,9 @@ verbs). Instead:
 - `start`  invokes `tmuxctl jobs daemon` in the foreground (passes
            through `--poll-interval` and `--run-once`).
 - `status` uses `pgrep -f` to detect a running daemon process.
-- `stop`   uses `pkill -TERM -f` to signal the running daemon.
+- `stop`   resolves the daemon PID(s) with `pgrep -f`, re-validates
+           each candidate's argv, then sends SIGTERM via `os.kill` to
+           exactly those PIDs (never a blunt `pkill -f`).
 
 Per the daemon-mode spike (linked from the brief) `tmuxctl jobs
 daemon` is a *scheduler loop*, not an IPC daemon. A separate
@@ -76,24 +78,130 @@ refactor the scheduler.
 
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import click
 
-# Regex passed to `pgrep -f` / `pkill -f`. We anchor on `tmuxctl` being
-# preceded by either start-of-line or a path separator so the pattern
-# matches a real `…/tmuxctl jobs daemon …` invocation but does NOT
-# match an interactive shell whose argv contains the *substring*
+# Regex passed to `pgrep -f` to *find candidate* PIDs. We anchor on
+# `tmuxctl` being preceded by either start-of-line or a path separator
+# so the pattern matches a real `…/tmuxctl jobs daemon …` invocation but
+# does NOT match an interactive shell whose argv contains the *substring*
 # `tmuxctl jobs daemon` (e.g. an editor or another shell typing the
 # command). The trailing `( |$)` keeps us from matching
 # `tmuxctl jobs daemon-something-else` if such a verb ever appears.
+#
+# This regex is only the *first* filter. `pgrep -f` (and the old
+# `pkill -f`) match the pattern against the whole space-joined command
+# line, so a coincidental argv — e.g. `vim notes/tmuxctl jobs daemon.md`
+# — can still match. Before sending any signal we therefore re-validate
+# each candidate's actual argv vector via `_argv_is_daemon` so we only
+# ever signal a process whose argv genuinely *is* a `tmuxctl jobs daemon`
+# invocation. That makes `daemon stop` precise instead of a blunt
+# `pkill -f` that signals every matching command line on the host.
 _DAEMON_PROCESS_PATTERN = r"(^|/)tmuxctl jobs daemon( |$)"
 # Plain substring used only for human-facing diagnostics; never passed
 # to a process-matching tool.
 _DAEMON_HUMAN_LABEL = "tmuxctl jobs daemon"
+
+
+def _read_proc_argv(pid: int) -> Optional[list[str]]:
+    """Return the argv vector for ``pid`` from ``/proc/<pid>/cmdline``.
+
+    The cmdline pseudo-file is NUL-separated argv with a trailing NUL.
+    Returns ``None`` when the process is gone, unreadable, or the host
+    has no ``/proc`` (non-Linux) — callers treat ``None`` as "cannot
+    confirm this PID is the daemon" and skip it rather than guessing.
+    """
+    try:
+        raw = Path("/proc", str(pid), "cmdline").read_bytes()
+    except (OSError, ValueError):
+        return None
+    if not raw:
+        return None
+    parts = raw.split(b"\x00")
+    # A trailing NUL leaves an empty final element; drop empties.
+    return [p.decode("utf-8", "replace") for p in parts if p]
+
+
+def _argv_is_daemon(argv: Sequence[str]) -> bool:
+    """True iff ``argv`` is literally a ``tmuxctl jobs daemon`` invocation.
+
+    This inspects the discrete argv *vector* (not a joined string), so a
+    file path or buffer that merely *contains* the substring
+    ``tmuxctl jobs daemon`` cannot match: we require argv[0]'s basename to
+    be exactly ``tmuxctl`` (optionally a `python …/tmuxctl` shim) followed
+    by the ``jobs`` and ``daemon`` subcommand tokens as their own argv
+    elements.
+    """
+    tokens = list(argv)
+    if not tokens:
+        return False
+
+    # Skip a leading interpreter (`python`, `python3`, …) so a
+    # `python /usr/bin/tmuxctl jobs daemon` launch still matches on the
+    # tmuxctl token rather than the interpreter.
+    idx = 0
+    first = os.path.basename(tokens[0])
+    if first in ("python", "python3") or first.startswith("python3."):
+        idx = 1
+
+    if idx >= len(tokens):
+        return False
+    if os.path.basename(tokens[idx]) != "tmuxctl":
+        return False
+    rest = tokens[idx + 1 :]
+    return len(rest) >= 2 and rest[0] == "jobs" and rest[1] == "daemon"
+
+
+def _resolve_daemon_pids() -> list[int]:
+    """Resolve the PIDs of live `tmuxctl jobs daemon` processes, validated.
+
+    Uses `pgrep -f` as the cheap first pass to enumerate candidate PIDs,
+    then confirms each candidate's real argv with :func:`_argv_is_daemon`
+    so coincidental command-line matches are dropped. Our own PID is
+    always excluded. Returns ``[]`` when `pgrep` is unavailable or no
+    genuine daemon is running.
+    """
+    pgrep_path = shutil.which("pgrep")
+    if pgrep_path is None:
+        return []
+    completed = subprocess.run(
+        [pgrep_path, "-f", _DAEMON_PROCESS_PATTERN],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode not in (0, 1):
+        # pgrep error (>=2): surface as "no resolvable PIDs" and let the
+        # caller decide. We do not signal anything on an enumeration error.
+        return []
+
+    own_pid = os.getpid()
+    pids: list[int] = []
+    for line in completed.stdout.split():
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid == own_pid:
+            continue
+        argv = _read_proc_argv(pid)
+        if argv is None:
+            # No /proc (non-Linux) — fall back to trusting pgrep's match
+            # so the feature still works off-Linux, but only when we could
+            # not read argv at all, never to widen a readable mismatch.
+            if not Path("/proc").exists():
+                pids.append(pid)
+            continue
+        if _argv_is_daemon(argv):
+            pids.append(pid)
+    return pids
 
 
 def _resolve_tmuxctl_binary() -> Optional[str]:
@@ -609,8 +717,10 @@ def _is_daemon_running() -> bool:
     help=(
         "Control the tmuxctl recurring-jobs scheduler.\n\n"
         "`start` runs `tmuxctl jobs daemon` in the foreground; `status` "
-        "and `stop` query/signal the running process via pgrep/pkill. The "
-        "scheduler loop and SQLite database remain owned by `tmuxctl`."
+        "and `stop` query/signal the running process via `pgrep` + argv "
+        "validation (stop sends SIGTERM only to the resolved daemon PIDs, "
+        "not a blunt `pkill -f`). The scheduler loop and SQLite database "
+        "remain owned by `tmuxctl`."
     ),
 )
 def daemon_group() -> None:
@@ -682,33 +792,46 @@ def daemon_status(ctx: click.Context) -> None:
 def daemon_stop(ctx: click.Context) -> None:
     """Signal a running `tmuxctl jobs daemon` to terminate.
 
-    Uses `pkill -TERM -f` so SIGTERM is delivered to every matching
-    scheduler process. If no daemon is running we exit 0 (idempotent
-    stop), matching `systemctl stop` semantics for an already-stopped
-    unit.
+    Resolves the daemon's PID(s) with `pgrep -f`, re-validates each
+    candidate's actual argv vector (so a coincidental command line that
+    merely *contains* the pattern is never signalled), then delivers
+    SIGTERM directly via :func:`os.kill` to exactly those PIDs. This
+    replaces the old blunt `pkill -TERM -f`, which signalled *every*
+    process whose full command line matched the pattern. If no daemon is
+    running we exit 0 (idempotent stop), matching `systemctl stop`
+    semantics for an already-stopped unit.
     """
-    pkill_path = shutil.which("pkill")
-    if pkill_path is None:
+    if shutil.which("pgrep") is None:
         click.echo(
-            "pocketshell: `pkill` is not available on this host; cannot "
+            "pocketshell: `pgrep` is not available on this host; cannot "
             "stop the scheduler.",
             err=True,
         )
         ctx.exit(127)
-    completed = subprocess.run(
-        [pkill_path, "-TERM", "-f", _DAEMON_PROCESS_PATTERN],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    # pkill exit codes: 0 = signalled at least one, 1 = no match,
-    # others = error. Treat "no match" as a successful idempotent stop.
-    if completed.returncode == 0:
-        click.echo("stopped")
-        return
-    if completed.returncode == 1:
+
+    pids = _resolve_daemon_pids()
+    if not pids:
         click.echo("not running")
         return
-    if completed.stderr:
-        sys.stderr.write(completed.stderr)
-    ctx.exit(completed.returncode)
+
+    signalled = 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            # Raced with the process exiting between resolve and kill;
+            # treat as already gone.
+            continue
+        except PermissionError as exc:
+            sys.stderr.write(
+                f"pocketshell: cannot signal pid {pid}: {exc}\n"
+            )
+            continue
+        signalled += 1
+
+    if signalled:
+        click.echo("stopped")
+        return
+    # We found candidate PIDs but every one vanished or was unsignalable;
+    # the daemon is effectively not running anymore.
+    click.echo("not running")

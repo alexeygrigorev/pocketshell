@@ -20,8 +20,10 @@ The second-PR scope exercises:
 - `pocketshell jobs daemon start` forwards to `tmuxctl jobs daemon`
   with optional `--poll-interval` / `--run-once`.
 - `pocketshell jobs daemon status` returns 0/3 based on `pgrep`.
-- `pocketshell jobs daemon stop` returns 0 for "no match" (idempotent)
-  and 0 for "signalled at least one".
+- `pocketshell jobs daemon stop` resolves the daemon PID(s) via
+  `pgrep -f` + argv re-validation, then SIGTERMs exactly those PIDs via
+  `os.kill` (never a blunt `pkill -f`). Returns 0 for "no match"
+  (idempotent) and 0 for "signalled at least one".
 - Missing `tmuxctl` produces a friendly stderr message + exit 127.
 - stdout/stderr/exit-code from the subprocess are proxied verbatim.
 
@@ -33,6 +35,8 @@ tmuxctl exists on the host", not "the scheduler works".
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 from typing import Sequence
 from unittest.mock import patch
@@ -702,42 +706,129 @@ def test_jobs_daemon_status_without_pgrep_returns_not_running() -> None:
 # ----- daemon stop ---------------------------------------------------
 
 
-def test_jobs_daemon_stop_signals_running_process() -> None:
+def test_jobs_daemon_stop_signals_resolved_pids_only() -> None:
+    """`stop` SIGTERMs exactly the resolved daemon PIDs via `os.kill`.
+
+    It must NOT shell out to a blunt `pkill -TERM -f` (the old broad
+    behaviour that signalled every matching command line on the host).
+    """
     runner = CliRunner()
-    with patch("pocketshell.jobs.shutil.which", return_value="/fake/pkill"), patch(
-        "pocketshell.jobs.subprocess.run",
-        return_value=_fake_completed(stdout="", returncode=0),
+    killed: list[tuple[int, int]] = []
+    with patch("pocketshell.jobs.shutil.which", return_value="/fake/pgrep"), patch(
+        "pocketshell.jobs._resolve_daemon_pids", return_value=[4321]
+    ), patch(
+        "pocketshell.jobs.os.kill",
+        side_effect=lambda pid, sig: killed.append((pid, sig)),
+    ), patch(
+        "pocketshell.jobs.subprocess.run"
     ) as run:
         result = runner.invoke(jobs_group, ["daemon", "stop"])
     assert result.exit_code == 0, result.output
     assert "stopped" in result.output.lower()
-    invoked: Sequence[str] = run.call_args.args[0]
-    # Same anchored pattern as `status`.
-    assert invoked[0:3] == ["/fake/pkill", "-TERM", "-f"]
-    assert "tmuxctl jobs daemon" in invoked[3]
+    # Exactly the resolved PID, with SIGTERM — no pkill, no broad match.
+    assert killed == [(4321, signal.SIGTERM)]
+    # No `pkill -TERM -f <pattern>` subprocess was ever launched.
+    for call in run.call_args_list:
+        argv = call.args[0]
+        assert "pkill" not in (argv[0] if argv else "")
 
 
 def test_jobs_daemon_stop_is_idempotent_when_not_running() -> None:
     runner = CliRunner()
-    with patch("pocketshell.jobs.shutil.which", return_value="/fake/pkill"), patch(
-        "pocketshell.jobs.subprocess.run",
-        # pkill exits 1 when no process matches; treat as no-op success.
-        return_value=_fake_completed(stdout="", returncode=1),
-    ):
+    with patch("pocketshell.jobs.shutil.which", return_value="/fake/pgrep"), patch(
+        "pocketshell.jobs._resolve_daemon_pids", return_value=[]
+    ), patch("pocketshell.jobs.os.kill") as kill:
+        result = runner.invoke(jobs_group, ["daemon", "stop"])
+    assert result.exit_code == 0, result.output
+    assert "not running" in result.output.lower()
+    kill.assert_not_called()
+
+
+def test_jobs_daemon_stop_treats_raced_exit_as_not_running() -> None:
+    """A PID that vanished between resolve and kill is not an error."""
+    runner = CliRunner()
+    with patch("pocketshell.jobs.shutil.which", return_value="/fake/pgrep"), patch(
+        "pocketshell.jobs._resolve_daemon_pids", return_value=[999]
+    ), patch("pocketshell.jobs.os.kill", side_effect=ProcessLookupError):
         result = runner.invoke(jobs_group, ["daemon", "stop"])
     assert result.exit_code == 0, result.output
     assert "not running" in result.output.lower()
 
 
-def test_jobs_daemon_stop_without_pkill_returns_127() -> None:
+def test_jobs_daemon_stop_without_pgrep_returns_127() -> None:
     runner = CliRunner()
     with patch("pocketshell.jobs.shutil.which", return_value=None), patch(
-        "pocketshell.jobs.subprocess.run"
-    ) as run:
+        "pocketshell.jobs.os.kill"
+    ) as kill:
         result = runner.invoke(jobs_group, ["daemon", "stop"])
     assert result.exit_code == 127
-    assert "pkill" in result.output.lower()
-    run.assert_not_called()
+    assert "pgrep" in result.output.lower()
+    kill.assert_not_called()
+
+
+# ----- daemon stop: PID resolution + argv validation (narrowing) -----
+
+
+def test_argv_is_daemon_accepts_real_invocations() -> None:
+    from pocketshell.jobs import _argv_is_daemon
+
+    assert _argv_is_daemon(["/home/u/.local/bin/tmuxctl", "jobs", "daemon"])
+    assert _argv_is_daemon(["tmuxctl", "jobs", "daemon", "--poll-interval", "5"])
+    # A `python …/tmuxctl jobs daemon` shim still matches on the tmuxctl token.
+    assert _argv_is_daemon(["python3", "/usr/bin/tmuxctl", "jobs", "daemon"])
+
+
+def test_argv_is_daemon_rejects_coincidental_command_lines() -> None:
+    """The whole point of the narrowing: a command line that merely
+    *contains* the substring `tmuxctl jobs daemon` (e.g. an editor
+    opening a file with that name) must NOT be classed as the daemon,
+    even though `pgrep -f`/`pkill -f` would regex-match it.
+    """
+    from pocketshell.jobs import _argv_is_daemon
+
+    # Editor opening a note whose filename contains the phrase.
+    assert not _argv_is_daemon(["vim", "notes/tmuxctl jobs daemon.md"])
+    # Another shell literally typing the command as one argv element.
+    assert not _argv_is_daemon(["bash", "-c", "tmuxctl jobs daemon"])
+    # A different tmuxctl subcommand.
+    assert not _argv_is_daemon(["tmuxctl", "jobs", "list"])
+    # `tmuxctl jobs daemon-something-else` style verb.
+    assert not _argv_is_daemon(["tmuxctl", "jobs", "daemon-foo"])
+    assert not _argv_is_daemon([])
+    assert not _argv_is_daemon(["tmuxctl"])
+
+
+def test_resolve_daemon_pids_drops_coincidental_match_and_self() -> None:
+    """`_resolve_daemon_pids` re-validates each `pgrep` candidate's real
+    argv and excludes our own PID, so a coincidental command-line match
+    (which `pgrep -f`/`pkill -f` would have signalled) is dropped.
+    """
+    own = os.getpid()
+
+    def fake_argv(pid: int):
+        return {
+            111: ["/usr/bin/tmuxctl", "jobs", "daemon"],  # genuine daemon
+            222: ["vim", "tmuxctl jobs daemon.md"],  # coincidental match
+            own: ["python3", "/x/tmuxctl", "jobs", "daemon"],  # ourselves
+        }.get(pid)
+
+    with patch("pocketshell.jobs.shutil.which", return_value="/fake/pgrep"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout=f"111\n222\n{own}\n", returncode=0),
+    ), patch("pocketshell.jobs._read_proc_argv", side_effect=fake_argv):
+        from pocketshell.jobs import _resolve_daemon_pids
+
+        pids = _resolve_daemon_pids()
+    # Only the genuine daemon PID survives: coincidental 222 and our own
+    # PID are both excluded.
+    assert pids == [111]
+
+
+def test_resolve_daemon_pids_empty_without_pgrep() -> None:
+    with patch("pocketshell.jobs.shutil.which", return_value=None):
+        from pocketshell.jobs import _resolve_daemon_pids
+
+        assert _resolve_daemon_pids() == []
 
 
 # ----- missing-binary handling ---------------------------------------

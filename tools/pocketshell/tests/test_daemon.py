@@ -779,6 +779,48 @@ def test_jobs_mutation_invalidates_jobs_list_cache(tmp_path: Path) -> None:
     assert calls["list"] == 2
 
 
+def test_handler_exception_returns_generic_message_and_logs_detail(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unhandled handler exception must NOT leak its raw text — which
+    can embed internal host filesystem paths — over the socket. The
+    client gets a generic, detail-free message; the full traceback is
+    logged to the daemon's OWN stderr for operator debugging.
+    """
+    secret_path = "/home/operator/.config/pocketshell/secret-token.json"
+
+    def exploding_handler(_params: dict) -> dict:
+        # A realistic failure whose text embeds an internal host path.
+        raise FileNotFoundError(f"[Errno 2] No such file or directory: {secret_path!r}")
+
+    daemon = daemon_mod.Daemon(
+        socket_path=tmp_path / "daemon.sock",
+        methods={"boom.now": exploding_handler},
+    )
+
+    response = _dispatch_in_memory(daemon, "boom.now", {})
+
+    # The wire response carries only a generic message + the method name.
+    assert "error" in response
+    error = response["error"]
+    assert error["code"] == daemon_mod.JSONRPC_INTERNAL_ERROR
+    message = error["message"]
+    assert "boom.now" in message
+    # The internal path, the exception text, and even the exception type
+    # name must NOT be present in the client-facing message.
+    assert secret_path not in message
+    assert "No such file" not in message
+    assert "FileNotFoundError" not in message
+    assert "Errno" not in message
+
+    # The full detail (incl. the host path) IS available to the operator
+    # on the daemon's own stderr for debugging.
+    captured = capsys.readouterr()
+    assert "FileNotFoundError" in captured.err
+    assert secret_path in captured.err
+
+
 def test_daemon_registry_includes_sessions_and_jobs_methods() -> None:
     assert "sessions.list" in daemon_mod.DEFAULT_METHODS
     assert "jobs.list" in daemon_mod.DEFAULT_METHODS

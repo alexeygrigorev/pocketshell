@@ -61,6 +61,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -836,12 +837,20 @@ class Daemon:
                 data=exc.data,
             )
             return
-        except Exception as exc:  # noqa: BLE001 — JSON-RPC envelope
+        except Exception:  # noqa: BLE001 — JSON-RPC envelope
+            # Log the full traceback (type, message, host paths) to the
+            # daemon's OWN stderr for operator debugging, but return only
+            # a generic, detail-free message over the socket. The raw
+            # ``str(exc)`` can embed internal filesystem paths / config
+            # values; even on the same-user SSH trust boundary there is no
+            # reason to surface those to the peer. The method name is the
+            # only request-correlatable hint the client gets.
+            traceback.print_exc(file=sys.stderr)
             self._send_error(
                 client_sock,
                 request_id=request_id,
                 code=JSONRPC_INTERNAL_ERROR,
-                message=f"{type(exc).__name__}: {exc}",
+                message=f"internal error handling {method!r}",
             )
             return
 

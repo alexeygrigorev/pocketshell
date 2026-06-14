@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -50,7 +49,9 @@ import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.MicGlyphIcon
 import com.pocketshell.uikit.model.MicButtonState
@@ -199,30 +200,44 @@ internal fun AssistantStrip(
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
-                        TextButton(
+                        PocketShellButton(
+                            text = "Send correction",
                             onClick = {
                                 onCorrect(correctionText)
                                 correcting = false
                                 correctionText = ""
                             },
+                            variant = ButtonVariant.Primary,
                             modifier = Modifier.testTag(ASSISTANT_SEND_CORRECTION_TAG),
-                        ) { Text("Send correction") }
-                        TextButton(onClick = { correcting = false }) { Text("Back") }
+                        )
+                        PocketShellButton(
+                            text = "Back",
+                            onClick = { correcting = false },
+                            variant = ButtonVariant.Text,
+                        )
                     }
                 } else {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        TextButton(
+                        PocketShellButton(
+                            text = "Run",
                             onClick = onConfirm,
+                            variant = ButtonVariant.Primary,
                             modifier = Modifier.testTag(ASSISTANT_CONFIRM_TAG),
-                        ) { Text("Run") }
-                        TextButton(
+                        )
+                        PocketShellButton(
+                            text = "No, do something else",
                             onClick = { correcting = true },
+                            variant = ButtonVariant.Text,
                             modifier = Modifier.testTag(ASSISTANT_CORRECT_TAG),
-                        ) { Text("No, do something else") }
-                        TextButton(onClick = onCancel) { Text("Cancel") }
+                        )
+                        PocketShellButton(
+                            text = "Cancel",
+                            onClick = onCancel,
+                            variant = ButtonVariant.Text,
+                        )
                     }
                 }
             }
@@ -234,15 +249,20 @@ internal fun AssistantStrip(
                     modifier = Modifier.testTag(ASSISTANT_CHOOSING_TAG),
                 )
                 state.candidates.forEach { candidate ->
-                    TextButton(
+                    PocketShellButton(
                         onClick = { onChoose(candidate) },
+                        variant = ButtonVariant.Text,
                         modifier = Modifier.testTag(assistantChoiceTag(candidate.path)),
                     ) {
                         val suffix = if (candidate.sessionCount > 0) " (${candidate.sessionCount} sessions)" else ""
                         Text("${candidate.label} — ${candidate.path}$suffix")
                     }
                 }
-                TextButton(onClick = onCancelChoice) { Text("Cancel") }
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = onCancelChoice,
+                    variant = ButtonVariant.Text,
+                )
             }
             is AssistantUiState.Done -> {
                 AssistantStatusRow(
@@ -250,7 +270,11 @@ internal fun AssistantStrip(
                     role = BadgeRole.Active,
                     text = state.message,
                 )
-                TextButton(onClick = onDismiss) { Text("Dismiss") }
+                PocketShellButton(
+                    text = "Dismiss",
+                    onClick = onDismiss,
+                    variant = ButtonVariant.Text,
+                )
             }
             is AssistantUiState.Error -> {
                 AssistantStatusRow(
@@ -261,12 +285,18 @@ internal fun AssistantStrip(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
                     if (state.retryable) {
-                        TextButton(
+                        PocketShellButton(
+                            text = "Retry",
                             onClick = onRetry,
+                            variant = ButtonVariant.Text,
                             modifier = Modifier.testTag(ASSISTANT_RETRY_TAG),
-                        ) { Text("Retry") }
+                        )
                     }
-                    TextButton(onClick = onDismiss) { Text("Dismiss") }
+                    PocketShellButton(
+                        text = "Dismiss",
+                        onClick = onDismiss,
+                        variant = ButtonVariant.Text,
+                    )
                 }
             }
             AssistantUiState.Idle -> Unit

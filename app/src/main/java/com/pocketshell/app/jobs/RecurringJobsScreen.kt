@@ -13,7 +13,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,9 +23,11 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Breadcrumb
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
@@ -76,9 +77,11 @@ public fun RecurringJobsScreen(
             title = "Scheduled",
             subtitle = if (state.loading) "Syncing..." else "${state.jobs.size} jobs",
             trailing = {
-                TextButton(onClick = { showCreate = true }) {
-                    Text("+ Job")
-                }
+                PocketShellButton(
+                    text = "+ Job",
+                    onClick = { showCreate = true },
+                    variant = ButtonVariant.Text,
+                )
             },
         )
 
@@ -253,14 +256,20 @@ private fun JobEditorDialog(
                     label = { Text("Message") },
                 )
                 if (showEnabled) {
-                    TextButton(onClick = { enabled = !enabled }) {
-                        Text(if (enabled) "Pause job" else "Resume job")
-                    }
+                    // State toggle (NOT a CTA): flips the local `enabled` flag,
+                    // which is passed verbatim to onSave. Kept as the muted Text
+                    // variant so it reads as a toggle affordance, not an action.
+                    PocketShellButton(
+                        text = if (enabled) "Pause job" else "Resume job",
+                        onClick = { enabled = !enabled },
+                        variant = ButtonVariant.Text,
+                    )
                 }
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Save",
                 onClick = {
                     onSave(
                         RecurringJobDraft(
@@ -271,21 +280,24 @@ private fun JobEditorDialog(
                         enabled,
                     )
                 },
+                variant = ButtonVariant.Primary,
                 enabled = canSave,
-            ) {
-                Text("Save")
-            }
+            )
         },
         dismissButton = {
             Row {
                 onRemove?.let {
-                    TextButton(onClick = it) {
-                        Text("Remove")
-                    }
+                    PocketShellButton(
+                        text = "Remove",
+                        onClick = it,
+                        variant = ButtonVariant.Destructive,
+                    )
                 }
-                TextButton(onClick = onDismiss) {
-                    Text("Cancel")
-                }
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = onDismiss,
+                    variant = ButtonVariant.Text,
+                )
             }
         },
     )

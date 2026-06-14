@@ -67,6 +67,52 @@ Mosh is explicitly not implemented in the current transport stack. The bootstrap
 
 Tmux's native split layout is unreadable on a phone. With control mode we know about panes individually — render *one pane at a time* in a real VT emulator, with swipes to move between panes/windows. The user never sees tmux's status bar. PocketShell *is* the status bar.
 
+## Connection / reconnect / grace (the most critical subsystem — D28)
+
+The SSH/tmux connection core (connect / attach / reattach / grace / lease /
+reconnect) is the single most important subsystem and the #1 dogfood blocker
+(D28). It is being moved off the old inline path onto a first-class
+`core-connection` `ConnectionController`, turned on **phase by phase** behind a
+temporary user-facing toggle (locked decision **D29** — see decisions.md).
+
+**Two selectable paths during the turn-on, chosen by a Settings toggle:**
+
+- **NEW (default) — `ConnectionController` + `RevealStateMachine`.** The
+  `ConnectionController` owns connect / attach / reattach / grace / lease /
+  reconnect as one state machine driven by exactly two inputs: app
+  foreground/background lifecycle, and the transport health signals
+  (`TmuxClient.disconnected` / `SshLeaseManager` state). The
+  `RevealStateMachine` keys the screen to the target session id
+  (`Navigating(targetId) → Seeding(targetId) → Live(targetId)`) and **drops any
+  pane seed whose id ≠ the current target**, so a late seed from a superseded
+  switch can never paint the wrong session. Grace is a single owner anchored on
+  the lease's 60 s warm window (D21), not three disagreeing clocks.
+- **OLD (selectable via the toggle) — inline `TmuxSessionViewModel`.** The
+  legacy reconnect/grace machine welded into the `TmuxSessionViewModel`. It
+  remains selectable as the on-device fallback **only** during the phased
+  turn-on, and is **deleted together with the toggle in #766** once the
+  maintainer confirms the new path on-device. After #766 there is a single
+  active path (D28 rule 4): `ConnectionController` only, no toggle, no old path.
+
+**What is MERGED vs PENDING (do not overstate):**
+
+- **P1 — screen-keyed reveal (#686): MERGED.** The `RevealStateMachine`
+  id-tagged-seed / drop-non-target behaviour above.
+- **P2 — single grace owner (#635): MERGED.** The within-grace foreground probe
+  / ride-through owned by one lease-anchored 60 s grace window, collapsing the
+  clocks that caused #685.
+- **P3 — reseed-on-reattach (#553): PENDING.** Reattach over a stale lease
+  reseeds panes (no blank pane, no surfaced `list-panes` EOF).
+- **P4 — Codex backpressure (#576): PENDING.** Flow-control / backpressure for
+  high-volume agent (Codex) output.
+
+Each phase is gated by a device-truth journey (J1–J4) that asserts the **user's
+rendered viewport** — the terminal text actually shown — NOT internal/shadow
+state. A journey that only checks internal state can be green while the visible
+app is broken (the #636/#638 lesson), so the gate must FAIL when the
+user-visible output regresses. These load-bearing journeys run in per-PR CI
+(#638/#691), not only the release gate.
+
 ## Server-side scheduler (locked decision — see decisions.md)
 
 Recurring tmux-send jobs run on each host via `pocketshell jobs daemon`, not on the phone. Jobs survive phone offline / sleep / network drops.

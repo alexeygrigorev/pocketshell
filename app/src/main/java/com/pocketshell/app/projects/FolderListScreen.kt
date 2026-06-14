@@ -837,12 +837,13 @@ private fun HostDetailAssistantPanel(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(
+            PocketShellButton(
+                text = "Close",
                 onClick = onDismiss,
                 modifier = Modifier.testTag(FOLDER_LIST_ASSISTANT_CLOSE_TAG),
-            ) {
-                Text("Close", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
-            }
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
         }
         if (state !is AssistantUiState.Idle) {
             AssistantStrip(
@@ -1332,12 +1333,13 @@ private fun FolderActionFailureBanner(
             style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
-        TextButton(
+        PocketShellButton(
+            text = "Dismiss",
             onClick = onDismiss,
             modifier = Modifier.testTag(FOLDER_LIST_ACTION_STATUS_DISMISS_TAG),
-        ) {
-            Text("Dismiss", color = color, fontSize = 12.sp)
-        }
+            variant = ButtonVariant.Text,
+            compact = true,
+        )
     }
 }
 

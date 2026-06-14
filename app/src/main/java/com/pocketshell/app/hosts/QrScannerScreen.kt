@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -146,13 +145,12 @@ fun QrScannerScreen(
                 title = context.getString(R.string.qr_scanner_title),
                 modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
                 trailing = {
-                    TextButton(onClick = onClose) {
-                        Text(
-                            text = context.getString(R.string.qr_scanner_close),
-                            color = PocketShellColors.Accent,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
+                    PocketShellButton(
+                        text = context.getString(R.string.qr_scanner_close),
+                        onClick = onClose,
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                    )
                 },
             )
 

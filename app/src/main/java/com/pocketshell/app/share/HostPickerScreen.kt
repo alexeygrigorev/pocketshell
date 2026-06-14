@@ -19,7 +19,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -372,12 +371,13 @@ private fun TargetPickerScreen(
 
         item {
             Spacer(Modifier.height(8.dp))
-            TextButton(
+            PocketShellButton(
+                text = "Back",
                 onClick = onBack,
                 modifier = Modifier.testTag(SHARE_TARGET_BACK_TAG),
-            ) {
-                Text(text = "Back")
-            }
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
         }
     }
 }
@@ -533,7 +533,8 @@ private fun UploadResultSurface(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (copyText?.isNotBlank() == true) {
-                TextButton(
+                PocketShellButton(
+                    text = "Copy",
                     onClick = {
                         coroutineScope.launch {
                             clipboard.setClipEntry(
@@ -544,29 +545,34 @@ private fun UploadResultSurface(
                         }
                     },
                     modifier = Modifier.testTag(SHARE_RESULT_COPY_TAG),
-                ) {
-                    Text(text = "Copy")
-                }
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                )
             }
             if (onChooseHost != null) {
-                TextButton(
+                PocketShellButton(
+                    text = "Choose host",
                     onClick = onChooseHost,
                     modifier = Modifier.testTag(SHARE_RESULT_CHOOSE_HOST_TAG),
-                ) {
-                    Text(text = "Choose host")
-                }
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                )
             }
             if (onRetry != null) {
-                TextButton(
+                PocketShellButton(
+                    text = "Retry",
                     onClick = onRetry,
                     modifier = Modifier.testTag(SHARE_RESULT_RETRY_TAG),
-                ) {
-                    Text(text = "Retry")
-                }
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                )
             }
-            TextButton(onClick = onDismiss) {
-                Text(text = "Done")
-            }
+            PocketShellButton(
+                text = "Done",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
         }
     }
 }

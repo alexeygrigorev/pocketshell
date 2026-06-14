@@ -25,7 +25,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -168,9 +167,12 @@ fun SshKeysManagementPane(
                         fontSize = 12.sp,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = viewModel::clearError) {
-                        Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
-                    }
+                    PocketShellButton(
+                        text = "Dismiss",
+                        onClick = viewModel::clearError,
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                    )
                 }
             }
 

@@ -21,7 +21,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -460,12 +459,13 @@ private fun DiscoveryPanel(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(
+            PocketShellButton(
+                text = "Hide",
                 onClick = onDismiss,
                 modifier = Modifier.testTag(WATCHED_FOLDERS_DISCOVER_DISMISS_TAG),
-            ) {
-                Text("Hide", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
-            }
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
         }
         Spacer(modifier = Modifier.height(8.dp))
         error?.let {
@@ -492,12 +492,13 @@ private fun DiscoveryPanel(
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
                 trailing = {
-                    TextButton(
+                    PocketShellButton(
+                        text = "Add",
                         onClick = { onAccept(candidate) },
                         modifier = Modifier.testTag(watchedFolderAcceptTestTag(candidate.path)),
-                    ) {
-                        Text("Add", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
-                    }
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                    )
                 },
             )
         }
@@ -529,9 +530,12 @@ private fun FeedbackBanner(message: String, onDismiss: () -> Unit) {
             style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
-        }
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            variant = ButtonVariant.Text,
+            compact = true,
+        )
     }
 }
 

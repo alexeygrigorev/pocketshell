@@ -101,6 +101,17 @@ sealed interface ReviewSubmitEvent {
 }
 
 /**
+ * The templated prompt the file viewer's "Attach to current session" action
+ * (issue #763) drops into the active session composer for a review saved at
+ * [remotePath]. The default proposal from the issue: a ready prompt referencing
+ * the saved path so the in-session agent can act on it immediately (rather than
+ * just the bare path or the full review content). Kept pure here so it is
+ * unit-testable and the exact wording is asserted in one place.
+ */
+fun reviewAttachPrompt(remotePath: String): String =
+    "Apply the PocketShell review at $remotePath"
+
+/**
  * One comment in the `pocketshell_review` export — either anchored to a line
  * (with the verbatim [code] of that line so an agent can re-locate it if its
  * copy drifted) or scoped to the whole file.

@@ -236,6 +236,50 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun seedDraftPromptReplacesEmptyDraft() {
+        val vm = newVm()
+        vm.seedDraftPrompt("Apply the PocketShell review at ~/inbox/pocketshell/reviews/README.md-20260614-025147.yaml")
+        assertEquals(
+            "Apply the PocketShell review at ~/inbox/pocketshell/reviews/README.md-20260614-025147.yaml",
+            vm.uiState.value.draft,
+        )
+    }
+
+    @Test
+    fun seedDraftPromptAppendsToExistingDraftOnNewLine() {
+        val vm = newVm()
+        vm.onDraftChange("look at this")
+        vm.seedDraftPrompt("Apply the PocketShell review at /tmp/r.yaml")
+        assertEquals(
+            "look at this\nApply the PocketShell review at /tmp/r.yaml",
+            vm.uiState.value.draft,
+        )
+    }
+
+    @Test
+    fun seedDraftPromptIgnoresBlank() {
+        val vm = newVm()
+        vm.onDraftChange("keep me")
+        vm.seedDraftPrompt("   ")
+        assertEquals("keep me", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun seedDraftPromptRecordsDiagnostic() {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            vm.seedDraftPrompt("Apply the PocketShell review at /tmp/r.yaml")
+            assertEquals(
+                listOf("review_prompt_seeded_into_composer"),
+                diagnostics.events.map { it.name },
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
     fun micTapInIdleStartsRecording() = runTest {
         val mic = FakeMicCapture()
         val vm = newVm(mic = mic, samplerDispatcher = StandardTestDispatcher(testScheduler))

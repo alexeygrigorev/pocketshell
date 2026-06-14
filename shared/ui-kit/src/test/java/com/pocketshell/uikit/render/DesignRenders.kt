@@ -1681,6 +1681,76 @@ class DesignRenders {
         }
     }
 
+    /**
+     * Issue #763 — post-Submit confirmation sheet content: the saved YAML path
+     * (copyable row) plus the "Attach to current session" / "Done" actions.
+     * Mirrors the app's `ReviewSubmittedSheet` so the design loop can inspect it
+     * without the emulator (ui-kit can't import the app composable).
+     */
+    @Test
+    fun reviewSubmittedSheet() = render("review-submitted-sheet") {
+        val savedPath = "/home/alexey/inbox/pocketshell/reviews/README.md-20260614-025147.yaml"
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface)
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+        ) {
+            Text(
+                text = "Review saved",
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                color = PocketShellColors.Text,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Sent 2 comments to agents. It's in the reviews inbox and you " +
+                    "can route it into this session.",
+                style = PocketShellType.bodyDense,
+                color = PocketShellColors.TextSecondary,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+                    .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = savedPath,
+                    style = PocketShellType.bodyMono,
+                    color = PocketShellColors.Text,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Copy",
+                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketShellColors.Accent,
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            PocketShellButton(
+                text = "Attach to current session",
+                onClick = {},
+                variant = ButtonVariant.Primary,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            PocketShellButton(
+                text = "Done",
+                onClick = {},
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+
     /** Mirror of the app's `CommentableLineRow` (#714): gutter + dot + line text. */
     @Composable
     private fun ReviewLineRow(lineNo: Int, text: String, commented: Boolean) {

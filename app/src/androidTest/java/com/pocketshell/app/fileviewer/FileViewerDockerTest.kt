@@ -5,6 +5,8 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import android.util.Base64
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -397,6 +399,8 @@ class FileViewerDockerTest {
             InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
             leasing.manager,
         )
+        // Issue #763: capture the "Attach to current session" prompt routed up.
+        val attachedPrompts = mutableListOf<String>()
         composeRule.setContent {
             FileViewerScreen(
                 hostId = TEST_HOST_ID,
@@ -409,6 +413,7 @@ class FileViewerDockerTest {
                 remotePath = srcPath,
                 cwd = null,
                 onBack = {},
+                onAttachReviewToSession = { prompt -> attachedPrompts += prompt },
                 viewModel = viewModel,
             )
         }
@@ -440,20 +445,31 @@ class FileViewerDockerTest {
         composeRule.waitUntil(timeoutMillis = 30_000) {
             !viewModel.reviewState.value.hasPending
         }
-        WalkthroughScreenshotArtifacts.capture("issue714-review-submitted")
+
+        // Issue #763: the post-Submit confirmation sheet surfaces the saved path
+        // (copyable) and the "Attach to current session" action.
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTagExists(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG)
+        }
+        composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_SAVED_PATH_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).assertIsDisplayed()
+        WalkthroughScreenshotArtifacts.capture("issue763-review-saved-sheet")
 
         // Read the YAML back off the host and prove it parses as a
-        // pocketshell_review with the expected fields.
-        val yaml = withTimeout(20_000) {
+        // pocketshell_review with the expected fields. Both the name and the
+        // body are read in ONE session so a sibling shard sharing this fixture
+        // can't slip a write in between the ls and the cat.
+        val (name, yaml) = withTimeout(20_000) {
             connect()?.use { session ->
                 val ls = session.exec("ls \"\$HOME/inbox/pocketshell/reviews/\"")
                 assertEquals("reviews dir listing exit", 0, ls.exitCode)
-                val name = ls.stdout.lineSequence().map { it.trim() }
+                val n = ls.stdout.lineSequence().map { it.trim() }
                     .firstOrNull { it.endsWith(".yaml") }
                     ?: error("no .yaml landed in the reviews inbox; ls=\n${ls.stdout}")
-                val cat = session.exec("cat \"\$HOME/inbox/pocketshell/reviews/$name\"")
+                val cat = session.exec("cat \"\$HOME/inbox/pocketshell/reviews/$n\"")
                 assertEquals("cat review yaml exit", 0, cat.exitCode)
-                cat.stdout
+                n to cat.stdout
             } ?: error("could not connect to read the review yaml")
         }
         assertTrue("YAML must be a pocketshell_review, was:\n$yaml", yaml.contains("type: pocketshell_review"))
@@ -462,6 +478,23 @@ class FileViewerDockerTest {
         assertTrue(yaml.contains("this allocation is on the hot path"))
         assertTrue(yaml.contains("overall structure is good"))
         assertTrue("YAML must carry the verbatim line code, was:\n$yaml", yaml.contains("val x = doThing(y)"))
+
+        // Issue #763: the surfaced saved path is the absolute one that was just
+        // written (it ends with the yaml name read off the host), and "Attach to
+        // current session" routes a prompt that references that exact path.
+        val surfacedPath = composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_SAVED_PATH_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+            .getOrNull(androidx.compose.ui.semantics.SemanticsProperties.Text)
+            ?.joinToString("") { it.text }
+            ?: error("saved path node had no text")
+        assertTrue(
+            "surfaced path must end with the written yaml name, was: $surfacedPath",
+            surfacedPath.endsWith("/reviews/$name"),
+        )
+        composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { attachedPrompts.isNotEmpty() }
+        assertEquals(reviewAttachPrompt(surfacedPath), attachedPrompts.single())
     }
 
     private suspend fun connect() = SshConnection.connect(

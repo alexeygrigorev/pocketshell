@@ -38,6 +38,7 @@ import androidx.compose.material3.SliderColors
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -127,6 +128,14 @@ const val FILE_VIEWER_REVIEW_SAVE_TAG = "fileViewerReviewSave"
 const val FILE_VIEWER_REVIEW_DELETE_TAG = "fileViewerReviewDelete"
 const val FILE_VIEWER_REVIEW_SUBMIT_TAG = "fileViewerReviewSubmit"
 
+// Issue #763 — post-Submit confirmation surface: the saved YAML path (copyable)
+// plus an "Attach to current session" action.
+const val FILE_VIEWER_REVIEW_SAVED_SHEET_TAG = "fileViewerReviewSavedSheet"
+const val FILE_VIEWER_REVIEW_SAVED_PATH_TAG = "fileViewerReviewSavedPath"
+const val FILE_VIEWER_REVIEW_COPY_PATH_TAG = "fileViewerReviewCopyPath"
+const val FILE_VIEWER_REVIEW_ATTACH_TAG = "fileViewerReviewAttach"
+const val FILE_VIEWER_REVIEW_SAVED_DONE_TAG = "fileViewerReviewSavedDone"
+
 /** Test tag for the gutter tap target of a 1-based [line] in the commentable panel. */
 fun fileViewerLineGutterTag(line: Int): String = "fileViewerLineGutter-$line"
 
@@ -164,6 +173,11 @@ fun FileViewerScreen(
     cwd: String?,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    // Issue #763: route a saved review into the active session composer. The
+    // caller (MainActivity) seeds the templated prompt into the activity-scoped
+    // PromptComposerViewModel and pops back to the session. A no-op default keeps
+    // direct callers / unit tests unchanged.
+    onAttachReviewToSession: (prompt: String) -> Unit = {},
     viewModel: FileViewerViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(hostId, hostname, port, username, keyPath, remotePath, cwd) {
@@ -184,18 +198,20 @@ fun FileViewerScreen(
     val readingPrefs by viewModel.readingPrefs.collectAsState()
     val reviewState by viewModel.reviewState.collectAsState()
 
-    // Issue #714 slice 2 — surface the review-submit outcome as a toast. Success
-    // confirms how many comments landed where; failure shows the calm reason
-    // (the pending comments are kept by the ViewModel so nothing is lost).
+    // Issue #714/#763 — surface the review-submit outcome. On SUCCESS we hold
+    // the result so the scaffold renders the confirmation sheet (the saved path,
+    // copyable, + an "Attach to current session" action — #763); a failure stays
+    // a calm one-line toast (the pending comments are kept by the ViewModel so
+    // nothing is lost).
     val context = LocalContext.current
+    var submittedReview by remember { mutableStateOf<ReviewSubmitEvent.Success?>(null) }
     LaunchedEffect(viewModel) {
         viewModel.reviewEvents.collect { event ->
-            val message = when (event) {
-                is ReviewSubmitEvent.Success ->
-                    "Sent ${event.count} ${if (event.count == 1) "comment" else "comments"} to ${event.host}"
-                is ReviewSubmitEvent.Failure -> event.message
+            when (event) {
+                is ReviewSubmitEvent.Success -> submittedReview = event
+                is ReviewSubmitEvent.Failure ->
+                    Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
             }
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -204,6 +220,7 @@ fun FileViewerScreen(
         state = state,
         readingPrefs = readingPrefs,
         reviewState = reviewState,
+        submittedReview = submittedReview,
         onBack = onBack,
         onRetry = viewModel::retry,
         onOpenLocated = viewModel::openLocated,
@@ -215,6 +232,14 @@ fun FileViewerScreen(
         onSetFileComment = viewModel::setFileComment,
         onDeleteFileComment = viewModel::deleteFileComment,
         onSubmitReview = { viewModel.submitReview(hostName) },
+        onCopyReviewPath = { path ->
+            copyTextToClipboard(context, path, "Copied review path")
+        },
+        onAttachReview = { path ->
+            submittedReview = null
+            onAttachReviewToSession(reviewAttachPrompt(path))
+        },
+        onDismissSubmittedReview = { submittedReview = null },
         modifier = modifier,
     )
 }
@@ -235,6 +260,9 @@ internal fun FileViewerScaffold(
     onOpenLocated: (String) -> Unit = {},
     readingPrefs: FileViewerReadingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
     reviewState: ReviewState = ReviewState(),
+    // Issue #763: the most recent successful submit (null when none pending) —
+    // drives the post-Submit confirmation sheet (saved path + attach action).
+    submittedReview: ReviewSubmitEvent.Success? = null,
     onToggleWordWrap: () -> Unit = {},
     onToggleRenderMarkdown: () -> Unit = {},
     onToggleReviewMode: () -> Unit = {},
@@ -243,6 +271,9 @@ internal fun FileViewerScaffold(
     onSetFileComment: (String) -> Unit = {},
     onDeleteFileComment: () -> Unit = {},
     onSubmitReview: () -> Unit = {},
+    onCopyReviewPath: (String) -> Unit = {},
+    onAttachReview: (String) -> Unit = {},
+    onDismissSubmittedReview: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // The wrap / Markdown-render toggles only apply to the text reading
@@ -362,6 +393,22 @@ internal fun FileViewerScaffold(
                 activeSheet = null
             },
         )
+
+        // Issue #763 — post-Submit confirmation: the saved YAML path (copyable)
+        // plus an "Attach to current session" action. Shown when the ViewModel
+        // reports a successful submit; dismissing or attaching clears it.
+        submittedReview?.let { success ->
+            val savedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ReviewSubmittedSheet(
+                host = success.host,
+                count = success.count,
+                savedPath = success.remotePath,
+                sheetState = savedSheetState,
+                onCopyPath = { onCopyReviewPath(success.remotePath) },
+                onAttach = { onAttachReview(success.remotePath) },
+                onDismiss = onDismissSubmittedReview,
+            )
+        }
     }
 }
 
@@ -739,15 +786,23 @@ private fun copyFileToClipboard(context: Context, shareable: Shareable) {
     Toast.makeText(context, "Copied ${file.name} to clipboard", Toast.LENGTH_SHORT).show()
 }
 
-/** Copy raw text to the clipboard as plain text (text viewer "Copy all"). */
-private fun copyTextToClipboard(context: Context, content: String) {
+/**
+ * Copy raw text to the clipboard as plain text. Used by the text viewer's
+ * "Copy all" (default toast) and the #763 review-saved sheet's copyable path
+ * (custom [toastLabel]).
+ */
+private fun copyTextToClipboard(
+    context: Context,
+    content: String,
+    toastLabel: String = "Copied text to clipboard",
+) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     if (clipboard == null) {
         Toast.makeText(context, "Clipboard unavailable", Toast.LENGTH_SHORT).show()
         return
     }
     clipboard.setPrimaryClip(ClipData.newPlainText("file text", content))
-    Toast.makeText(context, "Copied text to clipboard", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, toastLabel, Toast.LENGTH_SHORT).show()
 }
 
 /** Background scope for the (fire-and-forget) Save IO — survives the click site. */

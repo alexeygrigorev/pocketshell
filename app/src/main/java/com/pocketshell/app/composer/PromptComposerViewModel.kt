@@ -468,6 +468,31 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #763: pre-load the composer draft with a ready prompt routed in from
+     * the file viewer's "Attach to current session" action (e.g. "Apply the
+     * PocketShell review at <path>"). The composer is activity-scoped, so the
+     * file viewer round-trip and the back-navigation to the session preserve
+     * this instance; seeding here lands the prompt in the field the user returns
+     * to, ready to edit and Send.
+     *
+     * If the user already has a draft typed, the prompt is appended on its own
+     * line so nothing they wrote is lost (mirrors the dictation-append rule);
+     * an empty draft is replaced outright. A blank [prompt] is a no-op.
+     */
+    public fun seedDraftPrompt(prompt: String) {
+        val trimmed = prompt.trim()
+        if (trimmed.isEmpty()) return
+        val existing = _uiState.value.draft
+        val combined = if (existing.isBlank()) {
+            trimmed
+        } else {
+            existing.trimEnd() + "\n" + trimmed
+        }
+        onDraftChange(combined)
+        DiagnosticEvents.record("action", "review_prompt_seeded_into_composer")
+    }
+
+    /**
      * Issue #544/#566: remove a single staged attachment tile by its remote path.
      * The draft text is untouched; removing every tile leaves the prompt
      * exactly as the user typed it, so the "Attached files:" suffix is only

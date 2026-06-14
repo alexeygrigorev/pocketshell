@@ -44,6 +44,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -445,6 +447,122 @@ private fun PendingTraySheet(
                 testTag = FILE_VIEWER_REVIEW_SUBMIT_TAG,
                 modifier = Modifier.fillMaxWidth(),
                 onClick = onSubmit,
+            )
+        }
+    }
+}
+
+/**
+ * The post-Submit confirmation surface (issue #763). After a review is written
+ * to `~/inbox/pocketshell/reviews/<file>-<ts>.yaml`, this sheet replaces the
+ * old fire-and-forget toast: it shows where the YAML landed, lets the maintainer
+ * **copy the exact saved path** (tap the path or the Copy button), and offers an
+ * **"Attach to current session"** action that drops a ready prompt referencing
+ * the path into the active session composer (`onAttach`).
+ *
+ * [savedPath] is the absolute remote path the ViewModel returned; [host] is the
+ * host alias the review was filed against; [count] is how many comments landed.
+ * The inbox-drop pickup path (#714) is untouched — this is purely additive in-
+ * session routing, so both coexist.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ReviewSubmittedSheet(
+    host: String,
+    count: Int,
+    savedPath: String,
+    sheetState: SheetState,
+    onCopyPath: () -> Unit,
+    onAttach: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = PocketShellColors.Surface,
+        contentColor = PocketShellColors.Text,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg)
+                .testTag(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG),
+        ) {
+            Text(
+                text = "Review saved",
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                color = PocketShellColors.Text,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Sent $count ${if (count == 1) "comment" else "comments"} to $host. " +
+                    "It's in the reviews inbox and you can route it into this session.",
+                style = PocketShellType.bodyDense,
+                color = PocketShellColors.TextSecondary,
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+
+            // The exact saved path — tap the path (or the Copy button) to copy.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = PocketShellColors.SurfaceElev,
+                        shape = PocketShellShapes.small,
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = PocketShellColors.BorderSoft,
+                        shape = PocketShellShapes.small,
+                    )
+                    .clickable(role = Role.Button, onClick = onCopyPath)
+                    .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = savedPath,
+                    style = PocketShellType.bodyMono,
+                    color = PocketShellColors.Text,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(FILE_VIEWER_REVIEW_SAVED_PATH_TAG),
+                )
+                Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+                Text(
+                    text = "Copy",
+                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketShellColors.Accent,
+                    modifier = Modifier
+                        .clickable(role = Role.Button, onClick = onCopyPath)
+                        .padding(vertical = PocketShellSpacing.xs)
+                        .testTag(FILE_VIEWER_REVIEW_COPY_PATH_TAG),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+            PocketShellButton(
+                text = "Attach to current session",
+                onClick = onAttach,
+                variant = ButtonVariant.Primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(FILE_VIEWER_REVIEW_ATTACH_TAG),
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+            PocketShellButton(
+                text = "Done",
+                onClick = onDismiss,
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(FILE_VIEWER_REVIEW_SAVED_DONE_TAG),
             )
         }
     }

@@ -224,6 +224,16 @@ class MainActivity : FragmentActivity() {
      */
     private var pendingComposerAttachments by mutableStateOf<List<String>>(emptyList())
 
+    /**
+     * Issue #763: a ready prompt routed up from the file viewer's "Attach to
+     * current session" action (e.g. "Apply the PocketShell review at <path>").
+     * The viewer sits on top of the session in the hand-rolled back stack; on
+     * attach we stash the prompt here and pop back, and the session screen seeds
+     * it into the activity-scoped composer once it re-composes. Consumed once so
+     * a later in-session navigation does not re-seed a stale prompt.
+     */
+    private var pendingComposerPrompt by mutableStateOf("")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         StartupTiming.mark("main-on-create-start", "savedInstanceState" to (savedInstanceState != null))
         super.onCreate(savedInstanceState)
@@ -407,6 +417,14 @@ class MainActivity : FragmentActivity() {
                         onInitialComposerAttachmentsConsumed = {
                             pendingComposerAttachments = emptyList()
                         },
+                        // Issue #763: a review prompt routed from the file
+                        // viewer's "Attach to current session" action. The
+                        // viewer raises [onSeedComposerPrompt] to stash it here;
+                        // the navigator seeds it into the session composer when
+                        // it returns to the tmux destination, then clears it.
+                        initialComposerPrompt = pendingComposerPrompt,
+                        onSeedComposerPrompt = { pendingComposerPrompt = it },
+                        onInitialComposerPromptConsumed = { pendingComposerPrompt = "" },
                         restoredTmuxDestination = restoredTmuxDestination,
                         // Issue #666: clear the persisted last-session snapshot
                         // when a restored session is found gone, so the next
@@ -565,6 +583,16 @@ private fun AppNavigator(
     // [onInitialComposerAttachmentsConsumed].
     initialComposerAttachments: List<String> = emptyList(),
     onInitialComposerAttachmentsConsumed: () -> Unit = {},
+    // Issue #763: a ready review prompt routed from the file viewer's "Attach to
+    // current session" action. Seeded into the session composer draft when the
+    // navigator returns to the tmux destination. Consumed once; cleared via
+    // [onInitialComposerPromptConsumed].
+    initialComposerPrompt: String = "",
+    onInitialComposerPromptConsumed: () -> Unit = {},
+    // Issue #763: the file viewer raises this to stash a review prompt on the
+    // activity before popping back to the session, so the seeded prompt survives
+    // the back-navigation and lands via [initialComposerPrompt].
+    onSeedComposerPrompt: (String) -> Unit = {},
     restoredTmuxDestination: AppDestination.TmuxSession? = null,
     // Issue #666: clear the persisted last-session snapshot when the restored
     // session is found gone on the server, so the next foreground does not
@@ -1148,6 +1176,14 @@ private fun AppNavigator(
             remotePath = dest.remotePath,
             cwd = dest.cwd,
             onBack = ::back,
+            // Issue #763: "Attach to current session" — stash the review prompt
+            // on the activity, then pop back to the session below in the back
+            // stack. The session screen seeds it into the activity-scoped
+            // composer once it re-composes.
+            onAttachReviewToSession = { prompt ->
+                onSeedComposerPrompt(prompt)
+                back()
+            },
         )
 
         // Issue #528: browsable remote file explorer. A tapped file pushes the
@@ -1343,6 +1379,10 @@ private fun AppNavigator(
             // session composer as #544 chips and open the composer focused.
             initialComposerAttachments = initialComposerAttachments,
             onInitialComposerAttachmentsConsumed = onInitialComposerAttachmentsConsumed,
+            // Issue #763: seed a review prompt routed from the file viewer's
+            // "Attach to current session" action into the composer draft.
+            initialComposerPrompt = initialComposerPrompt,
+            onInitialComposerPromptConsumed = onInitialComposerPromptConsumed,
             onComposerDraftChanged = onComposerDraftChanged,
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(

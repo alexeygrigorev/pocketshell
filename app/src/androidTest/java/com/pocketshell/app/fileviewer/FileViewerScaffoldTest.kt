@@ -494,4 +494,103 @@ class FileViewerScaffoldTest {
         compose.waitForIdle()
         assertEquals(1, backs)
     }
+
+    // Issue #763 — post-Submit confirmation: saved path (copyable) + attach.
+
+    private val savedPath = "/home/alexey/inbox/pocketshell/reviews/README.md-20260614-025147.yaml"
+
+    private fun submittedReviewState() = ReviewSubmitEvent.Success(
+        host = "agents",
+        count = 2,
+        remotePath = savedPath,
+    )
+
+    @Test
+    fun submittedReviewSheetShowsSavedPathAndActions() {
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/home/alexey/README.md",
+                        content = "# readme",
+                        sizeBytes = 8,
+                    ),
+                    reviewState = ReviewState(active = true),
+                    submittedReview = submittedReviewState(),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG).assertIsDisplayed()
+        compose.onNodeWithText(savedPath).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun tappingSavedPathCopiesItToClipboard() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/home/alexey/README.md",
+                        content = "# readme",
+                        sizeBytes = 8,
+                    ),
+                    reviewState = ReviewState(active = true),
+                    submittedReview = submittedReviewState(),
+                    onBack = {},
+                    onRetry = {},
+                    onCopyReviewPath = { path ->
+                        val cm = instrumentation.targetContext
+                            .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("review path", path))
+                    },
+                )
+            }
+        }
+        compose.waitForIdle()
+        // The path text owns its own click semantics inside the (merged) Copy
+        // row, so target it in the unmerged tree.
+        compose.onNodeWithTag(FILE_VIEWER_REVIEW_SAVED_PATH_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.waitForIdle()
+        var clipText: String? = null
+        instrumentation.runOnMainSync {
+            val cm = instrumentation.targetContext
+                .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipText = cm.primaryClip?.getItemAt(0)?.text?.toString()
+        }
+        assertEquals(savedPath, clipText)
+    }
+
+    @Test
+    fun attachToCurrentSessionInvokesCallbackWithSavedPath() {
+        var attached: String? = null
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/home/alexey/README.md",
+                        content = "# readme",
+                        sizeBytes = 8,
+                    ),
+                    reviewState = ReviewState(active = true),
+                    submittedReview = submittedReviewState(),
+                    onBack = {},
+                    onRetry = {},
+                    onAttachReview = { path -> attached = path },
+                )
+            }
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).performClick()
+        compose.waitForIdle()
+        assertEquals(savedPath, attached)
+    }
 }

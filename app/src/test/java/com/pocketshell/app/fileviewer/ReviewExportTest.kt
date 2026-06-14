@@ -179,4 +179,13 @@ class ReviewExportTest {
             comments,
         )
     }
+
+    @Test
+    fun `reviewAttachPrompt references the saved path`() {
+        assertEquals(
+            "Apply the PocketShell review at " +
+                "~/inbox/pocketshell/reviews/README.md-20260614-025147.yaml",
+            reviewAttachPrompt("~/inbox/pocketshell/reviews/README.md-20260614-025147.yaml"),
+        )
+    }
 }

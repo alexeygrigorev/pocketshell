@@ -303,6 +303,13 @@ public fun TmuxSessionScreen(
     // once via [onInitialComposerAttachmentsConsumed].
     initialComposerAttachments: List<String> = emptyList(),
     onInitialComposerAttachmentsConsumed: () -> Unit = {},
+    // Issue #763: a ready review prompt routed from the file viewer's "Attach to
+    // current session" action. When non-blank, the screen seeds it into the
+    // shared [PromptComposerViewModel] draft and opens the composer focused so
+    // the user lands ready to edit + Send. Consumed once via
+    // [onInitialComposerPromptConsumed].
+    initialComposerPrompt: String = "",
+    onInitialComposerPromptConsumed: () -> Unit = {},
     // Issue #560: the shared composer VM, obtained at the screen level so the
     // staged attachment chips can be seeded before the sheet first opens. The
     // same instance is handed to [PromptComposerSheet] below so the sheet
@@ -550,6 +557,19 @@ public fun TmuxSessionScreen(
             initialComposerAttachments.forEach { promptComposerViewModel.seedAttachment(it) }
             showMicSheet = true
             onInitialComposerAttachmentsConsumed()
+        }
+    }
+    // Issue #763: a review prompt routed from the file viewer's "Attach to
+    // current session" action. Seed it into the shared composer draft and open
+    // the composer focused so the user lands ready to edit + Send. Keyed on the
+    // prompt so the back-navigation that returns to this session re-seeds it;
+    // the consume callback clears the activity-side state so a later navigation
+    // does not re-seed a stale prompt.
+    LaunchedEffect(initialComposerPrompt) {
+        if (initialComposerPrompt.isNotBlank()) {
+            promptComposerViewModel.seedDraftPrompt(initialComposerPrompt)
+            showMicSheet = true
+            onInitialComposerPromptConsumed()
         }
     }
     // Issue #458: whether the terminal key bar shows its full row (the long

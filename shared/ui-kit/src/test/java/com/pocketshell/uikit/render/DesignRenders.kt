@@ -1553,6 +1553,144 @@ class DesignRenders {
     }
 
     /**
+     * Issue #765: the LONG-draft, keyboard-up composer. The maintainer reported
+     * that with a long multi-line message and the soft keyboard up the draft
+     * text gets "cut off" and the caret / last line being typed is not visible.
+     *
+     * Caveat (#555): the real `SheetContent` + `BasicTextField` scroll/IME
+     * behaviour lives in the `app` module, which this ui-kit render harness
+     * cannot import, so this is a STATIC visual mirror of the intended end
+     * state: a draft field that has internally scrolled to keep the LAST lines
+     * + the caret visible, with the controls row still fully reachable below
+     * it. It is the fast first design check; the actual caret-follow + IME
+     * occlusion fix is validated on the emulator with the keyboard up.
+     */
+    @Test
+    fun composerLongDraftCaretVisible() = render("composer-long-draft-caret-visible") {
+        val lines = (1..14).map { "line $it of a long multi-line prompt I'm typing" }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+        ) {
+            // Header (fixed).
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "Prompt Composer",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketShellColors.Text,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(PocketShellColors.SurfaceElev, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "×", color = PocketShellColors.TextSecondary, fontSize = 20.sp)
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            // Draft field, internally scrolled to the LAST lines (caret at end).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                    .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                contentAlignment = Alignment.BottomStart,
+            ) {
+                Column {
+                    // Only the bottom slice of a long draft is visible — the
+                    // field has scrolled to keep the caret in view.
+                    lines.takeLast(7).forEach { line ->
+                        Text(text = line, color = PocketShellColors.Text, fontSize = 14.sp)
+                    }
+                    // The caret on the last line being typed.
+                    Row {
+                        Text(
+                            text = "line 14, still typing",
+                            color = PocketShellColors.Text,
+                            fontSize = 14.sp,
+                        )
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 1.dp)
+                                .width(2.dp)
+                                .height(18.dp)
+                                .background(PocketShellColors.Accent),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            // Controls row — must stay fully reachable below the field.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
+                    }
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "{ }",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Row(
+                    modifier = Modifier
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Text(
+                        text = "Send",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(PocketShellColors.Accent, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
+                }
+            }
+        }
+    }
+
+    /**
      * #704: compact transcript tool-call rows. ui-kit cannot import the
      * app-level `ConversationToolCallChatCard`, so this replicates its layout
      * with the SAME design tokens (post-#704 compact: 6dp vertical padding,

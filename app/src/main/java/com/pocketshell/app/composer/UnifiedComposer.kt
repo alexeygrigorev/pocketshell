@@ -3,13 +3,12 @@ package com.pocketshell.app.composer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -147,11 +146,19 @@ private fun DraftFieldBox(
         if (fieldTag != null) {
             fieldModifier = fieldModifier.testTag(fieldTag)
         }
-        val scrollState = rememberScrollState()
+        // Issue #765: do NOT wrap the editor in an external `Modifier.
+        // verticalScroll(...)`. A multi-line `BasicTextField` scrolls ITSELF to
+        // keep the caret in view when it is given a bounded height and owns its
+        // own scroll. An external `verticalScroll` modifier OVERRIDES that
+        // built-in caret-follow, so on a long draft with the keyboard up the
+        // editor stayed pinned at the top and the line being typed scrolled out
+        // of view ("it starts cutting, I don't see anything"). Instead we let the
+        // editor `fillMaxHeight()` of the height-bounded [DraftFieldBox] so the
+        // framework scrolls it to the caret natively.
         val editableModifier = if (singleLine) {
             fieldModifier
         } else {
-            fieldModifier.verticalScroll(scrollState)
+            fieldModifier.fillMaxHeight()
         }
         val textStyle = TextStyle(
             color = MaterialTheme.colorScheme.onSurface,

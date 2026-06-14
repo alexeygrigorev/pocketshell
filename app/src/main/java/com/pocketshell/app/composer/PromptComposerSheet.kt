@@ -670,6 +670,18 @@ internal fun SheetContent(
         }
         val keyboardIntrusionDp = (imeBottomDp - navBarsBottomDp).coerceAtLeast(0.dp)
         val availableAboveKeyboard = (maxHeight - keyboardIntrusionDp).coerceAtLeast(0.dp)
+        val keyboardUp = keyboardIntrusionDp > 0.dp
+        // Issue #765: the height of the scrollable region (draft + banners +
+        // attachment tiles) when the keyboard is up — the room above the keyboard
+        // MINUS the pinned header + the sticky controls + the body's bottom
+        // padding ([PROMPT_SCROLL_REGION_IME_CHROME_RESERVE]). Giving the region a
+        // definite height (rather than a wrap-content weight that collapses) lets
+        // the `fillMaxHeight` draft inside claim a real viewport and self-scroll to
+        // the caret, while the whole body still fits exactly above the keyboard.
+        // Floored so the draft is never crushed to nothing on a very short screen.
+        val imeScrollRegionHeight =
+            (availableAboveKeyboard - PROMPT_SCROLL_REGION_IME_CHROME_RESERVE)
+                .coerceAtLeast(PROMPT_SCROLL_REGION_IME_MIN_HEIGHT)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -688,24 +700,18 @@ internal fun SheetContent(
                 .padding(horizontal = 18.dp)
                 .padding(bottom = 26.dp),
         ) {
-            Column(
-                modifier = Modifier
-                    // Issue #682: the scroll region absorbs overflow so a long
-                    // draft or a stack of status banners scrolls WITHIN the
-                    // compact sheet instead of forcing the whole content taller
-                    // (which would push the sticky action row off-screen / under
-                    // the keyboard). `weight(1f, fill = false)` keeps the column
-                    // at its content height when short (compact wrap-content) but
-                    // lets it SHRINK to the available height when long, because
-                    // the parent Column is bounded by `availableAboveKeyboard`
-                    // above — so the sticky action row below always stays
-                    // on-screen.
-                    .weight(1f, fill = false)
-                    .heightIn(max = PromptComposerScrollRegionMaxHeight)
-                    .verticalScroll(rememberScrollState()),
-            ) {
             // Header: title + close X. The Material 3 sheet draws its own
             // grabber above this, so we don't redraw it.
+            //
+            // Issue #765: the header is a FIXED top child of the parent Column —
+            // it is NOT inside the scroll region below. Previously it was the
+            // first child of the upper `verticalScroll` Column, so when the
+            // editor was focused (keyboard up) the scroll region auto-scrolled to
+            // bring the focused draft into view and shoved the header off the top
+            // of the sheet (the maintainer could not see the title / close, and
+            // the draft "cut off"). Pinning the header keeps it on-screen
+            // regardless of how long the draft is or how many attachment tiles
+            // are staged.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -745,6 +751,38 @@ internal fun SheetContent(
                 }
             }
 
+            Column(
+                modifier = Modifier
+                    // Issue #682/#765: the scroll region (draft + status banners +
+                    // attachment tiles) absorbs overflow so a long draft / a stack
+                    // of tiles scrolls WITHIN the compact sheet instead of forcing
+                    // the whole content taller (which would push the sticky action
+                    // row off-screen / under the keyboard). The header is PINNED
+                    // above this region (#765) so it never scrolls away.
+                    //
+                    // Issue #765: when the keyboard is UP, give this region a
+                    // DEFINITE height equal to the room left after the pinned
+                    // header + the sticky controls + paddings
+                    // ([imeScrollRegionHeight]). A definite height (vs the old
+                    // `weight(1f, fill=false)`, which collapsed to content and left
+                    // the draft a thin strip) lets the `fillMaxHeight` draft inside
+                    // claim the WHOLE region — so the editor gets a real viewport
+                    // and self-scrolls to the caret, while the region as a whole
+                    // still fits exactly the room above the keyboard. When the
+                    // keyboard is DOWN we keep the wrap-content
+                    // `weight(1f, fill=false).heightIn(max=360)` so the sheet stays
+                    // compact at partial-expand (#234).
+                    .then(
+                        if (keyboardUp) {
+                            Modifier.height(imeScrollRegionHeight)
+                        } else {
+                            Modifier
+                                .weight(1f, fill = false)
+                                .heightIn(max = PromptComposerScrollRegionMaxHeight)
+                        },
+                    )
+                    .verticalScroll(rememberScrollState()),
+            ) {
             // Issue #453: the composer's primary surface is state-driven.
             //  - Idle / Text-inserted: the editable input (`Compose prompt…`).
             //  - Recording: an amplitude-driven waveform + mm:ss timer + Stop.
@@ -2602,8 +2640,23 @@ private const val MIC_GESTURE_START_SLOP_DP = 24
 // content-height sheet never grows taller than this even with a long draft +
 // several banners. Keeps the composer compact above the keyboard; the inner
 // `verticalScroll` lets a long draft scroll within the cap instead of pushing
-// the sticky action row off-screen.
+// the sticky action row off-screen. Used ONLY when the keyboard is DOWN; when it
+// is up the region gets an explicit [PROMPT_SCROLL_REGION_IME_CHROME_RESERVE]-
+// derived height (see SheetContent).
 private val PromptComposerScrollRegionMaxHeight = 360.dp
+
+// Issue #765: when the keyboard is up the scrollable region (draft + banners +
+// tiles) is sized to `availableAboveKeyboard - this reserve`. The reserve is the
+// pinned header (+ its 14dp bottom padding), the sticky controls row, and the
+// body's bottom padding + small spacers. Tuned so the draft fills the bulk of
+// the room above the keyboard while the header stays visible and the controls
+// sit just above the keyboard.
+private val PROMPT_SCROLL_REGION_IME_CHROME_RESERVE = 104.dp
+
+// Issue #765: floor for the keyboard-up scroll region so a short screen never
+// crushes the draft to nothing; it keeps roughly two lines + the caret visible
+// and the field self-scrolls past it.
+private val PROMPT_SCROLL_REGION_IME_MIN_HEIGHT = 88.dp
 
 /**
  * Issue #180: test tags for the failed-transcription queue surface.

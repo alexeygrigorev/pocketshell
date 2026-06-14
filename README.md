@@ -1,44 +1,42 @@
 # PocketShell
 
-PocketShell is a voice-first, tmux-native Android SSH client for the
-developer workstation you already use. It is built around persistent tmux
-sessions, per-pane mobile rendering, AI-agent awareness, and server-side
-helpers that run on the dev box instead of moving provider credentials or
-long-running work onto the phone.
+PocketShell is a voice-first, tmux-native, agent-aware Android SSH client. It
+connects your phone to the developer workstation you already use over SSH,
+attaches to your **tmux** sessions in control mode, and gives you a phone-shaped
+way to drive shells and AI coding agents (Claude Code, Codex, OpenCode) without
+typing everything by hand.
 
-The current release line is **v0.3.27** (2026-06-06). The Android APK and the
-server-side `pocketshell` Python helper are released from the same tag and
-must stay version-matched.
+It is built for one job: keep working on your dev box from your phone. Long-lived
+state lives on the dev box in tmux and a small server-side `pocketshell` helper;
+the app reconnects when you bring it back to the foreground.
 
-## Status
+## What it does
 
-PocketShell is under active development for the maintainer's own use. There is
-no install base to migrate and no compatibility promise beyond preserving the
-maintainer's same-package app data across normal APK updates. Feature
-replacement follows the hard-cut rule in
-[docs/decisions.md](docs/decisions.md): remove obsolete paths instead of
-shipping compatibility shims.
+- **tmux-native sessions.** Attaches with `tmux -CC` control mode and renders one
+  pane at a time in a real terminal emulator, instead of trying to read a tiled
+  tmux layout on a small screen. Swipe/navigation controls move between panes.
+- **Agent awareness.** Detects Claude Code, Codex, and OpenCode running in the
+  visible tmux pane and shows a clean Conversation view of that agent's turns,
+  tool calls, and output, with a reply composer that sends back into the pane.
+- **Voice-first input.** A composer with OpenAI Whisper and the Android speech
+  recognizer turns dictation into commands or agent prompts. A key bar adds Esc,
+  Tab, Ctrl, Alt, and arrows above the keyboard; per-host snippets and prompt
+  templates cut down typing further.
+- **Host management.** Save SSH hosts, import or generate keys, unlock key
+  passphrases biometrically, and import a host from a **QR code**.
+- **Server-side helpers, zero phone-side credentials.** Provider usage/quota,
+  repo browsing, env management, and jobs run through the `pocketshell` helper on
+  the dev box, so provider credentials never move onto the phone.
+- **More.** Remote file browse/view, per-host port forwarding, attachment upload,
+  and a dense dark dev-tool UI.
 
-PocketShell is also intentionally foreground-first. It does not schedule phone
-work with `WorkManager`, `AlarmManager`, repeating timers, or wakelocks. tmux
-and the `pocketshell` helper keep durable state on the dev box; the Android app
-reconnects when foregrounded. The scoped exception is port forwarding, which
-uses an Android foreground service only while tunnels are active. The active
-terminal connection also has a bounded 60 second app-switch grace window before
-teardown.
+Deeper docs live in [docs/README.md](docs/README.md) (architecture, agent
+awareness, usage panel, design system, testing).
 
 ## Screenshots
 
-Current README captures live under [docs/screenshots/](docs/screenshots/). They
-were produced from the visual-audit emulator workflow against the deterministic
-Docker SSH fixture:
-
-```bash
-scripts/phone-walkthrough.sh visual-audit
-```
-
-Host list, terminal, settings, and composer are app captures. Conversation is a
-production conversation-pane render with deterministic sample agent events.
+Captured from the visual-audit emulator workflow against the deterministic Docker
+SSH fixture (`scripts/phone-walkthrough.sh visual-audit`).
 
 <table>
   <tr>
@@ -63,97 +61,27 @@ production conversation-pane render with deterministic sample agent events.
   </tr>
 </table>
 
-## What Works Today
-
-- **Host management.** Save SSH hosts, import keys, generate keys, unlock
-  passphrases biometrically, scan QR host payloads, and add hosts manually.
-  QR import uses the versioned `pocketshell.ssh-import.v1` payload and supports
-  multi-part QR codes for large keys.
-- **Host setup detection.** On connect, the app derives the remote PATH, checks
-  `command -v pocketshell`, compares `pocketshell --version` to the Android app
-  version, and offers install or upgrade commands through `uv` or `pipx`.
-- **Project-first navigation.** Each host opens into watched folders and
-  discovered tmux sessions grouped by project/root, with controls for browsing
-  GitHub repos through the host's `gh` CLI and opening sessions in cloned
-  repos.
-- **tmux-native sessions.** PocketShell attaches via `tmux -CC` control mode,
-  tracks sessions/windows/panes from structured tmux events, and renders one
-  pane at a time in the vendored Termux terminal emulator. Swipe/navigation
-  controls replace trying to read tiled tmux layouts on a phone.
-- **Dense dark dev-tool UI.** The app uses the shared PocketShell design system
-  across host, folder, session, settings, snippets, env, file, and port-forward
-  screens: always-dark surfaces, restrained typography, dense rows, status dots,
-  one overflow affordance per row, and shared headers/list primitives.
-- **Voice-first composer.** The prompt composer supports OpenAI Whisper and the
-  Android system speech recognizer, editable drafts, configurable language and
-  silence threshold, Insert vs Send, per-session draft retention, and inline
-  dictation straight into the terminal.
-- **Keyboard support for terminals.** A key bar supplies Esc, Tab, Ctrl, Alt,
-  and arrows above the system keyboard. The terminal defaults to a raw command
-  keyboard mode to avoid autocorrect corrupting shell input, with an opt-in
-  smart text mode in settings.
-- **Snippets.** Per-host snippets and prompt templates can be sent into the
-  terminal/composer, with snippet picker flows covered by the app tests.
-- **Agent awareness.** PocketShell detects Claude Code, Codex, and OpenCode in
-  the visible tmux pane using cwd/log candidates plus pane-scoped process
-  evidence, then surfaces a Conversation tab for that pane. Claude JSONL,
-  Codex rollout JSONL, and OpenCode SQLite sources are parsed into a normalized
-  conversation model.
-- **Conversation view.** The agent view renders dense message turns, timestamps,
-  Markdown/code, collapsible tool calls, copy/quote affordances, search, and a
-  reply composer that sends back into the currently detected agent pane.
-- **Agent slash-command palette.** When an agent is detected, a dedicated `/`
-  affordance opens a curated per-agent slash-command sheet for commands such as
-  goal/compact/clear-style flows, plus related session-control rows.
-- **Attachments.** The composer can stage files selected on Android, upload
-  them to `~/.pocketshell/attachments/...` on the remote host, show compact
-  attachment tiles, send attachment-only prompts, and prune old staged files.
-  Shared text/files can also be routed into an active session.
-- **Usage and quota.** The app shows provider usage/quota from the server-side
-  `pocketshell usage --json` helper for Claude, Codex, Copilot, Z.AI, and
-  compatible custom commands, without storing provider credentials on the
-  phone.
-- **Port forwarding.** Per-host forwarding tables and auto-forward controls are
-  backed by the shared `core-portfwd` module. Active tunnels can survive panel
-  disposal/backgrounding through the scoped foreground-service carve-out, and
-  re-establish automatically through transport drops, network recovery, and
-  validated wifi↔cellular handoffs without the user toggling auto-forward
-  off/on.
-- **Remote file and env tools.** The app includes remote file browsing/viewing,
-  file-path tap handling from terminal output, `.env` / `.envrc` key management
-  through `pocketshell env`, watched-folder management, and recurring jobs
-  through `pocketshell jobs`.
-- **Diagnostics and cost tracking.** Settings include usage, AI cost tracking
-  for app-side OpenAI calls, crash reports, terminal/conversation font controls,
-  voice settings, assistant-provider settings, and diagnostics export.
-
-The deterministic Docker host used in tests includes local shims for `claude`,
-`codex`, `opencode`, `gh`, `pocketshell`, `uv`, and related tools so emulator
-and JVM tests can exercise the flows without real provider credentials.
-
 ## Install
 
-### Android App
+### 1. Install the Android app
 
-1. Download the latest debug APK from
-   [GitHub Releases](https://github.com/alexeygrigorev/pocketshell/releases).
-2. Install it on the phone:
+1. Open the [GitHub Releases page](https://github.com/alexeygrigorev/pocketshell/releases)
+   and download the latest debug APK (`pocketshell-<version>-debug.apk`).
+2. Allow installs from your browser/file manager if your phone prompts, then open
+   the APK to install it.
 
-   ```bash
-   adb install -r app-debug.apk
-   ```
-
-   The repo helper for the data-preserving update path is:
+   Or, with `adb`:
 
    ```bash
-   scripts/install-update-apk.sh app-debug.apk
+   adb install -r pocketshell-<version>-debug.apk
    ```
 
-3. Open PocketShell and add a host through QR import or manual entry.
+Requirements: Android 8.0 (API 26) or newer.
 
-### Server-Side Helper
+### 2. Install the server-side helper on the dev box
 
-Install the matching `pocketshell` helper on every dev box you plan to use:
+The app drives a small Python helper named `pocketshell` on each dev box for
+usage/quota, repos, env, jobs, and QR sharing. Install it once per box:
 
 ```bash
 uv tool install pocketshell
@@ -161,55 +89,88 @@ uv tool install pocketshell
 pipx install pocketshell
 ```
 
-For QR generation support:
+To also generate host QR codes from the dev box, add the QR extra:
 
 ```bash
 uv tool install pocketshell --with "qrcode[pil]"
 ```
 
-The helper exposes the server-side commands the Android app drives:
-`usage`, `sessions`, `jobs`, `repos`, `env`, `hooks`, `logs`, `agent-log`, and
-`qr-share`. See [tools/pocketshell/README.md](tools/pocketshell/README.md) and
-[docs/server-setup.md](docs/server-setup.md).
+See [tools/pocketshell/README.md](tools/pocketshell/README.md) and
+[docs/server-setup.md](docs/server-setup.md) for PATH and troubleshooting notes.
 
-## Quickstart
+## Configure a host
 
-Phone in hand, dev box reachable over SSH at `dev.example.com`:
+You can add a host two ways: scan a QR code (fastest), or enter the details
+manually.
 
-1. Install the helper with QR support on the dev box:
+### Manual entry
 
-   ```bash
-   ssh dev.example.com 'uv tool install pocketshell --with "qrcode[pil]"'
-   ```
+1. On the **Hosts** screen, tap the **+** button.
+2. Fill in the host form:
+   - **Name** — display name for the host (e.g. `dev box`).
+   - **Hostname / IP** — the address to connect to (e.g. `dev.example.com`).
+   - **Port** — SSH port, defaults to `22`.
+   - **Username** — the SSH user.
+   - **SSH key** — pick a key from your saved keys.
+   - **Usage command** (optional) — a custom command for the usage panel;
+     defaults to `pocketshell usage --json`.
+3. Tap **Add host**.
 
-2. Generate a QR payload from an SSH config alias:
+To add keys, open the SSH keys screen and use **Import key** (load an existing
+private key from the device) or **Generate** (create a new key on the device).
+PocketShell inspects the key locally and prompts for a passphrase when one is
+needed; passphrases are not stored.
 
-   ```bash
-   pocketshell qr-share dev.example.com
-   ```
+### QR code import
 
-   If the alias cannot be resolved, pass details explicitly:
+QR import is the fastest way to set up a host — it carries the host details and,
+optionally, the private key, so there is nothing to type on the phone.
 
-   ```bash
-   pocketshell qr-share --host dev.example.com --user alex \
-     --key ~/.ssh/id_ed25519 --name "Dev box"
-   ```
+**On the dev box**, generate a QR from an SSH config alias (resolves host, port,
+user, and identity file via `ssh -G`):
 
-   The QR payload can include the private key. Render it only on a private
-   screen. Multi-part QR codes are reassembled by the Android scanner.
+```bash
+pocketshell qr-share dev
+```
 
-3. In PocketShell, use Scan to import the host. Manual host entry remains
-   available.
+Or pass the details explicitly, skipping `~/.ssh/config`:
 
-4. Tap the host. PocketShell runs the bootstrap probe, checks the helper
-   version, discovers watched folders and tmux sessions, and opens the
-   host/project view.
+```bash
+pocketshell qr-share \
+  --host dev.example.com \
+  --user ubuntu \
+  --port 22 \
+  --key ~/.ssh/id_ed25519 \
+  --name "dev box"
+```
 
-5. Attach to or create a tmux session. Use the mic/composer, key bar, snippets,
-   slash-command palette, conversation tab, file browser, env screen, or port
-   forwarding panel as needed.
+`qr-share` prints the QR inline when the terminal is a TTY, or writes a numbered
+PNG sequence (`qr-share-01.png`, ...) with `--png --out-dir <dir>`. Large keys
+are split across several QR codes automatically; the helper pauses between codes
+so you can scan each in turn.
 
-## Architecture
+**On the phone**, go to **Settings → Host import → Import host → Scan QR** and
+point the camera at the code(s). The scanner reassembles multi-part codes and
+imports the host once every part has arrived.
+
+> The QR payload can include your private key, which is a visible secret on the
+> screen. Generate and scan QR codes in a private space, prefer
+> passphrase-protected keys, and delete any generated PNGs after import.
+
+Full payload format, multi-QR envelope, and the `pocketshell://import?...` deep
+link are documented in [docs/ssh-qr-import.md](docs/ssh-qr-import.md).
+
+## Connect
+
+1. Tap a host on the **Hosts** screen.
+2. PocketShell connects, checks the `pocketshell` helper version (offering an
+   install/upgrade command if needed), and discovers watched folders and tmux
+   sessions.
+3. Open or create a tmux session. Use the mic/composer, key bar, snippets,
+   slash-command palette, Conversation tab, file browser, or port-forward panel
+   as needed.
+
+## How it fits together
 
 ```text
 Android phone                 SSH (sshj)              Dev box
@@ -218,40 +179,21 @@ Compose + VT     tail JSONL / SQLite -------------->   agent logs
 foreground app   pocketshell commands ------------>   pocketshell helper
 ```
 
-Load-bearing choices:
+Load-bearing choices: `tmux -CC` control mode instead of screen-scraping; one
+visible pane at a time instead of tiled tmux; server-side helpers so no provider
+credentials live on the phone; and a foreground-first model — the app does not
+schedule background phone work, it reconnects when you bring it forward (the
+active connection has a short app-switch grace window so quick app swaps don't
+tear it down). The scoped exception is port forwarding, which uses a foreground
+service while tunnels are active.
 
-- `tmux -CC` control mode instead of screen-scraping.
-- sshj instead of JSch.
-- One visible pane at a time instead of tiled tmux.
-- Server-side helpers for usage, repos, env, hooks, logs, and jobs.
-- Zero phone-side provider credentials for usage/repo/provider state.
-
-More detail: [docs/architecture.md](docs/architecture.md),
-[docs/decisions.md](docs/decisions.md),
-[docs/agent-awareness.md](docs/agent-awareness.md), and
-[docs/usage-panel.md](docs/usage-panel.md).
-
-## Repository Layout
-
-- `app/` - Android application.
-- `shared/core-ssh/` - sshj wrapper, leases, key management, remote file APIs.
-- `shared/core-portfwd/` - port-forwarding support.
-- `shared/core-tmux/` - tmux control-mode parsing/client behavior.
-- `shared/core-terminal/` - vendored Termux terminal emulator and Compose
-  adapter.
-- `shared/core-agents/` - Claude Code, Codex, and OpenCode parsers/detection.
-- `shared/core-usage/` - normalized usage/quota parsing.
-- `shared/core-storage/` - Room entities, DAOs, migrations.
-- `shared/core-voice/` - Whisper and speech input support.
-- `shared/ui-kit/` - shared dark design system components and tokens.
-- `tools/pocketshell/` - server-side Python helper published to PyPI.
-- `tests/docker/` - deterministic SSH/dev-box test fixtures.
-- `docs/` - product docs, architecture notes, design notes, and QA runbooks.
+See [docs/architecture.md](docs/architecture.md) and
+[docs/decisions.md](docs/decisions.md) for the full rationale.
 
 ## Development
 
-Prerequisites: JDK 17, Android SDK/platform tools, an emulator image, Docker
-with Compose, and `local.properties` pointing at the Android SDK, for example:
+Prerequisites: JDK 17, the Android SDK and platform tools, an emulator image,
+Docker with Compose, and a `local.properties` pointing at the SDK:
 
 ```properties
 sdk.dir=/home/alexey/Android/Sdk
@@ -264,64 +206,29 @@ Common commands:
 ./gradlew test --stacktrace
 ./gradlew check --stacktrace
 ./gradlew connectedDebugAndroidTest
-scripts/terminal-workbench.sh
 ```
 
-Docker-backed SSH/port-forward integration tests:
+The test matrix and Docker/emulator setup are in
+[docs/testing.md](docs/testing.md) and
+[docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md). The
+orchestrator/reviewer process and release flow are in
+[process.md](process.md).
 
-```bash
-./gradlew :shared:core-ssh:integrationTest \
-  :shared:core-portfwd:integrationTest --stacktrace
-```
+## Repository layout
 
-Pre-release validation:
-
-```bash
-scripts/pre-release-confidence-gate.sh
-scripts/release-emulator-validation.sh
-```
-
-Focused screenshot capture for reviewer/README evidence:
-
-```bash
-scripts/phone-walkthrough.sh visual-audit
-```
-
-The project test matrix is in [docs/testing.md](docs/testing.md). Docker and
-emulator setup details are in
-[docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md).
-
-## Release Flow
-
-Release APKs are built by pushing a version tag. The same tag publishes
-`tools/pocketshell/` to PyPI so the Android app and helper stay in lockstep.
-The guarded release process, version checks, validation artifacts, and fallback
-GitHub Actions path are documented in [process.md](process.md).
-
-## Links
-
-- [docs/vision.md](docs/vision.md) - product vision and positioning.
-- [docs/architecture.md](docs/architecture.md) - module layout, sshj, tmux
-  control mode, per-pane rendering.
-- [docs/decisions.md](docs/decisions.md) - locked decisions, foreground model,
-  and hard-cut compatibility rule.
-- [docs/design-language.md](docs/design-language.md) - visual design brief.
-- [docs/design-system.md](docs/design-system.md) - codified design tokens.
-- [docs/input-methods.md](docs/input-methods.md) - voice, key bar, snippets,
-  and composer behavior.
-- [docs/agent-awareness.md](docs/agent-awareness.md) - Claude/Codex/OpenCode
-  detection and conversation view.
-- [docs/usage-panel.md](docs/usage-panel.md) - provider quota through
-  server-side `pocketshell usage`.
-- [docs/ssh-qr-import.md](docs/ssh-qr-import.md) - QR import payload format.
-- [docs/server-setup.md](docs/server-setup.md) - helper install/PATH
-  troubleshooting.
-- [docs/walkthrough-visual-pass.md](docs/walkthrough-visual-pass.md) -
-  screenshot capture workflow.
-- [docs/testing.md](docs/testing.md) - testing matrix and QA expectations.
-- [docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md) -
-  Docker, emulator, and connected-test runbook.
-- [process.md](process.md) - orchestrator/reviewer process and release flow.
-- [agents.md](agents.md) - local Android tooling paths and agent role pointers.
-- [tools/pocketshell/README.md](tools/pocketshell/README.md) - server-side
-  helper reference.
+- `app/` — Android application.
+- `shared/core-ssh/` — sshj wrapper, leases, key management, remote file APIs.
+- `shared/core-connection/` — connect/attach/reattach/grace/reconnect controller.
+- `shared/core-portfwd/` — port forwarding.
+- `shared/core-tmux/` — tmux control-mode parsing and client behavior.
+- `shared/core-terminal/` — vendored Termux terminal emulator + Compose adapter.
+- `shared/core-agents/` — Claude Code, Codex, and OpenCode detection/parsers.
+- `shared/core-usage/` — normalized usage/quota parsing.
+- `shared/core-storage/` — Room entities, DAOs, migrations.
+- `shared/core-voice/` — Whisper and speech input.
+- `shared/ui-kit/` — shared dark design system.
+- `tools/pocketshell/` — server-side Python helper published to PyPI.
+- `tests/docker/` — deterministic SSH/dev-box test fixtures.
+- `docs/` — product docs, architecture notes, and QA runbooks.
+</content>
+</invoke>

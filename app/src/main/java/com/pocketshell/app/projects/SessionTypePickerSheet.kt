@@ -14,14 +14,11 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -36,7 +33,9 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -286,14 +285,15 @@ internal fun SessionTypePickerContent(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(
+            PocketShellButton(
+                text = "Cancel",
                 onClick = onCancel,
+                variant = ButtonVariant.Text,
                 modifier = Modifier.testTag(SESSION_TYPE_PICKER_CANCEL_TAG),
-            ) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            )
             Spacer(modifier = Modifier.padding(end = 8.dp))
-            Button(
+            PocketShellButton(
+                text = "Create",
                 onClick = {
                     onCreate(
                         SessionTypeChoice(
@@ -314,15 +314,10 @@ internal fun SessionTypePickerContent(
                         ),
                     )
                 },
+                variant = ButtonVariant.Primary,
                 enabled = startDirectory.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PocketShellColors.Accent,
-                    contentColor = PocketShellColors.OnAccent,
-                ),
                 modifier = Modifier.testTag(SESSION_TYPE_PICKER_CREATE_TAG),
-            ) {
-                Text("Create")
-            }
+            )
         }
     }
 }

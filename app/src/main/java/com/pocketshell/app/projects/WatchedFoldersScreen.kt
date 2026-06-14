@@ -38,9 +38,11 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -175,23 +177,20 @@ fun WatchedFoldersScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        TextButton(
+                        PocketShellButton(
+                            text = "+ Add folder",
                             onClick = { showAddDialog = true },
+                            variant = ButtonVariant.Text,
                             modifier = Modifier.testTag(WATCHED_FOLDERS_ADD_TAG),
-                        ) {
-                            Text("+ Add folder", color = PocketShellColors.Accent)
-                        }
+                        )
                         if (state.sshCapable) {
-                            TextButton(
+                            PocketShellButton(
+                                text = if (state.discovering) "Discovering…" else "Discover from remote",
                                 onClick = { viewModel.discoverFromRemote() },
+                                variant = ButtonVariant.Text,
                                 enabled = !state.discovering,
                                 modifier = Modifier.testTag(WATCHED_FOLDERS_DISCOVER_TAG),
-                            ) {
-                                Text(
-                                    text = if (state.discovering) "Discovering…" else "Discover from remote",
-                                    color = PocketShellColors.Accent,
-                                )
-                            }
+                            )
                         }
                     }
                     if (!state.sshCapable) {
@@ -421,18 +420,20 @@ private fun FolderEntryDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
+                text = "Save",
                 onClick = { onConfirm(label, path) },
+                variant = ButtonVariant.Primary,
                 enabled = path.trim().isNotEmpty(),
                 modifier = Modifier.testTag(WATCHED_FOLDERS_DIALOG_CONFIRM_TAG),
-            ) {
-                Text("Save", color = PocketShellColors.Accent)
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+            )
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,

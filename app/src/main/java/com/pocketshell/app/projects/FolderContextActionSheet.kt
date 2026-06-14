@@ -12,13 +12,10 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -29,7 +26,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -222,22 +221,21 @@ fun EmptyProjectDialog(
             }
         },
         confirmButton = {
-            Button(
+            PocketShellButton(
+                text = "Create",
                 onClick = { onCreate(name) },
+                variant = ButtonVariant.Primary,
                 enabled = name.trim().isNotBlank(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PocketShellColors.Accent,
-                    contentColor = PocketShellColors.OnAccent,
-                ),
                 modifier = Modifier.testTag(EMPTY_PROJECT_CREATE_TAG),
-            ) {
-                Text("Create")
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, modifier = Modifier.testTag(EMPTY_PROJECT_CANCEL_TAG)) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.testTag(EMPTY_PROJECT_CANCEL_TAG),
+            )
         },
         modifier = Modifier.testTag(EMPTY_PROJECT_DIALOG_TAG),
     )

@@ -35,13 +35,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -86,12 +82,16 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.MicButton
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -924,7 +924,7 @@ private fun LoadingPanel(modifier: Modifier = Modifier.fillMaxSize()) {
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.testTag(FOLDER_LIST_LOADING_BODY_TAG),
         ) {
-            CircularProgressIndicator(color = PocketShellColors.Accent)
+            LoadingIndicator.Spinner(size = SpinnerSize.Medium)
             Spacer(modifier = Modifier.height(PocketShellSpacing.md))
             Text(
                 text = "Loading workspace tree",
@@ -949,9 +949,12 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
             color = PocketShellColors.Text,
             fontSize = 14.sp,
         )
-        TextButton(onClick = onRetry, modifier = Modifier.testTag(FOLDER_LIST_RETRY_TAG)) {
-            Text("Retry", color = PocketShellColors.Accent)
-        }
+        PocketShellButton(
+            text = "Retry",
+            onClick = onRetry,
+            variant = ButtonVariant.Text,
+            modifier = Modifier.testTag(FOLDER_LIST_RETRY_TAG),
+        )
     }
 }
 
@@ -1210,15 +1213,11 @@ internal fun FolderListContent(
 
 @Composable
 private fun FolderRefreshProgressBar(modifier: Modifier = Modifier) {
-    LinearProgressIndicator(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(3.dp)
-            .testTag(FOLDER_LIST_REFRESHING_TAG),
-        color = PocketShellColors.Accent,
-        // A faint track keeps the bar legible against the dark background while
-        // staying a thin, non-displacing affordance (issue #639).
-        trackColor = PocketShellColors.Accent.copy(alpha = 0.18f),
+    // The canonical indeterminate "in flight" strip (#756): one accent bar on a
+    // faint track, kept thin/non-displacing (issue #639). Geometry + colours now
+    // come from the shared LoadingIndicator.Bar token, not per-call values.
+    LoadingIndicator.Bar(
+        modifier = modifier.testTag(FOLDER_LIST_REFRESHING_TAG),
     )
 }
 
@@ -2617,18 +2616,21 @@ private fun RenameSessionDialog(
             }
         },
         confirmButton = {
-            Button(
+            PocketShellButton(
+                text = "Rename",
                 onClick = { onConfirm(trimmed) },
+                variant = ButtonVariant.Primary,
                 enabled = canRename,
                 modifier = Modifier.testTag(RENAME_SESSION_CONFIRM_TAG),
-            ) {
-                Text("Rename")
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, modifier = Modifier.testTag(RENAME_SESSION_CANCEL_TAG)) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.testTag(RENAME_SESSION_CANCEL_TAG),
+            )
         },
         modifier = Modifier.testTag(RENAME_SESSION_DIALOG_TAG),
     )
@@ -2665,21 +2667,20 @@ private fun StopSessionDialog(
             )
         },
         confirmButton = {
-            Button(
+            PocketShellButton(
+                text = "Stop",
                 onClick = onConfirm,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PocketShellColors.Red,
-                    contentColor = PocketShellColors.OnAccent,
-                ),
+                variant = ButtonVariant.Destructive,
                 modifier = Modifier.testTag(STOP_SESSION_CONFIRM_TAG),
-            ) {
-                Text("Stop")
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, modifier = Modifier.testTag(STOP_SESSION_CANCEL_TAG)) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.testTag(STOP_SESSION_CANCEL_TAG),
+            )
         },
         modifier = Modifier.testTag(STOP_SESSION_DIALOG_TAG),
     )

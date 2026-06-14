@@ -896,19 +896,11 @@ class DesignRenders {
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = {}) {
-                    Text("Cancel", color = PocketShellColors.TextSecondary)
-                }
+                // Mirrors the migrated SessionTypePickerSheet action row (#756):
+                // Cancel = Text variant, Create = Primary variant.
+                PocketShellButton(text = "Cancel", onClick = {}, variant = ButtonVariant.Text)
                 Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = {},
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = PocketShellColors.Accent,
-                        contentColor = PocketShellColors.OnAccent,
-                    ),
-                ) {
-                    Text("Create")
-                }
+                PocketShellButton(text = "Create", onClick = {}, variant = ButtonVariant.Primary)
             }
         }
     }
@@ -1018,19 +1010,11 @@ class DesignRenders {
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = {}) {
-                    Text("Cancel", color = PocketShellColors.TextSecondary)
-                }
+                // Mirrors the migrated SessionTypePickerSheet action row (#756):
+                // Cancel = Text variant, Create = Primary variant.
+                PocketShellButton(text = "Cancel", onClick = {}, variant = ButtonVariant.Text)
                 Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = {},
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = PocketShellColors.Accent,
-                        contentColor = PocketShellColors.OnAccent,
-                    ),
-                ) {
-                    Text("Create")
-                }
+                PocketShellButton(text = "Create", onClick = {}, variant = ButtonVariant.Primary)
             }
         }
     }

@@ -410,17 +410,32 @@ abstract class NetworkFaultProofBase {
     }
 
     /**
-     * Clean socket-drop outage for sustained reconnect checks. Toxiproxy
-     * disables the proxy, which drops active connections and refuses new ones
-     * until [ToxiproxyControl.enable] is called.
+     * Clean socket-drop outage for sustained reconnect checks: the reusable
+     * "cut the link for N ms, then restore" primitive. Toxiproxy disables the
+     * proxy, which drops active connections and refuses new ones, holds the
+     * link down for at least [downMillis], then re-enables it.
+     *
+     * Pass [whileDown] to run assertions/waits *during* the outage (e.g. wait
+     * for the disconnect band to surface on a sustained cut); whatever wall time
+     * it consumes counts toward [downMillis], and any remaining hold is slept
+     * out so the link stays down for the full window. The link is always
+     * restored in `finally`, even if [whileDown] throws.
      */
-    protected fun disableProxyFor(label: String, downMillis: Long) {
+    protected fun disableProxyFor(
+        label: String,
+        downMillis: Long,
+        whileDown: () -> Unit = {},
+    ) {
         val proxy = toxiproxy()
         val cutStart = SystemClock.elapsedRealtime()
         proxy.disable()
         try {
             recordTiming("${label}_proxy_disabled_ms", downMillis)
-            SystemClock.sleep(downMillis)
+            whileDown()
+            val remainingHold = downMillis - (SystemClock.elapsedRealtime() - cutStart)
+            if (remainingHold > 0L) {
+                SystemClock.sleep(remainingHold)
+            }
         } finally {
             proxy.enable()
             recordTiming("${label}_proxy_disable_total_ms", SystemClock.elapsedRealtime() - cutStart)

@@ -108,18 +108,10 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
         waitForVisibleTerminalText("before-longcut") { "BEFORE-$marker" in it }
         assertNoExtraConnectAttempts(attemptsBefore, expectedDelta = 1, label = "initial attach")
 
-        val cutStart = SystemClock.elapsedRealtime()
-        val proxy = toxiproxy()
-        proxy.disable()
-        try {
+        // Reusable clean-cut primitive: drop the link for a sustained window and
+        // confirm the disconnect band surfaces while it is down, then restore.
+        disableProxyFor("longcut", downMillis = LONG_CUT_MS) {
             waitForDisconnectBand("longcut")
-            val remainingHold = LONG_CUT_MS - (SystemClock.elapsedRealtime() - cutStart)
-            if (remainingHold > 0L) {
-                SystemClock.sleep(remainingHold)
-            }
-        } finally {
-            proxy.enable()
-            recordTiming("longcut_proxy_disable_total_ms", SystemClock.elapsedRealtime() - cutStart)
         }
 
         tapReconnectAndWait("longcut")

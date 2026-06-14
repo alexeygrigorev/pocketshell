@@ -48,7 +48,9 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.terminal.ui.openUrlWithFallback
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
@@ -524,7 +526,14 @@ private fun PortForwardRow(
             }
         }
         Spacer(Modifier.width(PocketShellSpacing.sm))
-        TextButtonBox(label = if (forwarding) "Stop" else "Start", onClick = onToggle)
+        // Canonical design-system button (#756): Start is the primary affordance
+        // for a discovered row; Stop is the low-emphasis text action that tears a
+        // forward down.
+        PocketShellButton(
+            text = if (forwarding) "Stop" else "Start",
+            onClick = onToggle,
+            variant = if (forwarding) ButtonVariant.Text else ButtonVariant.Primary,
+        )
     }
 }
 

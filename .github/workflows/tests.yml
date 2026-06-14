@@ -258,76 +258,125 @@ jobs:
             exit 1
           fi
 
-      # Issue #771: since 2026-06-13 the job died inside the emulator-runner
-      # action's OWN "Install Android SDK" step — `yes | sdkmanager --licenses`
-      # exited 1 BEFORE any AVD/emulator started (the later "could not connect to
-      # TCP port 5554" is just the action's cleanup handler, not a boot failure).
-      # This is a GitHub hosted-runner SDK-install/license flake we don't control
-      # via the action (the floating `v2` tag has NOT moved since v2.37.0 in
-      # March, so it is not an action regression). Harden the hosted SDK install
-      # BEFORE the action runs so the action's internal `sdkmanager --licenses`
-      # is a no-op against an already-accepted, already-warmed SDK:
-      #   * ensure cmdline-tools + sdkmanager are on PATH (the hosted image ships
-      #     them under $ANDROID_SDK_ROOT/cmdline-tools/latest/bin),
-      #   * accept ALL licenses in a retry loop (transient network/license-cache
-      #     failures are the documented failure mode here),
-      #   * pre-install the exact packages the action would otherwise fetch
-      #     (platform-tools, platforms;android-34, the api-34 google_apis x86_64
-      #     system image) with retries, so the action's install step finds them
-      #     present and cannot fail on a fresh download.
-      # The trailing `true` only guards the convenience step: if it still cannot
-      # accept here, the action's own license step remains the authoritative gate
-      # and a genuine boot/test failure still reddens the job via the classifier
-      # below. We never `exit 0` on a real test failure (no #636/#638 false-green).
-      - name: Pre-accept Android SDK licenses + warm up SDK (robust, issue #771)
+      # Issue #771 — REAL root cause + fix (supersedes the earlier "warm up a
+      # separate SDK copy" pre-step, which was INEFFECTIVE).
+      #
+      # The job dies inside the emulator-runner action's OWN "Install Android SDK"
+      # step. The action runs, by name on PATH:
+      #     sh -c "yes | sdkmanager --licenses > /dev/null"
+      # and that exits 1 in ~10 ms — far too fast for a JVM tool that actually
+      # started. The matching symptom in the previous pre-step's log was
+      # `yes: standard output: Broken pipe` on EVERY attempt: `sdkmanager` exits
+      # before reading a single line of stdin, so `yes` gets SIGPIPE. In other
+      # words the runner image's PRE-INSTALLED `sdkmanager`
+      # ($ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager) is broken on the
+      # current ubuntu-24.04 image and crashes instantly. The later
+      # "could not connect to TCP port 5554" is only the action's cleanup handler
+      # firing after that crash — no emulator was ever started.
+      #
+      # Why the previous attempt did NOT work: it accepted licenses / warmed
+      # packages against the SAME broken sdkmanager and threw the output away
+      # (`> /dev/null 2>&1`), so it could not even tell the binary was crashing.
+      # And the action does not reuse a "warmed" SDK — it re-invokes its own
+      # `sdkmanager --licenses` regardless, against the same broken binary.
+      #
+      # Why bumping the action version does NOT help: android-emulator-runner only
+      # downloads its own cmdline-tools when `$ANDROID_HOME/cmdline-tools` does NOT
+      # already exist (`if (!fs.existsSync(cmdlineToolsPath))`). On the hosted
+      # runner that directory exists, so EVERY action version (incl. main) skips
+      # the download and uses the runner's broken pre-installed sdkmanager.
+      #
+      # THE FIX (targets the action's actual failing call): replace the runner's
+      # broken `$ANDROID_HOME/cmdline-tools/latest` with the exact known-good
+      # cmdline-tools build the action itself pins (commandlinetools build
+      # 14742923). When the action then runs `sdkmanager --licenses` by name on
+      # PATH, PATH resolves to THIS freshly-installed, working sdkmanager — the
+      # same path the action uses — so its own license step succeeds and the AVD
+      # actually boots. We also accept licenses + warm the api-34 packages with
+      # the fresh tools so the action's subsequent install is a no-op.
+      #
+      # This step runs BEFORE any emulator/test, so a failure here can only ever
+      # block the run on infra provisioning — it can NEVER turn a genuine J1/J3
+      # test failure green (no #636/#638 false-green). We keep the journey suite
+      # + #760 retry-once + classifier below as the sole authoritative test gate.
+      - name: Repair Android cmdline-tools + accept licenses (issue #771)
         run: |
-          set -u
+          set -uo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           echo "Using SDK_ROOT=$SDK_ROOT"
-          SDKMANAGER=""
-          for cand in \
-            "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            "$SDK_ROOT/cmdline-tools/bin/sdkmanager" \
-            "$(command -v sdkmanager 2>/dev/null || true)"; do
-            if [[ -n "$cand" && -x "$cand" ]]; then SDKMANAGER="$cand"; break; fi
-          done
-          if [[ -z "$SDKMANAGER" ]]; then
-            echo "::warning title=sdkmanager not found::Could not locate sdkmanager under $SDK_ROOT; leaving license/install to the emulator-runner action."
-            exit 0
-          fi
-          echo "Using sdkmanager: $SDKMANAGER"
+          PREINSTALLED="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 
-          accept_licenses() {
-            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null 2>&1
-          }
-          echo "::group::Accept SDK licenses (retry x5)"
+          # 1) DIAGNOSE the pre-installed sdkmanager so the next CI run proves the
+          #    root cause (do NOT discard stderr this time). A working sdkmanager
+          #    prints its version in well under a second; the broken one exits
+          #    instantly. `|| true` keeps this purely diagnostic.
+          echo "::group::Diagnose pre-installed sdkmanager (expected to be broken)"
+          if [[ -x "$PREINSTALLED" ]]; then
+            echo "java -version:"; java -version 2>&1 | sed 's/^/  /' || true
+            echo "sdkmanager --version (stderr included):"
+            "$PREINSTALLED" --version 2>&1 | sed 's/^/  /' || echo "  (non-zero exit from pre-installed sdkmanager --version)"
+          else
+            echo "No pre-installed sdkmanager at $PREINSTALLED"
+          fi
+          echo "::endgroup::"
+
+          # 2) REPAIR: install the action's exact known-good cmdline-tools build
+          #    over the (broken) pre-installed `latest`, so the action's own
+          #    PATH-resolved `sdkmanager --licenses` runs against a working copy.
+          CMDLINE_TOOLS_ZIP="commandlinetools-linux-14742923_latest.zip"
+          CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/${CMDLINE_TOOLS_ZIP}"
+          echo "::group::Reinstall known-good cmdline-tools (build 14742923)"
+          TMP_DL="$(mktemp -d)"
           ok=""
-          for attempt in 1 2 3 4 5; do
-            if accept_licenses; then ok="yes"; echo "Licenses accepted on attempt $attempt"; break; fi
-            echo "License acceptance attempt $attempt failed; retrying in 5s..."
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 -o "$TMP_DL/$CMDLINE_TOOLS_ZIP" "$CMDLINE_TOOLS_URL"; then
+              ok="yes"; echo "Downloaded $CMDLINE_TOOLS_ZIP on attempt $attempt"; break
+            fi
+            echo "cmdline-tools download attempt $attempt failed; retrying in 5s..."
             sleep 5
           done
           if [[ -z "$ok" ]]; then
-            echo "::warning title=License pre-accept could not complete::Falling back to the action's internal license step; a real failure will still redden the job."
+            echo "::error title=cmdline-tools download failed::Could not fetch ${CMDLINE_TOOLS_URL} after retries. This is a runner-network infra failure, not a test failure (issue #771)."
+            exit 1
+          fi
+          rm -rf "$TMP_DL/extract"
+          unzip -q "$TMP_DL/$CMDLINE_TOOLS_ZIP" -d "$TMP_DL/extract"
+          # The zip extracts to `cmdline-tools/`; the action expects the tools at
+          # `$SDK_ROOT/cmdline-tools/latest`.
+          rm -rf "$SDK_ROOT/cmdline-tools/latest"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          mv "$TMP_DL/extract/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          chmod +x "$SDKMANAGER" || true
+          echo "Installed fresh sdkmanager at $SDKMANAGER"
+          echo "::endgroup::"
+
+          # 3) VERIFY the fresh sdkmanager actually runs. This is the load-bearing
+          #    proof that the repair worked (a JVM tool that starts prints a
+          #    version line in well under a second). If it still can't run, fail
+          #    NOW with an explicit infra classification rather than letting the
+          #    action crash deeper with the confusing "TCP port 5554" message.
+          echo "::group::Verify fresh sdkmanager"
+          if ! "$SDKMANAGER" --version; then
+            echo "::error title=sdkmanager still broken after repair::The freshly-installed cmdline-tools sdkmanager still failed to run (issue #771). Treat as EMULATOR INFRA UNAVAILABLE, not a test failure."
+            exit 1
           fi
           echo "::endgroup::"
 
-          install_pkgs() {
-            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
-              "platform-tools" \
-              "platforms;android-34" \
-              "system-images;android-34;google_apis;x86_64" > /dev/null 2>&1
-          }
-          echo "::group::Warm up SDK packages (retry x3)"
-          for attempt in 1 2 3; do
-            if install_pkgs; then echo "SDK packages installed/verified on attempt $attempt"; break; fi
-            echo "SDK warm-up attempt $attempt failed; retrying in 10s..."
-            sleep 10
-          done
+          # 4) Accept licenses + warm the exact api-34 packages with the WORKING
+          #    tools so the action's own license/install step is a no-op. Output is
+          #    visible this time so a future regression is diagnosable. The `|| true`
+          #    keeps these non-fatal: the action re-runs them, and the journey
+          #    suite + classifier remain the authoritative test gate.
+          echo "::group::Accept SDK licenses"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
           echo "::endgroup::"
-          # Convenience step — never let it redden the job; the action + classifier
-          # remain the authoritative gate.
-          true
+          echo "::group::Warm up api-34 packages"
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "system-images;android-34;google_apis;x86_64" || true
+          echo "::endgroup::"
 
       - name: Build SSH base image
         run: docker compose -f tests/docker/docker-compose.yml build sshd

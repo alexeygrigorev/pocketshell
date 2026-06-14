@@ -2055,6 +2055,124 @@ class DesignRenders {
         ).apply { addPath(pathData = builder.nodes, fill = SolidColor(Color.White)) }.build()
     }
 
+    /**
+     * Issue #764 — the image-annotation mode toolbar + a mocked annotated image.
+     * The real annotate UI is app-only (`FileViewerScreen.ImagePanel` + the
+     * `AnnotationToolbar`) and can't be imported into this ui-kit test source set,
+     * so this case REPRODUCES the toolbar with the same ui-kit tokens (tool pills,
+     * the fixed swatch row, Undo/Done) over a mock image canvas with a Pen stroke
+     * and an Arrow, as a fast first visual check of the layout + colour language.
+     * The emulator run is the acceptance check for the live composable.
+     */
+    @Test
+    fun imageAnnotateToolbar() = render("image-annotate-toolbar") {
+        // Mock "image with markup": a dark canvas + a drawn red arrow + a freehand
+        // circle, to convey what the user sees in annotate mode.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(360.dp)
+                .padding(horizontal = 16.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF010409)),
+        ) {
+            androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+                val red = Color(0xFFEF4444)
+                // Freehand circle-ish stroke.
+                val path = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(size.width * 0.30f, size.height * 0.40f)
+                    cubicTo(
+                        size.width * 0.20f, size.height * 0.20f,
+                        size.width * 0.50f, size.height * 0.15f,
+                        size.width * 0.55f, size.height * 0.35f,
+                    )
+                    cubicTo(
+                        size.width * 0.60f, size.height * 0.55f,
+                        size.width * 0.30f, size.height * 0.62f,
+                        size.width * 0.30f, size.height * 0.40f,
+                    )
+                }
+                drawPath(
+                    path,
+                    color = red,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 8f),
+                )
+                // Arrow pointing at the circled region.
+                val s = androidx.compose.ui.geometry.Offset(size.width * 0.85f, size.height * 0.80f)
+                val e = androidx.compose.ui.geometry.Offset(size.width * 0.58f, size.height * 0.45f)
+                drawLine(red, s, e, strokeWidth = 8f)
+                drawLine(red, e, androidx.compose.ui.geometry.Offset(e.x + 28f, e.y + 4f), strokeWidth = 8f)
+                drawLine(red, e, androidx.compose.ui.geometry.Offset(e.x + 6f, e.y + 28f), strokeWidth = 8f)
+            }
+        }
+        // The toolbar reproduction.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                listOf("Pan" to false, "Pen" to true, "Arrow" to false).forEach { (label, active) ->
+                    Box(
+                        modifier = Modifier
+                            .height(40.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (active) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev)
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (active) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp,
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                listOf(0xFFEF4444, 0xFFF59E0B, 0xFF22C55E, 0xFF22D3EE, 0xFFFFFFFF).forEachIndexed { i, c ->
+                    Box(
+                        modifier = Modifier.size(28.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(if (i == 0) 24.dp else 20.dp)
+                                .clip(CircleShape)
+                                .background(Color(c.toInt()))
+                                .then(
+                                    if (i == 0) Modifier.border(2.dp, PocketShellColors.Text, CircleShape) else Modifier,
+                                ),
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Undo", color = PocketShellColors.Accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(modifier = Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PocketShellColors.Accent)
+                        .padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Done", color = PocketShellColors.OnAccent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+
     private fun render(name: String, content: @Composable () -> Unit) {
         captureRoboImage("build/renders/$name.png") {
             PocketShellTheme {

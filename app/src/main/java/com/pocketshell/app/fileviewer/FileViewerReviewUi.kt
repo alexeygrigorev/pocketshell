@@ -568,6 +568,102 @@ internal fun ReviewSubmittedSheet(
     }
 }
 
+/**
+ * Post-Submit confirmation surface for an annotated image (issue #764). After
+ * the flattened PNG is written to `~/inbox/pocketshell/annotations/<file>-<ts>.png`
+ * (plus its `pocketshell_annotation` YAML sidecar), this sheet shows where the
+ * PNG landed and lets the maintainer **copy the exact saved path**. Mirrors
+ * [ReviewSubmittedSheet] but without the attach-to-session action (MVP: inbox-
+ * drop only — the orchestrator picks the PNG up like a screenshot).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun AnnotationSavedSheet(
+    host: String,
+    savedPath: String,
+    sheetState: SheetState,
+    onCopyPath: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = PocketShellColors.Surface,
+        contentColor = PocketShellColors.Text,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg)
+                .testTag(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG),
+        ) {
+            Text(
+                text = "Annotated image saved",
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                color = PocketShellColors.Text,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Sent the marked-up image to $host. " +
+                    "It's in the annotations inbox (with a YAML sidecar).",
+                style = PocketShellType.bodyDense,
+                color = PocketShellColors.TextSecondary,
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = PocketShellColors.SurfaceElev,
+                        shape = PocketShellShapes.small,
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = PocketShellColors.BorderSoft,
+                        shape = PocketShellShapes.small,
+                    )
+                    .clickable(role = Role.Button, onClick = onCopyPath)
+                    .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = savedPath,
+                    style = PocketShellType.bodyMono,
+                    color = PocketShellColors.Text,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(FILE_VIEWER_ANNOTATE_SAVED_PATH_TAG),
+                )
+                Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+                Text(
+                    text = "Copy",
+                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketShellColors.Accent,
+                    modifier = Modifier
+                        .clickable(role = Role.Button, onClick = onCopyPath)
+                        .padding(vertical = PocketShellSpacing.xs),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+            PocketShellButton(
+                text = "Done",
+                onClick = onDismiss,
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
 @Composable
 private fun TrayRow(
     label: String,

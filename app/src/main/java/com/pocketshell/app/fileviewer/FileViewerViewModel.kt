@@ -177,6 +177,25 @@ class FileViewerViewModel @Inject constructor(
     )
     val reviewEvents: SharedFlow<ReviewSubmitEvent> = _reviewEvents.asSharedFlow()
 
+    /**
+     * Image-annotation state (issue #764). Held here — not in Compose `remember`
+     * — so the pending markup survives scroll / config change, exactly as
+     * [reviewState] does. Cleared on a successful submit.
+     */
+    private val _annotationState = MutableStateFlow(ImageAnnotationState())
+    val annotationState: StateFlow<ImageAnnotationState> = _annotationState.asStateFlow()
+
+    /**
+     * One-shot results of a [submitAnnotation] (issue #764). The screen collects
+     * this to surface the post-submit confirmation / error. Buffered the same way
+     * as [_reviewEvents] so an emit never suspends.
+     */
+    private val _annotationEvents = MutableSharedFlow<AnnotationSubmitEvent>(
+        replay = 0,
+        extraBufferCapacity = 1,
+    )
+    val annotationEvents: SharedFlow<AnnotationSubmitEvent> = _annotationEvents.asSharedFlow()
+
     private var loadJob: Job? = null
     private var lastRequest: Request? = null
 
@@ -345,6 +364,165 @@ class FileViewerViewModel @Inject constructor(
             }
         }
 
+    // --- Image annotation (issue #764) --------------------------------------
+
+    /** Turn annotate mode on/off (the markup overlay + toolbar). */
+    fun toggleAnnotationMode() {
+        _annotationState.value = _annotationState.value.toggledActive()
+    }
+
+    /** Select the active annotation tool (Pan / Pen / Arrow). */
+    fun setAnnotationTool(tool: AnnotationTool) {
+        _annotationState.value = _annotationState.value.withTool(tool)
+    }
+
+    /** Select the stroke colour for new annotations. */
+    fun setAnnotationColor(argb: Int) {
+        _annotationState.value = _annotationState.value.withColor(argb)
+    }
+
+    /** Append a finished annotation (a completed Pen stroke or Arrow drag). */
+    fun addAnnotation(annotation: Annotation) {
+        _annotationState.value = _annotationState.value.withAnnotation(annotation)
+    }
+
+    /** Undo the last annotation. */
+    fun undoAnnotation() {
+        _annotationState.value = _annotationState.value.undone()
+    }
+
+    /** Set/overwrite the optional caption note written into the YAML sidecar. */
+    fun setAnnotationNote(text: String) {
+        _annotationState.value = _annotationState.value.withNote(text)
+    }
+
+    /**
+     * Submit the pending annotations (issue #764). Flattens the live
+     * annotations onto the source bitmap, encodes a PNG, and writes it +
+     * a `pocketshell_annotation` YAML sidecar to the host's
+     * `~/inbox/pocketshell/annotations/` over the SAME warm viewer lease — NO
+     * new connection (D21), mirroring [submitReview].
+     *
+     * Lifecycle: sets [ImageAnnotationState.submitting] for the duration; on
+     * success clears the pending markup and emits [AnnotationSubmitEvent.Success];
+     * on failure KEEPS every annotation (nothing lost) and emits a calm
+     * [AnnotationSubmitEvent.Failure]. A no-op when there is nothing to submit,
+     * the open file isn't an image, or a submit is already in flight.
+     */
+    fun submitAnnotation(host: String) {
+        val current = _annotationState.value
+        if (!current.hasAnnotations || current.submitting) return
+        val image = (_state.value as? FileViewerUiState.Image) ?: return
+        val request = lastRequest ?: return
+
+        _annotationState.value = current.copy(submitting = true)
+        viewModelScope.launch {
+            val pngBytes = withContext(Dispatchers.Default) {
+                renderAnnotatedPng(image.cacheFile, current.annotations)
+            }
+            if (pngBytes == null) {
+                _annotationState.value = _annotationState.value.copy(submitting = false)
+                _annotationEvents.tryEmit(AnnotationSubmitEvent.Failure("Couldn't render the annotated image"))
+                return@launch
+            }
+            val submittedAt = isoUtcNow()
+            val result = withContext(Dispatchers.IO) {
+                writeAnnotatedImage(request, image.displayPath, host, pngBytes, current.note, submittedAt)
+            }
+            result.fold(
+                onSuccess = { remotePath ->
+                    _annotationState.value = _annotationState.value.cleared()
+                    _annotationEvents.tryEmit(AnnotationSubmitEvent.Success(host = host, remotePath = remotePath))
+                },
+                onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    _annotationState.value = _annotationState.value.copy(submitting = false)
+                    _annotationEvents.tryEmit(AnnotationSubmitEvent.Failure(reviewErrorMessage(error)))
+                    Log.w(ANNOTATION_LOG_TAG, "Annotation submit failed: ${error.message}", error)
+                },
+            )
+        }
+    }
+
+    /**
+     * Re-decode the cached source image at full resolution and flatten the
+     * [annotations] onto it (issue #764). Re-decode (rather than reuse the
+     * display [ImageBitmap]) so the export keeps the source's full resolution.
+     * Returns null when the cache file can't be decoded.
+     */
+    private fun renderAnnotatedPng(cacheFile: File, annotations: List<Annotation>): ByteArray? {
+        val source = BoundedImageDecoder.decodeFile(cacheFile) ?: return null
+        return try {
+            AnnotationRenderer.flattenToPng(source, annotations)
+        } finally {
+            source.recycle()
+        }
+    }
+
+    /**
+     * Write the flattened [pngBytes] to
+     * `~/inbox/pocketshell/annotations/<sanitised>-<ts>.png` plus a matching
+     * `pocketshell_annotation` `.yaml` sidecar on the host over the reused viewer
+     * lease (issue #764). A near-copy of [writeReview]: same `mkdir -p` +
+     * `uploadStream` mechanism over [LeaseSessionExec.withSession] (D21, no new
+     * dial). Returns the absolute remote PNG path written.
+     */
+    private suspend fun writeAnnotatedImage(
+        request: Request,
+        displayPath: String,
+        host: String,
+        pngBytes: ByteArray,
+        note: String?,
+        submittedAt: String,
+    ): Result<String> =
+        LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = request.toLeaseTarget(),
+        ) { session ->
+            val home = remoteHomeDirectory(session)
+                ?: conventionalRemoteHome(request.username)
+                ?: throw SshException("Couldn't resolve the remote home directory")
+            val dir = "$home/$ANNOTATIONS_SUBDIR"
+            val mk = session.exec("mkdir -p '$dir'")
+            if (mk.exitCode != 0) {
+                throw SshException(
+                    "Couldn't create $dir: ${mk.stderr.ifBlank { mk.stdout.trim() }.ifBlank { "exit ${mk.exitCode}" }}",
+                )
+            }
+            val stem = annotationFileStem(displayPath)
+            val pngName = "$stem.png"
+            val pngPath = "$dir/$pngName"
+            pngBytes.inputStream().use { input ->
+                session.uploadStream(
+                    input = input,
+                    length = pngBytes.size.toLong(),
+                    name = pngName,
+                    remotePath = pngPath,
+                )
+            }
+            // The YAML sidecar mirrors pocketshell_review: machine-readable wrapper
+            // carrying host + source provenance + the flattened-image path + note.
+            val yaml = AnnotationExport.buildAnnotationYaml(
+                host = host,
+                sourceFile = displayPath,
+                image = pngPath,
+                submittedAt = submittedAt,
+                note = note,
+            )
+            Log.d(ANNOTATION_LOG_TAG, "Submitting pocketshell_annotation sidecar:\n$yaml")
+            val yamlName = "$stem.yaml"
+            val yamlBytes = yaml.toByteArray(Charsets.UTF_8)
+            yamlBytes.inputStream().use { input ->
+                session.uploadStream(
+                    input = input,
+                    length = yamlBytes.size.toLong(),
+                    name = yamlName,
+                    remotePath = "$dir/$yamlName",
+                )
+            }
+            pngPath
+        }
+
     /**
      * Bind to a host + path and fetch. Re-binding with the identical request
      * is a no-op so a recomposition doesn't re-download.
@@ -379,6 +557,11 @@ class FileViewerViewModel @Inject constructor(
             cwd = request.cwd,
             remoteHome = conventionalRemoteHome(request.username),
         )
+        // A fresh open clears any annotate session — the overlay belongs to the
+        // previous image, not the one being loaded (issue #764).
+        if (_annotationState.value.active || _annotationState.value.hasAnnotations) {
+            _annotationState.value = ImageAnnotationState()
+        }
         loadJob?.cancel()
         // Re-open of a just-viewed text file paints instantly from the LRU; a
         // fresh fetch still runs underneath and the live result wins (#697).
@@ -703,6 +886,30 @@ class FileViewerViewModel @Inject constructor(
 
         /** Inbox subdirectory (under `~/inbox/pocketshell/`) reviews land in. */
         internal const val REVIEWS_SUBDIR: String = "inbox/pocketshell/reviews"
+
+        /** Logcat tag for the annotation-PNG submit (issue #764). */
+        internal const val ANNOTATION_LOG_TAG = "FileViewerAnnotation"
+
+        /** Inbox subdirectory annotated PNGs + their YAML sidecars land in. */
+        internal const val ANNOTATIONS_SUBDIR: String = "inbox/pocketshell/annotations"
+
+        /**
+         * Shared filename stem for a submitted annotation: the PNG and its YAML
+         * sidecar use `<sanitised-basename>-<ts>` so the pair is co-located and
+         * obviously related. Reuses [FilenameSanitiser] + [ShareUploader.formatTimestamp]
+         * (mirroring [reviewFileName]); the source extension is dropped — the
+         * exported markup is always a PNG.
+         */
+        internal fun annotationFileStem(displayPath: String): String {
+            val basename = displayPath.substringAfterLast('/').ifBlank { "image" }
+            // Drop the source extension (".png"/".jpg") so the stem is clean; the
+            // export forces .png / .yaml regardless of the source type.
+            val withoutExt = basename.substringBeforeLast('.', basename)
+            val sanitised = FilenameSanitiser.sanitise(withoutExt)
+            val stem = sanitised.render().ifBlank { "image" }
+            val timestamp = ShareUploader.formatTimestamp(System.currentTimeMillis())
+            return "$stem-$timestamp"
+        }
 
         /**
          * Remote filename for a submitted review: `<sanitised-basename>-<ts>.yaml`.

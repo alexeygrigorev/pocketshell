@@ -333,6 +333,163 @@ class FileViewerScaffoldTest {
     }
 
     @Test
+    fun imageStateOffersTheMarkupToggle() {
+        // Issue #764 — an image preview gets the Markup header action.
+        val cacheDir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "file-viewer",
+        ).apply { mkdirs() }
+        val imageFile = File(cacheDir, "issue764-toggle.png").apply {
+            if (exists()) delete()
+            writeBytes(onePixelPngBytes())
+        }
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.Image(
+                        displayPath = "/tmp/shot.png",
+                        cacheFile = imageFile,
+                        sizeBytes = imageFile.length(),
+                    ),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOGGLE_TAG).assertIsDisplayed()
+        imageFile.delete()
+    }
+
+    @Test
+    fun annotateModeShowsTheToolbarAndSubmitGatesOnAnnotations() {
+        // Issue #764 — in annotate mode the toolbar (tools + swatches + Undo +
+        // Done) is shown; Submit fires only with at least one annotation.
+        val cacheDir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "file-viewer",
+        ).apply { mkdirs() }
+        val imageFile = File(cacheDir, "issue764-toolbar.png").apply {
+            if (exists()) delete()
+            writeBytes(onePixelPngBytes())
+        }
+        var submits = 0
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.Image(
+                        displayPath = "/tmp/shot.png",
+                        cacheFile = imageFile,
+                        sizeBytes = imageFile.length(),
+                    ),
+                    // Active annotate mode WITH one annotation so Submit is enabled.
+                    annotationState = ImageAnnotationState(
+                        active = true,
+                        tool = AnnotationTool.Pen,
+                        annotations = listOf(
+                            Annotation.Freehand(
+                                points = listOf(ImagePoint(0f, 0f), ImagePoint(1f, 1f)),
+                                colorArgb = ImageAnnotationState.DEFAULT_COLOR_ARGB,
+                                strokeWidthPx = 2f,
+                            ),
+                        ),
+                    ),
+                    onBack = {},
+                    onRetry = {},
+                    onSubmitAnnotation = { submits++ },
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_UNDO_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_CANVAS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(
+            fileViewerAnnotateSwatchTag(ImageAnnotationState.DEFAULT_COLOR_ARGB),
+        ).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_SUBMIT_TAG).performClick()
+        compose.waitForIdle()
+        assertEquals(1, submits)
+        imageFile.delete()
+    }
+
+    @Test
+    fun annotateSubmitDisabledWithNoAnnotations() {
+        val cacheDir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "file-viewer",
+        ).apply { mkdirs() }
+        val imageFile = File(cacheDir, "issue764-empty.png").apply {
+            if (exists()) delete()
+            writeBytes(onePixelPngBytes())
+        }
+        var submits = 0
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.Image(
+                        displayPath = "/tmp/shot.png",
+                        cacheFile = imageFile,
+                        sizeBytes = imageFile.length(),
+                    ),
+                    annotationState = ImageAnnotationState(active = true, tool = AnnotationTool.Pen),
+                    onBack = {},
+                    onRetry = {},
+                    onSubmitAnnotation = { submits++ },
+                )
+            }
+        }
+        // Done is present but disabled — clicking does nothing.
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_SUBMIT_TAG).performClick()
+        compose.waitForIdle()
+        assertEquals(0, submits)
+        imageFile.delete()
+    }
+
+    @Test
+    fun annotationSavedSheetShowsCopyablePath() {
+        // Issue #764 — the post-submit confirmation sheet surfaces the saved PNG
+        // path and copying it puts it on the clipboard.
+        val cacheDir = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "file-viewer",
+        ).apply { mkdirs() }
+        val imageFile = File(cacheDir, "issue764-saved.png").apply {
+            if (exists()) delete()
+            writeBytes(onePixelPngBytes())
+        }
+        val savedPath = "/home/alexey/inbox/pocketshell/annotations/shot-20260614-101010.png"
+        var copied = 0
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.Image(
+                        displayPath = "/tmp/shot.png",
+                        cacheFile = imageFile,
+                        sizeBytes = imageFile.length(),
+                    ),
+                    submittedAnnotation = AnnotationSubmitEvent.Success(host = "agents", remotePath = savedPath),
+                    onBack = {},
+                    onRetry = {},
+                    onCopyAnnotationPath = { copied++ },
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG).assertIsDisplayed()
+        compose.onNodeWithText(savedPath).assertIsDisplayed()
+        // The path Text is inside a merged clickable row; click via the unmerged
+        // tree so the tagged node is addressable.
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_SAVED_PATH_TAG, useUnmergedTree = true).performClick()
+        compose.waitForIdle()
+        assertEquals(1, copied)
+        imageFile.delete()
+    }
+
+    @Test
     fun imageStateShowsShareAndCopyActions() {
         val cacheDir = File(
             InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,

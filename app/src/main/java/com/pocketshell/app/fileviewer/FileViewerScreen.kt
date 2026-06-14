@@ -10,10 +10,12 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -24,10 +26,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -46,18 +50,28 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -136,6 +150,20 @@ const val FILE_VIEWER_REVIEW_COPY_PATH_TAG = "fileViewerReviewCopyPath"
 const val FILE_VIEWER_REVIEW_ATTACH_TAG = "fileViewerReviewAttach"
 const val FILE_VIEWER_REVIEW_SAVED_DONE_TAG = "fileViewerReviewSavedDone"
 
+// Issue #764 — image annotation mode (Pen / Arrow / Undo / Submit + flatten).
+const val FILE_VIEWER_ANNOTATE_TOGGLE_TAG = "fileViewerAnnotateToggle"
+const val FILE_VIEWER_ANNOTATE_CANVAS_TAG = "fileViewerAnnotateCanvas"
+const val FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG = "fileViewerAnnotateToolPan"
+const val FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG = "fileViewerAnnotateToolPen"
+const val FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG = "fileViewerAnnotateToolArrow"
+const val FILE_VIEWER_ANNOTATE_UNDO_TAG = "fileViewerAnnotateUndo"
+const val FILE_VIEWER_ANNOTATE_SUBMIT_TAG = "fileViewerAnnotateSubmit"
+const val FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG = "fileViewerAnnotateSavedSheet"
+const val FILE_VIEWER_ANNOTATE_SAVED_PATH_TAG = "fileViewerAnnotateSavedPath"
+
+/** Test tag for an annotation colour swatch (the packed ARGB int). */
+fun fileViewerAnnotateSwatchTag(argb: Int): String = "fileViewerAnnotateSwatch-$argb"
+
 /** Test tag for the gutter tap target of a 1-based [line] in the commentable panel. */
 fun fileViewerLineGutterTag(line: Int): String = "fileViewerLineGutter-$line"
 
@@ -197,6 +225,7 @@ fun FileViewerScreen(
     val state by viewModel.state.collectAsState()
     val readingPrefs by viewModel.readingPrefs.collectAsState()
     val reviewState by viewModel.reviewState.collectAsState()
+    val annotationState by viewModel.annotationState.collectAsState()
 
     // Issue #714/#763 — surface the review-submit outcome. On SUCCESS we hold
     // the result so the scaffold renders the confirmation sheet (the saved path,
@@ -215,12 +244,29 @@ fun FileViewerScreen(
         }
     }
 
+    // Issue #764 — surface the annotation-submit outcome. SUCCESS holds the
+    // result so the scaffold renders the saved-path confirmation sheet (copyable
+    // PNG path); a failure stays a calm one-line toast (the ViewModel keeps the
+    // annotations so nothing is lost).
+    var submittedAnnotation by remember { mutableStateOf<AnnotationSubmitEvent.Success?>(null) }
+    LaunchedEffect(viewModel) {
+        viewModel.annotationEvents.collect { event ->
+            when (event) {
+                is AnnotationSubmitEvent.Success -> submittedAnnotation = event
+                is AnnotationSubmitEvent.Failure ->
+                    Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     FileViewerScaffold(
         hostName = hostName,
         state = state,
         readingPrefs = readingPrefs,
         reviewState = reviewState,
         submittedReview = submittedReview,
+        annotationState = annotationState,
+        submittedAnnotation = submittedAnnotation,
         onBack = onBack,
         onRetry = viewModel::retry,
         onOpenLocated = viewModel::openLocated,
@@ -240,6 +286,16 @@ fun FileViewerScreen(
             onAttachReviewToSession(reviewAttachPrompt(path))
         },
         onDismissSubmittedReview = { submittedReview = null },
+        onToggleAnnotateMode = viewModel::toggleAnnotationMode,
+        onSetAnnotationTool = viewModel::setAnnotationTool,
+        onSetAnnotationColor = viewModel::setAnnotationColor,
+        onAddAnnotation = viewModel::addAnnotation,
+        onUndoAnnotation = viewModel::undoAnnotation,
+        onSubmitAnnotation = { viewModel.submitAnnotation(hostName) },
+        onCopyAnnotationPath = { path ->
+            copyTextToClipboard(context, path, "Copied image path")
+        },
+        onDismissSubmittedAnnotation = { submittedAnnotation = null },
         modifier = modifier,
     )
 }
@@ -263,6 +319,9 @@ internal fun FileViewerScaffold(
     // Issue #763: the most recent successful submit (null when none pending) —
     // drives the post-Submit confirmation sheet (saved path + attach action).
     submittedReview: ReviewSubmitEvent.Success? = null,
+    // Issue #764 — image annotation state + the most recent successful submit.
+    annotationState: ImageAnnotationState = ImageAnnotationState(),
+    submittedAnnotation: AnnotationSubmitEvent.Success? = null,
     onToggleWordWrap: () -> Unit = {},
     onToggleRenderMarkdown: () -> Unit = {},
     onToggleReviewMode: () -> Unit = {},
@@ -274,11 +333,21 @@ internal fun FileViewerScaffold(
     onCopyReviewPath: (String) -> Unit = {},
     onAttachReview: (String) -> Unit = {},
     onDismissSubmittedReview: () -> Unit = {},
+    onToggleAnnotateMode: () -> Unit = {},
+    onSetAnnotationTool: (AnnotationTool) -> Unit = {},
+    onSetAnnotationColor: (Int) -> Unit = {},
+    onAddAnnotation: (Annotation) -> Unit = {},
+    onUndoAnnotation: () -> Unit = {},
+    onSubmitAnnotation: () -> Unit = {},
+    onCopyAnnotationPath: (String) -> Unit = {},
+    onDismissSubmittedAnnotation: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // The wrap / Markdown-render toggles only apply to the text reading
     // surface, so the app bar offers them only for a TextContent state.
     val textState = state as? FileViewerUiState.TextContent
+    // Issue #764 — annotate mode applies only to an image preview.
+    val imageState = state as? FileViewerUiState.Image
     val isMarkdown = textState != null && MarkdownParser.isMarkdownPath(textState.displayPath)
 
     // Issue #714 — which comment sheet (if any) is open: a line sheet, the
@@ -321,6 +390,19 @@ internal fun FileViewerScaffold(
                 } else {
                     null
                 },
+                // Issue #764: an image preview gets a Markup toggle, shown next
+                // to Save/Share/Copy (not replacing them).
+                annotateAction = if (imageState != null) {
+                    {
+                        HeaderAction(
+                            label = if (annotationState.active) "Markup: on" else "Markup",
+                            testTag = FILE_VIEWER_ANNOTATE_TOGGLE_TAG,
+                            onClick = onToggleAnnotateMode,
+                        )
+                    }
+                } else {
+                    null
+                },
             )
             if (textState != null) {
                 TextReadingToggleBar(
@@ -335,7 +417,23 @@ internal fun FileViewerScaffold(
             }
             when (state) {
                 is FileViewerUiState.Loading -> LoadingPanel()
-                is FileViewerUiState.Image -> ImagePanel(state.cacheFile)
+                is FileViewerUiState.Image -> Column(modifier = Modifier.fillMaxSize()) {
+                    ImagePanel(
+                        cacheFile = state.cacheFile,
+                        annotationState = annotationState,
+                        onAddAnnotation = onAddAnnotation,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (annotationState.active) {
+                        AnnotationToolbar(
+                            annotationState = annotationState,
+                            onSetTool = onSetAnnotationTool,
+                            onSetColor = onSetAnnotationColor,
+                            onUndo = onUndoAnnotation,
+                            onSubmit = onSubmitAnnotation,
+                        )
+                    }
+                }
                 is FileViewerUiState.TextContent -> if (reviewState.active) {
                     // Review mode forces the per-line source rows (markdown
                     // render is not line-addressable — #714 fallback); the
@@ -407,6 +505,20 @@ internal fun FileViewerScaffold(
                 onCopyPath = { onCopyReviewPath(success.remotePath) },
                 onAttach = { onAttachReview(success.remotePath) },
                 onDismiss = onDismissSubmittedReview,
+            )
+        }
+
+        // Issue #764 — post-Submit confirmation for an annotated image: the saved
+        // PNG path (copyable). The annotated PNG landed in the host's annotations
+        // inbox; the orchestrator picks it up like a screenshot.
+        submittedAnnotation?.let { success ->
+            val savedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            AnnotationSavedSheet(
+                host = success.host,
+                savedPath = success.remotePath,
+                sheetState = savedSheetState,
+                onCopyPath = { onCopyAnnotationPath(success.remotePath) },
+                onDismiss = onDismissSubmittedAnnotation,
             )
         }
     }
@@ -552,6 +664,9 @@ private fun FileViewerAppBar(
     shareable: Shareable?,
     onBack: () -> Unit,
     reviewActions: (@Composable () -> Unit)? = null,
+    // Issue #764 — the image Markup toggle, shown ALONGSIDE Save/Share/Copy for
+    // an image (review mode's [reviewActions] still fully replaces the slot).
+    annotateAction: (@Composable () -> Unit)? = null,
 ) {
     // Slice E1b (#539): the bespoke 60dp bar + raw `sp` title/breadcrumb adopt
     // the shared `ScreenHeader`. The file name is the title; the full remote
@@ -587,7 +702,7 @@ private fun FileViewerAppBar(
                 )
             }
         },
-        trailing = if (shareable == null && reviewActions == null) {
+        trailing = if (shareable == null && reviewActions == null && annotateAction == null) {
             null
         } else {
             {
@@ -596,22 +711,27 @@ private fun FileViewerAppBar(
                 // suppressed so the row stays uncrowded while reviewing).
                 if (reviewActions != null) {
                     reviewActions()
-                } else if (shareable != null) {
-                    HeaderAction(
-                        label = "Save",
-                        testTag = FILE_VIEWER_SAVE_TAG,
-                        onClick = { saveFileToLocal(context, shareable) },
-                    )
-                    HeaderAction(
-                        label = "Share",
-                        testTag = FILE_VIEWER_SHARE_TAG,
-                        onClick = { shareFile(context, shareable) },
-                    )
-                    HeaderAction(
-                        label = "Copy",
-                        testTag = FILE_VIEWER_COPY_TAG,
-                        onClick = { copyFileToClipboard(context, shareable) },
-                    )
+                } else {
+                    // Issue #764: for an image the Markup toggle sits next to the
+                    // Save/Share/Copy actions (both stay reachable).
+                    annotateAction?.invoke()
+                    if (shareable != null) {
+                        HeaderAction(
+                            label = "Save",
+                            testTag = FILE_VIEWER_SAVE_TAG,
+                            onClick = { saveFileToLocal(context, shareable) },
+                        )
+                        HeaderAction(
+                            label = "Share",
+                            testTag = FILE_VIEWER_SHARE_TAG,
+                            onClick = { shareFile(context, shareable) },
+                        )
+                        HeaderAction(
+                            label = "Copy",
+                            testTag = FILE_VIEWER_COPY_TAG,
+                            onClick = { copyFileToClipboard(context, shareable) },
+                        )
+                    }
                 }
             }
         },
@@ -960,11 +1080,25 @@ private fun LoadingPanel() {
 }
 
 /**
- * Zoom/pan image view. Decodes the cached file to a bitmap and binds pinch
- * (scale) + drag (translate) transform gestures via `graphicsLayer`.
+ * Zoom/pan image view (with an annotation overlay — issue #764).
+ *
+ * Decodes the cached file to a bitmap and, in the default (non-annotate) mode,
+ * binds pinch (scale) + drag (translate) transform gestures via `graphicsLayer`.
+ *
+ * Annotate mode (#764): the image is pinned to `ContentScale.Fit` at zoom=1 /
+ * pan=0 (so the screen↔source coordinate mapping is exactly [ImageFitMapping] —
+ * no zoom term), and a Compose `Canvas` overlay captures Pen/Arrow drags +
+ * re-draws every committed annotation. Each captured screen point is mapped to
+ * source-bitmap pixels via [ImageFitMapping] before commit, so the flattened
+ * export matches what the user drew. The `Pan` tool re-enables pinch/pan.
  */
 @Composable
-private fun ImagePanel(cacheFile: File) {
+private fun ImagePanel(
+    cacheFile: File,
+    annotationState: ImageAnnotationState = ImageAnnotationState(),
+    onAddAnnotation: (Annotation) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     val bitmap = remember(cacheFile.path) {
         runCatching { BoundedImageDecoder.decodeFile(cacheFile)?.asImageBitmap() }.getOrNull()
     }
@@ -976,25 +1110,92 @@ private fun ImagePanel(cacheFile: File) {
         )
         return
     }
+
+    val annotateActive = annotationState.active
+    val drawing = annotateActive && annotationState.tool != AnnotationTool.Pan
+
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
+    // Entering annotate mode pins the view to fit-scale so the coordinate map is
+    // the pure letterbox transform; the Pan tool can still pinch/zoom.
+    LaunchedEffect(annotateActive) {
+        if (annotateActive) {
+            scale = 1f; offsetX = 0f; offsetY = 0f
+        }
+    }
+
+    // Viewport size (px) — captured so the source↔screen mapping is exact.
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    val mapping = remember(viewportSize, bitmap.width, bitmap.height) {
+        if (viewportSize.width > 0 && viewportSize.height > 0) {
+            ImageFitMapping.of(
+                sourceWidth = bitmap.width,
+                sourceHeight = bitmap.height,
+                viewportWidth = viewportSize.width.toFloat(),
+                viewportHeight = viewportSize.height.toFloat(),
+            )
+        } else {
+            null
+        }
+    }
+
+    // The in-progress stroke (screen points), committed to source space on drag-end.
+    val livePoints = remember { mutableStateListOf<Offset>() }
+
+    val gestureModifier = if (drawing && mapping != null) {
+        Modifier.pointerInput(annotationState.tool, mapping, annotationState.colorArgb) {
+            detectDragGestures(
+                onDragStart = { start ->
+                    livePoints.clear()
+                    livePoints.add(start)
+                },
+                onDrag = { change, _ ->
+                    change.consume()
+                    livePoints.add(change.position)
+                },
+                onDragEnd = {
+                    commitStroke(annotationState, mapping, livePoints.toList(), onAddAnnotation)
+                    livePoints.clear()
+                },
+                onDragCancel = { livePoints.clear() },
+            )
+        }
+    } else if (!annotateActive) {
+        Modifier.pointerInput(Unit) {
+            detectTransformGestures { _, pan, zoom, _ ->
+                scale = (scale * zoom).coerceIn(1f, 8f)
+                if (scale > 1f) {
+                    offsetX += pan.x
+                    offsetY += pan.y
+                } else {
+                    offsetX = 0f
+                    offsetY = 0f
+                }
+            }
+        }
+    } else {
+        // Annotate mode + Pan tool: pinch/pan the pinned image.
+        Modifier.pointerInput(Unit) {
+            detectTransformGestures { _, pan, zoom, _ ->
+                scale = (scale * zoom).coerceIn(1f, 8f)
+                if (scale > 1f) {
+                    offsetX += pan.x
+                    offsetY += pan.y
+                } else {
+                    offsetX = 0f
+                    offsetY = 0f
+                }
+            }
+        }
+    }
+
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .background(PocketShellColors.TermBg)
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 8f)
-                    if (scale > 1f) {
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    } else {
-                        offsetX = 0f
-                        offsetY = 0f
-                    }
-                }
-            },
+            .onSizeChanged { viewportSize = it }
+            .then(gestureModifier),
         contentAlignment = Alignment.Center,
     ) {
         Image(
@@ -1010,6 +1211,253 @@ private fun ImagePanel(cacheFile: File) {
                     translationY = offsetY,
                 )
                 .testTag(FILE_VIEWER_IMAGE_TAG),
+        )
+
+        // Annotation overlay — committed annotations + the live stroke, drawn in
+        // screen space (source → screen via the mapping) so it tracks the image.
+        if (annotateActive && mapping != null) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag(FILE_VIEWER_ANNOTATE_CANVAS_TAG),
+            ) {
+                annotationState.annotations.forEach { drawAnnotationOnCanvas(it, mapping) }
+                drawLiveStroke(annotationState, livePoints)
+            }
+        }
+    }
+}
+
+/**
+ * Commit the captured [screenPoints] of a finished drag as an [Annotation] in
+ * source-pixel space (issue #764). Pen → a [Annotation.Freehand] of every
+ * sampled point; Arrow → a [Annotation.Arrow] from the first to the last point.
+ * The stroke width is a fixed screen width converted to source pixels so it
+ * scales with the image in the flattened export. A degenerate stroke (no points,
+ * or an arrow with start==end) is dropped.
+ */
+private fun commitStroke(
+    state: ImageAnnotationState,
+    mapping: ImageFitMapping,
+    screenPoints: List<Offset>,
+    onAddAnnotation: (Annotation) -> Unit,
+) {
+    if (screenPoints.isEmpty()) return
+    val strokeWidthPx = mapping.screenToSourceLength(ANNOTATION_STROKE_SCREEN_WIDTH)
+    when (state.tool) {
+        AnnotationTool.Pen -> {
+            val pts = screenPoints.map { mapping.screenToSource(it.x, it.y) }
+            onAddAnnotation(Annotation.Freehand(points = pts, colorArgb = state.colorArgb, strokeWidthPx = strokeWidthPx))
+        }
+        AnnotationTool.Arrow -> {
+            val start = mapping.screenToSource(screenPoints.first().x, screenPoints.first().y)
+            val end = mapping.screenToSource(screenPoints.last().x, screenPoints.last().y)
+            if (start != end) {
+                onAddAnnotation(Annotation.Arrow(start = start, end = end, colorArgb = state.colorArgb, strokeWidthPx = strokeWidthPx))
+            }
+        }
+        AnnotationTool.Pan -> Unit
+    }
+}
+
+/** Fixed on-screen annotation stroke width (dp-ish px); mapped to source pixels. */
+private const val ANNOTATION_STROKE_SCREEN_WIDTH = 8f
+
+/** Draw a committed [annotation] (in source space) onto the screen-space canvas. */
+private fun DrawScope.drawAnnotationOnCanvas(annotation: Annotation, mapping: ImageFitMapping) {
+    val color = ComposeColor(annotation.colorArgb)
+    val widthPx = annotation.strokeWidthPx * mapping.scale
+    when (annotation) {
+        is Annotation.Freehand -> {
+            val pts = annotation.points
+            if (pts.isEmpty()) return
+            if (pts.size == 1) {
+                val (cx, cy) = mapping.sourceToScreen(pts[0])
+                drawCircle(color = color, radius = widthPx / 2f, center = Offset(cx, cy))
+                return
+            }
+            val path = Path()
+            val (x0, y0) = mapping.sourceToScreen(pts[0])
+            path.moveTo(x0, y0)
+            for (i in 1 until pts.size) {
+                val (x, y) = mapping.sourceToScreen(pts[i])
+                path.lineTo(x, y)
+            }
+            drawPath(path, color = color, style = Stroke(width = widthPx, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+        is Annotation.Arrow -> {
+            val (sx, sy) = mapping.sourceToScreen(annotation.start)
+            val (ex, ey) = mapping.sourceToScreen(annotation.end)
+            drawArrowOnCanvas(Offset(sx, sy), Offset(ex, ey), color, widthPx)
+        }
+    }
+}
+
+/** Draw the live (in-progress) stroke in screen space while the user drags. */
+private fun DrawScope.drawLiveStroke(state: ImageAnnotationState, screenPoints: List<Offset>) {
+    if (screenPoints.isEmpty()) return
+    val color = ComposeColor(state.colorArgb)
+    val widthPx = ANNOTATION_STROKE_SCREEN_WIDTH
+    when (state.tool) {
+        AnnotationTool.Pen -> {
+            if (screenPoints.size == 1) {
+                drawCircle(color = color, radius = widthPx / 2f, center = screenPoints[0])
+                return
+            }
+            val path = Path().apply {
+                moveTo(screenPoints[0].x, screenPoints[0].y)
+                for (i in 1 until screenPoints.size) lineTo(screenPoints[i].x, screenPoints[i].y)
+            }
+            drawPath(path, color = color, style = Stroke(width = widthPx, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+        AnnotationTool.Arrow -> {
+            drawArrowOnCanvas(screenPoints.first(), screenPoints.last(), color, widthPx)
+        }
+        AnnotationTool.Pan -> Unit
+    }
+}
+
+/** Draw an arrow (shaft + two head wings) on the screen-space canvas. */
+private fun DrawScope.drawArrowOnCanvas(start: Offset, end: Offset, color: ComposeColor, widthPx: Float) {
+    drawLine(color = color, start = start, end = end, strokeWidth = widthPx, cap = StrokeCap.Round)
+    val angle = kotlin.math.atan2((end.y - start.y).toDouble(), (end.x - start.x).toDouble())
+    val wing = maxOf(widthPx * 4f, 28f)
+    val a1 = angle + Math.PI - 0.5
+    val a2 = angle + Math.PI + 0.5
+    drawLine(
+        color = color,
+        start = end,
+        end = Offset(end.x + (wing * kotlin.math.cos(a1)).toFloat(), end.y + (wing * kotlin.math.sin(a1)).toFloat()),
+        strokeWidth = widthPx,
+        cap = StrokeCap.Round,
+    )
+    drawLine(
+        color = color,
+        start = end,
+        end = Offset(end.x + (wing * kotlin.math.cos(a2)).toFloat(), end.y + (wing * kotlin.math.sin(a2)).toFloat()),
+        strokeWidth = widthPx,
+        cap = StrokeCap.Round,
+    )
+}
+
+/**
+ * The annotate-mode bottom toolbar (issue #764): tool toggles (Pan/Pen/Arrow),
+ * a fixed colour swatch row, Undo, and Submit. One dense row of ui-kit-token
+ * controls; the selected tool/colour gets an accent tint. Submit is enabled only
+ * when there is at least one annotation and no submit is in flight.
+ */
+@Composable
+private fun AnnotationToolbar(
+    annotationState: ImageAnnotationState,
+    onSetTool: (AnnotationTool) -> Unit,
+    onSetColor: (Int) -> Unit,
+    onUndo: () -> Unit,
+    onSubmit: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            // Keep Done + the tool row above the system navigation bar so every
+            // control stays fully visible and tappable (#641 reachability).
+            .navigationBarsPadding()
+            .padding(horizontal = PocketShellSpacing.sm, vertical = PocketShellSpacing.xs),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+        ) {
+            ToolToggle("Pan", annotationState.tool == AnnotationTool.Pan, FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG) { onSetTool(AnnotationTool.Pan) }
+            ToolToggle("Pen", annotationState.tool == AnnotationTool.Pen, FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG) { onSetTool(AnnotationTool.Pen) }
+            ToolToggle("Arrow", annotationState.tool == AnnotationTool.Arrow, FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG) { onSetTool(AnnotationTool.Arrow) }
+            Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
+            ImageAnnotationState.SWATCHES.forEach { argb ->
+                ColorSwatch(argb = argb, selected = annotationState.colorArgb == argb) { onSetColor(argb) }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        ) {
+            HeaderAction(
+                label = "Undo",
+                testTag = FILE_VIEWER_ANNOTATE_UNDO_TAG,
+                onClick = onUndo,
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            val canSubmit = annotationState.hasAnnotations && !annotationState.submitting
+            Box(
+                modifier = Modifier
+                    .height(PocketShellDensity.tapTargetMin)
+                    .background(
+                        color = if (canSubmit) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .clickable(enabled = canSubmit, role = Role.Button, onClick = onSubmit)
+                    .padding(horizontal = PocketShellSpacing.lg)
+                    .testTag(FILE_VIEWER_ANNOTATE_SUBMIT_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (annotationState.submitting) "Sending…" else "Done",
+                    color = if (canSubmit) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+/** A tool toggle pill for the annotate toolbar. */
+@Composable
+private fun ToolToggle(label: String, active: Boolean, testTag: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .height(PocketShellDensity.tapTargetMin)
+            .background(
+                color = if (active) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = PocketShellSpacing.sm)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (active) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/** A colour swatch for the annotate toolbar; the selected one gets an accent ring. */
+@Composable
+private fun ColorSwatch(argb: Int, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .testTag(fileViewerAnnotateSwatchTag(argb)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(if (selected) 24.dp else 20.dp)
+                .background(color = ComposeColor(argb), shape = CircleShape)
+                .then(
+                    if (selected) {
+                        Modifier.border(width = 2.dp, color = PocketShellColors.Text, shape = CircleShape)
+                    } else {
+                        Modifier
+                    },
+                ),
         )
     }
 }

@@ -2,7 +2,6 @@ package com.pocketshell.app.bootstrap
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,16 +21,16 @@ import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
@@ -168,16 +167,18 @@ private fun PromptContent(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
             ) {
-                SecondaryButton(
-                    label = "Skip",
+                PocketShellButton(
+                    text = "Skip",
                     onClick = onSkip,
+                    variant = ButtonVariant.Secondary,
                     modifier = Modifier
                         .weight(1f)
                         .testTag(HOST_BOOTSTRAP_SKIP_TAG),
                 )
-                PrimaryButton(
-                    label = "Install all",
+                PocketShellButton(
+                    text = "Install all",
                     onClick = onInstall,
+                    variant = ButtonVariant.Primary,
                     modifier = Modifier
                         .weight(1f)
                         .testTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG),
@@ -186,9 +187,10 @@ private fun PromptContent(
         } else {
             Row(modifier = Modifier.fillMaxWidth()) {
                 Spacer(modifier = Modifier.weight(1f))
-                PrimaryButton(
-                    label = "Continue",
+                PocketShellButton(
+                    text = "Continue",
                     onClick = onSkip,
+                    variant = ButtonVariant.Primary,
                     modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
                 )
             }
@@ -278,7 +280,11 @@ private fun SetupActionRow(
         },
         trailing = {
             Badge(label = statusLabel, role = BadgeRole.Error, mono = false)
-            SecondaryButton(label = actionLabel, onClick = onClick)
+            PocketShellButton(
+                text = actionLabel,
+                onClick = onClick,
+                variant = ButtonVariant.Secondary,
+            )
         },
     )
 }
@@ -355,16 +361,18 @@ private fun SuccessContent(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
             ) {
-                SecondaryButton(
-                    label = "Continue",
+                PocketShellButton(
+                    text = "Continue",
                     onClick = onContinue,
+                    variant = ButtonVariant.Secondary,
                     modifier = Modifier
                         .weight(1f)
                         .testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
                 )
-                PrimaryButton(
-                    label = "Open Usage",
+                PocketShellButton(
+                    text = "Open Usage",
                     onClick = onOpenUsage,
+                    variant = ButtonVariant.Primary,
                     modifier = Modifier
                         .weight(1f)
                         .testTag(HOST_BOOTSTRAP_OPEN_USAGE_TAG),
@@ -373,9 +381,10 @@ private fun SuccessContent(
         } else {
             Row(modifier = Modifier.fillMaxWidth()) {
                 Spacer(modifier = Modifier.weight(1f))
-                PrimaryButton(
-                    label = "Continue",
+                PocketShellButton(
+                    text = "Continue",
                     onClick = onContinue,
+                    variant = ButtonVariant.Primary,
                     modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
                 )
             }
@@ -417,11 +426,11 @@ private fun FailedContent(hostName: String, message: String, onClose: () -> Unit
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
         Row(modifier = Modifier.fillMaxWidth()) {
             Spacer(modifier = Modifier.weight(1f))
-            // AlertDialog button styling, but reuse our SecondaryButton
-            // so the visual matches the rest of the sheet.
-            SecondaryButton(
-                label = "Close",
+            // Secondary so the visual matches the rest of the sheet.
+            PocketShellButton(
+                text = "Close",
                 onClick = onClose,
+                variant = ButtonVariant.Secondary,
                 modifier = Modifier.testTag(HOST_BOOTSTRAP_CLOSE_TAG),
             )
         }
@@ -540,61 +549,4 @@ private fun SheetSubtitle(text: String) {
         color = PocketShellColors.TextSecondary,
         style = PocketShellType.bodyDense,
     )
-}
-
-@Composable
-private fun PrimaryButton(
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .height(PocketShellDensity.tapTargetMin)
-            .clickable(role = Role.Button, onClick = onClick)
-            .background(
-                color = PocketShellColors.Accent,
-                shape = PocketShellShapes.small,
-            )
-            .padding(horizontal = PocketShellSpacing.lg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = PocketShellColors.OnAccent,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-private fun SecondaryButton(
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .height(PocketShellDensity.tapTargetMin)
-            .clickable(role = Role.Button, onClick = onClick)
-            .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = PocketShellShapes.small,
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.Border,
-                shape = PocketShellShapes.small,
-            )
-            .padding(horizontal = PocketShellSpacing.lg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
 }

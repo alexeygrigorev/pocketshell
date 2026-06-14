@@ -252,6 +252,21 @@ JOURNEY_CLASSES=(
   # (the kill is a CI-compatible sidecar `kill -9`, no toxiproxy), and does NOT
   # self-skip on CI, so it belongs in this per-push subset.
   "$FQCN_PREFIX.WithinGraceSocketDropForegroundJourneyE2eTest"
+  # ADDED (epic #687 Phase 3 / P3 — the device-truth gate J2, #553): a within-grace
+  # reattach that leaves the pane PARTIALLY blank (one live timer line painting, the
+  # static viewport above it wiped by a reflow during a brief link blip) must restore
+  # the FULL prior viewport, not just the live line. The warm `-CC` client is RETAINED
+  # across the (no-socket-drop) within-grace background, and the post-reflow partial
+  # blank is reproduced DIRECTLY on the retained emulator (a local `CSI 2J`+`CSI H`+one
+  # timer line — the REMOTE tmux grid is untouched, so capture-pane still holds the full
+  # banner). RED on the unfixed/OLD path (the non-blank timer line makes
+  # `reseedBlankVisiblePanes` SKIP the pane → banner never restored); the P3 id-tagged
+  # FULL-VIEWPORT reseed under the NEW path (`reseedActivePaneForReattach` —
+  # UNCONDITIONAL, not gated on full-blank, keyed to the target session id) restores the
+  # banner and flips it GREEN. Uses ONLY the deterministic agents:2222 fixture (the
+  # partial blank is injected LOCALLY on the emulator, no toxiproxy), and does NOT
+  # self-skip on CI, so it belongs in this per-push subset.
+  "$FQCN_PREFIX.ReconnectPartialBlankReseedJourneyE2eTest"
 )
 
 echo "=========================================================="

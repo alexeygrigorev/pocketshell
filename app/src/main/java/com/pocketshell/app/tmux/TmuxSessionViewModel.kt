@@ -2318,12 +2318,70 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 client = client,
             )
-            // Safety net: tmux `-CC` does not re-emit an idle pane's existing content,
-            // so a pane that came back blank during the brief background heals here over
-            // the SAME live client (no handshake). The per-pane seed success also fires
-            // the controller's SeedLanded feedback (idempotent once already Live).
-            reseedBlankVisiblePanes(guard)
+            if (connectionPathIsNew.value) {
+                // EPIC #687 P3 (J2/#553): id-tagged FULL-VIEWPORT reseed. A
+                // within-grace reattach is an authoritative reseed point — tmux's grid
+                // holds the FULL prior content, but the warm `-CC` client never re-emits
+                // an idle pane's existing frame, so the emulator can be left
+                // PARTIALLY blank (e.g. only a per-second timer line repainted while the
+                // static viewport above it was wiped by a reflow during the blip). The
+                // OLD blank-gated [reseedBlankVisiblePanes] SKIPS such a pane (it is not
+                // `transcriptText.isBlank()` once one live line is present), leaving the
+                // maintainer's "only a timer, rest blank" pane un-healed (#553). Under
+                // NEW we restore the FULL viewport keyed to the TARGET session id,
+                // UNCONDITIONALLY (not gated on full-blank) — so the static content above
+                // the live line is repainted from a fresh `capture-pane`. The reseed is
+                // dropped if the runtime/target was superseded mid-flight (the guard),
+                // so a late seed for a switched-away session can never paint.
+                reseedActivePaneForReattach(guard)
+            } else {
+                // OLD path verbatim: tmux `-CC` does not re-emit an idle pane's existing
+                // content, so a pane that came back FULLY blank during the brief
+                // background heals here over the SAME live client (no handshake). The
+                // per-pane seed success also fires the controller's SeedLanded feedback
+                // (idempotent once already Live). The partial-blank skip remains on OLD
+                // (single-owner per branch — no double-drive).
+                reseedBlankVisiblePanes(guard)
+            }
         }
+    }
+
+    /**
+     * EPIC #687 P3 (J2/#553): the id-tagged FULL-VIEWPORT reseed for a within-grace
+     * reattach. Unlike [reseedBlankVisiblePanes] (which `continue`s on any pane that is
+     * not `transcriptText.isBlank()`), this UNCONDITIONALLY re-captures the active
+     * visible pane from a fresh `capture-pane` and feeds the full grid back into the
+     * emulator — so a PARTIALLY-blank pane (one live line present, the static content
+     * above it gone) is restored to the FULL prior viewport, not left "only a timer,
+     * rest blank" (#553). [seedPaneFromCapture] → [TerminalSurfaceState.appendRemoteOutput]
+     * repaints the whole grid (a full clear+restore), so the live line is preserved
+     * within the restored frame, not duplicated.
+     *
+     * Keyed to the TARGET session id via the [RuntimeRefreshGuard] (generation + target
+     * + client): the reseed aborts the instant the runtime is superseded (a switch /
+     * fresh connect raced the within-grace foreground), so a late seed can never paint a
+     * non-target session. The full-viewport restore is only meaningful for the pane the
+     * user is actually looking at (page 0); the lazily-revealed background panes keep the
+     * existing reveal-time blank-reseed safety net (#640/#662).
+     */
+    private suspend fun reseedActivePaneForReattach(refreshGuard: RuntimeRefreshGuard) {
+        val client = clientRef ?: return
+        if (client.disconnected.value) return
+        if (!isCurrentRuntime(refreshGuard)) return
+        val activePane = activeVisiblePane() ?: return
+        val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-reattach-full-viewport-reseed pane=${activePane.paneId} " +
+                "window=${activePane.windowId} session=${activeTarget?.sessionName} " +
+                "partialBlank=$partialBlank status=${_connectionStatus.value}",
+        )
+        // UNCONDITIONAL full-viewport restore of the active pane (id-tagged via the
+        // guard) — NOT gated on `visibleScreenIsBlank()`, so a partial blank is healed.
+        seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = false)
+        // Then run the existing blank-net backstop over any OTHER visible pane that came
+        // back fully blank (a no-op for the active pane just restored above).
+        reseedBlankVisiblePanes(refreshGuard)
     }
 
     /**

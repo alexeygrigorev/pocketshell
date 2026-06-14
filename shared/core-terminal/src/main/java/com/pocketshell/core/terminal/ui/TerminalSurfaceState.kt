@@ -452,6 +452,59 @@ class TerminalSurfaceState(
     }
 
     /**
+     * Issue #553 (epic #687 Phase 3, J2) — true when the visible screen is PARTIALLY
+     * blank: it has SOME live content (so [visibleScreenIsBlank] is false) but the vast
+     * majority of the viewport is empty. This is the maintainer's "only a timer, rest
+     * blank" symptom after a within-grace reattach: tmux's `-CC` control client never
+     * re-emits an idle pane's existing frame, so a reflow during a brief link blip can
+     * wipe the static viewport while a single per-second status/timer line keeps
+     * repainting. Because that ONE live line makes `transcriptText` non-blank, the
+     * blank-gated heal ([visibleScreenIsBlank]) SKIPS the pane and the static content is
+     * never restored.
+     *
+     * This is a DIAGNOSTIC signal only: the P3 within-grace reattach reseed restores the
+     * FULL viewport UNCONDITIONALLY (it does not gate on this), so the heal decision is
+     * never at the mercy of a fragile threshold. It is exposed so the ViewModel can log
+     * the partial-blank state and tests can assert the exact "one live line, rest blank"
+     * pre-reseed condition.
+     *
+     * Returns false when no emulator is attached, when the screen is FULLY blank (that is
+     * [visibleScreenIsBlank]'s job), or when a comfortable share of the visible rows
+     * carry content (a normally-painted viewport is NOT "partially blank").
+     *
+     * NOTE — this is a best-effort HEURISTIC, not a precise oracle. `transcriptText` is
+     * trimmed of trailing blank rows, so the live-line FRACTION is measured against the
+     * emulator's actual row count (`mRows`), and a lone timer line is indistinguishable
+     * from a single-line fresh prompt. That ambiguity is acceptable precisely because the
+     * P3 reattach reseed does NOT branch on this — it restores the full viewport
+     * unconditionally — so a false positive only adds a diagnostic log line, never a wrong
+     * heal decision.
+     */
+    fun visibleScreenIsPartiallyBlank(): Boolean {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        val text = try {
+            emulator.screen.transcriptText
+        } catch (_: Throwable) {
+            return false
+        }
+        if (text.isBlank()) return false
+        val nonBlank = text.split('\n').count { it.isNotBlank() }
+        // A "partial blank" is a viewport with a handful of live lines amid an otherwise
+        // empty grid. Bound the absolute live-line count AND the live FRACTION of the
+        // emulator's visible rows (`mRows`, NOT the trimmed transcript) so the timer-only
+        // case holds and a normally-populated shell/agent pane is excluded.
+        if (nonBlank > PARTIAL_BLANK_MAX_LIVE_LINES) return false
+        val totalRows = try {
+            emulator.mRows
+        } catch (_: Throwable) {
+            return false
+        }
+        if (totalRows <= 0) return false
+        val liveFraction = nonBlank.toDouble() / totalRows.toDouble()
+        return liveFraction <= PARTIAL_BLANK_MAX_LIVE_FRACTION
+    }
+
+    /**
      * Pull the current visible-transcript text from the attached session and
      * run the matcher across it. Returns an empty list when no session is
      * attached or the session has no emulator yet (the View has not yet laid
@@ -670,6 +723,22 @@ class TerminalSurfaceState(
          * pass, but a user who pauses for half a second sees fresh matches.
          */
         private const val MATCH_DEBOUNCE_MS = 250L
+
+        /**
+         * Issue #553 (J2): upper bound on live (non-blank) lines for
+         * [visibleScreenIsPartiallyBlank] to still classify the viewport as partially
+         * blank. The "only a timer, rest blank" symptom is a single repainting status
+         * line (occasionally a couple); a normally-populated pane has many more.
+         */
+        private const val PARTIAL_BLANK_MAX_LIVE_LINES = 3
+
+        /**
+         * Issue #553 (J2): upper bound on the live-line FRACTION of the visible rows for
+         * [visibleScreenIsPartiallyBlank]. Combined with [PARTIAL_BLANK_MAX_LIVE_LINES]
+         * this excludes a small-but-fully-painted pane (e.g. a 3-row prompt on a 4-row
+         * viewport) while catching a lone timer line on an otherwise empty grid.
+         */
+        private const val PARTIAL_BLANK_MAX_LIVE_FRACTION = 0.25
     }
 }
 

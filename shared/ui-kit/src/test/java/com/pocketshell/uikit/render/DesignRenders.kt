@@ -2291,15 +2291,13 @@ class DesignRenders {
                 Text(
                     text = lineNo.toString(),
                     color = if (commented) PocketShellColors.Accent else PocketShellColors.TextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
+                    style = PocketShellType.bodyMono,
                 )
             }
             Text(
                 text = text,
                 color = PocketShellColors.TermText,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyMono,
                 modifier = Modifier.weight(1f).padding(end = 12.dp, top = 2.dp, bottom = 2.dp),
             )
         }

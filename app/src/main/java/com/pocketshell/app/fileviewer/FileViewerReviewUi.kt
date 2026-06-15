@@ -39,11 +39,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -151,15 +149,13 @@ private fun CommentableLineRow(
             Text(
                 text = lineNo.toString(),
                 color = if (hasComment) PocketShellColors.Accent else PocketShellColors.TextMuted,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyMono,
             )
         }
         Text(
             text = lineText,
             color = PocketShellColors.TermText,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyMono,
             softWrap = wordWrap,
             overflow = if (wordWrap) TextOverflow.Clip else TextOverflow.Ellipsis,
             maxLines = if (wordWrap) Int.MAX_VALUE else 1,

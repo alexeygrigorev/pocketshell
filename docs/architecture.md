@@ -94,17 +94,26 @@ temporary user-facing toggle (locked decision **D29** — see decisions.md).
   maintainer confirms the new path on-device. After #766 there is a single
   active path (D28 rule 4): `ConnectionController` only, no toggle, no old path.
 
-**What is MERGED vs PENDING (do not overstate):**
+**Turn-on status — P1–P4 ALL MERGED (2026-06-14):**
 
 - **P1 — screen-keyed reveal (#686): MERGED.** The `RevealStateMachine`
   id-tagged-seed / drop-non-target behaviour above.
 - **P2 — single grace owner (#635): MERGED.** The within-grace foreground probe
   / ride-through owned by one lease-anchored 60 s grace window, collapsing the
   clocks that caused #685.
-- **P3 — reseed-on-reattach (#553): PENDING.** Reattach over a stale lease
-  reseeds panes (no blank pane, no surfaced `list-panes` EOF).
-- **P4 — Codex backpressure (#576): PENDING.** Flow-control / backpressure for
-  high-volume agent (Codex) output.
+- **P3 — id-tagged reseed-on-reattach (#553): MERGED.** Within-grace reattach
+  UNCONDITIONALLY re-captures the active pane (full clear+restore) keyed to the
+  target session id, then the blank-net backstop — so "one live line, rest blank"
+  is fully healed (the old heal skipped on `!visibleScreenIsBlank()`).
+- **P4 — Codex backpressure (#576): MERGED.** The core-tmux command-timeout is now
+  an IDLE deadline keyed on reader-side activity (fires on reader silence, re-arms
+  while bytes flow), and read-only commands fail-open instead of `FatalClose` — so
+  a busy-but-alive `-CC` link no longer self-inflicts a reconnect. No toggle
+  (transport-layer; fixes both paths). Keep-alive dead-peer detection is untouched.
+
+The full P1–P4 ConnectionController turn-on is therefore COMPLETE behind the
+New/Old toggle (default New); only **#766** (delete the toggle + the OLD inline
+path, gated on maintainer on-device verification of all four journeys) remains.
 
 Each phase is gated by a device-truth journey (J1–J4) that asserts the **user's
 rendered viewport** — the terminal text actually shown — NOT internal/shadow

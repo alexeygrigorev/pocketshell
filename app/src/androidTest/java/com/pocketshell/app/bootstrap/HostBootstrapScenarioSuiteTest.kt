@@ -3,6 +3,7 @@ package com.pocketshell.app.bootstrap
 import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -105,7 +106,13 @@ class HostBootstrapScenarioSuiteTest {
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
         assertSetupRows("pocketshell CLI update needed")
-        compose.onNodeWithText("Upgrade").assertExists()
+        // Issue #779: ONE clear action. The status badge says "Outdated" (a
+        // state, not a verb) and the single action button says "Update" — the
+        // old "Update" badge + "Upgrade" button pair read as two competing
+        // buttons. The synonym verb "Upgrade" must NOT appear as a control.
+        compose.onNodeWithText("Outdated").assertExists()
+        compose.onNodeWithText("Update").assertExists()
+        compose.onAllNodesWithText("Upgrade").assertCountEquals(0)
         capture("02-cli-update-needed")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()

@@ -8,7 +8,10 @@ import android.content.pm.PackageManager
 import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.bootstrap.BootstrapTool
+import com.pocketshell.app.bootstrap.HostBootstrapSheetState
 import com.pocketshell.app.bootstrap.HostBootstrapper
+import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.notifications.UpdateNotifier
 import com.pocketshell.app.release.ReleaseCheckResult
 import com.pocketshell.app.release.ReleaseChecker
@@ -829,6 +832,57 @@ class HostListViewModelTest {
         assertNull(viewModel.hostOpenProgress.value)
         assertNotNull(viewModel.bootstrapState.value)
         assertEquals(false, viewModel.pendingNavigation.value!!.ready)
+    }
+
+    @Test
+    fun installBootstrapTool_surfacesNoChangeMessage_whenUpgradeExitsZeroButVersionUnchanged() = runTest {
+        // Issue #779: the user taps "Update" on the outdated-CLI row. The
+        // host's `uv tool install --upgrade …` exits 0 but installs nothing
+        // (the exclude-newer-style "Nothing to upgrade" dead end), so the
+        // version is unchanged. Without the fix the sheet just re-renders the
+        // identical "update needed" prompt — the spinner runs and nothing
+        // happens. The fix surfaces an explicit Failed message instead of
+        // silently looping.
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "outdated-cli",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                // Remote 0.1.0 < app 0.4.1 → VersionMismatch; the upgrade is a
+                // silent no-op that leaves 0.1.0 in place.
+                FakeBootstrapSession(pocketshellVersion = "0.1.0", upgradeIsNoOp = true)
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        // The probe surfaced the outdated-CLI prompt.
+        val prompt = viewModel.bootstrapState.value as? HostBootstrapSheetState.Prompt
+        assertNotNull("expected an outdated-CLI Prompt", prompt)
+        assertTrue(
+            "expected a pocketshell VersionMismatch",
+            prompt!!.report?.tools?.get(BootstrapTool.Pocketshell) is ToolStatus.VersionMismatch,
+        )
+
+        // Tap "Update" → no-op upgrade → the no-change Failed message, NOT a
+        // silent re-render of the same prompt.
+        viewModel.installBootstrapTool(BootstrapTool.Pocketshell)
+        testScheduler.advanceUntilIdle()
+
+        val failed = viewModel.bootstrapState.value as? HostBootstrapSheetState.Failed
+        assertNotNull(
+            "tapping Update on a no-op upgrade must surface a Failed message, not loop",
+            failed,
+        )
+        assertTrue(failed!!.message.contains("did not change the installed version"))
+        assertTrue(failed.message.contains("still reports 0.1.0"))
     }
 
     @Test
@@ -2284,6 +2338,11 @@ class HostListViewModelTest {
         // Issue #514: drive the reported remote pocketshell CLI version so a
         // test can stand up a "remote newer than this app build" host.
         private val pocketshellVersion: String = "0.2.0",
+        // Issue #779: when true, the `uv tool install --upgrade …` command
+        // exits 0 but leaves [pocketshellVersion] unchanged — i.e. a silent
+        // no-op upgrade (the exclude-newer-style "Nothing to upgrade" dead
+        // end). Lets a test drive the "update ran but did nothing" branch.
+        private val upgradeIsNoOp: Boolean = false,
     ) : SshSession {
         val recorded = mutableListOf<String>()
         var closeCount: Int = 0
@@ -2309,6 +2368,13 @@ class HostListViewModelTest {
                         ExecResult("", "", 1)
                     }
                 }
+                // Issue #779: a no-op upgrade — the installer reports success
+                // (exit 0) but installs nothing, so the version below stays
+                // unchanged. Must be matched BEFORE the generic `command -v
+                // pocketshell` rule since the upgrade line also mentions
+                // `pocketshell`.
+                upgradeIsNoOp && command.contains("tool install") && command.contains("--upgrade") ->
+                    ExecResult("Nothing to upgrade\n", "", 0)
                 command.contains("command -v") && command.contains("pocketshell") ->
                     ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
                 command.contains("pocketshell") && command.contains("--version") ->

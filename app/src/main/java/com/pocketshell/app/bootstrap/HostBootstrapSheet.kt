@@ -223,11 +223,16 @@ private fun SetupActions(
             )
         }
         report.pocketshellVersionMismatch?.let { mismatch ->
+            // One clear action (issue #779). The status word ("Outdated") and
+            // the action verb ("Update") must NOT be near-synonyms, or the
+            // red status badge reads as a second, competing button next to the
+            // real action button. "Outdated" describes the state; "Update" is
+            // the single thing the user can do about it.
             SetupActionRow(
                 title = "pocketshell CLI update needed",
                 detail = versionMismatchDetail(report.installer, mismatch, report.installerPath),
-                statusLabel = "Update",
-                actionLabel = "Upgrade",
+                statusLabel = "Outdated",
+                actionLabel = "Update",
                 onClick = { onInstallTool(BootstrapTool.Pocketshell) },
             )
         }
@@ -511,6 +516,37 @@ internal fun cliUpdateFailureMessage(
     append("\n\nManual update:\n")
     append(upgradeCommand(installer, BootstrapTool.Pocketshell))
     append("\n\nIf that does not update the binary above, run the matching command over SSH and make sure ~/.local/bin is on PATH.")
+}
+
+/**
+ * Issue #779: the update command ran and EXITED 0, but the host's
+ * `pocketshell` is still on the same (too-old) version afterwards — the
+ * upgrade was a silent no-op. Without this the sheet just re-renders the
+ * same "update needed" row, so the user taps Update, sees a spinner, and is
+ * dropped back on the identical prompt with no explanation ("pressing it
+ * does nothing"). This turns that dead end into an explicit message naming
+ * the still-installed version and the most likely cause (the host's package
+ * index / installer cache hiding the newer release), plus the manual command.
+ */
+internal fun cliUpdateNoChangeMessage(
+    mismatch: ToolStatus.VersionMismatch?,
+    installer: PythonToolInstaller?,
+): String = buildString {
+    append("PocketShell CLI update ran but did not change the installed version.")
+    if (mismatch != null) {
+        append(
+            "\n\nThe host still reports ${mismatch.currentVersion}; the app needs " +
+                "${mismatch.expectedVersion}.\nPath: ${mismatch.path}",
+        )
+    }
+    append(
+        "\n\nThe installer reported success but found nothing newer to install. " +
+            "This usually means the host's package index or installer cache does " +
+            "not yet see the newer pocketshell release.",
+    )
+    append("\n\nTry again over SSH (this clears most installer caches):\n")
+    append(upgradeCommand(installer, BootstrapTool.Pocketshell))
+    append("\n\nIf it still reports nothing to update, make sure ~/.local/bin is on PATH and the host can reach PyPI.")
 }
 
 @Composable

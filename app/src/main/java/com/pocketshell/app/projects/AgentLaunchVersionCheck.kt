@@ -36,8 +36,19 @@ object AgentLaunchVersionCheck {
      * The copy-paste command shown to the user to bring the host's
      * `pocketshell` up to date. `uv` is the maintainer's primary install path;
      * the pipx / pip alternatives cover the other supported install methods.
+     *
+     * Issue #779: a plain `uv tool upgrade pocketshell` is silently capped by
+     * the host's global `exclude-newer` (`~/.config/uv/uv.toml`) — when the
+     * newest release is younger than that cutoff, uv reports "Nothing to
+     * upgrade" and exits 0, so the upgrade is a no-op and the version mismatch
+     * never clears. The targeted `--exclude-newer-package pocketshell=<far
+     * future>` override lifts that cap for this one package only (mirroring the
+     * bootstrap installer's [com.pocketshell.app.bootstrap.UV_POCKETSHELL_EXCLUDE_NEWER_PACKAGE]),
+     * leaving the user's reproducibility setting intact for everything else.
+     * `pipx upgrade` / `pip install -U` are not affected by uv's cutoff.
      */
-    const val UPDATE_COMMAND: String = "uv tool upgrade pocketshell"
+    const val UPDATE_COMMAND: String =
+        "uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell"
 
     /**
      * The server-side wrapper line the agent-launch flow types into a fresh

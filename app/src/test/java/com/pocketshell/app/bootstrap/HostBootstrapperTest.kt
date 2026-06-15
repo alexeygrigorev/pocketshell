@@ -621,6 +621,31 @@ class HostBootstrapperTest {
     }
 
     @Test
+    fun cliUpdateNoChangeMessage_explainsTheNoOpUpgradeAndNamesVersions() {
+        // Issue #779: the update exited 0 but the version is unchanged. The
+        // message must NOT be silent — it names the still-installed version,
+        // the expected version, the likely cause, and the manual command.
+        val mismatch = ToolStatus.VersionMismatch(
+            path = "/home/u/.local/bin/pocketshell",
+            currentVersion = "0.3.33",
+            expectedVersion = "0.4.1",
+        )
+
+        val message = cliUpdateNoChangeMessage(
+            mismatch = mismatch,
+            installer = PythonToolInstaller.Uv,
+        )
+
+        assertTrue(message.contains("did not change the installed version"))
+        assertTrue(message.contains("still reports 0.3.33"))
+        assertTrue(message.contains("needs 0.4.1"))
+        assertTrue(message.contains("/home/u/.local/bin/pocketshell"))
+        assertTrue(message.contains("nothing newer to install"))
+        // The retry command is the exclude-newer-bypassing form.
+        assertTrue(message.contains(UV_POCKETSHELL_UPGRADE_COMMAND))
+    }
+
+    @Test
     fun uvPocketshellCommands_includeTargetedExcludeNewerOverride() {
         assertEquals(
             "uv tool install --exclude-newer-package pocketshell=2099-12-31 pocketshell",

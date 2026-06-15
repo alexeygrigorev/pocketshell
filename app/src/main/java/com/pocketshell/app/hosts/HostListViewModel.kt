@@ -13,6 +13,7 @@ import com.pocketshell.app.bootstrap.PocketshellDaemonStatus
 import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.bootstrap.cliUpdateFailureMessage
+import com.pocketshell.app.bootstrap.cliUpdateNoChangeMessage
 import com.pocketshell.app.bootstrap.compareSemver
 import com.pocketshell.app.notifications.DefaultUpdateNotifier
 import com.pocketshell.app.notifications.UpdateNotifier
@@ -1329,13 +1330,33 @@ class HostListViewModel internal constructor(
         }
         _bootstrapState.value = HostBootstrapSheetState.Installing
         viewModelScope.launch {
-            val result = if (prompt.report.tools[tool] is ToolStatus.VersionMismatch) {
+            val wasVersionMismatch = prompt.report.tools[tool] is ToolStatus.VersionMismatch
+            val result = if (wasVersionMismatch) {
                 bootstrapper.upgradeServerTool(session, installer, tool, prompt.report.installerPath)
             } else {
                 bootstrapper.installServerTool(session, installer, tool, prompt.report.installerPath)
             }
             when (result) {
-                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
+                InstallResult.Success -> {
+                    val refreshed = refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
+                    // Issue #779: a version-mismatch "Update" can exit 0 yet
+                    // leave the same too-old version installed (the host's
+                    // installer found nothing newer). Without this the sheet
+                    // would just re-render the identical "update needed" row,
+                    // so the user sees the spinner and then nothing changes.
+                    // Surface an explicit no-change message instead of looping.
+                    if (wasVersionMismatch) {
+                        val stillMismatch = refreshed.tools[tool] as? ToolStatus.VersionMismatch
+                        if (stillMismatch != null) {
+                            _bootstrapState.value = HostBootstrapSheetState.Failed(
+                                message = cliUpdateNoChangeMessage(
+                                    mismatch = stillMismatch,
+                                    installer = installer,
+                                ),
+                            )
+                        }
+                    }
+                }
                 is InstallResult.SetupIncomplete -> _bootstrapState.value = HostBootstrapSheetState.Prompt(
                     needsTmux = prompt.needsTmux,
                     report = result.report,
@@ -1395,7 +1416,7 @@ class HostListViewModel internal constructor(
     private suspend fun refreshServerSetupPrompt(
         session: SshSession,
         needsTmux: Boolean,
-    ) {
+    ): HostBootstrapReport {
         val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
         bootstrapTargetHost?.let {
             persistPocketshellResult(it, report)
@@ -1408,6 +1429,7 @@ class HostListViewModel internal constructor(
         } else {
             HostBootstrapSheetState.Prompt(needsTmux = needsTmux, report = report)
         }
+        return report
     }
 
     /**

@@ -313,6 +313,22 @@ JOURNEY_CLASSES=(
   # lives under com.pocketshell.app.projects, not the proof prefix, so it carries
   # its fully-qualified name directly.
   "com.pocketshell.app.projects.FolderListWindowCloseAfterStopPollingDockerTest"
+  # ADDED (#785, EPIC #687 slice 3 / D28(3)): the attachment -> NO-reconnect journey.
+  # Tapping the 📎 attach button launches the separate-process `OpenMultipleDocuments`
+  # picker, briefly backgrounding the app WITHIN the 60s grace window; on return the
+  # attach handler must TRUST the still-warm lease (the within-grace silent heal is
+  # already restoring the session) instead of firing a LOUD `reconnect()` that blanks
+  # then restores the viewport. This journey opens a real `tmux -CC` session, simulates
+  # the picker bg->fg round-trip, drives the production `stagePromptAttachments(uris)`,
+  # and asserts ZERO reconnect/EOF diagnostics (`reconnect_tapped`/`reconnect_start`/…)
+  # + NO Connecting/Reconnecting/Disconnected/Tap-Reconnect/Attaching surface + the
+  # viewport still shows the seeded marker (never blanked). RED on base (the attach
+  # handler's unconditional `reconnect()` records `reconnect_tapped` and raises the
+  # band); GREEN after the slice-3 warm-lease-trust fix. It is the regression net for
+  # the controller-owned reconnect ladder (the attach path now aligns with it). Uses
+  # ONLY the deterministic agents:2222 fixture (no toxiproxy) that `tests.yml` already
+  # brings up — no workflow change needed — and does NOT self-skip on CI.
+  "$FQCN_PREFIX.AttachmentNoReconnectE2eTest"
 )
 
 echo "=========================================================="

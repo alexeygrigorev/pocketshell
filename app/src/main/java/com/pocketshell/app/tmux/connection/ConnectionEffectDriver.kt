@@ -50,9 +50,18 @@ import kotlinx.coroutines.launch
  *    own [ConnectionController] reducer self-gates a drop to a live-ish state (no-op
  *    from Idle/Backgrounded/Gone/Unreachable), reproducing the old `Connected` gate.
  * After this slice the controller's transport inputs are driver-fed FROM REALITY — the
- * prerequisite for the driver ACTING in slice C. The lease `Down` edge is NOT yet
- * submitted (the reconnect-loop ownership that consumes it is slice C/D); B2 replaces
- * exactly the two mirror feeds and nothing more.
+ * prerequisite for the driver ACTING in slice C. B2 replaced exactly the two mirror
+ * feeds (control-channel drop + lease `Up`) and nothing more.
+ *
+ * Slice 3 (#766 reconnect-ladder authority) takes the LAST deferred transport input off
+ * the bench: the lease `Down` edge (`TransportPort.transportEvents` `Down(host)` for the
+ * controller's current host) is now SUBMITTED as [ConnectionEvent.TransportDropped],
+ * under the SAME single-grace-owner suppression the control-channel drop uses. This makes
+ * the [ConnectionController] AUTHORITATIVE for the reconnect LADDER STATE — a real lease
+ * close walks it Live → Reattaching → Reconnecting(n) → Unreachable. The inline
+ * `scheduleAutoReconnect` / network-changed reconnect IO is UNCHANGED and still performs
+ * the actual re-dial until slice 4 deletes it (D22 hard-cut, gated on the maintainer
+ * checkpoint).
  *
  * After each driver-submitted transport event the driver fires the VM-supplied
  * [onControllerTransition] callback so the VM re-projects `_connectionStatus` from the
@@ -92,8 +101,9 @@ import kotlinx.coroutines.launch
  * @param tmuxPort the tmux control-mode port. Its [TmuxPort.disconnected] true-edge is
  *   submitted as [ConnectionEvent.TransportDropped]; no IO method is ever called.
  * @param transportPort the SSH-lease transport port. Its [TransportPort.transportEvents]
- *   `Up` edge for the current host is submitted as [ConnectionEvent.TransportLive]; no
- *   IO method is ever called.
+ *   `Up` edge for the current host is submitted as [ConnectionEvent.TransportLive], and
+ *   (slice 3) its `Down` edge for the current host as [ConnectionEvent.TransportDropped]
+ *   under the [suppressTransportDrops] single-grace-owner gate; no IO method is ever called.
  * @param scope the scope the three collectors run in (the VM supplies its
  *   `viewModelScope`; tests supply a `TestScope`'s scope).
  * @param backgroundedEffect fired SYNCHRONOUSLY when the controller transitions INTO
@@ -164,7 +174,9 @@ class ConnectionEffectDriver(
      *  - [TmuxPort.disconnected] — the transport-drop oracle; its true-edge is
      *    submitted as [ConnectionEvent.TransportDropped] (slice B2),
      *  - [TransportPort.transportEvents] — the lease up/down edge stream; an `Up` for
-     *    the current host is submitted as [ConnectionEvent.TransportLive] (slice B2).
+     *    the current host is submitted as [ConnectionEvent.TransportLive] (slice B2), a
+     *    `Down` for the current host as [ConnectionEvent.TransportDropped] under the
+     *    single-grace-owner gate (slice 3 — controller-authoritative reconnect ladder).
      * Idempotent: a second [start] is a no-op.
      */
     fun start() {
@@ -247,11 +259,47 @@ class ConnectionEffectDriver(
             // mirror fed `observeTransportLive` from. The host filter reproduces its
             // per-target gate (both encode the lease key via `hostKeyFor`, so a live
             // signal for an unrelated host never spuriously promotes the controller).
-            // The lease `Down` edge is NOT submitted in B2 — its consumer (the
-            // reconnect loop) is a later slice; `TransportDropped` here comes from the
-            // control-channel oracle above, matching the old mirror feed exactly.
-            if (edge is TransportUpDown.Up && edge.host == controller.state.value.hostOrNull()) {
-                submitTransport(ConnectionEvent.TransportLive)
+            //
+            // Slice 3 (#766 reconnect-ladder authority): the lease `Down` edge — which
+            // B2 deliberately deferred ("its consumer the reconnect loop is a later
+            // slice") — is now SUBMITTED to the controller as a
+            // [ConnectionEvent.TransportDropped] for the CURRENT host. This is the
+            // missing input that makes the ConnectionController AUTHORITATIVE for the
+            // reconnect ladder: a real lease close walks the controller's state
+            // Live → Reattaching → Reconnecting(n) → (budget exhausted) Unreachable via
+            // [ConnectionController.onTransportDropped], so the displayed status follows
+            // the controller's honest ladder, not only the inline `scheduleAutoReconnect`
+            // state. The inline reconnect IO (`scheduleAutoReconnect`, network-changed
+            // reconnect) is UNCHANGED and still performs the actual re-dial until slice 4
+            // deletes it (D22 hard-cut, gated on the maintainer checkpoint) — this slice
+            // makes the controller the ladder STATE owner without removing the inline IO.
+            //
+            // The same single-grace-owner suppression the control-channel drop uses
+            // ([suppressTransportDrops]) applies to the lease `Down`: a drop while the
+            // app is BACKGROUNDED is inside the App-level background-grace window (the
+            // sole grace authority), so submitting it would collapse the controller to
+            // Unreachable while backgrounded and paint a band on the next within-grace
+            // foreground (the #635 regression). Deferring leaves recovery to the
+            // within-grace foreground heal (the single owner). A `Down` for an UNRELATED
+            // host is ignored by the host filter, matching the `Up` edge's per-target gate.
+            when (edge) {
+                is TransportUpDown.Up ->
+                    if (edge.host == controller.state.value.hostOrNull()) {
+                        submitTransport(ConnectionEvent.TransportLive)
+                    }
+
+                is TransportUpDown.Down ->
+                    if (edge.host == controller.state.value.hostOrNull()) {
+                        if (suppressTransportDrops()) {
+                            record(Observation.DropSuppressed)
+                        } else {
+                            submitTransport(
+                                ConnectionEvent.TransportDropped(
+                                    reason = "lease_down:${edge.reason}",
+                                ),
+                            )
+                        }
+                    }
             }
         }
     }

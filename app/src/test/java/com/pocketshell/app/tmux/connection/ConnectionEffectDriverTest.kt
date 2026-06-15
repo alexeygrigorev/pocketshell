@@ -484,6 +484,129 @@ class ConnectionEffectDriverTest {
         scope.cancel()
     }
 
+    // --- Slice 3 (#766): controller-authoritative RECONNECT LADDER -----------------
+    //
+    // The lease `Down` edge — deferred since B2 ("its consumer the reconnect loop is a
+    // later slice") — is now SUBMITTED as `TransportDropped` for the current host, under
+    // the SAME single-grace-owner gate. This is the input that makes the
+    // ConnectionController authoritative for the ladder STATE: a real lease close walks
+    // it Live -> Reattaching -> Reconnecting(n) -> Unreachable. These pin both the submit
+    // and the gate-suppression at gradle-test speed.
+
+    @Test
+    fun submitsLeaseDownAsTransportDrop_walkingTheControllerReconnectLadder() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        // Default gate `{ false }` (foregrounded): the lease Down must drive the ladder.
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+        ).also { it.start() }
+
+        // Drive to Live (warm enter: Attaching -> Live).
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
+
+        // A real lease `Down` for the CURRENT host is now submitted as TransportDropped:
+        // the controller heals Live -> Reattaching (the first ladder rung). Slice 3
+        // makes the controller authoritative for that ladder STATE.
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        assertEquals(
+            "a foreground lease Down walks the controller Live -> Reattaching",
+            listOf("Idle", "Attaching", "Live", "Reattaching"),
+            stateNamesOf(driver),
+        )
+        assertTrue(
+            "controller must be Reattaching after the first lease Down",
+            controller.state.value is ConnectionState.Reattaching,
+        )
+
+        // A second lease Down escalates the ladder: Reattaching -> Reconnecting(1).
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        assertTrue(
+            "a second lease Down escalates the ladder to Reconnecting",
+            controller.state.value is ConnectionState.Reconnecting,
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun suppressesLeaseDownSubmissionWhenGateIsTrue_singleGraceOwner() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            suppressTransportDrops = { true }, // backgrounded: single grace owner governs
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
+
+        // A lease Down while backgrounded must be recorded as DropSuppressed and NOT
+        // submitted — submitting it would collapse the controller toward Unreachable
+        // while backgrounded (the #635 band on the next within-grace foreground).
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        assertTrue(
+            "a suppressed lease Down must be recorded as DropSuppressed",
+            driver.observations.value.any {
+                it is ConnectionEffectDriver.Observation.DropSuppressed
+            },
+        )
+        assertEquals(
+            "a suppressed lease Down must NOT walk the controller off Live",
+            listOf("Idle", "Attaching", "Live"),
+            stateNamesOf(driver),
+        )
+        assertTrue(
+            "controller stays Live (single grace owner handles recovery)",
+            controller.state.value is ConnectionState.Live,
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun ignoresLeaseDownForUnrelatedHost() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
+
+        // A lease Down for a DIFFERENT host must be ignored by the per-target host
+        // filter — exactly as the lease Up edge already gates — so it never disturbs
+        // the current target's live channel.
+        transportPort.transportEventsFlow.emit(
+            TransportUpDown.Down(HostKey("bob@elsewhere.example:22/9"), reason = "closed"),
+        )
+        assertEquals(
+            "a lease Down for an unrelated host must not move the controller",
+            listOf("Idle", "Attaching", "Live"),
+            stateNamesOf(driver),
+        )
+        assertTrue(controller.state.value is ConnectionState.Live)
+        scope.cancel()
+    }
+
     @Test
     fun gateTrueStillNeverSuppressesTheLeaseUpTransportLiveFeed() = runTest {
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))

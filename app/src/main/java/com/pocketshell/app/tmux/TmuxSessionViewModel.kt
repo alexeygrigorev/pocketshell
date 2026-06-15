@@ -8247,17 +8247,90 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private suspend fun awaitLiveSessionForAttachment(): SshSession? {
         liveSessionForAttachmentOrNull()?.let { return it }
-        // Connect-on-action: drive a (re)connect like Send does. No-op when a
-        // connect is already in flight, so it just falls through to the wait.
-        reconnect()
+        // EPIC #687 slice 3 / #785: TRUST THE WITHIN-GRACE OWNER, DON'T REDIAL.
+        //
+        // The file picker (`OpenMultipleDocuments`) is a separate-process Activity,
+        // so launching it backgrounds PocketShell (ProcessLifecycle `ON_STOP`) and
+        // returning foregrounds it (`ON_START`). On a quick round-trip the App-level
+        // background-grace window (#450, the SINGLE grace owner) holds the `-CC`
+        // lease warm and the within-grace foreground heal
+        // ([launchForegroundHealWithinGrace]) is ALREADY re-promoting the session
+        // back to Live — silently, with no band. That heal is ASYNC, so the instant
+        // this attach callback fires (on the same foreground return) the synchronous
+        // [liveSessionForAttachmentOrNull] snapshot can momentarily read not-Connected
+        // / a transiently-null `sessionRef` while the heal is mid-flight.
+        //
+        // Calling [reconnect] here in that window is the #785 bug: it fires a LOUD
+        // `connect(trigger = Reconnect)` that raises the Connecting overlay + reseeds
+        // the viewport (the blank-then-restore the maintainer reported), racing the
+        // silent heal it should have trusted. So when the lease is still WARM (the
+        // same [liveLeaseKeys] predicate [canReseedWithinGraceForeground] uses), we
+        // do NOT redial — we just POLL for the heal to land. We only fall back to the
+        // connect-on-action [reconnect] when the lease is genuinely COLD (grace
+        // elapsed / socket truly dead), where a redial is the correct recovery. This
+        // is the attach-flow alignment with the controller-owned reconnect ladder
+        // (slice 3): the single grace owner / ladder decides reconnect, not a
+        // connect-on-action snapshot reached around it.
+        if (!isAttachmentLeaseWarm()) {
+            // Cold lease: connect-on-action, drive a (re)connect like Send does.
+            // No-op when a connect is already in flight, so it just falls through
+            // to the wait.
+            reconnect()
+        }
         return withTimeoutOrNull(ATTACH_SESSION_WAIT_TIMEOUT_MS) {
             while (currentCoroutineContext().isActive) {
                 liveSessionForAttachmentOrNull()?.let { return@withTimeoutOrNull it }
+                // Re-check the lease each poll: a within-grace heal may complete OR
+                // the grace window may elapse (lease goes cold) while we wait. If it
+                // goes cold and no connect is in flight, kick the connect-on-action
+                // recovery so a genuinely-dead link still resolves within the bound.
+                if (!isAttachmentLeaseWarm() && !isConnectInFlight()) {
+                    reconnect()
+                }
                 delay(ATTACH_SESSION_WAIT_POLL_MS)
             }
             null
         }
     }
+
+    /**
+     * EPIC #687 slice 3 / #785: is the active target's SSH lease still WARM — i.e.
+     * the within-grace owner is holding the connection and a silent heal will bring
+     * the session back without a redial? Mirrors the [liveLeaseKeys] warm-snapshot
+     * predicate [canReseedWithinGraceForeground] uses, but deliberately does NOT
+     * require a non-null `clientRef`/`sessionRef`: those are exactly what go
+     * transiently null while the within-grace heal re-opens the `-CC` channel, and
+     * gating on them would defeat the whole "trust the warm lease" fix. The lease
+     * key membership is the authoritative "the transport is still leased / warm"
+     * signal the single grace owner maintains.
+     */
+    private fun isAttachmentLeaseWarm(): Boolean {
+        val target = activeTarget ?: connectingTarget ?: return false
+        return liveLeaseKeys.contains(target.toSshLeaseTarget().leaseKey)
+    }
+
+    /**
+     * EPIC #687 slice 3 / #785 (deterministic test seam): would the attachment wait
+     * REDIAL (`reconnect()`) for the current state, or POLL the warm lease? This is the
+     * exact gate `awaitLiveSessionForAttachment` consults: `true` only when the lease is
+     * genuinely COLD. On the OLD (base) code the attach wait redialed UNCONDITIONALLY,
+     * so this gate did not exist — the #785 bug. A JVM unit test drives the VM into a
+     * warm-lease + transiently-not-Connected state and asserts this returns `false`
+     * (poll, do not redial), the red→green discriminator for the fix.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun attachmentWaitWouldRedialForTest(): Boolean = !isAttachmentLeaseWarm()
+
+    /**
+     * EPIC #687 slice 3 / #785: true when a connect/reconnect attempt is already in
+     * flight, so the attach wait must not kick another [reconnect] on top of it.
+     */
+    private fun isConnectInFlight(): Boolean =
+        connectJob?.isActive == true ||
+            autoReconnectJob?.isActive == true ||
+            inlineConnectionStatus is ConnectionStatus.Connecting ||
+            inlineConnectionStatus is ConnectionStatus.Reconnecting ||
+            inlineConnectionStatus is ConnectionStatus.Switching
 
     private fun liveSessionForAttachmentOrNull(): SshSession? {
         if (inlineConnectionStatus !is ConnectionStatus.Connected) return null

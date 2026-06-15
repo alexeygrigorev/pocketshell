@@ -82,4 +82,136 @@ class MarkdownTextTest {
 
         assertEquals("see docs please", rendered.text)
     }
+
+    // --- GFM tables (#781) ---
+
+    @Test
+    fun pipeTableParsesHeaderDelimiterAndRows() {
+        val blocks = parseMarkdownBlocks(
+            """
+            | # | Issue | Labels |
+            |---|-------|--------|
+            | 1 | Tables | bug, ui |
+            | 2 | Voice  | feature |
+            """.trimIndent(),
+        )
+
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(listOf("#", "Issue", "Labels"), table.header)
+        assertEquals(2, table.rows.size)
+        assertEquals(listOf("1", "Tables", "bug, ui"), table.rows[0])
+        assertEquals(listOf("2", "Voice", "feature"), table.rows[1])
+    }
+
+    @Test
+    fun tableWithoutOuterPipesStillParses() {
+        val blocks = parseMarkdownBlocks(
+            """
+            a | b | c
+            --- | --- | ---
+            1 | 2 | 3
+            """.trimIndent(),
+        )
+
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(listOf("a", "b", "c"), table.header)
+        assertEquals(listOf("1", "2", "3"), table.rows.single())
+    }
+
+    @Test
+    fun alignmentMarkersAreHonored() {
+        val aligns = parseTableAlignments("| :--- | :---: | ---: | --- |")
+
+        assertEquals(
+            listOf(
+                ColumnAlignment.Start,
+                ColumnAlignment.Center,
+                ColumnAlignment.End,
+                ColumnAlignment.Start,
+            ),
+            aligns,
+        )
+    }
+
+    @Test
+    fun alignmentsAreCarriedOnTheParsedTableBlock() {
+        val blocks = parseMarkdownBlocks(
+            """
+            | left | mid | right |
+            | :--- | :---: | ---: |
+            | a | b | c |
+            """.trimIndent(),
+        )
+
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(
+            listOf(ColumnAlignment.Start, ColumnAlignment.Center, ColumnAlignment.End),
+            table.alignments,
+        )
+    }
+
+    @Test
+    fun ragRowsArePaddedToColumnCount() {
+        val blocks = parseMarkdownBlocks(
+            """
+            | a | b | c |
+            |---|---|---|
+            | 1 | 2 |
+            """.trimIndent(),
+        )
+
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(3, table.alignments.size)
+        assertEquals(listOf("1", "2", ""), table.rows.single())
+    }
+
+    @Test
+    fun escapedPipeStaysInsideCell() {
+        val cells = splitTableRow("""| a \| b | c |""")
+
+        assertEquals(listOf("a | b", "c"), cells)
+    }
+
+    @Test
+    fun delimiterRowDetection() {
+        assertTrue(isTableDelimiterRow("|---|---|"))
+        assertTrue(isTableDelimiterRow("| :--- | ---: |"))
+        assertTrue(isTableDelimiterRow("--- | ---"))
+        // A normal body row is not a delimiter row.
+        assertEquals(false, isTableDelimiterRow("| 1 | 2 |"))
+        // A heading line with no dashes is not a delimiter row.
+        assertEquals(false, isTableDelimiterRow("# heading"))
+    }
+
+    @Test
+    fun pipeBearingProseWithoutDelimiterStaysParagraph() {
+        // A single `|` in prose with no following delimiter row must NOT be
+        // promoted to a table (no regression to ordinary text).
+        val blocks = parseMarkdownBlocks("use `a | b` to pipe output")
+
+        assertTrue(blocks.single() is MarkdownBlock.Paragraph)
+    }
+
+    @Test
+    fun tableDoesNotRegressSurroundingMarkdown() {
+        val blocks = parseMarkdownBlocks(
+            """
+            ## Results
+
+            | a | b |
+            |---|---|
+            | 1 | 2 |
+
+            - bullet after table
+            ```kotlin
+            val x = 1
+            ```
+            """.trimIndent(),
+        )
+
+        assertTrue(blocks[0] is MarkdownBlock.Heading)
+        assertTrue(blocks.any { it is MarkdownBlock.Table })
+        assertTrue(blocks.any { it is MarkdownBlock.Bullet })
+        assertTrue(blocks.any { it is MarkdownBlock.CodeBlock })
+    }
 }

@@ -1,13 +1,16 @@
 package com.pocketshell.app.composer
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -25,6 +28,7 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -62,9 +66,9 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * and bullet lists. Hand-rolling an AnnotatedString-based renderer for
  * that surface fits in well under a hundred lines, keeps everything
  * inside Compose (so [SelectionContainer] works end-to-end for
- * long-press copy), and adds zero new dependencies. Trade-off: tables
- * and HTML pass-through aren't rendered, but the agent output we see
- * in practice doesn't use them.
+ * long-press copy), and adds zero new dependencies. GFM pipe tables
+ * are rendered as laid-out columns (#781); HTML pass-through still
+ * falls through as plain text.
  *
  * ### Rendering rules
  *
@@ -79,6 +83,10 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *   leading marker so lists render with the expected indentation.
  * - Headings (`#`, `##`, `###`) bump the font size + weight on the
  *   surrounding paragraph.
+ * - GFM pipe tables (a `|`-bearing header row immediately followed by a
+ *   `---`/`:--`/`--:`/`:--:` delimiter row) render as aligned columns
+ *   with a bold header; column alignment markers are honoured and the
+ *   whole table scrolls horizontally as one unit when wide (#781).
  *
  * Anything we don't recognise falls through as plain text — that's the
  * "don't garble prose with stray asterisks" requirement from the
@@ -128,6 +136,12 @@ public fun MarkdownText(
                         fontSize = fontSize,
                         fontFamily = fontFamily,
                     )
+                    is MarkdownBlock.Table -> TableBlock(
+                        block = block,
+                        fontSize = fontSize,
+                        fontFamily = fontFamily,
+                        onLinkTap = onLinkTap,
+                    )
                 }
             }
         }
@@ -161,6 +175,103 @@ private fun CodeBlock(text: String) {
     }
 }
 
+/**
+ * Render a GFM pipe table (#781).
+ *
+ * Overflow behaviour (chosen): the WHOLE table is wrapped in a single
+ * [horizontalScroll]. A wide table scrolls sideways as one unit and never
+ * pushes the rest of the transcript off-screen or clips it. Individual cells
+ * wrap their text within a per-column max width so a long single cell doesn't
+ * force an unusably wide table. The header row is bold; a thin border + header
+ * underline match the compact, dark, terminal-adjacent design system.
+ */
+@Composable
+private fun TableBlock(
+    block: MarkdownBlock.Table,
+    fontSize: TextUnit,
+    fontFamily: FontFamily?,
+    onLinkTap: ((ConversationLink) -> Unit)?,
+) {
+    val columnCount = block.alignments.size
+    if (columnCount == 0) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .background(
+                color = PocketShellColors.Surface,
+                shape = RoundedCornerShape(6.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Border,
+                shape = RoundedCornerShape(6.dp),
+            ),
+    ) {
+        TableRow(
+            cells = block.header,
+            alignments = block.alignments,
+            fontSize = fontSize,
+            fontFamily = fontFamily,
+            isHeader = true,
+            onLinkTap = onLinkTap,
+        )
+        block.rows.forEach { row ->
+            TableRow(
+                cells = row,
+                alignments = block.alignments,
+                fontSize = fontSize,
+                fontFamily = fontFamily,
+                isHeader = false,
+                onLinkTap = onLinkTap,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TableRow(
+    cells: List<String>,
+    alignments: List<ColumnAlignment>,
+    fontSize: TextUnit,
+    fontFamily: FontFamily?,
+    isHeader: Boolean,
+    onLinkTap: ((ConversationLink) -> Unit)?,
+) {
+    Row(
+        modifier = Modifier
+            .background(
+                color = if (isHeader) PocketShellColors.SurfaceElev else Color.Transparent,
+            )
+            .border(width = TableHairline, color = PocketShellColors.BorderSoft),
+    ) {
+        alignments.forEachIndexed { index, alignment ->
+            val cell = cells.getOrElse(index) { "" }
+            val textAlign = when (alignment) {
+                ColumnAlignment.Start -> TextAlign.Start
+                ColumnAlignment.Center -> TextAlign.Center
+                ColumnAlignment.End -> TextAlign.End
+            }
+            Box(
+                modifier = Modifier
+                    .width(TableCellMaxWidth)
+                    .border(width = TableHairline, color = PocketShellColors.BorderSoft)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            ) {
+                Text(
+                    text = renderInline(cell, onLinkTap),
+                    color = if (isHeader) PocketShellColors.Text else PocketShellColors.TextSecondary,
+                    fontSize = fontSize,
+                    fontFamily = fontFamily,
+                    fontWeight = if (isHeader) FontWeight.SemiBold else FontWeight.Normal,
+                    textAlign = textAlign,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun BulletRow(
     marker: String,
@@ -186,7 +297,22 @@ internal sealed interface MarkdownBlock {
     data class Heading(val level: Int, val text: String) : MarkdownBlock
     data class Bullet(val marker: String, val text: String) : MarkdownBlock
     data class CodeBlock(val text: String) : MarkdownBlock
+
+    /**
+     * A GFM pipe table (#781). [header] is the single header row; [rows] are the
+     * body rows; [alignments] holds the per-column alignment parsed from the
+     * delimiter row (`:--` → Start, `:--:` → Center, `--:` → End, `--` → Start).
+     * All three lists are normalised to the same column count.
+     */
+    data class Table(
+        val header: List<String>,
+        val alignments: List<ColumnAlignment>,
+        val rows: List<List<String>>,
+    ) : MarkdownBlock
 }
+
+/** Column alignment parsed from a GFM table delimiter cell (#781). */
+internal enum class ColumnAlignment { Start, Center, End }
 
 /**
  * Split [input] into block-level Markdown elements. Visible for tests
@@ -225,6 +351,33 @@ internal fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
         if (line.isBlank()) {
             flushParagraph()
             index += 1
+            continue
+        }
+        // GFM pipe table (#781): a header row containing `|` immediately
+        // followed by a delimiter row of `---` / `:--` / `--:` / `:--:` cells.
+        if (line.contains('|') && index + 1 < lines.size && isTableDelimiterRow(lines[index + 1])) {
+            val alignments = parseTableAlignments(lines[index + 1])
+            val header = splitTableRow(line)
+            index += 2 // consume header + delimiter
+            val rows = mutableListOf<List<String>>()
+            while (index < lines.size && lines[index].contains('|') && lines[index].isNotBlank()) {
+                // A new fence/heading would end the table; pipe-bearing prose
+                // inside a fence is already consumed above, so a plain `|` line
+                // here is a table body row.
+                rows += splitTableRow(lines[index])
+                index += 1
+            }
+            flushParagraph()
+            val columnCount = maxOf(
+                header.size,
+                alignments.size,
+                rows.maxOfOrNull { it.size } ?: 0,
+            )
+            blocks += MarkdownBlock.Table(
+                header = header.padToColumns(columnCount),
+                alignments = alignments.padAlignments(columnCount),
+                rows = rows.map { it.padToColumns(columnCount) },
+            )
             continue
         }
         val heading = HeadingRegex.matchEntire(line)
@@ -415,7 +568,83 @@ private fun AnnotatedString.Builder.appendConversationLink(
 /** Test/inspection tag carried by every conversation tap-to-open link span. */
 internal const val CONVERSATION_LINK_TAG: String = "conversation-link"
 
+// Per-column max width for table cells. Wide tables scroll horizontally as a
+// unit; a long single cell wraps inside this bound rather than ballooning the
+// whole table (#781).
+private val TableCellMaxWidth = 160.dp
+private val TableHairline = 0.5.dp
+
 private val FencedCodeRegex = Regex("^```[a-zA-Z0-9_+-]*\\s*$")
 private val HeadingRegex = Regex("^(#{1,6})\\s+(.+)$")
 private val UnorderedBulletRegex = Regex("^(\\s*)[-*+]\\s+(.*)$")
 private val OrderedBulletRegex = Regex("^(\\s*)(\\d+)\\.\\s+(.*)$")
+
+// A single GFM delimiter cell: optional leading `:`, one-or-more `-`, optional
+// trailing `:`, surrounded by optional whitespace.
+private val TableDelimiterCellRegex = Regex("^\\s*:?-+:?\\s*$")
+
+/**
+ * True when [line] is a GFM table delimiter row — every pipe-separated cell is a
+ * dashes-with-optional-colons marker and there is at least one cell. Visible for
+ * tests (#781).
+ */
+internal fun isTableDelimiterRow(line: String): Boolean {
+    if (!line.contains('-')) return false
+    val cells = splitTableRow(line)
+    if (cells.isEmpty()) return false
+    return cells.all { TableDelimiterCellRegex.matches(it) }
+}
+
+/**
+ * Split a GFM table row on unescaped `|`, dropping the optional leading/trailing
+ * pipe so `| a | b |` and `a | b` both yield `[a, b]`. A backslash-escaped `\|`
+ * stays as a literal `|` inside a cell. Visible for tests (#781).
+ */
+internal fun splitTableRow(line: String): List<String> {
+    val cells = mutableListOf<String>()
+    val current = StringBuilder()
+    var i = 0
+    while (i < line.length) {
+        val ch = line[i]
+        if (ch == '\\' && i + 1 < line.length && line[i + 1] == '|') {
+            current.append('|')
+            i += 2
+            continue
+        }
+        if (ch == '|') {
+            cells += current.toString().trim()
+            current.clear()
+            i += 1
+            continue
+        }
+        current.append(ch)
+        i += 1
+    }
+    cells += current.toString().trim()
+    // Drop the empty cells produced by an optional leading/trailing pipe.
+    if (cells.isNotEmpty() && cells.first().isEmpty()) cells.removeAt(0)
+    if (cells.isNotEmpty() && cells.last().isEmpty()) cells.removeAt(cells.size - 1)
+    return cells
+}
+
+/**
+ * Parse the per-column alignment from a GFM delimiter row. Visible for tests
+ * (#781). `:--` → Start, `:--:` → Center, `--:` → End, `--` → Start (default).
+ */
+internal fun parseTableAlignments(delimiterRow: String): List<ColumnAlignment> =
+    splitTableRow(delimiterRow).map { cell ->
+        val token = cell.trim()
+        val left = token.startsWith(":")
+        val right = token.endsWith(":")
+        when {
+            left && right -> ColumnAlignment.Center
+            right -> ColumnAlignment.End
+            else -> ColumnAlignment.Start
+        }
+    }
+
+private fun List<String>.padToColumns(columns: Int): List<String> =
+    if (size >= columns) this else this + List(columns - size) { "" }
+
+private fun List<ColumnAlignment>.padAlignments(columns: Int): List<ColumnAlignment> =
+    if (size >= columns) this else this + List(columns - size) { ColumnAlignment.Start }

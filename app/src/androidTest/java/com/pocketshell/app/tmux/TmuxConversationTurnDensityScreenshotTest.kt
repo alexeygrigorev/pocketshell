@@ -294,6 +294,66 @@ class TmuxConversationTurnDensityScreenshotTest {
         captureFullDevice(File(artifactDir(), "issue-704-expanded-read-image.png"))
     }
 
+    /**
+     * Issue #781: a GFM pipe table inside an assistant message renders as a
+     * laid-out table (header + body cells, honoured alignment), NOT raw
+     * `|`-delimited lines. Asserts the parsed cell text is visible and that the
+     * literal delimiter row (`|---|`) never appears in the rendered transcript,
+     * then captures a full-device screenshot of the real table in the
+     * conversation pane.
+     */
+    @Test
+    fun gfmTableRendersAsLaidOutTableNotRawPipes() {
+        val tableMessage = ConversationEvent.Message(
+            id = "a-table",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.Assistant,
+            text = """
+                Here are the open issues:
+
+                | # | Issue | Type |
+                |--:|:------|:----:|
+                | 1 | Render Markdown tables in the conversation pane | ui |
+                | 2 | Voice composer | feature |
+                | 10 | Reconnect grace window | bug |
+
+                Let me know which to start.
+            """.trimIndent(),
+        )
+
+        compose.setContent {
+            PocketShellTheme {
+                TmuxConversationPane(
+                    events = listOf(tableMessage),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .testTag(TMUX_CONVERSATION_PANE_TAG),
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        // Header + cell text rendered as table cells.
+        compose.onAllNodesWithText("Issue", substring = false, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose.onAllNodesWithText(
+            "Reconnect grace window",
+            substring = true,
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
+        compose.onAllNodesWithText("feature", substring = false, useUnmergedTree = true)
+            .assertCountEquals(1)
+
+        // The literal GFM delimiter row must NOT survive as raw text.
+        compose.onAllNodesWithText("|--", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.onAllNodesWithText("--:", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+
+        captureFullDevice(File(artifactDir(), "issue-781-conversation-table.png"))
+    }
+
     private fun densityComparisonEvents(): List<ConversationEvent.Message> = listOf(
         ConversationEvent.Message(
             id = "d1",

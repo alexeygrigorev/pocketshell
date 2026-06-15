@@ -842,6 +842,48 @@ class DesignRenders {
     }
 
     /**
+     * Issue #781: the conversation Markdown renderer now lays GFM pipe tables
+     * out as aligned columns instead of raw `|` text. The real renderer
+     * (`com.pocketshell.app.composer.MarkdownText` / its `TableBlock`) lives in
+     * `:app`, which this ui-kit harness cannot import — so this fixture mirrors
+     * its exact tokens (Surface fill, Border outline, SurfaceElev bold header,
+     * BorderSoft hairlines, per-column alignment) to prove the design-system
+     * look of a rendered table. The emulator screenshot is the acceptance check
+     * for the real component.
+     */
+    @Test
+    fun conversationMarkdownTable() = render("conversation-markdown-table") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "Here are the open issues:",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+            MarkdownTableMirror(
+                header = listOf("#", "Issue", "Align"),
+                alignments = listOf(TextAlign.End, TextAlign.Start, TextAlign.Center),
+                rows = listOf(
+                    listOf("1", "Render Markdown tables in the conversation pane", "ui"),
+                    listOf("2", "Voice composer", "feature"),
+                    listOf("10", "Reconnect grace window", "bug"),
+                ),
+            )
+            Text(
+                text = "Long cells wrap inside the column; a wide table scrolls horizontally as one unit.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+
+    /**
      * Issue #614: the "new session" type picker body, reconstructed from the
      * same ui-kit primitives the real [SessionTypePickerSheet] now composes
      * (`SectionHeader`, the shared cyan-fill `SegmentedToggle`, and a
@@ -2698,6 +2740,61 @@ class DesignRenders {
                     contentAlignment = Alignment.Center,
                 ) {
                     Text("Done", color = PocketShellColors.OnAccent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+
+    /**
+     * Visual mirror of the real `MarkdownText.TableBlock` (#781). Same tokens:
+     * Surface fill + Border outline on the whole table, a SurfaceElev bold
+     * header row, BorderSoft hairline cell separators, per-column alignment, and
+     * a fixed per-column max width so the table scrolls horizontally as a unit.
+     */
+    @Composable
+    private fun MarkdownTableMirror(
+        header: List<String>,
+        alignments: List<TextAlign>,
+        rows: List<List<String>>,
+    ) {
+        Column(
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(PocketShellColors.Surface)
+                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(6.dp)),
+        ) {
+            MarkdownTableMirrorRow(header, alignments, isHeader = true)
+            rows.forEach { MarkdownTableMirrorRow(it, alignments, isHeader = false) }
+        }
+    }
+
+    @Composable
+    private fun MarkdownTableMirrorRow(
+        cells: List<String>,
+        alignments: List<TextAlign>,
+        isHeader: Boolean,
+    ) {
+        Row(
+            modifier = Modifier
+                .background(if (isHeader) PocketShellColors.SurfaceElev else Color.Transparent)
+                .border(0.5.dp, PocketShellColors.BorderSoft),
+        ) {
+            alignments.forEachIndexed { index, align ->
+                Box(
+                    modifier = Modifier
+                        .width(110.dp)
+                        .border(0.5.dp, PocketShellColors.BorderSoft)
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                ) {
+                    Text(
+                        text = cells.getOrElse(index) { "" },
+                        color = if (isHeader) PocketShellColors.Text else PocketShellColors.TextSecondary,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = if (isHeader) FontWeight.SemiBold else FontWeight.Normal,
+                        textAlign = align,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }

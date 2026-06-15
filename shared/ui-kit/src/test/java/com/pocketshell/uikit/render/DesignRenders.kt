@@ -1584,6 +1584,16 @@ class DesignRenders {
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
+                    // Issue #787: the new `/` slash-command button — third in the
+                    // 📎 / `{}` / `/` group, the single consolidated entry.
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "/",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
                 }
                 Spacer(Modifier.weight(1f))
                 // Filled accent Send pill.
@@ -1995,6 +2005,16 @@ class DesignRenders {
                             text = "{ }",
                             color = PocketShellColors.TextSecondary,
                             fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    // Issue #787: the `/` button that opens THIS dropdown — the
+                    // single consolidated slash entry beside 📎 / `{}`.
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "/",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 20.sp,
                             fontWeight = FontWeight.SemiBold,
                         )
                     }

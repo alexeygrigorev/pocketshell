@@ -643,6 +643,19 @@ internal fun SheetContent(
         draftFocusRequester.requestFocus()
     }
 
+    // Issue #787: the `/` action-row button opens the SAME #767 dropdown — no
+    // new picker. It seeds a leading `/` into the draft (idempotent: replaces an
+    // existing leading slash token, otherwise prepends) and focuses the field,
+    // which makes [SlashCommandAutocomplete.slashQueryFor] non-null with a blank
+    // query so the full catalog appears. Mirrors into the ViewModel draft (same
+    // contract as [insertSlashCommand]).
+    val onSlashTap: () -> Unit = {
+        val updated = SlashCommandAutocomplete.insertCommandText(draftFieldValue, "/")
+        draftFieldValue = updated
+        onDraftChange(updated.text)
+        draftFocusRequester.requestFocus()
+    }
+
     // Issue #491 / #682: the single Send path used by every Send affordance.
     //
     // Order matters for the #682 "Send opens the keyboard" regression:
@@ -1128,6 +1141,14 @@ internal fun SheetContent(
                     onClick = { onSnippets?.invoke() },
                     enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
                     modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
+                )
+                // Issue #787: the single consolidated `/` slash-command entry.
+                // Disabled on shell panes (`agentKind == null` → empty catalog,
+                // nothing to show), matching the prior key-bar / chip gating.
+                SlashIconButton(
+                    onClick = onSlashTap,
+                    enabled = !isTranscribing && !attachmentBusy && agentKind != null,
+                    modifier = Modifier.testTag(COMPOSER_SLASH_TAG),
                 )
             }
             // Issue #453: the separate keyboard icon is removed from the Idle
@@ -2099,6 +2120,43 @@ private fun SnippetsIconButton(
 }
 
 /**
+ * Issue #787: the `/` slash-command button — the single consolidated entry
+ * point for slash commands. A tap opens the SAME #767 autocomplete dropdown (it
+ * seeds a leading `/` into the draft + focuses the field, which makes
+ * [SlashCommandAutocomplete.slashQueryFor] non-null and renders the full
+ * catalog); there is NO separate picker. Rendered as a literal `/` glyph to
+ * match the maintainer's "add a `/`" mental model and the `/`-token it opens,
+ * and sized/coloured identically to its 📎 / `{}` siblings.
+ */
+@Composable
+private fun SlashIconButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier
+            .size(COMPOSER_ACTION_ICON_BUTTON_SIZE)
+            .semantics { contentDescription = "Slash commands" },
+        colors = IconButtonDefaults.iconButtonColors(
+            contentColor = PocketShellColors.TextSecondary,
+            disabledContentColor = PocketShellColors.TextMuted,
+        ),
+    ) {
+        Text(
+            text = "/",
+            // Sized to read at the same visual weight as the 20dp Material
+            // glyphs in its 📎 / `{}` siblings; mono so the `/` matches the
+            // slash-command token it opens.
+            style = PocketShellType.bodyMono.copy(fontSize = 20.sp),
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/**
  * Issue #453: amplitude-driven waveform shown in the Recording state. The
  * animated strip alone conveys "we are capturing" — there is no redundant
  * status text any more (the maintainer's declutter request).
@@ -2687,6 +2745,11 @@ internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
 internal const val COMPOSER_SNIPPETS_TAG = "prompt-composer-snippets"
+// Issue #787: the `/` slash-command button in the left tools pill (📎 / `{}` /
+// `/`). The single consolidated slash-command ENTRY point — taps open the same
+// #767 autocomplete dropdown (no new picker). Disabled on shell panes (no
+// agent → empty catalog).
+internal const val COMPOSER_SLASH_TAG = "prompt-composer-slash"
 internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
 
 /**

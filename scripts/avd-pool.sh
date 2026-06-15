@@ -21,11 +21,29 @@ set -euo pipefail
 # The base `test` AVD (emulator-5554) is deliberately NEVER in the pool, so a
 # sibling agent already using emulator-5554 is never disturbed.
 #
+# KVM / hardware acceleration (issue #776):
+#   x86_64 emulation REQUIRES /dev/kvm. On the Hetzner dev box a plain shell
+#   often lacks ACTIVE kvm-group membership (the login session predates the
+#   group add), so a bare `emulator -avd ...` dies with "x86_64 emulation
+#   currently requires hardware acceleration" and the pool never boots — which
+#   silently defeats every multi-emulator lane mitigation: online_emulator_count
+#   stays 1, so connected-test's auto-pin / auto-pool branches never fire and
+#   all lanes pile onto the one manually-started emulator (the foreground-steal
+#   + sibling-SIGKILL flakes this issue is about). So we launch each pool
+#   emulator via `sg kvm -c "..."` whenever the current shell can't read+write
+#   /dev/kvm but the kvm group can. When /dev/kvm is already accessible (a CI
+#   runner with active membership) OR absent (no KVM at all), we launch directly
+#   — byte-for-byte the legacy behaviour. Override with POOL_KVM_WRAP.
+#
 # Config (env overrides):
 #   POOL_SIZE=3              number of pool emulators
 #   BASE_AVD=test            base AVD to clone
 #   POOL_PORT_BASE=5554      port = POOL_PORT_BASE + 2*K
 #   BOOT_TIMEOUT_SECONDS=300 per-emulator boot wait
+#   POOL_KVM_WRAP=auto       sg|none|auto — wrap the emulator launch in
+#                            `sg kvm -c` (auto = only when /dev/kvm is not
+#                            directly accessible to this shell but the kvm group
+#                            can reach it)
 #   ANDROID_SDK / ADB / EMULATOR   tool paths
 #   AVD_START_FLAGS          emulator launch flags
 
@@ -43,8 +61,59 @@ POOL_PORT_BASE="${POOL_PORT_BASE:-5554}"
 BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-300}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/avd-pool}"
 AVD_START_FLAGS="${AVD_START_FLAGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot}"
+POOL_KVM_WRAP="${POOL_KVM_WRAP:-auto}"
 
 mkdir -p "$LOG_ROOT"
+
+# Decide whether the emulator launch must be wrapped in `sg kvm -c` to gain an
+# ACTIVE kvm-group membership (issue #776). Returns 0 (wrap) / 1 (launch direct).
+#   POOL_KVM_WRAP=sg    -> always wrap (force)
+#   POOL_KVM_WRAP=none  -> never wrap  (force; CI / kvm-active shells)
+#   POOL_KVM_WRAP=auto  -> wrap ONLY when this shell can't read+write /dev/kvm
+#                          AND `sg kvm` can. If there's no /dev/kvm at all, or
+#                          this shell already has access, don't wrap.
+pool_needs_kvm_wrap() {
+  case "$POOL_KVM_WRAP" in
+    sg)   return 0 ;;
+    none) return 1 ;;
+  esac
+  # auto: only meaningful when /dev/kvm exists.
+  [[ -e /dev/kvm ]] || return 1
+  # Already accessible to this shell -> no wrap needed.
+  if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+    return 1
+  fi
+  # Not accessible here; can the kvm group reach it? (sg available + grants RW.)
+  command -v sg >/dev/null 2>&1 || return 1
+  if sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm' >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+# Launch the emulator, wrapping in `sg kvm -c` when pool_needs_kvm_wrap says so.
+# The launched process is detached (nohup ... &) and its PID written by the
+# caller. When wrapping, the `sg` process is the parent of the emulator; killing
+# the process bound to the console port (emulator_pid_for_port) still tears the
+# emulator down regardless, so teardown is unaffected.
+pool_launch_emulator() {
+  local clone_name="$1" port="$2" logf="$3"
+  if pool_needs_kvm_wrap; then
+    # shellcheck disable=SC2016  # backticks here are literal log text, not a subshell
+    printf '  (launching via `sg kvm -c` for /dev/kvm access)\n' >&2
+    # Build a single shell command string for sg -c. AVD_START_FLAGS is a
+    # space-separated flag list (word-splitting is intentional, as in the
+    # direct-launch path below).
+    # shellcheck disable=SC2086
+    nohup sg kvm -c "exec '$EMULATOR' -avd '$clone_name' -port '$port' $AVD_START_FLAGS" \
+      > "$logf" 2>&1 &
+  else
+    # shellcheck disable=SC2086
+    nohup "$EMULATOR" -avd "$clone_name" -port "$port" $AVD_START_FLAGS \
+      > "$logf" 2>&1 &
+  fi
+  printf '%s\n' "$!"
+}
 
 usage() {
   cat <<'USAGE'
@@ -109,10 +178,7 @@ boot_one() {
     printf 'Pool emulator on port %s already starting; waiting for boot.\n' "$port" >&2
   else
     printf 'Booting %s on port %s (%s)...\n' "$clone_name" "$port" "$serial" >&2
-    # shellcheck disable=SC2086
-    nohup "$EMULATOR" -avd "$clone_name" -port "$port" $AVD_START_FLAGS \
-      > "$logf" 2>&1 &
-    printf '%s\n' "$!" > "$LOG_ROOT/$clone_name.pid"
+    pool_launch_emulator "$clone_name" "$port" "$logf" > "$LOG_ROOT/$clone_name.pid"
   fi
 
   local deadline=$((SECONDS + BOOT_TIMEOUT_SECONDS))

@@ -217,6 +217,73 @@ CI runs (one emulator, one `agents` on 2222) are unchanged. `ci-journey-suite.sh
 shards across lanes only when `POCKETSHELL_JOURNEY_SHARD=1`; its default is the
 clean single-lane serial loop.
 
+#### Booting the emulator pool — `sg kvm` requirement (issue #776)
+
+The per-lane emulator serial only exists if the pool emulators are actually
+booted. `scripts/avd-pool.sh start` boots `POOL_SIZE` extra emulators from the
+standalone AVDs `test-1` / `test-2` / `test-3` (clones of the base `test`, port
+scheme `5554 + 2K` -> `emulator-5556 / 5558 / 5560`), leaving the maintainer's
+manual `emulator-5554` untouched:
+
+```bash
+scripts/avd-pool.sh start     # POOL_SIZE=3: boot test-1/2/3 (emulator-5556/5558/5560)
+scripts/avd-pool.sh status    # CLONE / SERIAL / PORT / STATE + host load/RAM
+scripts/avd-pool.sh stop      # tear down the pool (leaves emulator-5554 alone)
+```
+
+**KVM gotcha (this is the whole point of #776):** x86_64 emulation requires
+`/dev/kvm`, and on the Hetzner dev box a plain shell often lacks an *active*
+`kvm`-group membership (the login session predates the group add), so a bare
+`emulator -avd ...` dies with *"x86_64 emulation currently requires hardware
+acceleration"*. When that happens the pool never boots, only the one manual
+emulator stays online, `connected-test.sh`'s multi-emulator branches
+(`online_emulator_count > 1`) never fire, and every `--pool` / auto-pin lane
+silently falls back to sharing that one emulator — which is exactly the
+foreground-steal + sibling-SIGKILL contention this issue set out to kill (a
+sibling lane launches its own `MainActivity` on the shared device, clearing
+another lane's activity -> `processForeground=false` -> null node lookups).
+
+So `avd-pool.sh` launches each pool emulator via `sg kvm -c "emulator -avd …"`
+to gain active `/dev/kvm` access. It auto-detects this: when the current shell
+can already read+write `/dev/kvm` (a CI runner with active membership) OR there
+is no `/dev/kvm` at all, it launches directly — byte-for-byte the legacy path.
+Override with `POOL_KVM_WRAP=sg` (always wrap) / `none` (never wrap) / `auto`
+(default).
+
+#### Per-lane emulator serial — the contention fix (issue #776)
+
+With the pool booted (>1 emulator online), each `--pool` lane claims a DISTINCT
+emulator serial via the per-serial flock and exports it as `ANDROID_SERIAL`
+(`Claimed pool emulator: emulator-5558` … `Pinned to single device via
+ANDROID_SERIAL=emulator-5558`). That `ANDROID_SERIAL` is exported through to the
+gradle `:app:connectedDebugAndroidTest` subprocess, so AGP's connected
+DeviceProvider filters to exactly that one emulator — a sibling lane on a
+different serial can never install onto, instrument, or steal the foreground of
+this lane's device. Two concurrent lanes therefore land on `(emulator-5556,
+2222)` and `(emulator-5558, 2243)` (distinct device AND distinct agents port),
+fully isolated. Even WITHOUT `--pool`, when more than one emulator is online the
+wrapper auto-pins a free serial (P1) so a bare `connected-test.sh` can't let AGP
+fan the install out across every online emulator. The pool claim never
+co-locates onto a busy emulator (P4); it waits for a free one, bounding
+instrumentation runs per emulator to 1.
+
+Restrict which emulators a lane may claim with
+`POCKETSHELL_POOL_SERIALS="emulator-5556 emulator-5558"` (whitelist intersected
+with the online set) — handy for keeping a lane off the maintainer's manual
+`emulator-5554`. Single-emulator / CI runs (one emulator online) keep the legacy
+single-lock, no-pin, no-pool behaviour unchanged.
+
+Two concurrent lanes, end to end:
+
+```bash
+scripts/avd-pool.sh start                       # boot the pool via sg kvm
+scripts/agents-pool.sh up 2222 2243             # warm two isolated agents fixtures
+CLASS=-Pandroid.testInstrumentationRunnerArguments.class=com.example.SomeE2eTest
+scripts/connected-test.sh --pool --suffix iA $CLASS &   # -> emulator-5556
+scripts/connected-test.sh --pool --suffix iB $CLASS &   # -> emulator-5558
+wait
+```
+
 ### Fixture JSONLs for agent tests
 
 The agent target seeds `testuser`'s home with recent deterministic fixtures on

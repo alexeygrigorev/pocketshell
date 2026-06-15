@@ -27,6 +27,7 @@ import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -191,16 +192,14 @@ class TmuxShellComposerOcclusionE2eTest {
         summaryLines += "keyboard_up_ime_top_px=$imeTopPx"
         summaryLines += "keyboard_up_root=$rootBoundsKbUp"
 
-        // Issue #755 (PR2, D22 hard-cut): the terminal hotkey KeyBar no longer
-        // lives on the raw terminal surface (where it was OCCLUDED by the
-        // keyboard). It moved INTO the inset-anchored composer column. So raising
-        // the raw terminal IME directly (the `show keyboard` chip) no longer
-        // surfaces a key bar here — there is no terminal-surface accessory to be
-        // wedged under the keyboard. The keyboard-up reachability of the relocated
-        // bar is covered by `PromptComposerKeyBarImeReachabilityTest` (real sheet
-        // + real IME geometry). Here we assert the hard-cut: no key bar on the
-        // terminal surface with the IME up.
-        val keyBarBottomScreenPx = bottomEdgeOnScreenPx(TMUX_KEY_BAR_TAG)
+        // Issue #784 (D22 hard-cut): the terminal hotkey grid no longer lives on
+        // the raw terminal surface OR in the composer (where #755 had wedged it).
+        // It is the dedicated `TerminalHotkeysPanel` bottom sheet, opened on
+        // demand from the launcher. So raising the raw terminal IME directly (the
+        // `show keyboard` chip) never surfaces a key grid wedged under the
+        // keyboard. Here we assert the hard-cut: no hotkeys-grid panel is laid out
+        // on the terminal surface with the IME up.
+        val keyBarBottomScreenPx = bottomEdgeOnScreenPx(TERMINAL_HOTKEYS_PANEL_TAG)
         summaryLines += "keyboard_up_keybar_present=${keyBarBottomScreenPx >= 0}"
 
         // Capture + persist the authoritative on-screen state BEFORE the
@@ -209,8 +208,8 @@ class TmuxShellComposerOcclusionE2eTest {
         writeSummary()
 
         assertTrue(
-            "After #755 the key bar is NOT on the raw terminal surface; it lives " +
-                "in the composer. keyBarBottomScreenPx=$keyBarBottomScreenPx",
+            "After #784 the hotkeys grid is NOT on the raw terminal surface; it " +
+                "is the dedicated panel sheet. keyBarBottomScreenPx=$keyBarBottomScreenPx",
             keyBarBottomScreenPx < 0,
         )
         Unit

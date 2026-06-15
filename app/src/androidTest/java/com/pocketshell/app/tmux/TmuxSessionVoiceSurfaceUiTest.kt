@@ -40,7 +40,8 @@ import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.app.voice.SnippetsChipIcon
-import com.pocketshell.uikit.components.KeyBar
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
+import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -61,15 +62,14 @@ class TmuxSessionVoiceSurfaceUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun tmuxKeyboardOpenTerminalSurfaceRendersNothing() {
-        // Issue #755 (PR2, D22 hard-cut): with the soft keyboard UP on the
-        // Terminal tab, this bottom-controls surface now renders NOTHING — the
-        // terminal hotkey KeyBar moved INTO the composer's inset-anchored column
-        // (so it rides the IME inset and is never occluded). The old surface used
-        // to render the KeyBar here, on a non-inset-anchored surface the keyboard
-        // hid (the v0.4.0 occlusion regression). This guards the hard-cut: no
-        // KeyBar, no attachment grid, no chip band when the IME is up on a
-        // terminal pane.
+    fun tmuxKeyboardOpenTerminalSurfaceRendersNoKeyGrid() {
+        // Issue #784 (D22 hard-cut): with the soft keyboard UP on the Terminal
+        // tab, this bottom-controls surface never renders a crammed key GRID
+        // above the IME (the #755 cram the maintainer rejected). The full hotkeys
+        // grid is the dedicated `TerminalHotkeysPanel` sheet. When no
+        // `onShowHotkeysTap` is wired (this test), nothing renders here at all.
+        // This guards the hard-cut: no key grid, no Esc/^C/Tab keys, no
+        // attachment grid, no chip band when the IME is up on a terminal pane.
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
@@ -87,12 +87,11 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
-        // The surface renders nothing in this state (no container, no key bar).
+        // The surface renders nothing in this state (no container, no key grid).
         compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertDoesNotExist()
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithText("^C").assertDoesNotExist()
-        compose.onNodeWithText(TmuxKeyBarEnterLabel).assertDoesNotExist()
         compose.onNodeWithText("Tab").assertDoesNotExist()
 
         // Issue #673: still no staged composer attachment grid in the session
@@ -104,6 +103,40 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun tmuxKeyboardOpenTerminalSurfaceShowsHotkeysLauncherWhenWired() {
+        // Issue #784: with the IME up on a terminal pane AND a hotkeys-launch
+        // callback wired, the surface shows the slim "⌨ Terminal hotkeys"
+        // launcher above the keyboard (one tap opens the dedicated panel) — but
+        // still NO crammed key grid. This is the un-cram: a single launcher, not
+        // a wall of keys, above the IME.
+        var launched = false
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = true,
+                    showConversation = false,
+                    sessionLive = true,
+                    isAgentPane = false,
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    onShowHotkeysTap = { launched = true },
+                    modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG).assertExists().performClick()
+        compose.waitForIdle()
+        assertTrue("Tapping the launcher should request opening the hotkeys panel", launched)
+        // The grid panel itself is a separate sheet — not rendered inline here.
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertDoesNotExist()
+        compose.onNodeWithText("^B").assertDoesNotExist()
     }
 
     @Test
@@ -126,7 +159,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         }
 
         compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
@@ -162,7 +195,7 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG).assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
     }
 
@@ -443,13 +476,16 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun tmuxKeyBarExposesCtrlCAndCtrlDKeys() {
+    fun tmuxHotkeysPanelExposesCtrlCAndCtrlDKeys() {
+        // Issue #784: the dedicated panel shows ^C / ^D (and the rest) as direct
+        // buttons; tapping fires the binding for the host to route.
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
-                KeyBar(
-                    keys = tmuxKeyBarLayout(expanded = false),
+                TerminalHotkeysPanel(
+                    sections = TmuxHotkeyPanelSections,
                     onKey = { taps += it.label },
+                    onClose = {},
                 )
             }
         }
@@ -461,22 +497,26 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun tmuxTerminalKeyBarExposesEmergencyKeysWithoutIme() {
+    fun tmuxHotkeysPanelExposesEmergencyKeysAndRestoredCtrlB() {
+        // Issue #784: Esc / ^C / ^D plus the restored ^B (tmux prefix) all show
+        // as direct, tappable buttons — no `…` overflow, no lone Ctrl.
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
-                KeyBar(
-                    keys = tmuxKeyBarLayout(expanded = false),
+                TerminalHotkeysPanel(
+                    sections = TmuxHotkeyPanelSections,
                     onKey = { taps += it.label },
+                    onClose = {},
                 )
             }
         }
 
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText("^B").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("^C").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("^D").assertIsDisplayed().assertHasClickAction().performClick()
 
-        assertEquals(listOf("Esc", "^C", "^D"), taps)
+        assertEquals(listOf("Esc", "^B", "^C", "^D"), taps)
     }
 
     @Test

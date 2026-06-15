@@ -53,7 +53,6 @@ import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
-import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
@@ -851,22 +850,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
     private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
     private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
-
-    /**
-     * Issue #458: sticky state of the key bar's `Ctrl` modifier. When armed
-     * ([KeyModifierState.OneShot] or [KeyModifierState.Locked]) the next
-     * regular key tapped in the bar is sent as a Ctrl-chord control byte
-     * (e.g. `Ctrl` then `C` → `0x03`). [KeyModifierState.OneShot] clears
-     * after one chord; [KeyModifierState.Locked] persists until tapped
-     * again. The ui-kit [com.pocketshell.uikit.components.KeyBar] owns the
-     * tap FSM and mirrors changes here via [onKeyBarModifierState]; this
-     * flow drives the screen's accent treatment + the chord decision in
-     * [onKeyBarKey]. No tmux command is sent on a modifier tap — it only
-     * decorates the next key, so there is no terminal redraw.
-     */
-    private val _ctrlModifierState: MutableStateFlow<KeyModifierState> =
-        MutableStateFlow(KeyModifierState.Off)
-    public val ctrlModifierState: StateFlow<KeyModifierState> = _ctrlModifierState.asStateFlow()
 
     /**
      * Issue #448 (epic #432 slice C): a newly-listening remote port the
@@ -9759,47 +9742,17 @@ public class TmuxSessionViewModel @Inject constructor(
      * ESC[A in here.
      */
     public fun onKeyBarKey(paneId: String, label: String) {
-        // Issue #458: if the `Ctrl` modifier is armed, the next regular key
-        // is sent as a Ctrl-chord control byte instead of its plain key. We
-        // consume the armed state first so a single chord lands and a
-        // one-shot arm clears. This routes through the same
-        // [sendControlInputToPane] (`send-keys -H`) overlay path the
-        // dedicated `^C`/`^D` keys use, so no terminal resize/redraw is
-        // triggered. Locked stays armed for repeated chords.
-        val ctrlArmed = _ctrlModifierState.value != KeyModifierState.Off
+        // Issue #784: every hotkey is now a DIRECT button (the lone `Ctrl`
+        // modifier + its armed-chord FSM were removed — the maintainer's "lone
+        // Ctrl does nothing useful" complaint). The label is mapped straight to
+        // its control byte (`send-keys -H` overlay) or tmux named key below.
         DiagnosticEvents.record(
             "action",
             "shortcut_sent",
             "mode" to "tmux",
             "paneId" to paneId,
             "key" to label,
-            "ctrlArmed" to ctrlArmed,
         )
-        if (ctrlArmed) {
-            consumeOneShotCtrl()
-            // Ctrl + ASCII letter → the classic control byte (0x01..0x1A)
-            // via the `send-keys -H` overlay path.
-            val chordByte = ctrlByteForLetter(label)
-            if (chordByte != null) {
-                paneRows[paneId]?.terminalState?.prepareForRawTerminalInput(TerminalRawInputPolicy.ClearSmartText)
-                sendControlInputToPane(paneId, chordByte, prepareSmartText = false)
-                return
-            }
-            // Ctrl + a named key tmux understands (arrows → word navigation,
-            // Tab, Esc) → tmux's own `C-<key>` chord syntax, which lets tmux
-            // emit the correct terminfo encoding (e.g. ESC[1;5C for
-            // Ctrl+Right). Still a `send-keys` control-channel command, so no
-            // resize/redraw.
-            val chordNamed = ctrlChordNamedKeyFor(label)
-            if (chordNamed != null) {
-                paneRows[paneId]?.terminalState?.prepareForRawTerminalInput(TerminalRawInputPolicy.ClearSmartText)
-                sendNamedKey(paneId, chordNamed)
-                return
-            }
-            // Nothing chordable for this label (e.g. an already-Ctrl combo);
-            // fall through and send the plain key, matching
-            // SessionViewModel.applyCtrl's unmodified fallback.
-        }
 
         val named = when (label) {
             "Esc" -> "Escape"
@@ -9809,15 +9762,41 @@ public class TmuxSessionViewModel @Inject constructor(
             // the tmux named `Enter` key on the `send-keys` control channel
             // — no terminal resize or redraw, like Esc/Tab.
             "⏎", "Enter" -> "Enter"
-            // Curated one-tap control combos (issue #458). Each maps
+            // Curated one-tap control combos (issue #458 / #784). Each maps
             // directly to its control byte via the `send-keys -H` overlay
-            // path — no resize, no redraw.
+            // path — no resize, no redraw. Every `^X` label is audited here so
+            // the visible label equals the byte sent (no dupes / mislabels):
+            //   ^A=0x01  ^B=0x02  ^C=0x03  ^D=0x04  ^E=0x05
+            //   ^L=0x0C  ^R=0x12  ^O=0x0F  ^X=0x18  ^Z=0x1A
+            "^A", "Ctrl-A" -> {
+                sendControlInputToPane(paneId, CtrlAByte)
+                null
+            }
+            // Issue #677/#784: `^B` (tmux prefix / Claude Code "ctrl-b ctrl-b
+            // to background"). Raw 0x02 straight through the control channel —
+            // in `-CC` mode it is NOT consumed as an outer-tmux prefix.
+            "^B", "Ctrl-B" -> {
+                sendControlInputToPane(paneId, CtrlBByteValue)
+                null
+            }
             "^C", "Ctrl-C" -> {
                 sendControlInputToPane(paneId, CtrlCByte)
                 null
             }
             "^D", "Ctrl-D" -> {
                 sendControlInputToPane(paneId, CtrlDByte)
+                null
+            }
+            "^E", "Ctrl-E" -> {
+                sendControlInputToPane(paneId, CtrlEByte)
+                null
+            }
+            "^L", "Ctrl-L" -> {
+                sendControlInputToPane(paneId, CtrlLByte)
+                null
+            }
+            "^R", "Ctrl-R" -> {
+                sendControlInputToPane(paneId, CtrlRByte)
                 null
             }
             "^Z", "Ctrl-Z" -> {
@@ -9832,10 +9811,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 sendControlInputToPane(paneId, CtrlXByte)
                 null
             }
-            "‹", "Left" -> "Left"
-            "⌃", "Up" -> "Up"
-            "⌄", "Down" -> "Down"
-            "›", "Right" -> "Right"
+            // Issue #784: clean arrow glyphs (← ↑ ↓ →) replace the old
+            // hard-to-read `‹ ⌃ ⌄ ›`. Both label families route to tmux's
+            // own cursor-key named keys so tmux owns the terminfo encoding.
+            "←", "‹", "Left" -> "Left"
+            "↑", "⌃", "Up" -> "Up"
+            "↓", "⌄", "Down" -> "Down"
+            "→", "›", "Right" -> "Right"
             else -> null
         }
         if (named != null) {
@@ -9866,54 +9848,11 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Issue #458: map a bar label to tmux's `C-<key>` chord named-key when a
-     * Ctrl chord with that key has a meaningful terminal encoding. Arrows
-     * become word-navigation (`C-Left`/`C-Right`), Tab/Esc pass through as
-     * `C-Tab`/`C-Escape`. Letters are handled separately via the raw control
-     * byte path. Returns `null` when there is no useful chord (the caller
-     * falls back to the plain key).
-     */
-    private fun ctrlChordNamedKeyFor(label: String): String? = when (label) {
-        "‹", "Left" -> "C-Left"
-        "⌃", "Up" -> "C-Up"
-        "⌄", "Down" -> "C-Down"
-        "›", "Right" -> "C-Right"
-        "Tab" -> "C-Tab"
-        "Esc" -> "C-Escape"
-        else -> null
-    }
-
     private fun smartTextPolicyForKeyBar(label: String): TerminalRawInputPolicy =
         when (label) {
             "⏎", "Enter" -> TerminalRawInputPolicy.FlushSmartText
             else -> TerminalRawInputPolicy.ClearSmartText
         }
-
-    /**
-     * Issue #458: mirror the ui-kit [com.pocketshell.uikit.components.KeyBar]
-     * sticky-state changes for the `Ctrl` modifier into [ctrlModifierState].
-     * The bar owns the tap FSM (tap = one-shot arm, double-tap = lock,
-     * tap-while-armed = disarm); we keep a screen-visible copy so the next
-     * key tap can chord and the strip can render the armed accent.
-     */
-    public fun onKeyBarModifierState(label: String, state: KeyModifierState) {
-        if (label == "Ctrl") {
-            _ctrlModifierState.value = state
-        }
-    }
-
-    /**
-     * Clear a one-shot armed `Ctrl` after a chord fires. A locked `Ctrl`
-     * survives so the user can fire several chords in a row; only an
-     * explicit tap on the `Ctrl` key disarms it (handled by the ui-kit
-     * FSM, mirrored back through [onKeyBarModifierState]).
-     */
-    private fun consumeOneShotCtrl() {
-        if (_ctrlModifierState.value == KeyModifierState.OneShot) {
-            _ctrlModifierState.value = KeyModifierState.Off
-        }
-    }
 
     /** Issue #285 test seam: snapshot the latest phone grid reported by Compose. */
     internal fun remoteDimensionsForTest(): Pair<Int, Int> = remoteColumns to remoteRows
@@ -11534,31 +11473,16 @@ private fun List<String>.toTerminalViewportBytes(cursor: TmuxPaneCursor? = null)
 }
 
 private const val MaxAgentEvents: Int = 500
+internal const val CtrlAByte: Int = 0x01
+internal const val CtrlBByteValue: Int = 0x02
 internal const val CtrlCByte: Int = 0x03
 internal const val CtrlDByte: Int = 0x04
+internal const val CtrlEByte: Int = 0x05
+internal const val CtrlLByte: Int = 0x0C
+internal const val CtrlRByte: Int = 0x12
 internal const val CtrlZByte: Int = 0x1A
 internal const val CtrlOByte: Int = 0x0F
 internal const val CtrlXByte: Int = 0x18
-
-/**
- * Issue #458: classic terminal Ctrl-letter encoding. `Ctrl` + an ASCII
- * letter `a`..`z` / `A`..`Z` maps to control bytes `0x01`..`0x1A`
- * (`Ctrl+A` → `0x01`, `Ctrl+C` → `0x03`, `Ctrl+Z` → `0x1A`). This mirrors
- * `SessionViewModel.applyCtrl` so the tmux Ctrl-modifier mode produces the
- * same wire bytes as the soft-key route. Returns `null` for anything that
- * is not a single ASCII letter — the caller falls back to the unmodified
- * key (the terminal has no canonical Ctrl-Tab / Ctrl-arrow encoding here).
- */
-internal fun ctrlByteForLetter(label: String): Int? {
-    if (label.length != 1) return null
-    val ch = label[0]
-    val upper = when (ch) {
-        in 'a'..'z' -> ch - ('a' - 'A')
-        in 'A'..'Z' -> ch
-        else -> return null
-    }
-    return upper.code - 'A'.code + 1
-}
 
 /**
  * Issue #215: ceiling on the synchronous `detach-client` round-trip the

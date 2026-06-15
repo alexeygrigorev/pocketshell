@@ -199,17 +199,6 @@ public fun PromptComposerSheet(
     // without a session context, e.g. previews / proof-of-life entry points).
     composerTargetKey: String? = null,
     onStageAttachments: (suspend (List<Uri>) -> Result<List<String>>)? = null,
-    // Issue #755: the terminal hotkey key bar (Esc / Ctrl / ^C / ⏎ / … / arrows)
-    // rendered INSIDE this composer's inset-anchored column, as the row directly
-    // above the action controls — so it rides the same IME inset as the rest of
-    // the composer and can never be occluded by the soft keyboard. The slot is
-    // built and wired by the host screen (the `tmuxKeyBarLayout` + ⋯/× expander
-    // FSM + per-key routing live there); the composer only owns WHERE it sits.
-    // Null on surfaces with no key bar (previews, non-terminal hosts), so the
-    // composer renders without one. Hard-cut (D22): the bar no longer lives on
-    // the separate terminal-screen `TmuxTerminalBottomControls` surface that the
-    // keyboard occluded.
-    keyBar: (@Composable () -> Unit)? = null,
     // Issue #767: the detected engine for the focused pane (the same
     // `paletteAgent` / `presumedAgentKind` the host screen already computes). It
     // selects which `AgentCommandCatalog` the `/`-autocomplete dropdown filters,
@@ -461,7 +450,6 @@ public fun PromptComposerSheet(
             onDiscardPending = viewModel::discardPending,
             onSavePendingAsAudio = viewModel::savePendingAsAudioFile,
             onAcknowledgeSavedAudio = viewModel::clearSavedAudioConfirmation,
-            keyBar = keyBar,
             agentKind = agentKind,
         )
     }
@@ -566,12 +554,6 @@ internal fun SheetContent(
     onDiscardPending: (String) -> Unit = {},
     onSavePendingAsAudio: (String) -> Unit = {},
     onAcknowledgeSavedAudio: () -> Unit = {},
-    // Issue #755: the relocated terminal hotkey key bar slot. Rendered as the
-    // sticky row directly above the action controls (and the connection-lost
-    // indicator), inside the same `availableAboveKeyboard`-capped column — so it
-    // rides the IME inset and is never occluded by the keyboard. Null on surfaces
-    // with no key bar (previews / non-terminal hosts).
-    keyBar: (@Composable () -> Unit)? = null,
     // Issue #767: detected engine for the focused pane — selects the
     // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
     // shell pane / preview, where the dropdown is never shown.
@@ -743,29 +725,16 @@ internal fun SheetContent(
         // the caret, while the whole body still fits exactly above the keyboard.
         // Floored so the draft is never crushed to nothing on a very short screen.
         //
-        // Issue #755: when the relocated key bar is present it is a second sticky
-        // row (above the controls) inside this same capped column, so it claims
-        // its own slice of the room above the keyboard. Subtract its reserved
-        // height ([PROMPT_SCROLL_REGION_KEY_BAR_RESERVE]) from the scroll region
-        // too, otherwise the region would over-claim and push the key bar +
-        // controls down under the IME — the exact occlusion #755 fixes.
-        val keyBarReserve = if (keyBar != null) PROMPT_SCROLL_REGION_KEY_BAR_RESERVE else 0.dp
-        // Issue #755: on a short screen (only ~175dp above the keyboard) the
-        // header + draft + key bar + controls cannot all keep their full heights.
-        // The sticky chrome (key bar + controls) MUST stay above the keyboard
-        // (that is the whole point of #755 / #615), so when a key bar is present
-        // the draft floor yields: use a smaller floor so the scroll region gives
-        // up height to the chrome rather than overflowing the capped column and
-        // clipping the key bar / Send under the IME. The draft still self-scrolls
-        // to the caret within whatever room is left.
-        val scrollRegionFloor = if (keyBar != null) {
-            PROMPT_SCROLL_REGION_IME_MIN_HEIGHT_WITH_KEY_BAR
-        } else {
-            PROMPT_SCROLL_REGION_IME_MIN_HEIGHT
-        }
+        // Issue #784 (hard-cut, D22): the terminal key bar that #755 had wedged
+        // into this column is GONE — it now lives in the dedicated
+        // `TerminalHotkeysPanel` bottom sheet. So the sticky bottom chrome here is
+        // just the action controls again, and the scroll region reclaims the slice
+        // the key bar used to reserve. This is what un-squishes the composer with
+        // the keyboard up: the field gets its full height back, and Send / mic /
+        // attach stay fully visible above the IME.
         val imeScrollRegionHeight =
-            (availableAboveKeyboard - PROMPT_SCROLL_REGION_IME_CHROME_RESERVE - keyBarReserve)
-                .coerceAtLeast(scrollRegionFloor)
+            (availableAboveKeyboard - PROMPT_SCROLL_REGION_IME_CHROME_RESERVE)
+                .coerceAtLeast(PROMPT_SCROLL_REGION_IME_MIN_HEIGHT)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1067,27 +1036,6 @@ internal fun SheetContent(
                     onRemove = onRemoveAttachment,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-            }
-        }
-
-        // Issue #755: the terminal hotkey key bar, relocated OUT of the
-        // separate terminal-screen chrome (`TmuxTerminalBottomControls`, which
-        // the keyboard occluded) and INTO this inset-anchored column. It sits in
-        // the sticky bottom chrome — OUTSIDE the scrollable upper region, above
-        // the connection-lost indicator and the action controls row — so it
-        // rides the same `availableAboveKeyboard` cap as the rest of the
-        // composer and is structurally guaranteed to stay above the soft
-        // keyboard (it can no longer be on a different surface than the IME it
-        // must clear). The host screen builds the bar (layout + ⋯/× expander FSM
-        // + per-key routing) and passes it in; null on surfaces without one.
-        keyBar?.let { bar ->
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-                    .testTag(COMPOSER_KEY_BAR_SLOT_TAG),
-            ) {
-                bar()
             }
         }
 
@@ -2726,14 +2674,6 @@ internal const val COMPOSER_SEND_IN_FLIGHT_TAG = "prompt-composer-send-in-flight
 internal const val COMPOSER_CONNECTION_LOST_TAG = "prompt-composer-connection-lost"
 
 /**
- * Issue #755: the relocated terminal hotkey key-bar slot inside the composer's
- * inset-anchored sticky chrome (above the connection-lost indicator + the action
- * controls). Connected tests assert the supplied key bar renders here and stays
- * above the soft keyboard with the IME up.
- */
-internal const val COMPOSER_KEY_BAR_SLOT_TAG = "prompt-composer-key-bar-slot"
-
-/**
  * Issue #767: test tags for the `/`-autocomplete dropdown. Connected tests
  * assert the dropdown appears when the draft starts with `/`, filters as more
  * characters are typed, and that tapping a row inserts the command into the
@@ -2867,22 +2807,6 @@ private val PROMPT_SCROLL_REGION_IME_CHROME_RESERVE = 104.dp
 // crushes the draft to nothing; it keeps roughly two lines + the caret visible
 // and the field self-scrolls past it.
 private val PROMPT_SCROLL_REGION_IME_MIN_HEIGHT = 88.dp
-
-// Issue #755: a smaller floor used when the relocated key bar is present. On a
-// short screen (only ~175dp above the keyboard) the key bar + controls (the
-// must-stay-above-keyboard chrome) take priority over a tall draft; the draft
-// yields so the key bar and Send are never pushed under the IME. Kept just above
-// one line of input — small enough that, with the key bar + chrome reserve, the
-// whole body still fits the room above the keyboard instead of clipping the key
-// bar / Send. The field still self-scrolls to the caret within this room.
-private val PROMPT_SCROLL_REGION_IME_MIN_HEIGHT_WITH_KEY_BAR = 24.dp
-
-// Issue #755: extra room reserved above the keyboard for the relocated terminal
-// hotkey key bar when one is present. The bar is a ~38dp slot row + 8dp vertical
-// inner padding (`KeyBar`) + the slot's own 8dp bottom padding ≈ 62dp. Subtracted
-// from the keyboard-up scroll region so the bar + controls always stay above the
-// IME (never pushed under it). Zero when no key bar is supplied.
-private val PROMPT_SCROLL_REGION_KEY_BAR_RESERVE = 62.dp
 
 // Issue #767: cap the `/`-autocomplete dropdown so a long catalog scrolls
 // internally instead of squeezing the draft field / pushing the controls under

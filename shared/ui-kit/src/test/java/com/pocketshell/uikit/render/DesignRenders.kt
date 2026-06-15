@@ -52,7 +52,6 @@ import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.HostCard
-import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.SpinnerSize
@@ -115,91 +114,56 @@ import org.robolectric.annotation.GraphicsMode
 class DesignRenders {
 
     /**
-     * Issue #616: the terminal hotkey `KeyBar` (Ctrl/Tab/Esc/arrows) as it must
-     * appear directly ABOVE the soft keyboard while the IME is up. The bug was
-     * that on the maintainer's device the keybar collapsed into the IME-hidden
-     * chip strip — only Gboard's toolbar showed. This render is the fast
-     * JVM-level visual check that the full-height bar + every key renders;
-     * the emulator keyboard-up screenshot is the acceptance.
-     *
-     * A grey block below the bar stands in for the soft keyboard so the
-     * "directly above the keyboard" framing reads at a glance.
+     * Issue #784: the dedicated terminal-hotkeys PANEL — its own bottom-sheet
+     * surface (NOT inside the composer, NOT part of the soft keyboard). Shows
+     * EVERY key at once in a tidy multi-row grid: no `…` overflow, no horizontal
+     * scroll, no lone `Ctrl` modifier, no duplicate `/`. `^B` (tmux prefix) is
+     * restored and every `^X` label is the byte it sends. Arrows use clean
+     * `← ↑ ↓ →` glyphs. This is the fast JVM-level visual check that the whole
+     * grid lays out cleanly; the emulator panel + keyboard-up composer
+     * screenshots are the acceptance.
      */
     @Test
-    fun keyBarAboveKeyboard() = render("keybar-above-keyboard") {
-        Spacer(modifier = Modifier.height(420.dp))
+    fun terminalHotkeysPanel() = render("terminal-hotkeys-panel") {
         Surface(color = PocketShellColors.Surface) {
-            KeyBar(
-                keys = listOf(
-                    KeyBinding("Esc", KeyKind.Regular),
-                    KeyBinding("Ctrl", KeyKind.Modifier),
-                    KeyBinding("^C", KeyKind.Regular),
-                    KeyBinding("⏎", KeyKind.Regular),
-                    KeyBinding("^D", KeyKind.Regular),
-                    KeyBinding("Tab", KeyKind.Regular),
-                    KeyBinding("⋯", KeyKind.Regular),
+            com.pocketshell.uikit.components.TerminalHotkeysPanel(
+                sections = listOf(
+                    com.pocketshell.uikit.components.HotkeySection(
+                        title = "KEYS",
+                        keys = listOf(
+                            KeyBinding("Esc", KeyKind.Regular),
+                            KeyBinding("Tab", KeyKind.Regular),
+                            KeyBinding("Enter", KeyKind.Regular),
+                        ),
+                        columns = 3,
+                    ),
+                    com.pocketshell.uikit.components.HotkeySection(
+                        title = "CTRL COMBOS",
+                        keys = listOf(
+                            KeyBinding("^A", KeyKind.Regular),
+                            KeyBinding("^B", KeyKind.Regular),
+                            KeyBinding("^C", KeyKind.Regular),
+                            KeyBinding("^D", KeyKind.Regular),
+                            KeyBinding("^E", KeyKind.Regular),
+                            KeyBinding("^L", KeyKind.Regular),
+                            KeyBinding("^R", KeyKind.Regular),
+                            KeyBinding("^Z", KeyKind.Regular),
+                        ),
+                        columns = 4,
+                    ),
+                    com.pocketshell.uikit.components.HotkeySection(
+                        title = "ARROWS",
+                        keys = listOf(
+                            KeyBinding("←", KeyKind.Arrow),
+                            KeyBinding("↑", KeyKind.Arrow),
+                            KeyBinding("↓", KeyKind.Arrow),
+                            KeyBinding("→", KeyKind.Arrow),
+                        ),
+                        columns = 4,
+                    ),
                 ),
                 onKey = {},
-            )
-        }
-        // Soft-keyboard stand-in so the framing reads "keybar sits above it".
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(260.dp)
-                .background(Color(0xFF202124)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "soft keyboard (system IME)",
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
-            )
-        }
-    }
-
-    /**
-     * Issue #677: the EXPANDED tmux key bar row (one `⋯` tap from the compact
-     * row) now carries `^B` (Ctrl-B, raw 0x02) next to the other control keys.
-     * Primary use is Claude Code's "ctrl-b ctrl-b to run in background" — the
-     * key is tappable twice in succession to send `C-b C-b` — plus a
-     * nested-tmux prefix passthrough. This render mirrors the app-side
-     * `TmuxKeyBarLayoutExpanded` so the new key reads at a glance; the
-     * emulator/real-agent run is the acceptance.
-     */
-    @Test
-    fun tmuxKeyBarExpandedWithCtrlB() = render("tmux-keybar-expanded-ctrl-b") {
-        Spacer(modifier = Modifier.height(420.dp))
-        Surface(color = PocketShellColors.Surface) {
-            KeyBar(
-                keys = listOf(
-                    KeyBinding("Esc", KeyKind.Regular),
-                    KeyBinding("Ctrl", KeyKind.Modifier),
-                    KeyBinding("⏎", KeyKind.Regular),
-                    KeyBinding("^B", KeyKind.Regular),
-                    KeyBinding("^Z", KeyKind.Regular),
-                    KeyBinding("^O", KeyKind.Regular),
-                    KeyBinding("^X", KeyKind.Regular),
-                    KeyBinding("‹", KeyKind.Arrow),
-                    KeyBinding("⌃", KeyKind.Arrow),
-                    KeyBinding("⌄", KeyKind.Arrow),
-                    KeyBinding("›", KeyKind.Arrow),
-                    KeyBinding("×", KeyKind.Arrow),
-                ),
-                onKey = {},
-            )
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(260.dp)
-                .background(Color(0xFF202124)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "soft keyboard (system IME)",
-                color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
+                onClose = {},
             )
         }
     }
@@ -1796,22 +1760,21 @@ class DesignRenders {
     }
 
     /**
-     * Issue #755: the terminal hotkey [KeyBar] relocated INTO the composer's
-     * inset-anchored column, as the sticky row directly ABOVE the action
-     * controls (the #765 layout, now with a key bar). With the keyboard up the
-     * key bar rides the same IME inset as the rest of the composer and can never
-     * be occluded (the v0.4.0 "key bar completely hidden by the keyboard"
-     * regression this fixes).
+     * Issue #784: the Prompt Composer with the keyboard up AFTER the key bar was
+     * removed (hard-cut, D22). The terminal hotkeys moved to the dedicated
+     * `TerminalHotkeysPanel`, so the composer is back to just header → roomy
+     * draft → action row (attach/snippets + Send + mic) above the soft keyboard.
+     * This mirrors the un-squished target: a tall draft field and a Send/mic/
+     * attach row fully visible above the IME — no key bar eating the space.
      *
      * Caveat (#555): the real `SheetContent` lives in `:app`, which this ui-kit
-     * harness cannot import, so this is a STATIC visual mirror of the intended
-     * layout — header, draft, then [KeyBar], then the action row, all above the
-     * soft-keyboard stand-in. The emulator keyboard-up screenshot
-     * (`PromptComposerKeyBarImeReachabilityTest`) is the acceptance.
+     * harness cannot import, so this is a STATIC visual mirror; the emulator
+     * keyboard-up screenshot (`PromptComposerImeSquishProofTest`) is the
+     * acceptance.
      */
     @Test
-    fun composerWithKeyBarAboveKeyboard() = render("composer-with-key-bar-above-keyboard") {
-        Spacer(Modifier.height(220.dp))
+    fun composerKeyboardUpNoKeyBar() = render("composer-keyboard-up-no-key-bar") {
+        Spacer(Modifier.height(260.dp))
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1843,7 +1806,7 @@ class DesignRenders {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(96.dp)
+                    .height(160.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
                     .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
@@ -1855,21 +1818,6 @@ class DesignRenders {
                     fontSize = 14.sp,
                 )
             }
-            Spacer(Modifier.height(12.dp))
-            // Issue #755: the relocated key bar — sticky row directly above the
-            // action controls, riding the composer's IME inset.
-            KeyBar(
-                keys = listOf(
-                    KeyBinding("Esc", KeyKind.Regular),
-                    KeyBinding("Ctrl", KeyKind.Modifier),
-                    KeyBinding("^C", KeyKind.Regular),
-                    KeyBinding("⏎", KeyKind.Regular),
-                    KeyBinding("^D", KeyKind.Regular),
-                    KeyBinding("Tab", KeyKind.Regular),
-                    KeyBinding("⋯", KeyKind.Regular),
-                ),
-                onKey = {},
-            )
             Spacer(Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),

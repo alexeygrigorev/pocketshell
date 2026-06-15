@@ -28,9 +28,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
-import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
-import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -4514,10 +4512,12 @@ class TmuxSessionViewModelTest {
 
         vm.onKeyBarKey("%0", "Esc")
         vm.onKeyBarKey("%0", "Tab")
-        vm.onKeyBarKey("%0", "‹")
-        vm.onKeyBarKey("%0", "⌃")
-        vm.onKeyBarKey("%0", "⌄")
-        vm.onKeyBarKey("%0", "›")
+        // Issue #784: the panel's clean arrow glyphs (← ↑ ↓ →) map to the same
+        // tmux cursor-key named keys the old `‹ ⌃ ⌄ ›` did.
+        vm.onKeyBarKey("%0", "←")
+        vm.onKeyBarKey("%0", "↑")
+        vm.onKeyBarKey("%0", "↓")
+        vm.onKeyBarKey("%0", "→")
         advanceUntilIdle()
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
@@ -4569,167 +4569,87 @@ class TmuxSessionViewModelTest {
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
 
-        // Issue #458: the curated one-tap combos use the `^X` short labels
-        // and each maps to its control byte via the `send-keys -H` overlay
-        // path (no resize/redraw). The legacy `Ctrl-C` / `Ctrl-D` aliases
-        // remain accepted for back-compat with the byte mapping.
+        // Issue #784: the hotkeys panel's Ctrl combos are DIRECT buttons (no
+        // lone-Ctrl modifier to arm). Each `^X` label maps to its control byte
+        // via the `send-keys -H` overlay path (no resize/redraw). `^B` (0x02,
+        // tmux prefix / Claude "ctrl-b ctrl-b", #677) is in the set. The legacy
+        // `Ctrl-C` / `Ctrl-D` aliases remain accepted for the byte mapping.
+        vm.onKeyBarKey("%0", "^A")
+        vm.onKeyBarKey("%0", "^B")
         vm.onKeyBarKey("%0", "^C")
         vm.onKeyBarKey("%0", "^D")
+        vm.onKeyBarKey("%0", "^E")
+        vm.onKeyBarKey("%0", "^L")
+        vm.onKeyBarKey("%0", "^R")
         vm.onKeyBarKey("%0", "^Z")
-        vm.onKeyBarKey("%0", "^O")
-        vm.onKeyBarKey("%0", "^X")
-        advanceUntilIdle()
-
-        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
-        assertEquals(
-            listOf(
-                "send-keys -H -t %0 03",
-                "send-keys -H -t %0 04",
-                "send-keys -H -t %0 1a",
-                "send-keys -H -t %0 0f",
-                "send-keys -H -t %0 18",
-            ),
-            sent,
-        )
-    }
-
-    @Test
-    fun ctrlBKeyBarKeySendsRawCtrlBByteAndDoubleTapSendsItTwice() = runTest(scheduler) {
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        vm.attachClientForTest(client)
-
-        // Issue #677: the `^B` key-bar key sends the raw Ctrl-B byte (0x02)
-        // through the same `send-keys -H` overlay path the `^C`/`^D` keys
-        // use ([TmuxSessionScreen]'s `onKey` lambda calls this public method
-        // directly so the terminal VM does not need a new `when` arm). The
-        // constant is asserted here so a future refactor cannot silently
-        // change the wire byte.
-        assertEquals(0x02, TmuxCtrlBByte)
-
-        // Two rapid `^B` taps (Claude Code's "ctrl-b ctrl-b to background"):
-        // each tap is an independent send, so the pane receives `02` twice
-        // with no de-dup or throttle swallowing the second press.
-        vm.sendControlInputToPane("%0", TmuxCtrlBByte)
-        vm.sendControlInputToPane("%0", TmuxCtrlBByte)
-        advanceUntilIdle()
-
-        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
-        assertEquals(
-            listOf(
-                "send-keys -H -t %0 02",
-                "send-keys -H -t %0 02",
-            ),
-            sent,
-        )
-    }
-
-    @Test
-    fun ctrlBKeyExposedOnExpandedTmuxKeyBarLayout() {
-        // Issue #677: the `^B` key lives on the expanded (long-tail) row next
-        // to the other control keys, surfaced one `⋯` tap away. The compact
-        // row stays as-is so it does not clip on a phone.
-        val ctrlB = KeyBinding(label = "^B", kind = KeyKind.Regular)
-        assertTrue(
-            "expanded layout should expose the ^B key",
-            tmuxKeyBarLayout(expanded = true).contains(ctrlB),
-        )
-        assertFalse(
-            "compact layout should not include ^B (long tail only)",
-            tmuxKeyBarLayout(expanded = false).contains(ctrlB),
-        )
-        assertEquals("^B", TmuxKeyBarCtrlBLabel)
-    }
-
-    @Test
-    fun ctrlModifierChordsTheNextKeyAsAControlByte() = runTest(scheduler) {
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        vm.attachClientForTest(client)
-
-        // Issue #458: arm Ctrl (one-shot), then tap a letter in the bar.
-        // The letter is sent as its Ctrl-chord control byte (`g` -> 0x07),
-        // and the one-shot Ctrl auto-clears so the following plain tap is
-        // NOT chorded.
-        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
-        assertEquals(KeyModifierState.OneShot, vm.ctrlModifierState.value)
-        vm.onKeyBarKey("%0", "g")
-        advanceUntilIdle()
-        assertEquals(KeyModifierState.Off, vm.ctrlModifierState.value)
-
-        vm.onKeyBarKey("%0", "Tab")
-        advanceUntilIdle()
-
-        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
-        assertEquals(
-            listOf(
-                "send-keys -H -t %0 07",
-                "send-keys -t %0 Tab",
-            ),
-            sent,
-        )
-    }
-
-    @Test
-    fun lockedCtrlModifierChordsRepeatedlyUntilDisarmed() = runTest(scheduler) {
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        vm.attachClientForTest(client)
-
-        // Locked Ctrl survives a chord so several land in a row.
-        vm.onKeyBarModifierState("Ctrl", KeyModifierState.Locked)
-        vm.onKeyBarKey("%0", "a")
-        advanceUntilIdle()
-        assertEquals(KeyModifierState.Locked, vm.ctrlModifierState.value)
-        vm.onKeyBarKey("%0", "B")
-        advanceUntilIdle()
-        assertEquals(KeyModifierState.Locked, vm.ctrlModifierState.value)
-        // Disarm via an explicit Ctrl tap mirrored from the bar FSM.
-        vm.onKeyBarModifierState("Ctrl", KeyModifierState.Off)
-        // A bar key after disarm chords nothing — `^C` is its own raw byte.
-        vm.onKeyBarKey("%0", "^C")
         advanceUntilIdle()
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
         assertEquals(
             listOf(
                 "send-keys -H -t %0 01",
-                // Uppercase B chords to the same byte as lowercase b.
                 "send-keys -H -t %0 02",
-                // Disarmed: the curated `^C` key sends its own raw byte.
                 "send-keys -H -t %0 03",
+                "send-keys -H -t %0 04",
+                "send-keys -H -t %0 05",
+                "send-keys -H -t %0 0c",
+                "send-keys -H -t %0 12",
+                "send-keys -H -t %0 1a",
             ),
             sent,
         )
     }
 
     @Test
-    fun ctrlModifierChordsArrowsAndNamedKeysViaTmuxChordSyntax() = runTest(scheduler) {
+    fun ctrlBHotkeyDoubleTapSendsRawCtrlBByteTwice() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
 
-        // Issue #458: Ctrl + arrow / Tab / Esc route through tmux's own
-        // `C-<key>` chord named keys so tmux emits the correct terminfo
-        // encoding (e.g. Ctrl+Right word-jump). Each is one-shot so it
-        // re-arms per chord here.
-        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
-        vm.onKeyBarKey("%0", "›")
-        advanceUntilIdle()
-        assertEquals(KeyModifierState.Off, vm.ctrlModifierState.value)
-
-        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
-        vm.onKeyBarKey("%0", "Esc")
+        // Issue #677/#784: `^B` is a direct hotkey routed through `onKeyBarKey`
+        // and sends the raw Ctrl-B byte (0x02). Two rapid taps (Claude Code's
+        // "ctrl-b ctrl-b to background") each fire independently, so the pane
+        // receives `02` twice with no de-dup/throttle swallowing the second.
+        vm.onKeyBarKey("%0", "^B")
+        vm.onKeyBarKey("%0", "^B")
         advanceUntilIdle()
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
         assertEquals(
             listOf(
-                "send-keys -t %0 C-Right",
-                "send-keys -t %0 C-Escape",
+                "send-keys -H -t %0 02",
+                "send-keys -H -t %0 02",
             ),
             sent,
         )
+    }
+
+    @Test
+    fun hotkeyPanelSectionsAreDeDupedAndCarryTheAuditedSet() {
+        // Issue #784: the dedicated panel set — no duplicate `/`, no lone
+        // `Ctrl`, `^B` present, clean arrow glyphs. Verify the curated set is
+        // exactly what we expect and has no duplicate labels.
+        val labels = TmuxHotkeyPanelSections.flatMap { it.keys }.map { it.label }
+        assertEquals(
+            listOf(
+                "Esc", "Tab", "Enter",
+                "^A", "^B", "^C", "^D", "^E", "^L", "^R", "^Z",
+                "←", "↑", "↓", "→",
+            ),
+            labels,
+        )
+        // No duplicates (the maintainer's "/ appears twice" / "Esc duplicated"
+        // complaints).
+        assertEquals(labels.size, labels.toSet().size)
+        // No lone Ctrl modifier and no `/` key in the panel.
+        assertFalse(labels.contains("Ctrl"))
+        assertFalse(labels.contains("/"))
+        // ^B (tmux prefix) restored.
+        assertTrue(labels.contains("^B"))
+        // The arrow section uses the clean glyphs, marked as Arrow kind.
+        val arrows = TmuxHotkeyPanelSections.last().keys
+        assertEquals(listOf("←", "↑", "↓", "→"), arrows.map { it.label })
+        assertTrue(arrows.all { it.kind == KeyKind.Arrow })
     }
 
     @Test
@@ -4752,8 +4672,7 @@ class TmuxSessionViewModelTest {
 
         vm.onKeyBarKey("%0", "^C")
         vm.onKeyBarKey("%0", "Esc")
-        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
-        vm.onKeyBarKey("%0", "›")
+        vm.onKeyBarKey("%0", "→")
         advanceUntilIdle()
 
         assertEquals(
@@ -4768,7 +4687,7 @@ class TmuxSessionViewModelTest {
             listOf(
                 "send-keys -H -t %0 03",
                 "send-keys -t %0 Escape",
-                "send-keys -t %0 C-Right",
+                "send-keys -t %0 Right",
             ),
             client.sentCommands.filter { it.startsWith("send-keys") },
         )

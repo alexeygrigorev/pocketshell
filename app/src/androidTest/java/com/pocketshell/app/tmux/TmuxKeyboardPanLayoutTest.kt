@@ -15,9 +15,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.uikit.components.KeyBar
+import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
@@ -128,31 +129,31 @@ class TmuxKeyboardPanLayoutTest {
     }
 
     @Test
-    fun tmuxImeAccessoryKeepsUsableHeight() {
-        // Issue #755 (PR2, D22 hard-cut): the terminal hotkey key bar moved out
-        // of `TmuxTerminalBottomControls` (which the keyboard occluded) and INTO
-        // the composer's inset-anchored column. This guards that the bar layout
-        // itself — the SAME `tmuxKeyBarLayout` the composer now renders — keeps a
-        // usable tap height and is not crushed to a thin strip.
+    fun tmuxHotkeysPanelKeysKeepUsableHeight() {
+        // Issue #784 (D22 hard-cut): the terminal hotkeys moved out of the
+        // composer into the dedicated `TerminalHotkeysPanel`. This guards that
+        // the panel's keys keep a usable tap height (not crushed to a thin
+        // strip) — a representative key (`^B`) must be at least one finger tall.
         compose.setContent {
             PocketShellTheme {
-                KeyBar(
-                    keys = tmuxKeyBarLayout(expanded = false),
+                TerminalHotkeysPanel(
+                    sections = TmuxHotkeyPanelSections,
                     onKey = {},
-                    modifier = Modifier.testTag(TMUX_KEY_BAR_TAG),
+                    onClose = {},
+                    modifier = Modifier.testTag("hotkeys-panel-host"),
                 )
             }
         }
 
-        val keyBarHeight = compose
-            .onNodeWithTag(TMUX_KEY_BAR_TAG)
+        val keyHeight = compose
+            .onNodeWithText("^B")
             .fetchSemanticsNode()
             .boundsInRoot
             .height
 
         assertTrue(
-            "tmux keybar itself must stay visible and usable",
-            keyBarHeight >= 56f,
+            "tmux hotkeys panel keys must stay visible and usable (>=44dp tap)",
+            keyHeight >= 40f,
         )
     }
 

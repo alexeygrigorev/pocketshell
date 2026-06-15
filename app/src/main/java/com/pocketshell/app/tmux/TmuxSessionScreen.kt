@@ -13,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -169,7 +170,6 @@ import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
-import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
@@ -180,7 +180,6 @@ import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.ConnectionStatus as UiConnectionStatus
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
-import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -595,15 +594,11 @@ public fun TmuxSessionScreen(
             onInitialComposerPromptConsumed()
         }
     }
-    // Issue #458: whether the terminal key bar shows its full row (the long
-    // tail of Ctrl combos + arrows) or the compact curated default. Local UI
-    // state toggled by the `⋯` / `×` slot; survives recomposition only (a
-    // fresh attach starts compact, which is the right default).
-    var keyBarExpanded by remember { mutableStateOf(false) }
-    // Issue #458: the armed state of the key bar's `Ctrl` modifier, mirrored
-    // from the ui-kit KeyBar FSM into the view model. Drives the accent
-    // treatment on the `Ctrl` slot so the user can see Ctrl is armed.
-    val ctrlModifierState by viewModel.ctrlModifierState.collectAsState()
+    // Issue #784: whether the dedicated terminal-hotkeys panel is open. It is
+    // its OWN bottom-sheet surface (NOT inside the composer, NOT part of the
+    // soft keyboard) toggled from the terminal bottom controls; survives
+    // recomposition only (a fresh attach starts closed, the right default).
+    var showHotkeysPanel by remember { mutableStateOf(false) }
     // Issue #436 (Slice A): agent slash-command quick-send palette state.
     var showAgentCommands by remember { mutableStateOf(false) }
     // Issue #462: a "sticky" last-known agent for the visible pane, so the
@@ -1605,12 +1600,10 @@ public fun TmuxSessionScreen(
                 // Prompt Composer sheet (state persists in the composer
                 // ViewModel across session switches), so the terminal controls
                 // never receive the staged-attachment list.
-                // Issue #755 (PR2): the key-bar callbacks (`onKey`,
-                // `modifierStates`, `onModifierStateChange`, `keyBarExpanded`)
-                // moved with the bar into the composer call site below — the bar
-                // is now built there and passed into [PromptComposerSheet]'s
-                // inset-anchored `keyBar` slot. This surface only renders the
-                // keyboard-DOWN chip band now.
+                // Issue #784 (hard-cut, D22): the terminal key bar no longer
+                // lives in the composer (or here). The terminal hotkeys are in
+                // the dedicated [TerminalHotkeysSheet] panel, opened from this
+                // surface's hotkeys launcher (`onShowHotkeysTap`).
                 TmuxTerminalBottomControls(
                     isImeVisible = isImeVisible,
                     showConversation = showConversation,
@@ -1677,6 +1670,17 @@ public fun TmuxSessionScreen(
                     previousSessionName = previousSessionName,
                     onTogglePreviousSession = previousSessionName?.let {
                         { onReplaceTmuxSession(previousSessionName) }
+                    },
+                    // Issue #784: open the dedicated terminal-hotkeys panel.
+                    // Terminal tab only (a raw pane to receive control bytes).
+                    onShowHotkeysTap = {
+                        DiagnosticEvents.record(
+                            "action",
+                            "hotkey_panel_show",
+                            "mode" to "tmux",
+                            "paneId" to pane.paneId,
+                        )
+                        showHotkeysPanel = true
                     },
                     modifier = bottomControlsModifier,
                 )
@@ -1930,71 +1934,13 @@ public fun TmuxSessionScreen(
             currentAgentConversation.selectedTab == SessionTab.Conversation
         // Issue #755: the terminal hotkey key bar now rides INSIDE the composer's
         // inset-anchored column (PR2 of the composer redesign), so it can never be
-        // occluded by the soft keyboard the way it was on the separate
-        // `TmuxTerminalBottomControls` surface. The bar is a *terminal* accessory
-        // (each tap writes a control byte / Enter to the focused pane), so it is
-        // shown on the Terminal tab only — never the Conversation (agent) tab,
-        // where there is no raw pane to receive control bytes. The agent-commands
-        // `/` slot is included when an agent is detected (`paletteAgent != null`),
-        // matching the old surface. This builds the EXACT same layout + ⋯/×
-        // expander FSM + per-key routing the old surface used; only WHERE the bar
-        // lives changed.
-        val keyBarPane = currentPane
-        val composerKeyBar: (@Composable () -> Unit)? =
-            if (keyBarPane != null && !viewingConversation) {
-                {
-                    KeyBar(
-                        keys = tmuxKeyBarLayout(
-                            expanded = keyBarExpanded,
-                            includeAgentCommands = paletteAgent != null,
-                        ),
-                        onKey = if (sessionLive) {
-                            { binding ->
-                                when (binding.label) {
-                                    TmuxAgentCommandsKeyLabel -> showAgentCommands = true
-                                    TmuxKeyBarExpandLabel -> {
-                                        DiagnosticEvents.record(
-                                            "action",
-                                            "hotkey_panel_show",
-                                            "mode" to "tmux",
-                                        )
-                                        keyBarExpanded = true
-                                    }
-                                    TmuxKeyBarCollapseLabel -> {
-                                        DiagnosticEvents.record(
-                                            "action",
-                                            "hotkey_panel_hide",
-                                            "mode" to "tmux",
-                                        )
-                                        keyBarExpanded = false
-                                    }
-                                    // Issue #677: `^B` sends the raw Ctrl-B byte
-                                    // (0x02) straight through the control-input
-                                    // path, identical to the old surface.
-                                    TmuxKeyBarCtrlBLabel ->
-                                        viewModel.sendControlInputToPane(
-                                            keyBarPane.paneId,
-                                            TmuxCtrlBByte,
-                                        )
-                                    else -> viewModel.onKeyBarKey(keyBarPane.paneId, binding.label)
-                                }
-                            }
-                        } else {
-                            { _ -> }
-                        },
-                        modifierStates = mapOf(TmuxCtrlModifierLabel to ctrlModifierState),
-                        onModifierStateChange = { binding, state ->
-                            viewModel.onKeyBarModifierState(binding.label, state)
-                        },
-                        modifier = Modifier.testTag(TMUX_KEY_BAR_TAG),
-                    )
-                }
-            } else {
-                null
-            }
+        // gone (hard-cut, D22). The terminal hotkeys now live in the dedicated
+        // [TerminalHotkeysPanel] bottom sheet (issue #784), opened from the
+        // terminal bottom controls — its own surface, never inside the composer,
+        // never part of the soft keyboard. The composer keeps ONLY compose-field +
+        // Send + mic + attach + snippets + `/`-autocomplete.
         PromptComposerSheet(
             viewModel = promptComposerViewModel,
-            keyBar = composerKeyBar,
             // Issue #767: the detected engine for the focused pane drives the
             // `/`-autocomplete command catalog in the composer. Reuse the same
             // flicker-resilient `paletteAgent` (live detection, or the sticky
@@ -2151,6 +2097,34 @@ public fun TmuxSessionScreen(
                     }
                 }
             },
+        )
+    }
+
+    // Issue #784: the dedicated terminal-hotkeys panel — its OWN bottom-sheet
+    // surface (not inside the composer, not part of the soft keyboard). Shows
+    // EVERY key at once in a tidy grid (no `…` overflow, no horizontal scroll).
+    // Terminal tab only (a raw pane to receive the control bytes); each key
+    // routes through [TmuxSessionViewModel.onKeyBarKey]. The panel stays open
+    // after a tap so the user can fire several keys (e.g. arrow navigation,
+    // `^B ^B`) without re-opening; `×` / scrim / back dismiss it.
+    val hotkeysPane = currentPane
+    if (showHotkeysPanel && hotkeysPane != null) {
+        TerminalHotkeysSheet(
+            sections = TmuxHotkeyPanelSections,
+            enabled = sessionLive,
+            onKey = { binding ->
+                if (sessionLive) {
+                    DiagnosticEvents.record(
+                        "action",
+                        "shortcut_sent",
+                        "mode" to "tmux",
+                        "paneId" to hotkeysPane.paneId,
+                        "key" to binding.label,
+                    )
+                    viewModel.onKeyBarKey(hotkeysPane.paneId, binding.label)
+                }
+            },
+            onDismiss = { showHotkeysPanel = false },
         )
     }
 
@@ -5284,32 +5258,22 @@ private fun PageIndicator(pageCount: Int, currentPage: Int) {
 }
 
 /**
- * Issue #458: the expander toggle label. Tapping `⋯` flips the bar between
- * its compact default row and the full row (the long tail of Ctrl combos +
- * arrows). The screen intercepts this label in its `onKey` lambda and
- * toggles local UI state instead of sending it to the pane — it is never a
- * keystroke.
- */
-internal const val TmuxKeyBarExpandLabel: String = "⋯"
-internal const val TmuxKeyBarCollapseLabel: String = "×"
-
-/**
  * Bottom terminal controls for tmux panes.
  *
  * Issue #588: once the terminal keyboard is up, this area is strictly a
  * terminal-control accessory. Prompt text belongs in [PromptComposerSheet],
  * opened from the IME-hidden bottom band.
  *
- * Issue #755 (PR2, composer redesign — D22 hard-cut): the terminal hotkey
- * [com.pocketshell.uikit.components.KeyBar] no longer lives HERE. It was on this
- * separate, non-inset-anchored surface and was therefore occluded by the soft
- * keyboard (the v0.4.0 "key bar completely hidden by the keyboard" regression).
- * It has moved INTO the [PromptComposerSheet]'s inset-anchored column (rendered
- * via that sheet's `keyBar` slot, wired at the call site in [TmuxSessionScreen]),
- * where it rides the same IME inset as the rest of the composer and can never be
- * occluded. So when the keyboard is UP this control area renders NOTHING — the
- * key bar appears inside the composer above the IME instead. The keyboard-DOWN
- * chip band ([BottomChipControls]) is unchanged.
+ * Issue #784 (composer/hotkeys redesign — D22 hard-cut): the terminal hotkey
+ * key bar no longer lives HERE or in the composer. #755 had relocated it into
+ * the composer, where it ate the space above the keyboard, hid keys behind a
+ * `…` expander, and squished the compose field. It is now the dedicated
+ * [com.pocketshell.uikit.components.TerminalHotkeysPanel] in its OWN bottom
+ * sheet ([TerminalHotkeysSheet]), opened from this surface's hotkeys launcher.
+ * With the keyboard UP this control area renders a SLIM launcher bar
+ * ([TerminalHotkeysLauncherBar]) above the IME — one tap to open the panel; the
+ * keyboard-DOWN chip band ([BottomChipControls]) gains the same launcher above
+ * it.
  *
  * Issue #673: staged composer attachments are NOT rendered here. They are
  * visible only inside the Prompt Composer sheet; the staged-attachment STATE
@@ -5332,6 +5296,12 @@ internal fun TmuxTerminalBottomControls(
     // Issue #628: toggle chip for switching back to the previous tmux session.
     previousSessionName: String? = null,
     onTogglePreviousSession: (() -> Unit)? = null,
+    // Issue #784: open the dedicated terminal-hotkeys panel. Reachable both with
+    // the keyboard down (a chip next to the others) and with the keyboard UP (a
+    // slim launcher bar above the IME), so the user can summon the full hotkey
+    // grid whenever they are interacting with the terminal. Null on surfaces
+    // with no pane to receive control bytes (e.g. the Conversation tab).
+    onShowHotkeysTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val chromeMode = tmuxTerminalKeyboardChromeMode(
@@ -5343,11 +5313,24 @@ internal fun TmuxTerminalBottomControls(
         // all. Staged attachments used to surface here; they now live only
         // inside the Prompt Composer sheet.
         TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> Unit
-        // Issue #755 (D22 hard-cut): with the keyboard up on the Terminal tab,
-        // this surface no longer renders the key bar — it moved into the
-        // composer's inset-anchored column (see the kdoc above). Nothing is
-        // rendered here in that state.
-        TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> Unit
+        // Issue #784: with the keyboard up on the Terminal tab, render a SLIM
+        // launcher bar above the IME so the hotkeys panel is one tap away while
+        // typing. The full hotkey grid lives in the dedicated
+        // [TerminalHotkeysPanel] bottom sheet — never crammed above the keyboard
+        // (the #755/#784 occlusion + cram complaints), just a single launcher.
+        TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> {
+            if (onShowHotkeysTap != null) {
+                // Wrap in a Box carrying the host's layout modifier so the
+                // launcher keeps its OWN test tag (a chained `testTag` on the
+                // launcher would otherwise be shadowed by a tag on `modifier`).
+                Box(modifier = modifier.fillMaxWidth()) {
+                    TerminalHotkeysLauncherBar(
+                        onClick = onShowHotkeysTap,
+                        enabled = sessionLive,
+                    )
+                }
+            }
+        }
         TmuxTerminalKeyboardChromeMode.HiddenImeControls -> {
             Column(
                 modifier = modifier
@@ -5355,6 +5338,17 @@ internal fun TmuxTerminalBottomControls(
                     .heightIn(min = SessionBottomControlsMinHeight)
                     .background(color = PocketShellColors.Surface),
             ) {
+                // Issue #784: the hotkeys-panel launcher above the chip band
+                // (terminal tab only — the panel writes control bytes to the
+                // raw pane). Keeps the launcher reachable with the keyboard
+                // down without expanding the shared `BottomChipControls`
+                // surface (out of this issue's scope).
+                if (!showConversation && onShowHotkeysTap != null) {
+                    TerminalHotkeysLauncherBar(
+                        onClick = onShowHotkeysTap,
+                        enabled = sessionLive,
+                    )
+                }
                 BottomChipControls(
                     chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                     onChipTap = onChipTap,
@@ -5383,6 +5377,40 @@ internal fun TmuxTerminalBottomControls(
     }
 }
 
+/**
+ * Issue #784: the slim launcher bar above the soft keyboard. ONE tappable row
+ * ("⌨ Terminal hotkeys") that opens the dedicated [TerminalHotkeysPanel]. It
+ * deliberately holds nothing else — no crammed key grid above the IME, which is
+ * the #755 cram the maintainer rejected. The full grid is in the panel sheet.
+ */
+@Composable
+private fun TerminalHotkeysLauncherBar(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(BorderStroke(1.dp, PocketShellColors.Border))
+            .let { if (enabled) it.clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick) else it }
+            .testTag(TERMINAL_HOTKEYS_LAUNCHER_TAG)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = "⌨  Terminal hotkeys",
+            color = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+internal const val TERMINAL_HOTKEYS_LAUNCHER_TAG: String = "tmux:hotkeys-launcher"
+
 internal enum class TmuxTerminalKeyboardChromeMode {
     HiddenImeControls,
     OpenImeTerminalHotkeys,
@@ -5399,100 +5427,65 @@ internal fun tmuxTerminalKeyboardChromeMode(
 }
 
 /**
- * Issue #458: the `Ctrl` modifier slot. A [KeyKind.Modifier] so the ui-kit
- * [com.pocketshell.uikit.components.KeyBar] owns the sticky tap FSM (tap =
- * arm for one chord, double-tap = lock, tap-while-armed = disarm). When
- * armed, the next regular key tapped in the bar is sent as a Ctrl-chord
- * control byte (see [TmuxSessionViewModel.onKeyBarKey]). The armed state is
- * mirrored to [TmuxSessionViewModel.ctrlModifierState] and rendered with the
- * accent treatment by the bar itself.
+ * Issue #784: the dedicated terminal-hotkeys panel key set.
+ *
+ * This replaces the cramped, `…`-overflowing in-composer key bar (#458/#755,
+ * hard-cut per D22). The panel shows EVERY key at once in a tidy multi-row grid
+ * — no `…` expander, no horizontal scroll, no lone `Ctrl` modifier, no
+ * duplicate `/`. Each label is audited so the visible glyph equals the byte
+ * sent ([TmuxSessionViewModel.onKeyBarKey]):
+ *
+ *  - Keys section: `Esc` (0x1B), `Tab`, `Enter` (#527).
+ *  - Ctrl combos section: the useful chords as DIRECT buttons (no modifier to
+ *    arm first) — `^A`(0x01) `^B`(0x02, tmux prefix / Claude "ctrl-b ctrl-b",
+ *    #677) `^C`(0x03) `^D`(0x04) `^E`(0x05) `^L`(0x0C) `^R`(0x12) `^Z`(0x1A).
+ *    `^[` (0x1B) is intentionally omitted: it equals `Esc`, which is already in
+ *    the Keys section — exposing both would re-introduce the duplicate the
+ *    maintainer flagged.
+ *  - Arrows section: `←` `↑` `↓` `→` with clean, legible glyphs (replacing the
+ *    old hard-to-read `‹ ⌃ ⌄ ›`).
+ *
+ * Every key routes through [TmuxSessionViewModel.onKeyBarKey], which maps the
+ * label to its control byte (`send-keys -H` overlay) or tmux named key — no
+ * terminal resize/redraw.
  */
-internal const val TmuxCtrlModifierLabel: String = "Ctrl"
-internal const val TmuxAgentCommandsKeyLabel: String = "/"
+internal const val TmuxHotkeyEnterLabel: String = "Enter"
 
-/**
- * Tmux key bar — curated default + an expandable long tail (issue #458).
- *
- * The default row stays compact and one-handed: `Esc`, the `Ctrl` modifier,
- * the two most-reached one-tap actions (`^C` interrupt, `⏎` Enter/submit),
- * `^D` EOF, `Tab`, and the `⋯` expander. Enter is the highest-frequency key
- * (issue #527): one obvious tap submits the typed/pending line to the pane
- * without opening the soft keyboard. Every control key maps directly to its
- * control byte through the `send-keys -H` overlay path
- * ([TmuxSessionViewModel.sendControlInputToPane]); `⏎` maps to the tmux
- * named `Enter` key via `send-keys -t <pane> Enter`
- * ([TmuxSessionViewModel.sendNamedKey]) — no terminal resize or redraw. The
- * `Ctrl` modifier covers any other chord the curated set omits: tap `Ctrl`,
- * then any letter key, and it is sent as `0x01`..`0x1A`.
- *
- * Tapping `⋯` expands the bar ([tmuxKeyBarLayout] with `expanded = true`) to
- * surface the long tail — `^B` (issue #677: Claude Code's "ctrl-b ctrl-b to
- * background" / nested-tmux prefix), `^Z` suspend, `^O` / `^X` and the four
- * arrow keys, plus the `Ctrl` modifier — with `×` to collapse back. Both rows
- * stay within a single non-scrolling row width on a phone so nothing clips.
- */
-internal const val TmuxKeyBarEnterLabel: String = "⏎"
-internal const val TMUX_KEY_BAR_TAG: String = "tmux:keybar"
-
-/**
- * Issue #677: the `^B` (Ctrl-B, raw byte `0x02`) key. Two use cases drive it:
- * Claude Code's "ctrl-b ctrl-b to run in background" gesture (so the key must
- * be tappable TWICE in quick succession, each tap sending one `0x02`), and a
- * nested-tmux prefix passthrough. PocketShell runs tmux in `-CC` control mode,
- * so `C-b` is NOT consumed as an outer-tmux prefix — the literal `0x02` byte
- * reaches the focused pane, which is exactly what Claude Code wants.
- *
- * Each tap routes through [TmuxSessionViewModel.sendControlInputToPane] (the
- * same `send-keys -H` overlay path `^C`/`^D` use), and each tap is an
- * independent send, so two rapid taps enqueue two independent `0x02` bytes
- * with no de-dup or throttle that could swallow the second press.
- *
- * The byte is wired from the screen's `onKey` lambda rather than from
- * `TmuxSessionViewModel.onKeyBarKey`'s `when (label)` block so the terminal
- * VM does not have to change — `sendControlInputToPane` is already a public
- * module-level entry point the screen calls directly (e.g. the agent-command
- * sheet's `Ctrl-C ×2` / `Ctrl-D ×2` controls).
- */
-internal const val TmuxKeyBarCtrlBLabel: String = "^B"
-internal const val TmuxCtrlBByte: Int = 0x02
-
-internal val TmuxKeyBarLayoutCompact: List<KeyBinding> = listOf(
-    KeyBinding(label = "Esc", kind = KeyKind.Regular),
-    KeyBinding(label = TmuxCtrlModifierLabel, kind = KeyKind.Modifier),
-    KeyBinding(label = "^C", kind = KeyKind.Regular),
-    KeyBinding(label = TmuxKeyBarEnterLabel, kind = KeyKind.Regular),
-    KeyBinding(label = "^D", kind = KeyKind.Regular),
-    KeyBinding(label = "Tab", kind = KeyKind.Regular),
-    KeyBinding(label = TmuxKeyBarExpandLabel, kind = KeyKind.Arrow),
+internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.HotkeySection> = listOf(
+    com.pocketshell.uikit.components.HotkeySection(
+        title = "KEYS",
+        keys = listOf(
+            KeyBinding(label = "Esc", kind = KeyKind.Regular),
+            KeyBinding(label = "Tab", kind = KeyKind.Regular),
+            KeyBinding(label = TmuxHotkeyEnterLabel, kind = KeyKind.Regular),
+        ),
+        columns = 3,
+    ),
+    com.pocketshell.uikit.components.HotkeySection(
+        title = "CTRL COMBOS",
+        keys = listOf(
+            KeyBinding(label = "^A", kind = KeyKind.Regular),
+            KeyBinding(label = "^B", kind = KeyKind.Regular),
+            KeyBinding(label = "^C", kind = KeyKind.Regular),
+            KeyBinding(label = "^D", kind = KeyKind.Regular),
+            KeyBinding(label = "^E", kind = KeyKind.Regular),
+            KeyBinding(label = "^L", kind = KeyKind.Regular),
+            KeyBinding(label = "^R", kind = KeyKind.Regular),
+            KeyBinding(label = "^Z", kind = KeyKind.Regular),
+        ),
+        columns = 4,
+    ),
+    com.pocketshell.uikit.components.HotkeySection(
+        title = "ARROWS",
+        keys = listOf(
+            KeyBinding(label = "←", kind = KeyKind.Arrow),
+            KeyBinding(label = "↑", kind = KeyKind.Arrow),
+            KeyBinding(label = "↓", kind = KeyKind.Arrow),
+            KeyBinding(label = "→", kind = KeyKind.Arrow),
+        ),
+        columns = 4,
+    ),
 )
-
-internal val TmuxKeyBarLayoutExpanded: List<KeyBinding> = listOf(
-    KeyBinding(label = "Esc", kind = KeyKind.Regular),
-    KeyBinding(label = TmuxCtrlModifierLabel, kind = KeyKind.Modifier),
-    KeyBinding(label = TmuxKeyBarEnterLabel, kind = KeyKind.Regular),
-    KeyBinding(label = "^B", kind = KeyKind.Regular),
-    KeyBinding(label = "^Z", kind = KeyKind.Regular),
-    KeyBinding(label = "^O", kind = KeyKind.Regular),
-    KeyBinding(label = "^X", kind = KeyKind.Regular),
-    KeyBinding(label = "‹", kind = KeyKind.Arrow),
-    KeyBinding(label = "⌃", kind = KeyKind.Arrow),
-    KeyBinding(label = "⌄", kind = KeyKind.Arrow),
-    KeyBinding(label = "›", kind = KeyKind.Arrow),
-    KeyBinding(label = TmuxKeyBarCollapseLabel, kind = KeyKind.Arrow),
-)
-
-/** Pick the curated or full key-bar layout based on the expander state. */
-internal fun tmuxKeyBarLayout(
-    expanded: Boolean,
-    includeAgentCommands: Boolean = false,
-): List<KeyBinding> {
-    val base = if (expanded) TmuxKeyBarLayoutExpanded else TmuxKeyBarLayoutCompact
-    return if (includeAgentCommands) {
-        listOf(KeyBinding(label = TmuxAgentCommandsKeyLabel, kind = KeyKind.Regular)) + base
-    } else {
-        base
-    }
-}
 
 internal const val CtrlC2Chip: String = "Ctrl-C x2"
 internal const val CtrlD2Chip: String = "Ctrl-D x2"

@@ -30,7 +30,6 @@ import com.pocketshell.app.agentcommands.agentCommandRowTag
 import com.pocketshell.app.agentcommands.agentCommandSendChipTag
 import com.pocketshell.app.voice.SESSION_AGENT_COMMANDS_CHIP_TAG
 import com.pocketshell.core.agents.AgentKind
-import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
@@ -139,46 +138,11 @@ class CommandPaletteAffordanceTest {
         assertEquals("/goal ship command templates", sent?.command)
     }
 
-    @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-    @Test
-    fun agentImeKeybarCommandControlOpensSheet() {
-        // Issue #755 (PR2, D22 hard-cut): the terminal hotkey key bar moved OUT
-        // of `TmuxTerminalBottomControls` and INTO the composer's inset-anchored
-        // column. On an agent pane the bar prepends the `/` slash-commands slot
-        // (`tmuxKeyBarLayout(includeAgentCommands = true)`), and the screen wires
-        // that slot to open the AgentCommandSheet. This mounts the SAME key-bar
-        // layout the composer now renders and asserts the `/` slot opens the
-        // sheet — the routing the composer-hosted bar performs.
-        var sheetOpen = false
-        compose.setContent {
-            PocketShellTheme {
-                var open by remember { mutableStateOf(false) }
-                KeyBar(
-                    keys = tmuxKeyBarLayout(expanded = false, includeAgentCommands = true),
-                    onKey = { binding ->
-                        if (binding.label == TmuxAgentCommandsKeyLabel) {
-                            sheetOpen = true
-                            open = true
-                        }
-                    },
-                    modifier = Modifier.testTag(TMUX_KEY_BAR_TAG),
-                )
-                if (open) {
-                    AgentCommandSheet(
-                        agent = AgentKind.ClaudeCode,
-                        onDismiss = { open = false },
-                        onCommandSend = {},
-                    )
-                }
-            }
-        }
-
-        compose.onNodeWithTag(TMUX_KEY_BAR_TAG).assertIsDisplayed()
-        compose.onNodeWithText(TmuxAgentCommandsKeyLabel).assertIsDisplayed().performClick()
-        compose.waitForIdle()
-        assertTrue("Tapping the IME keybar palette control should open the sheet", sheetOpen)
-        compose.onNodeWithTag(AGENT_COMMAND_SHEET_TAG).assertIsDisplayed()
-    }
+    // Issue #784 (D22 hard-cut): the former `/`-on-keybar slot is GONE. Slash
+    // commands reach the agent via the bottom `/ commands` chip (covered above)
+    // and the composer `/`-autocomplete (#767). There is no `/` key in the new
+    // hotkeys panel — the old `agentImeKeybarCommandControlOpensSheet` test that
+    // exercised that slot was removed with the slot.
 
     @Test
     fun commandPaletteAffordanceAbsentForPlainShellControls() {

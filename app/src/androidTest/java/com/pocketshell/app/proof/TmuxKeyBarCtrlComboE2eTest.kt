@@ -8,6 +8,10 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -21,10 +25,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
+import com.pocketshell.app.tmux.TERMINAL_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
-import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -102,12 +106,12 @@ class TmuxKeyBarCtrlComboE2eTest {
     }
 
     @Test
-    fun keyBarCtrlCInterruptsRunningProcessAndCtrlModifierArms() = runBlocking {
+    fun hotkeysPanelCtrlCInterruptsRunningProcessAndEnterSubmits() = runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
 
-        val hostRowTag = seedDockerHost(key, "Issue458 KeyBar")
+        val hostRowTag = seedDockerHost(key, "Issue784 Hotkeys")
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
         // ===== Attach to the session =====
@@ -124,41 +128,44 @@ class TmuxKeyBarCtrlComboE2eTest {
         waitForTerminalViewAttached()
         waitForVisibleTerminal("prompt-ready") { it.isNotBlank() }
         recordTiming("attach_ms", SystemClock.elapsedRealtime() - attachAt)
-        captureViewport("issue458-01-attached")
+        captureViewport("issue784-01-attached")
 
-        // ===== Raise the soft keyboard so the key bar renders =====
+        // ===== Open the dedicated terminal-hotkeys panel =====
+        // Issue #784: the hotkeys are no longer above the keyboard or in the
+        // composer — they are their own bottom-sheet panel, opened from the
+        // launcher in the (keyboard-down) bottom controls. No soft IME needed.
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()
-        val imeShown = waitForInputMethodVisible(
-            scenario = launchedActivity!!,
-            expected = true,
-            timeoutMs = 30_000,
-        )
-        assertTrue("expected the IME (and thus the key bar) to be visible", imeShown)
-        // The curated default key bar must surface Esc + the common
-        // combos + the Ctrl modifier.
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        // The panel shows EVERY key at once in a tidy grid — Esc / Tab / Enter,
+        // the de-duped Ctrl combos incl. the restored ^B (tmux prefix), and the
+        // clean arrow glyphs. No `…` overflow, no lone Ctrl, no duplicate `/`.
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("^C", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        listOf("Esc", "Ctrl", "^C", "⏎", "^D", "Tab").forEach { label ->
-            assertTrue(
-                "expected the compact key bar to show '$label'",
-                compose.onAllNodesWithText(label, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty(),
-            )
-        }
-        captureViewport("issue458-02-keybar-visible")
-        // Advisory full-device frame so the reviewer sees the actual
-        // compact key bar (the terminal-only viewport capture does not
-        // include the Compose overlay).
-        captureFullDevice("issue458-02b-keybar-fulldevice")
+        listOf("Esc", "Tab", "Enter", "^A", "^B", "^C", "^D", "^E", "^L", "^R", "←", "→")
+            .forEach { label ->
+                assertTrue(
+                    "expected the hotkeys panel to show '$label'",
+                    compose.onAllNodesWithText(label, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty(),
+                )
+            }
+        // No lone Ctrl modifier and no `/` key — the maintainer's complaints.
+        assertTrue(
+            "the hotkeys panel must NOT show a lone Ctrl modifier",
+            compose.onAllNodesWithText("Ctrl", useUnmergedTree = true).fetchSemanticsNodes().isEmpty(),
+        )
+        captureViewport("issue784-02-hotkeys-panel-visible")
+        // Advisory full-device frame so the reviewer sees the actual panel grid
+        // (the terminal-only viewport capture does not include the Compose sheet).
+        captureFullDevice("issue784-02b-hotkeys-panel-fulldevice")
 
         // ===== Start a long-running process in the pane =====
         // A ticking loop is the canonical "is it still running?" process:
@@ -174,10 +181,10 @@ class TmuxKeyBarCtrlComboE2eTest {
             // Several ticks must be present — proof the process is live.
             transcript.split(FLOOD_MARKER).size >= 4
         }
-        captureViewport("issue458-03-process-running")
+        captureViewport("issue784-03-process-running")
         val gridBeforeInterrupt = terminalGridSize()
 
-        // ===== Tap the key bar ^C to interrupt =====
+        // ===== Tap the panel ^C to interrupt =====
         val interruptAt = SystemClock.elapsedRealtime()
         compose.onNodeWithText("^C", useUnmergedTree = true).performClick()
         // After the interrupt, the flood stops and a fresh shell prompt
@@ -187,7 +194,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         waitForFloodToStop()
         recordTiming("ctrl_c_interrupt_to_quiescent_ms", SystemClock.elapsedRealtime() - interruptAt)
         val gridAfterInterrupt = terminalGridSize()
-        captureViewport("issue458-04-after-ctrl-c")
+        captureViewport("issue784-04-after-ctrl-c")
 
         // No reflow: the on-screen grid dimensions are unchanged across the
         // interrupt. `send-keys -H` is a control-channel command, not a
@@ -200,21 +207,20 @@ class TmuxKeyBarCtrlComboE2eTest {
 
         // The shell must be interactive again: type a sentinel command and
         // confirm it echoes (only possible if the loop was interrupted and
-        // the prompt returned). Settle first so the prompt has landed and
-        // re-focus is clean after the key-bar button tap.
+        // the prompt returned). The panel is a Compose sheet over the terminal;
+        // typing goes straight to the pane's input connection, unaffected.
         SystemClock.sleep(750)
         sendCommandThroughTerminalInput("echo $RESUME_MARKER", "post-interrupt-echo")
         waitForVisibleTerminal("resume-echo", timeoutMillis = 20_000) { transcript ->
             transcript.contains(RESUME_MARKER)
         }
-        captureViewport("issue458-05-prompt-resumed")
+        captureViewport("issue784-05-prompt-resumed")
 
-        // ===== Enter key (issue #527): submit a pending line via the bar ====
+        // ===== Enter key (issue #527): submit a pending line via the panel ====
         // Type a command WITHOUT a trailing newline so it sits as a pending,
         // unsubmitted line in the pane — the exact situation the maintainer
-        // hits when the composer fails to submit. Then tap the dedicated `⏎`
-        // key in the compact key bar and confirm the line executes (the
-        // sentinel echoes), all without opening anything beyond the key bar.
+        // hits when the composer fails to submit. Then tap the dedicated
+        // `Enter` key in the hotkeys panel and confirm the line executes.
         SystemClock.sleep(750)
         val enterGridBefore = terminalGridSize()
         typePendingLine("echo $ENTER_MARKER", "enter-pending-line")
@@ -223,10 +229,16 @@ class TmuxKeyBarCtrlComboE2eTest {
         waitForVisibleTerminal("enter-pending-visible", timeoutMillis = 20_000) { transcript ->
             transcript.contains("echo $ENTER_MARKER")
         }
-        captureViewport("issue458-05b-enter-pending")
-        // Tap the dedicated Enter/Return key in the compact row.
+        captureViewport("issue784-05b-enter-pending")
+        // Tap the dedicated Enter/Return key in the panel. Disambiguate from the
+        // keyboard-down Enter chip (`session:enter-chip`) by scoping the match to
+        // a descendant of the hotkeys panel sheet.
         val enterAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText("⏎", useUnmergedTree = true).performClick()
+        compose.onNode(
+            hasText("Enter")
+                .and(hasClickAction())
+                .and(hasAnyAncestor(hasTestTag(TERMINAL_HOTKEYS_PANEL_TAG))),
+        ).performClick()
         waitForVisibleTerminal("enter-executed", timeoutMillis = 20_000) { transcript ->
             // Echo output: the marker now appears as a standalone echoed line
             // (twice overall — once as the typed command, once as output).
@@ -234,7 +246,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         }
         recordTiming("enter_key_submit_to_echo_ms", SystemClock.elapsedRealtime() - enterAt)
         val enterGridAfter = terminalGridSize()
-        captureViewport("issue458-05c-enter-executed")
+        captureViewport("issue784-05c-enter-executed")
         // No reflow: tapping Enter is a `send-keys` control-channel command,
         // never a resize. The on-screen grid is unchanged across the submit.
         assertTrue(
@@ -243,47 +255,10 @@ class TmuxKeyBarCtrlComboE2eTest {
             enterGridBefore == enterGridAfter,
         )
 
-        // ===== Ctrl modifier: arm it and capture the armed state =====
-        // Re-focus is unnecessary here — the key bar is a Compose overlay,
-        // not part of the terminal. Tapping `Ctrl` arms the one-shot
-        // modifier; the bar renders it with the accent treatment.
-        compose.onNodeWithText("Ctrl", useUnmergedTree = true).performClick()
-        // Settle and capture the viewport so the armed `Ctrl` is visible.
-        SystemClock.sleep(300)
-        captureViewport("issue458-06-ctrl-armed")
-        // Advisory full-device frame showing the armed `Ctrl` accent.
-        captureFullDevice("issue458-06b-ctrl-armed-fulldevice")
-        // Fire a chord while armed by tapping a compact-row key. `Esc` has
-        // no raw control byte, so the armed Ctrl routes it through tmux's
-        // `C-Escape` chord named-key (see onKeyBarKey). The one-shot Ctrl
-        // auto-clears after the chord — the crucial UX assertion.
-        compose.onNodeWithText("Esc", useUnmergedTree = true).performClick()
-        SystemClock.sleep(300)
-        captureViewport("issue458-07-ctrl-after-chord")
+        // Advisory full-device frame showing the full panel grid.
+        captureFullDevice("issue784-06-hotkeys-panel-fulldevice")
 
-        // ===== Expander: surface the long tail (^O / ^X + arrows) =====
-        // The compact default omits these to stay one-handed; the `⋯`
-        // expander reveals them, with `×` to collapse back. This proves the
-        // curated-default + expandable-long-tail acceptance criterion.
-        compose.onNodeWithText("⋯", useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("^X", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        listOf("^Z", "^O", "^X", "‹", "›").forEach { label ->
-            assertTrue(
-                "expected the expanded key bar to show '$label'",
-                compose.onAllNodesWithText(label, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty(),
-            )
-        }
-        captureViewport("issue458-08-keybar-expanded")
-        // Advisory full-device frame showing the expanded long-tail row.
-        captureFullDevice("issue458-08b-keybar-expanded-fulldevice")
-
-        writeText("summary.txt", buildSummary(imeShown, gridBeforeInterrupt, gridAfterInterrupt))
+        writeText("summary.txt", buildSummary(true, gridBeforeInterrupt, gridAfterInterrupt))
         writeTimings()
 
         val transcript = visibleTerminalText()
@@ -303,13 +278,13 @@ class TmuxKeyBarCtrlComboE2eTest {
     }
 
     private fun buildSummary(
-        imeShown: Boolean,
+        panelOpened: Boolean,
         gridBefore: GridSize,
         gridAfter: GridSize,
     ): String = buildString {
-        appendLine("issue=458 scenario=keybar-ctrl-combo")
+        appendLine("issue=784 scenario=hotkeys-panel-ctrl-combo")
         appendLine("host=$DEFAULT_HOST port=$DEFAULT_PORT user=$DEFAULT_USER session=$SESSION_NAME")
-        appendLine("ime_visible=$imeShown")
+        appendLine("hotkeys_panel_opened=$panelOpened")
         appendLine("grid_before_interrupt=${gridBefore.columns}x${gridBefore.rows}")
         appendLine("grid_after_interrupt=${gridAfter.columns}x${gridAfter.rows}")
         appendLine("no_reflow=${gridBefore == gridAfter}")
@@ -318,16 +293,13 @@ class TmuxKeyBarCtrlComboE2eTest {
         appendLine("enter_marker=$ENTER_MARKER")
         appendLine("artifacts:")
         listOf(
-            "issue458-01-attached",
-            "issue458-02-keybar-visible",
-            "issue458-03-process-running",
-            "issue458-04-after-ctrl-c",
-            "issue458-05-prompt-resumed",
-            "issue458-05b-enter-pending",
-            "issue458-05c-enter-executed",
-            "issue458-06-ctrl-armed",
-            "issue458-07-ctrl-after-chord",
-            "issue458-08-keybar-expanded",
+            "issue784-01-attached",
+            "issue784-02-hotkeys-panel-visible",
+            "issue784-03-process-running",
+            "issue784-04-after-ctrl-c",
+            "issue784-05-prompt-resumed",
+            "issue784-05b-enter-pending",
+            "issue784-05c-enter-executed",
         ).forEach { appendLine("  $it-viewport.png + $it-visible-terminal.txt") }
     }
 

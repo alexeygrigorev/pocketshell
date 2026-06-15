@@ -279,6 +279,26 @@ JOURNEY_CLASSES=(
   # ONLY the deterministic agents:2222 fixture (no toxiproxy) that `tests.yml`
   # already brings up — no workflow change needed — and does NOT self-skip on CI.
   "$FQCN_PREFIX.PreExistingMultiWindowSeedE2eTest"
+  # ADDED (#783, epic #657 / F-wiring): the project-tree torn-down prune
+  # journey. A window closed ON THE HOST while the user is NOT on the tree
+  # screen (they navigated into the session screen, so FolderListScreen disposed
+  # and called stopPolling()) must still prune the `[wN]` node from the
+  # maintained tree the instant `%window-close` arrives on the warm `-CC`
+  # channel — no manual pull-to-refresh, far inside the 15-min staleness gate.
+  # The #783 reviewer asked for this to be PR-gated: it is the torn-down
+  # (collector-cancelled) lifecycle edge that the bound-only JVM unit test
+  # (FolderListViewModelWindowCloseTest) structurally cannot exercise — the
+  # exact #657 A3 anti-pattern (event emitted while the subscriber is still
+  # alive). It drives the PRODUCTION FolderListViewModel + gateway + a REAL
+  # `tmux -CC` control client against the deterministic `agents` host (DEFAULT_HOST
+  # / DEFAULT_PORT -> 10.0.2.2:2222) — the SAME fixture every class above uses,
+  # no toxiproxy, no new Docker service/port — and does NOT self-skip on CI. RED
+  # on base (the dispose-time stopPolling cancelled the %window-close
+  # subscription so the event dropped on a dead collector); GREEN after the fix
+  # ties the subscription to the warm-lease lifetime, not screen composition. It
+  # lives under com.pocketshell.app.projects, not the proof prefix, so it carries
+  # its fully-qualified name directly.
+  "com.pocketshell.app.projects.FolderListWindowCloseAfterStopPollingDockerTest"
 )
 
 echo "=========================================================="

@@ -770,6 +770,77 @@ A reviewer who approves a layout/occlusion fix without an emulator screenshot of
 the exact reported state (keyboard up where relevant) has not done the review.
 When in doubt, return `CHANGES REQUESTED` and ask for the missing-state proof.
 
+### Regression-proof validity rules (mandatory — #657)
+
+The maintainer's #1 process complaint is issues getting reviewer-APPROVED and
+closed while the real on-device thing is still broken, because the test
+exercises a **narrow proxy** of the bug rather than the user's actual on-device
+state, and passes vacuously. The #657 audit catalogued five recurring
+anti-patterns; this section is the rule that kills them, and
+`scripts/check-test-validity.sh` is its automated backstop (run in the Unit job
+of `.github/workflows/tests.yml` and as a fast first check by reviewers — it is
+the machine sibling of this rule, not a replacement for it).
+
+The corrective TEMPLATE already exists in the tree:
+`app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerImeSquishProofTest.kt`
+(#780). It dispatches a **synthetic `ime()` inset**, HARD-asserts the inset
+applied (no `assumeTrue` skip), and checks `boundsInRoot` **containment** rather
+than mere "displayed". Copy that shape for any new keyboard-up / occlusion /
+layout proof. The reusable containment assertions live in
+`app/src/androidTest/java/com/pocketshell/app/proof/signals/ComposeSignals.kt`:
+`assertNodeFullyWithinRoot(tag)` and `assertNodeFullyAboveImeOrKeyboard(tag, keyboardTopPx)`.
+
+**F2 — Test the REAL reported state (no proxy, no stand-in).** A regression proof
+for a reported visual / occlusion / layout / lifecycle bug MUST:
+
+- Compose the **production screen/component** in the maintainer's reported state
+  — real scaffold, the real `ModalBottomSheet` / `PromptComposerSheet` window,
+  the breadcrumb crumb present where it competes for width, and the soft keyboard
+  up (or its synthetic-inset equivalent, the #780 model). Rendering a convenient
+  state instead of the reported one is the #641-class failure: the proof passes
+  while the user-visible symptom survives.
+- NOT substitute a `*StandIn` / `*Proxy` for the view under test when the heavy
+  view's cost is the symptom (e.g. a `FrameLayout` stand-in for the Termux
+  `TerminalView` cannot reproduce the real attach-time freeze). If a stand-in is
+  genuinely irrelevant to the symptom, the test MUST say so explicitly in a
+  comment, and the reviewer must agree.
+- Assert **containment**, not just presence: use `assertNodeFullyWithinRoot` /
+  `assertNodeFullyAboveImeOrKeyboard`, not a bare `assertIsDisplayed()`, wherever
+  "the user can actually see and tap it" is the property under test.
+  `assertIsDisplayed()` is satisfied by layout participation, not viewport
+  containment — a control pushed off the right edge or under the keyboard still
+  reports "displayed".
+- For event-driven / lifecycle flows, cover BOTH the subscriber-alive path AND
+  the subscriber-torn-down path. Emitting an event while the collector is still
+  bound never exercises the navigated-away / VM-cleared edge that actually
+  breaks on-device (the #783 torn-down gap).
+
+**F3 — Per-PR test-validity checklist.** For any layout / lifecycle / occlusion
+/ keyboard fix, the reviewer confirms ALL of the following before APPROVED (and
+the implementer self-checks them before requesting review):
+
+- [ ] The proof asserts viewport **containment** (`assertNodeFullyWithinRoot` /
+  `assertNodeFullyAboveImeOrKeyboard`), not a bare `assertIsDisplayed()`, for the
+  control the maintainer said was hidden/clipped/off-screen.
+- [ ] The proof reproduces the **reported state** (real screen/sheet window,
+  crumb present, keyboard up where relevant), not a convenient standalone render.
+- [ ] No `*StandIn` / `*Proxy` substitutes for the view whose cost/geometry is
+  the symptom (or the test explicitly justifies why the stand-in is sufficient).
+- [ ] For event-driven flows, BOTH the subscriber-alive and subscriber-torn-down
+  paths are covered.
+- [ ] **No `assumeTrue(...)` / `Assume.assumeFalse(isRunningOnCi())` on the
+  load-bearing assertion.** If the environment cannot produce the state (e.g.
+  the CI swiftshader AVD won't raise the real soft IME), inject it
+  **synthetically** (the #780 model) and HARD-fail otherwise — a self-skip means
+  only the dev-box AVD ever asserts, so CI is green with zero protection.
+- [ ] `scripts/check-test-validity.sh` reports no NEW unjustified A5 (IME-skip)
+  smell for the touched tests.
+
+Isolated component tests and Roborazzi renders remain the fast first check only;
+they are NOT sufficient to close an occlusion / layout bug (see the mandatory
+block above). The full-device emulator screenshot of the exact reported state is
+still the acceptance.
+
 ## Fast Design Renders (Roborazzi)
 
 For UI/design work, the JVM render harness (#555) is the **fast first visual

@@ -39,6 +39,24 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # Issue #657 (F4): test-validity grep-guard. Flags the highest-signal
+      # test anti-patterns the #657 audit catalogued — chiefly an IME/keyboard/
+      # geometry assertion gated behind an `assumeTrue(...)` self-skip, which on
+      # the CI swiftshader AVD silently does NOT run (the real soft IME often
+      # never raises), so the test passes vacuously and an on-device regression
+      # ships green. The guard hard-fails ONLY on a NEW unjustified occurrence
+      # (a small baseline allowlists the catalogued-but-not-yet-rewritten cases,
+      # and an inline `// JUSTIFIED:` comment opts a legitimate non-IME guard
+      # out), so it adds protection without reddening CI for tests it is not its
+      # job to fix. Cheap (< 1 s grep), runs BEFORE the Gradle test step. This is
+      # the machine backstop for the process.md "Regression-proof validity rules"
+      # (F2/F3) so the rule does not rely solely on reviewer memory. Additive —
+      # it does not touch the existing Unit/Python/Integration/emulator jobs.
+      - name: Test-validity guard (issue #657)
+        run: |
+          chmod +x scripts/check-test-validity.sh
+          scripts/check-test-validity.sh
+
       # Issue #760: the unit job occasionally failed with ALL visible tests
       # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
       # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out

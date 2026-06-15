@@ -481,17 +481,9 @@ public class TmuxSessionViewModel @Inject constructor(
     /**
      * EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER suppression predicate the
      * [ConnectionEffectDriver] consults before submitting a `TransportDropped`. True
-     * only on the NEW path while the app is BACKGROUNDED. Implemented as a method (not
-     * an inline field read) so the field-initialization order is irrelevant: the driver
-     * is constructed and started BEFORE [connectionPathIsNew]/[appActive] are
-     * initialized, and a control-channel drop can never arrive before a connection
-     * exists, so a null-safe read defaulting to "do not suppress" is correct for the
-     * pre-init window.
+     * while the app is BACKGROUNDED.
      */
     private fun shouldSuppressTransportDropsForSingleGraceOwner(): Boolean {
-        @Suppress("UNNECESSARY_SAFE_CALL")
-        val isNew = connectionPathIsNew?.value ?: return false
-        if (!isNew) return false
         // The app is backgrounded at the PROCESS level (ProcessLifecycle below STARTED).
         // We deliberately do NOT use [appActive] here: within the App-level background
         // grace window the `-CC` connection is held and `onAppBackgrounded()` (which
@@ -547,12 +539,7 @@ public class TmuxSessionViewModel @Inject constructor(
      *     EXISTING seed-landing point ([seedPaneFromCaptureOnce]).
      *
      * The machine itself owns NO transport / jobs / leases — only the projection.
-     * The view consumes [revealState] ONLY when the connection-path toggle is
-     * [com.pocketshell.app.settings.ConnectionPath.New]; under
-     * [com.pocketshell.app.settings.ConnectionPath.Old] the screen renders the
-     * previous inline `switchHidesTerminal` path verbatim (single-owner per
-     * branch — no double-drive: the inline `switchHidesTerminal` flow is simply
-     * not read on the NEW branch).
+     * The view renders strictly from [revealState] (the sole reveal source).
      */
     private val revealStateMachine: RevealStateMachine = RevealStateMachine()
 
@@ -564,29 +551,6 @@ public class TmuxSessionViewModel @Inject constructor(
      * under the NEW connection path. Mirrors [RevealStateMachine.state].
      */
     public val revealState: StateFlow<RevealState> = _revealState.asStateFlow()
-
-    /**
-     * EPIC #687 P1: true when the user-facing connection-path toggle selects the
-     * NEW [ConnectionController]/[RevealStateMachine] reveal (the default). The
-     * session screen keys its reveal source off this — NEW renders [revealState],
-     * OLD renders the previous inline `switchHidesTerminal` path. Persisted in
-     * [com.pocketshell.app.settings.SettingsRepository]; when the repository is
-     * absent (unit-test constructors) it defaults to NEW so the new path is the
-     * tested default.
-     */
-    public val connectionPathIsNew: StateFlow<Boolean> =
-        settingsRepository?.settings?.let { settings ->
-            MutableStateFlow(
-                settings.value.connectionPath == com.pocketshell.app.settings.ConnectionPath.New,
-            ).also { flow ->
-                viewModelScope.launch {
-                    settings.collect { snapshot ->
-                        flow.value =
-                            snapshot.connectionPath == com.pocketshell.app.settings.ConnectionPath.New
-                    }
-                }
-            }
-        } ?: MutableStateFlow(true)
 
     /**
      * EPIC #687 P1: pump the controller's [ConnectionController.state] into the
@@ -2090,7 +2054,7 @@ public class TmuxSessionViewModel @Inject constructor(
             foregroundReattachReseedForTest?.invoke() ?: launchForegroundReattachReseed()
             return
         }
-        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER under the NEW path. The App-level
+        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. The App-level
         // background-grace window (#450) is the SOLE grace authority — when it reports
         // `resumedWithinGrace=true`, a within-grace foreground must stay CALM (no
         // Reconnecting/Disconnected/Connecting/Attaching band or overlay) EVEN WHEN the
@@ -2102,10 +2066,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // Instead we SILENTLY heal the dropped channel within grace: re-open a fresh
         // `-CC` control client over a freshly-acquired lease and reseed, with NO band
         // and NO overlay. The inline passive-disconnect grace clock that fired while
-        // backgrounded is disabled under NEW (see [handlePassiveClientDisconnect]), so
+        // backgrounded is disabled (see [handlePassiveClientDisconnect]), so
         // there is no competing second clock — this within-grace foreground heal is the
-        // single owner of the within-grace recovery decision on the NEW branch.
-        if (resumedWithinGrace && connectionPathIsNew.value) {
+        // single owner of the within-grace recovery decision.
+        if (resumedWithinGrace) {
             foregroundHealWithinGraceForTest?.invoke() ?: launchForegroundHealWithinGrace()
             return
         }
@@ -2199,31 +2163,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 client = client,
             )
-            if (connectionPathIsNew.value) {
-                // EPIC #687 P3 (J2/#553): id-tagged FULL-VIEWPORT reseed. A
-                // within-grace reattach is an authoritative reseed point — tmux's grid
-                // holds the FULL prior content, but the warm `-CC` client never re-emits
-                // an idle pane's existing frame, so the emulator can be left
-                // PARTIALLY blank (e.g. only a per-second timer line repainted while the
-                // static viewport above it was wiped by a reflow during the blip). The
-                // OLD blank-gated [reseedBlankVisiblePanes] SKIPS such a pane (it is not
-                // `transcriptText.isBlank()` once one live line is present), leaving the
-                // maintainer's "only a timer, rest blank" pane un-healed (#553). Under
-                // NEW we restore the FULL viewport keyed to the TARGET session id,
-                // UNCONDITIONALLY (not gated on full-blank) — so the static content above
-                // the live line is repainted from a fresh `capture-pane`. The reseed is
-                // dropped if the runtime/target was superseded mid-flight (the guard),
-                // so a late seed for a switched-away session can never paint.
-                reseedActivePaneForReattach(guard)
-            } else {
-                // OLD path verbatim: tmux `-CC` does not re-emit an idle pane's existing
-                // content, so a pane that came back FULLY blank during the brief
-                // background heals here over the SAME live client (no handshake). The
-                // per-pane seed success also fires the controller's SeedLanded feedback
-                // (idempotent once already Live). The partial-blank skip remains on OLD
-                // (single-owner per branch — no double-drive).
-                reseedBlankVisiblePanes(guard)
-            }
+            // EPIC #687 P3 (J2/#553): id-tagged FULL-VIEWPORT reseed. A
+            // within-grace reattach is an authoritative reseed point — tmux's grid
+            // holds the FULL prior content, but the warm `-CC` client never re-emits
+            // an idle pane's existing frame, so the emulator can be left
+            // PARTIALLY blank (e.g. only a per-second timer line repainted while the
+            // static viewport above it was wiped by a reflow during the blip). We
+            // restore the FULL viewport keyed to the TARGET session id,
+            // UNCONDITIONALLY (not gated on full-blank) — so the static content above
+            // the live line is repainted from a fresh `capture-pane`. The reseed is
+            // dropped if the runtime/target was superseded mid-flight (the guard),
+            // so a late seed for a switched-away session can never paint.
+            reseedActivePaneForReattach(guard)
         }
     }
 
@@ -5169,29 +5120,28 @@ public class TmuxSessionViewModel @Inject constructor(
         val current = inlineConnectionStatus as? ConnectionStatus.Connected ?: return
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(current, disconnectEvent)
-        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER under the NEW path. A passive
+        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. A passive
         // `-CC` drop that arrives while the app is BACKGROUNDED is, by construction,
         // inside the App-level background-grace window (#450) — that window is the SOLE
-        // grace authority on the NEW branch. Running the inline passive grace clock here
+        // grace authority. Running the inline passive grace clock here
         // (the 60s silent-reattach loop OR pause→Unreachable) would be a SECOND,
         // competing grace clock — the blueprint's #1 risk and the literal cause of the
         // #635 spurious-band regression: it pauses the auto-reconnect + sets Unreachable,
         // which then makes the within-grace foreground gate decline and fall into the
-        // reconnect ladder (the scary band). So under NEW we DISABLE the inline grace
+        // reconnect ladder (the scary band). So we DISABLE the inline grace
         // path while backgrounded entirely: just record the drop and DEFER all recovery
         // to the single grace owner — the within-grace foreground heal
         // ([launchForegroundHealWithinGrace]) on the next foreground, which silently
         // re-opens the channel and reseeds with no band. (Beyond-grace teardown already
         // ran the clean detach; that foreground is `resumedWithinGrace=false` and takes
-        // the normal reconnect path, unaffected.) The OLD path keeps the verbatim inline
-        // grace behavior below — single-owner per branch, no double-drive.
+        // the normal reconnect path, unaffected.)
         //
         // NOTE: we gate on the PROCESS-backgrounded signal, NOT `appActive`: within the
         // App-level grace window the connection is held and `onAppBackgrounded()` (which
         // flips `appActive`) is never called, so `appActive` stays true across a
         // within-grace background. [isProcessBackgroundedForGraceOwner] flips at `ON_STOP`
         // regardless of grace, correctly identifying the within-grace background.
-        if (connectionPathIsNew.value && isProcessBackgroundedForGraceOwner()) {
+        if (isProcessBackgroundedForGraceOwner()) {
             DiagnosticEvents.record(
                 "connection",
                 "passive_disconnect_deferred_to_grace_owner",

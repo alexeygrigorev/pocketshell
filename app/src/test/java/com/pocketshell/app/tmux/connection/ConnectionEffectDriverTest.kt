@@ -388,7 +388,7 @@ class ConnectionEffectDriverTest {
     // --- EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER drop-suppression gate ----
     //
     // `suppressTransportDrops` is the no-double-drive invariant: when it returns
-    // true (VM supplies `{ connectionPathIsNew && !appActive }`), a control-channel
+    // true (VM supplies a process-backgrounded predicate), a control-channel
     // drop is NOT submitted as `TransportDropped` — the App-level background-grace
     // window is the SOLE grace authority, so the driver must NOT start a second
     // competing grace clock that walks the controller Live → … → Unreachable while

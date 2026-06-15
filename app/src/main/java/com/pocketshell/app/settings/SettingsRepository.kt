@@ -208,20 +208,6 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(diagnosticsRecordingEnabled = enabled)
     }
 
-    /**
-     * EPIC #687: persist which connection manager drives the in-session reveal
-     * path. [ConnectionPath.New] (default) uses the new `ConnectionController` /
-     * `RevealStateMachine`; [ConnectionPath.Old] preserves the previous inline
-     * `switchHidesTerminal` reveal as the maintainer's on-device safety fallback.
-     * Persisted across launches so a fallback survives a restart. Removed with the
-     * old path in #766.
-     */
-    fun setConnectionPath(path: ConnectionPath) {
-        if (_settings.value.connectionPath == path) return
-        prefs.edit().putString(KEY_CONNECTION_PATH, path.name).apply()
-        _settings.value = _settings.value.copy(connectionPath = path)
-    }
-
     private fun readSnapshot(): AppSettings {
         val font = prefs.safeFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
@@ -292,12 +278,6 @@ class SettingsRepository @Inject constructor(
             KEY_DIAGNOSTICS_RECORDING_ENABLED,
             AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
         )
-        val connectionPathName = prefs.safeString(
-            KEY_CONNECTION_PATH,
-            AppSettings.DEFAULT_CONNECTION_PATH.name,
-        ) ?: AppSettings.DEFAULT_CONNECTION_PATH.name
-        val connectionPath = runCatching { ConnectionPath.valueOf(connectionPathName) }
-            .getOrDefault(AppSettings.DEFAULT_CONNECTION_PATH)
         return AppSettings(
             terminalFontSizeSp = font,
             conversationFontSizeSp = conversationFont,
@@ -313,7 +293,6 @@ class SettingsRepository @Inject constructor(
             agentSubmitEnterDelayMs = agentSubmitEnterDelayMs,
             backgroundGraceMillis = backgroundGraceMillis,
             diagnosticsRecordingEnabled = diagnosticsRecordingEnabled,
-            connectionPath = connectionPath,
         )
     }
 
@@ -416,6 +395,5 @@ class SettingsRepository @Inject constructor(
         const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
         const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
         const val KEY_DIAGNOSTICS_RECORDING_ENABLED = "diagnostics_recording_enabled"
-        const val KEY_CONNECTION_PATH = "connection_path"
     }
 }

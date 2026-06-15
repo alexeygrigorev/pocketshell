@@ -67,32 +67,6 @@ class SettingsRepositoryTest {
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
         assertEquals(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS, snap.backgroundGraceMillis)
         assertEquals(AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED, snap.diagnosticsRecordingEnabled)
-        // EPIC #687: fresh installs default to the NEW connection path (the
-        // wrong-session-on-switch fix); OLD is the opt-in safety fallback.
-        assertEquals(AppSettings.DEFAULT_CONNECTION_PATH, snap.connectionPath)
-        assertEquals(ConnectionPath.New, AppSettings.DEFAULT_CONNECTION_PATH)
-    }
-
-    @Test
-    fun `setConnectionPath persists and round-trips`() {
-        val repo = SettingsRepository(context)
-        assertEquals(ConnectionPath.New, repo.settings.value.connectionPath)
-        repo.setConnectionPath(ConnectionPath.Old)
-        assertEquals(ConnectionPath.Old, repo.settings.value.connectionPath)
-        // Survives a fresh repository (persisted across launches).
-        assertEquals(ConnectionPath.Old, SettingsRepository(context).settings.value.connectionPath)
-        repo.setConnectionPath(ConnectionPath.New)
-        assertEquals(ConnectionPath.New, SettingsRepository(context).settings.value.connectionPath)
-    }
-
-    @Test
-    fun `connection path wrong-typed prefs blob falls back to default New`() {
-        context.getSharedPreferences("app_settings", android.content.Context.MODE_PRIVATE)
-            .edit()
-            .putInt("connection_path", 7)
-            .commit()
-        val repo = SettingsRepository(context)
-        assertEquals(ConnectionPath.New, repo.settings.value.connectionPath)
     }
 
     @Test

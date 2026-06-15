@@ -360,21 +360,9 @@ public fun TmuxSessionScreen(
     // Issue #626: unified pane list for the cross-session pager.
     val unifiedPanes by viewModel.unifiedPanes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
-    // Issue #661: while a cross-session switch to a not-yet-cached target is in
-    // flight, hide the terminal surface entirely (compact "Attaching" loading
-    // state) so the leaving session's frame is NEVER painted — not even one
-    // frame. Revealed only once the new session's panes are seeded (the VM
-    // flips this false in the same mutation that flips status to Connected).
-    val switchHidesTerminal by viewModel.switchHidesTerminal.collectAsState()
-    // EPIC #687 P1 (#686/#658): screen keyed to the TARGET session id. Under the
-    // NEW connection path the rendered screen state is a pure function of the
-    // target session id (`RevealStateMachine`), so a late/stale frame from the
-    // previous session can NEVER paint. The user-facing connection-path toggle
-    // (Settings, default NEW) selects this; under OLD the screen renders EXACTLY
-    // the previous inline `switchHidesTerminal` path (the maintainer's on-device
-    // safety fallback). Single-owner per branch — no double-drive: under NEW the
-    // inline `switchHidesTerminal` flow is simply NOT read for the reveal gate.
-    val connectionPathIsNew by viewModel.connectionPathIsNew.collectAsState()
+    // EPIC #687 P1 (#686/#658): the screen is keyed to the TARGET session id —
+    // the rendered screen state is a pure function of that id (`RevealStateMachine`),
+    // so a late/stale frame from the previous session can NEVER paint.
     val revealState by viewModel.revealState.collectAsState()
     // The id the controller / reveal machine key on for THIS screen's target —
     // mints the SAME SessionId encoding the VM uses (`shadowSessionId` =
@@ -382,16 +370,11 @@ public fun TmuxSessionScreen(
     val targetSessionId = remember(hostId, sessionName) {
         SessionId("$hostId/$sessionName")
     }
-    // Under NEW: hold the terminal (loading placeholder) until the reveal machine
-    // confirms RevealState.Live FOR THIS target — never paint the previous
-    // session's frame. Under OLD: defer to the inline switchHidesTerminal flag.
-    val revealHoldsTerminal = connectionPathIsNew &&
+    // Hold the terminal (loading placeholder) until the reveal machine confirms
+    // RevealState.Live FOR THIS target — never paint the previous session's frame.
+    val revealHoldsTerminal =
         !(revealState is RevealState.Live && revealState.targetIdOrNull() == targetSessionId)
-    val effectiveHidesTerminal = if (connectionPathIsNew) {
-        revealHoldsTerminal
-    } else {
-        switchHidesTerminal
-    }
+    val effectiveHidesTerminal = revealHoldsTerminal
     // Issue #487: active-forwarding state for the host this session belongs
     // to. `remember(hostId)` re-subscribes if the screen is reused for a
     // different host. Drives the in-session forwarding chip in the chrome.
@@ -1473,18 +1456,15 @@ public fun TmuxSessionScreen(
                         val pane = unifiedPanes[pageIndex]
                         // Issue #626: compute session boundary per-page.
                         val paneSession = viewModel.sessionNameForUnifiedPane(pane)
-                        // EPIC #687 P1 (#686/#658): under the NEW connection path the
-                        // rendered screen is keyed STRICTLY to the target session id —
-                        // a pane belonging to ANY non-target session must never paint
-                        // its terminal surface OR its `SessionBoundaryDivider` (the
-                        // stray mid-pane label bearing the leaving session's name was
-                        // the maintainer's wrong-session-on-switch symptom). Render the
-                        // loading placeholder for a non-target pane instead, so a late
-                        // frame from the previous session can never bleed into the shown
-                        // pane. Under OLD this guard is inert (the inline #626 path is
-                        // preserved verbatim).
-                        val paneIsForTarget = !connectionPathIsNew ||
-                            paneSession == null ||
+                        // EPIC #687 P1 (#686/#658): the rendered screen is keyed
+                        // STRICTLY to the target session id — a pane belonging to ANY
+                        // non-target session must never paint its terminal surface OR
+                        // its `SessionBoundaryDivider` (the stray mid-pane label bearing
+                        // the leaving session's name was the maintainer's
+                        // wrong-session-on-switch symptom). Render the loading
+                        // placeholder for a non-target pane instead, so a late frame
+                        // from the previous session can never bleed into the shown pane.
+                        val paneIsForTarget = paneSession == null ||
                             paneSession == sessionName
                         if (!paneIsForTarget) {
                             SwitchingLoadingPlaceholder()

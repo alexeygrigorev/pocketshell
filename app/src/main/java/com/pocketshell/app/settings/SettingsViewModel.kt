@@ -226,15 +226,6 @@ class SettingsViewModel @Inject constructor(
     fun setBackgroundGraceMillis(millis: Long) =
         repository.setBackgroundGraceMillis(millis)
 
-    /**
-     * EPIC #687: persist which connection manager drives the in-session
-     * open/switch/reveal path. [ConnectionPath.New] (default) uses the new
-     * `ConnectionController` / `RevealStateMachine`; [ConnectionPath.Old] is the
-     * maintainer's on-device safety fallback to the previous inline reveal.
-     */
-    fun setConnectionPath(path: ConnectionPath) =
-        repository.setConnectionPath(path)
-
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) =
         repository.setDiagnosticsRecordingEnabled(enabled)
 

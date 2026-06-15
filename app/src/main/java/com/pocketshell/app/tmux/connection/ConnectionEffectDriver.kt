@@ -128,17 +128,17 @@ class ConnectionEffectDriver(
     private val onControllerTransition: () -> Unit = {},
     // EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER gate. When this returns true, the
     // driver SUPPRESSES the `TransportDropped` submission for a control-channel drop —
-    // i.e. it does NOT walk the controller down the reconnect ladder. The VM supplies
-    // `{ connectionPathIsNew && !appActive }`: under the NEW path a `-CC` drop that
-    // arrives while the app is BACKGROUNDED is, by construction, inside the App-level
-    // background-grace window (#450), which is the SOLE grace authority. Acting on it
-    // here would be a SECOND, competing grace clock that collapses the controller to
-    // Unreachable while backgrounded — the literal cause of the #635 spurious band on
-    // the next within-grace foreground. Suppressing it leaves recovery entirely to the
-    // single grace owner (the within-grace foreground heal). Default `{ false }` keeps
-    // the prior always-submit behavior for the observe-only test harness and the OLD
-    // path. The lease `Up`/`TransportLive` feed is NEVER suppressed (a healthy
-    // re-`Connected` must always promote the controller).
+    // i.e. it does NOT walk the controller down the reconnect ladder. The VM supplies a
+    // process-backgrounded predicate: a `-CC` drop that arrives while the app is
+    // BACKGROUNDED is, by construction, inside the App-level background-grace window
+    // (#450), which is the SOLE grace authority. Acting on it here would be a SECOND,
+    // competing grace clock that collapses the controller to Unreachable while
+    // backgrounded — the literal cause of the #635 spurious band on the next
+    // within-grace foreground. Suppressing it leaves recovery entirely to the single
+    // grace owner (the within-grace foreground heal). Default `{ false }` keeps the
+    // always-submit behavior for the observe-only test harness. The lease
+    // `Up`/`TransportLive` feed is NEVER suppressed (a healthy re-`Connected` must
+    // always promote the controller).
     private val suppressTransportDrops: () -> Boolean = { false },
     private val sink: (String) -> Unit = { line -> Log.i(TAG, line) },
 ) {

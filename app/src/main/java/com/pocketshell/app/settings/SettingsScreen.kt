@@ -262,12 +262,6 @@ fun SettingsScreen(
                 )
             }
             item {
-                ConnectionSection(
-                    connectionPath = settings.connectionPath,
-                    onConnectionPathChange = viewModel::setConnectionPath,
-                )
-            }
-            item {
                 DiagnosticsSection(
                     recordingEnabled = settings.diagnosticsRecordingEnabled,
                     shareState = diagnosticsShareState,
@@ -1666,55 +1660,6 @@ private fun UsageSection(
     }
 }
 
-/**
- * Connection section — EPIC #687. Surfaces the user-facing connection-path
- * selector: NEW (the new `ConnectionController` / `RevealStateMachine` reveal, the
- * default + the wrong-session-on-switch fix) vs OLD (the previous inline reveal,
- * the maintainer's on-device SAFETY FALLBACK while dogfooding the rewrite). This
- * is a deliberate, maintainer-authorized TEMPORARY toggle — the sanctioned
- * exception to D22 — removed together with the old path in #766.
- */
-@Composable
-private fun ConnectionSection(
-    connectionPath: ConnectionPath,
-    onConnectionPathChange: (ConnectionPath) -> Unit,
-) {
-    Column {
-        SectionLabel("Connection")
-        SectionCard {
-            Text(
-                text = "Connection manager",
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = "Which engine drives connecting and switching sessions. " +
-                    "Keep New unless it breaks — switch to Old to fall back without " +
-                    "reinstalling.",
-                color = PocketShellColors.TextSecondary,
-                style = MaterialTheme.typography.labelSmall,
-            )
-            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
-            DefaultHostOptionRow(
-                title = "New (recommended)",
-                subtitle = "New connection manager — fixes wrong-session-on-switch",
-                selected = connectionPath == ConnectionPath.New,
-                onClick = { onConnectionPathChange(ConnectionPath.New) },
-                testTag = CONNECTION_PATH_NEW_TAG,
-            )
-            DefaultHostOptionRow(
-                title = "Old (fallback)",
-                subtitle = "Previous connection manager — use only if New breaks",
-                selected = connectionPath == ConnectionPath.Old,
-                onClick = { onConnectionPathChange(ConnectionPath.Old) },
-                testTag = CONNECTION_PATH_OLD_TAG,
-            )
-        }
-    }
-}
-
 @Composable
 private fun DiagnosticsSection(
     recordingEnabled: Boolean,
@@ -2070,8 +2015,6 @@ internal const val AGENT_SUBMIT_DELAY_VALUE_TAG = "settings:terminal:agent-submi
 internal const val BACKGROUND_GRACE_OPTION_PREFIX = "settings:terminal:background-grace"
 internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"
 internal const val DEFAULT_HOST_EMPTY_TAG = "settings:startup:default-host:empty"
-internal const val CONNECTION_PATH_NEW_TAG = "settings:connection:path-new"
-internal const val CONNECTION_PATH_OLD_TAG = "settings:connection:path-old"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
 internal const val DIAGNOSTICS_RECORDING_SWITCH_TAG = "settings:diagnostics:recording-switch"
 internal const val DIAGNOSTICS_RECORDING_INDICATOR_TAG = "settings:diagnostics:recording-indicator"

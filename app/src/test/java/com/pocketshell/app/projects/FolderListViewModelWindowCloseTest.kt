@@ -122,6 +122,9 @@ class FolderListViewModelWindowCloseTest {
                 windowIds(after, "solo"),
             )
         } finally {
+            // #783: stopPolling cancels the periodic reconcile loop so runTest's
+            // auto-advance reaches idle (the loop would otherwise reschedule the
+            // ~5-min heartbeat forever).
             vm.stopPolling()
         }
     }
@@ -152,6 +155,9 @@ class FolderListViewModelWindowCloseTest {
             assertEquals(1, gateway.callCount)
             assertEquals(listOf("@0", "@1"), windowIds(after, "multi"))
         } finally {
+            // #783: stopPolling cancels the periodic reconcile loop so runTest's
+            // auto-advance reaches idle (the loop would otherwise reschedule the
+            // ~5-min heartbeat forever).
             vm.stopPolling()
         }
     }
@@ -187,6 +193,171 @@ class FolderListViewModelWindowCloseTest {
                 windowIds(after, "multi"),
             )
         } finally {
+            // #783: stopPolling cancels the periodic reconcile loop so runTest's
+            // auto-advance reaches idle (the loop would otherwise reschedule the
+            // ~5-min heartbeat forever).
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun windowClosedWhileOnSessionScreenStillPrunesTreeOnReturn() = runTest {
+        // ISSUE #783 regression journey (FAILS on base): the user navigates from
+        // the tree into the session screen, which disposes `FolderListScreen` and
+        // calls `stopPolling()`. On base that cancelled the `%window-close`
+        // subscription, so a window closed ON THE HOST while away landed on a
+        // dead collector and was dropped — the stale `[wN]` node lingered up to
+        // ~15 min. The fix ties the subscription to the bound-host warm-lease
+        // lifetime, so the prune still lands while the tree screen is disposed.
+        val gateway = SteppingGateway(
+            listOf(
+                FolderListResult.Sessions(
+                    rows = listOf(
+                        row("multi", windows = listOf(win(0, "@0"), win(1, "@1"), win(2, "@2"))),
+                    ),
+                ),
+            ),
+        )
+        val client = FakeTmuxClient()
+        val registry = registryWith(client)
+        val vm = newViewModel(gateway, registry, processStarted = true)
+
+        try {
+            bind(vm)
+            runCurrent()
+            assertEquals(1, gateway.callCount)
+            assertEquals(
+                listOf("@0", "@1", "@2"),
+                windowIds(vm.state.value as FolderListUiState.Ready, "multi"),
+            )
+
+            // User taps a session row → navigates to the session screen →
+            // `FolderListScreen` disposes → `stopPolling()`.
+            vm.stopPolling()
+            runCurrent()
+
+            // While the tree screen is torn down, a window is closed on the host.
+            client.emittedEvents.emit(ControlEvent.WindowClose(sessionId = "\$0", windowId = "@1"))
+            runCurrent()
+
+            // User returns to the tree (same host re-bind). NO manual pull.
+            bind(vm)
+            runCurrent()
+
+            val after = vm.state.value as FolderListUiState.Ready
+            assertEquals(
+                "the closed window must be GONE on return without a manual refresh (#783)",
+                listOf("@0", "@2"),
+                windowIds(after, "multi"),
+            )
+            assertEquals(
+                "the prune is a DIRECT by-id mutation — no gateway re-probe was needed",
+                1,
+                gateway.callCount,
+            )
+        } finally {
+            // #783: stopPolling cancels the periodic reconcile loop so runTest's
+            // auto-advance reaches idle (the loop would otherwise reschedule the
+            // ~5-min heartbeat forever).
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun sameHostReturnKeepsTheSubscriptionLiveAcrossStopPolling() = runTest {
+        // #783: a stopPolling()→bind() round-trip (leave tree, come back) must
+        // NOT drop a window-close that arrives AFTER the return — the live
+        // subscription is kept across the screen dispose, so the very next event
+        // still prunes.
+        val gateway = SteppingGateway(
+            listOf(
+                FolderListResult.Sessions(
+                    rows = listOf(row("multi", windows = listOf(win(0, "@0"), win(1, "@1")))),
+                ),
+            ),
+        )
+        val client = FakeTmuxClient()
+        val registry = registryWith(client)
+        val vm = newViewModel(gateway, registry, processStarted = true)
+
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+            bind(vm)
+            runCurrent()
+
+            client.emittedEvents.emit(ControlEvent.WindowClose(sessionId = "\$0", windowId = "@1"))
+            runCurrent()
+
+            assertEquals(
+                "a window close after a same-host return is still pruned (#783)",
+                listOf("@0"),
+                windowIds(vm.state.value as FolderListUiState.Ready, "multi"),
+            )
+            assertEquals(1, gateway.callCount)
+        } finally {
+            // #783: stopPolling cancels the periodic reconcile loop so runTest's
+            // auto-advance reaches idle (the loop would otherwise reschedule the
+            // ~5-min heartbeat forever).
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun periodicReconcileFiresWhileBoundAndForegrounded() = runTest {
+        // #783: the ~5-min foreground heartbeat reconciles host-side changes that
+        // emitted no control event. After PERIODIC_RECONCILE_MS the gateway is
+        // re-probed and the dropped session disappears.
+        val gateway = SteppingGateway(
+            listOf(
+                FolderListResult.Sessions(
+                    rows = listOf(
+                        row("multi", windows = listOf(win(0, "@0"))),
+                        row("solo", windows = listOf(win(0, "@9"))),
+                    ),
+                ),
+                // Second probe (the periodic tick): `solo` was killed on the host.
+                FolderListResult.Sessions(
+                    rows = listOf(row("multi", windows = listOf(win(0, "@0")))),
+                ),
+            ),
+        )
+        val client = FakeTmuxClient()
+        val registry = registryWith(client)
+        val vm = newViewModel(gateway, registry, processStarted = true)
+        // #783: the heartbeat is OFF by default for directly-constructed VMs;
+        // this test specifically exercises it, so enable it before bind.
+        vm.setPeriodicReconcileEnabledForTest(true)
+
+        try {
+            bind(vm)
+            runCurrent()
+            assertEquals(1, gateway.callCount)
+            assertEquals(
+                listOf("multi", "solo"),
+                (vm.state.value as FolderListUiState.Ready).flatSessions.map { it.sessionName },
+            )
+
+            // Advance past the ~5-min heartbeat — the tick fires a reconcile.
+            advanceTimeBy(FolderListViewModel.PERIODIC_RECONCILE_MS + 100L)
+            runCurrent()
+
+            assertEquals(
+                "the periodic ~5-min heartbeat re-probes the host (#783)",
+                2,
+                gateway.callCount,
+            )
+            assertEquals(
+                "the host-killed session is gone after the periodic reconcile",
+                listOf("multi"),
+                (vm.state.value as FolderListUiState.Ready).flatSessions.map { it.sessionName },
+            )
+        } finally {
+            // #783: stopPolling cancels the periodic reconcile loop so runTest's
+            // auto-advance reaches idle (the loop would otherwise reschedule the
+            // ~5-min heartbeat forever).
             vm.stopPolling()
         }
     }

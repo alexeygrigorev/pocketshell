@@ -167,6 +167,16 @@ class ControlModeParserTest {
     }
 
     @Test
+    fun `parses unlinked-window-close event as WindowClose (issue 783)`() {
+        // tmux emits %unlinked-window-close (not %window-close) when a window the
+        // control client did not actively link closes — e.g. a pre-existing
+        // window killed on the host. The project tree's by-id prune treats both
+        // the same.
+        val event = parser.parse("%unlinked-window-close @7") as ControlEvent.WindowClose
+        assertEquals("@7", event.windowId)
+    }
+
+    @Test
     fun `parses window-renamed event`() {
         val event = parser.parse("%window-renamed @3 build") as ControlEvent.WindowRenamed
         assertEquals("@3", event.windowId)

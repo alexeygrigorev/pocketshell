@@ -358,7 +358,33 @@ class FolderListViewModel internal constructor(
     // the gate via [setProcessStartedForTest] pass `false` so they never
     // touch the main-thread-affine lifecycle registry.
     attachLifecycle: Boolean = true,
+    // Issue #783: when true the bound-host periodic (~5 min) reconcile heartbeat
+    // ([startPeriodicReconcile]) runs while the tree screen is composed. Always
+    // true on the production Hilt path. Defaults FALSE for the bare internal
+    // constructor so the great majority of unit tests — which construct the VM
+    // directly, call `bind`, but never `stopPolling` — are not left with an
+    // infinite `delay`-loop coroutine that `runTest`'s end-of-body
+    // `advanceUntilIdle` would chase forever. Tests that specifically exercise the
+    // heartbeat flip it on via [setPeriodicReconcileEnabledForTest].
+    periodicReconcileEnabled: Boolean = false,
 ) : ViewModel() {
+
+    /**
+     * Issue #783: gate for the bound-host periodic reconcile heartbeat — see the
+     * `periodicReconcileEnabled` constructor param. Mutable so a focused test can
+     * enable it on a directly-constructed VM via
+     * [setPeriodicReconcileEnabledForTest].
+     */
+    private var periodicReconcileEnabled: Boolean = periodicReconcileEnabled
+
+    /**
+     * Issue #783 test seam: enable the periodic reconcile heartbeat on a
+     * directly-constructed VM. Production gets it via the `@Inject` constructor.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setPeriodicReconcileEnabledForTest(enabled: Boolean) {
+        periodicReconcileEnabled = enabled
+    }
 
     /**
      * Production Hilt entry point. Delegates to the internal constructor
@@ -407,6 +433,7 @@ class FolderListViewModel internal constructor(
         activeTmuxClients = activeTmuxClients,
         profilesGateway = profilesGateway,
         attachLifecycle = true,
+        periodicReconcileEnabled = true,
     )
 
     private val _state: MutableStateFlow<FolderListUiState> =
@@ -472,24 +499,73 @@ class FolderListViewModel internal constructor(
     private var probeJob: Job? = null
 
     /**
-     * Issue #706: subscription to the bound host's live `tmux -CC` client's
-     * `%sessions-changed` (ControlEvent.SessionsChanged) event. Re-bound per
-     * [bind] call (and torn down on host change / [stopPolling]) so it always
-     * tracks the currently-shown host. A burst of `%sessions-changed` is
-     * debounced into a single reconcile trigger.
+     * Issue #706 / #783: subscription to the bound host's live `tmux -CC`
+     * client's `%sessions-changed` (ControlEvent.SessionsChanged) event. A burst
+     * of `%sessions-changed` is debounced into a single reconcile trigger.
+     *
+     * Issue #783 lifecycle: this subscription is tied to the BOUND-HOST WARM-LEASE
+     * lifetime, NOT `FolderListScreen` composition. It is started in [bind] (and
+     * re-started on a host CHANGE), survives [stopPolling] (screen dispose), and
+     * is torn down only on a host change or [onCleared]. This way an out-of-band
+     * session change that lands while the user is on the session screen still
+     * reconciles the tree the instant the event arrives — the prune no longer
+     * lands on a dead collector. It rides the same already-open `-CC` event bus
+     * via [ActiveTmuxClients] (the warm lease, D21) and is foreground-gated inside
+     * [launchReconcile], so no second SSH/`-CC` connection is opened and nothing
+     * runs while backgrounded.
      */
     private var sessionsChangedJob: Job? = null
 
     /**
-     * Issue #653: subscription to the bound host's live `tmux -CC` client's
+     * Issue #653 / #783: subscription to the bound host's live `tmux -CC` client's
      * `%window-close @<id>` event ([ControlEvent.WindowClose]). When a single
-     * tmux WINDOW closes remotely while its session stays alive, this prunes
-     * exactly that window node from the maintained tree by window id — the
-     * window-level analogue of the [sessionsChangedJob] whole-session path.
-     * Re-bound per [bind] (and torn down on host change / [stopPolling]) so it
-     * always tracks the currently-shown host.
+     * tmux WINDOW closes (on the host, another terminal, an agent) while its
+     * session stays alive, this prunes exactly that window node from the
+     * maintained tree by window id — the window-level analogue of the
+     * [sessionsChangedJob] whole-session path.
+     *
+     * Issue #783 lifecycle: like [sessionsChangedJob], this is tied to the
+     * BOUND-HOST WARM-LEASE lifetime, NOT `FolderListScreen` composition. It is
+     * started in [bind] (re-started on a host CHANGE), SURVIVES [stopPolling]
+     * (screen dispose), and is torn down only on a host change or [onCleared].
+     * This is the core #783 fix: a `%window-close` that arrives while the user is
+     * NOT on the tree screen (e.g. they navigated into the session screen to
+     * close a window on the host) used to land on a collector that `stopPolling`
+     * had already cancelled, so the stale `[wN]` node lingered up to ~15 min.
+     * Keeping the subscription alive for the bound host prunes the node the
+     * instant the event arrives. It reuses the warm `-CC` client (D21 — no second
+     * connection) and is foreground-gated by [processStarted].
      */
     private var windowCloseJob: Job? = null
+
+    /**
+     * Issue #783: the host id the event subscriptions ([sessionsChangedJob] /
+     * [windowCloseJob] / [periodicReconcileJob]) are currently bound to. Lets
+     * [bind] keep the live subscriptions running across a same-host re-bind (so
+     * `stopPolling` → return does not restart them and miss an event in the gap),
+     * while a host CHANGE tears them down and re-subscribes for the new host.
+     * `null` while unbound.
+     */
+    private var subscriptionsHost: Long? = null
+
+    /**
+     * Issue #783: periodic (~5 min) reconcile while the tree screen is composed.
+     * Out-of-band host changes that DON'T emit a control event on the open `-CC`
+     * channel (so neither `%sessions-changed` nor `%window-close` fires) are
+     * caught by this slow safety-net tick. Per the maintainer's tree spec this is
+     * a freshness net for the SHOWN tree, so — unlike the event subscriptions
+     * (which survive screen dispose, see [windowCloseJob]) — it follows the SCREEN
+     * lifecycle: started in [bind], cancelled in [stopPolling]. That matches the
+     * old discovery-probe lifecycle (it reuses the screen's own warm lease, not a
+     * second connection) and avoids re-acquiring the warm lease for an undisplayed
+     * screen (the probe lease is released on `stopPolling`).
+     *
+     * D21-clean: each tick's reconcile is gated on the foreground signal inside
+     * [launchReconcile] (`processStarted.first { it }`), so while backgrounded the
+     * loop parks at the gate and never runs background SSH work — a foreground
+     * heartbeat, not a `Timer`/`WorkManager`/`AlarmManager`.
+     */
+    private var periodicReconcileJob: Job? = null
 
     /**
      * EPIC #679 — the maintained in-memory project tree. Held across opens of
@@ -688,17 +764,22 @@ class FolderListViewModel internal constructor(
         )
         warmReleaseJob?.cancel()
         warmReleaseJob = null
-        // Issue #706: (re)subscribe to the bound host's live `-CC`
-        // `%sessions-changed` event so an out-of-band create/kill triggers a
-        // debounced reconcile. Idempotent per host — restarted here on every
-        // bind so it tracks the currently-shown host.
-        startSessionsChangedSubscription(params)
-        // Issue #653: (re)subscribe to the bound host's live `-CC` `%window-close`
-        // event so a single window closed remotely prunes exactly that window
-        // node from the maintained tree by id (no full reconcile, sibling windows
-        // + parent session intact). Same per-host lifecycle as the
-        // `%sessions-changed` subscription above.
-        startWindowCloseSubscription(params)
+        // Issue #783: keep the live `-CC` event subscriptions
+        // (`%sessions-changed` + `%window-close`) and the periodic reconcile tied
+        // to the BOUND-HOST lifetime, not screen composition. On a same-host
+        // re-bind they keep running (no restart gap that could miss an event);
+        // only a host CHANGE tears them down and re-subscribes. This is the
+        // #783 core fix — a `%window-close` that lands while the user is on the
+        // session screen still prunes the tree, because `stopPolling` no longer
+        // cancels these jobs. They reuse the warm `-CC` client (D21, no second
+        // connection) and are foreground-gated.
+        ensureBoundHostSubscriptions(params)
+        // Issue #783: (re)start the periodic ~5-min reconcile heartbeat for the
+        // SHOWN tree. Unlike the event subscriptions it follows the screen
+        // lifecycle (cancelled in `stopPolling`), so it is restarted on every
+        // tree open. It reuses the screen's own warm lease (no second
+        // connection) and is foreground-gated.
+        startPeriodicReconcile(params)
         // EPIC #679 requirement #1: opening the host detail renders the HELD
         // tree INSTANTLY. Re-binding the SAME host reuses the maintained tree
         // (no probe-on-open, no loading flash) and only kicks a reconcile if one
@@ -1337,6 +1418,83 @@ class FolderListViewModel internal constructor(
     }
 
     /**
+     * Issue #783: (re)bind the bound-host EVENT subscriptions
+     * ([startSessionsChangedSubscription] / [startWindowCloseSubscription]) for
+     * [params]'s host.
+     *
+     * Idempotent per host: a same-host re-bind (returning to the tree screen)
+     * keeps the already-running subscriptions, so there is NO restart gap in
+     * which a `%window-close` / `%sessions-changed` could fall on a cancelled
+     * collector. A host CHANGE tears the old subscriptions down and starts fresh
+     * ones for the new host. Tied to the bound-host warm-lease lifetime — NOT
+     * `FolderListScreen` composition — so the prune survives `stopPolling`.
+     *
+     * NOTE: the periodic reconcile heartbeat ([startPeriodicReconcile]) is NOT
+     * part of this — it follows the SCREEN lifecycle ([bind]/[stopPolling]), see
+     * its docs.
+     */
+    private fun ensureBoundHostSubscriptions(params: BoundParams) {
+        if (subscriptionsHost == params.hostId &&
+            sessionsChangedJob?.isActive == true &&
+            windowCloseJob?.isActive == true
+        ) {
+            // Same host, both subscriptions live — keep them so a return to the
+            // tree screen doesn't reopen the dead-collector window.
+            return
+        }
+        startSessionsChangedSubscription(params)
+        startWindowCloseSubscription(params)
+        subscriptionsHost = params.hostId
+    }
+
+    /**
+     * Issue #783: tear down the bound-host EVENT subscriptions. Called on a host
+     * change (before re-subscribing) and from [onCleared]. NOT called from
+     * [stopPolling] — that is the whole point: the subscriptions outlive screen
+     * composition so a `%window-close` while the user is on the session screen
+     * still prunes the tree. (The periodic heartbeat is cancelled separately by
+     * [stopPolling]/[onCleared].)
+     */
+    private fun tearDownBoundHostSubscriptions() {
+        sessionsChangedJob?.cancel()
+        sessionsChangedJob = null
+        windowCloseJob?.cancel()
+        windowCloseJob = null
+        subscriptionsHost = null
+    }
+
+    /**
+     * Issue #783: start the periodic (~5 min) reconcile heartbeat for the SHOWN
+     * tree screen. Started in [bind] and cancelled in [stopPolling] (screen
+     * dispose) / [onCleared] — it follows the screen, not the bound-host event
+     * subscriptions, because it is a freshness net for the tree the user is
+     * looking at and reuses the screen's own warm lease (no second connection).
+     *
+     * D21-clean: each tick's reconcile is gated on the foreground signal inside
+     * [launchReconcile] (`processStarted.first { it }`), so while backgrounded the
+     * loop parks at the gate and performs no SSH work — a foreground heartbeat,
+     * not a `Timer`/`WorkManager`/`AlarmManager`.
+     */
+    private fun startPeriodicReconcile(params: BoundParams) {
+        periodicReconcileJob?.cancel()
+        periodicReconcileJob = null
+        // Issue #783: disabled for the bare internal constructor (most unit
+        // tests) so a directly-constructed VM that never calls `stopPolling`
+        // does not leave an infinite `delay`-loop for `runTest` to chase.
+        if (!periodicReconcileEnabled) return
+        periodicReconcileJob = viewModelScope.launch {
+            while (true) {
+                delay(PERIODIC_RECONCILE_MS)
+                if (bound != params || !rootSnapshotLoaded) continue
+                // launchReconcile is itself foreground-gated, so a tick that
+                // fires while backgrounded suspends at the gate instead of
+                // probing a dead lease.
+                launchReconcile(params)
+            }
+        }
+    }
+
+    /**
      * Force a reconcile NOW regardless of staleness — the explicit
      * pull-to-refresh swipe (requirement #4), error-panel retry, and the
      * post-app-action confirmation. Gated only on the foreground signal (D21).
@@ -1377,16 +1535,22 @@ class FolderListViewModel internal constructor(
     fun stopPolling() {
         probeJob?.cancel()
         probeJob = null
-        // Issue #706: navigating away tears down the `%sessions-changed`
-        // subscription too so a reconcile cannot fire for a screen that is no
-        // longer composed. Re-entry runs bind() again, which re-subscribes.
-        sessionsChangedJob?.cancel()
-        sessionsChangedJob = null
-        // Issue #653: tear down the `%window-close` subscription on the same
-        // lifecycle, so a window-close prune cannot fire for an undisplayed
-        // screen. Re-entry runs bind() again, which re-subscribes.
-        windowCloseJob?.cancel()
-        windowCloseJob = null
+        // Issue #783: the `%sessions-changed` / `%window-close` EVENT
+        // subscriptions are DELIBERATELY NOT torn down here. They are tied to the
+        // bound-host warm-lease lifetime (see [ensureBoundHostSubscriptions]), not
+        // screen composition, so a window/session closed on the host (or in
+        // another terminal) while the user is on the session screen still prunes
+        // the maintained tree the instant the event arrives — no dead-collector
+        // drop, no ~15-min staleness wait. They reuse the registry's live `-CC`
+        // client (D21, no second connection) and are foreground-gated, and are
+        // torn down only on a host change or [onCleared].
+        //
+        // The periodic ~5-min reconcile heartbeat DOES stop here — it is a
+        // freshness net for the SHOWN tree, so it follows screen composition like
+        // the old discovery probe and must not re-acquire the warm lease (just
+        // scheduled for release below) for an undisplayed screen.
+        periodicReconcileJob?.cancel()
+        periodicReconcileJob = null
         scheduleWarmRelease()
     }
 
@@ -1674,8 +1838,13 @@ class FolderListViewModel internal constructor(
 
     override fun onCleared() {
         probeJob?.cancel()
-        sessionsChangedJob?.cancel()
-        windowCloseJob?.cancel()
+        // Issue #783: the event subscriptions are torn down here (and on a host
+        // change), not on screen dispose. The periodic heartbeat is cancelled
+        // here too (it normally stops on `stopPolling`, but a VM destroyed while
+        // the tree screen is still composed must not leak the loop).
+        tearDownBoundHostSubscriptions()
+        periodicReconcileJob?.cancel()
+        periodicReconcileJob = null
         warmJob?.cancel()
         warmReleaseJob?.cancel()
         runBlocking {
@@ -1859,6 +2028,19 @@ class FolderListViewModel internal constructor(
          * signal, never a Timer/AlarmManager/WorkManager.
          */
         const val RESUME_FRESHEN_MS: Long = 10_000L
+
+        /**
+         * Issue #783: period of the bound-host foreground reconcile heartbeat
+         * ([startPeriodicReconcile]). ~5 minutes per the maintainer's tree spec —
+         * a slow safety net for out-of-band host changes that emit NO control
+         * event on the open `-CC` channel (so neither `%sessions-changed` nor
+         * `%window-close` fires) and that the foreground-resume freshen
+         * ([RESUME_FRESHEN_MS]) / pull-to-refresh don't otherwise catch. Long
+         * enough to honour EPIC #679's "reconcile infrequently, no constant poll"
+         * intent. D21-clean: each tick's reconcile is foreground-gated, so the
+         * loop parks while backgrounded (no background SSH work).
+         */
+        const val PERIODIC_RECONCILE_MS: Long = 5 * 60 * 1000L
 
         /**
          * Issue #706: debounce window for the live-`-CC`-client

@@ -87,6 +87,15 @@ public class ControlModeParser {
             "%sessions-changed" -> ControlEvent.SessionsChanged
             "%window-add" -> parseWindowAdd(args)
             "%window-close" -> parseWindowClose(args)
+            // Issue #783: tmux emits `%unlinked-window-close @<id>` (not
+            // `%window-close`) when a window that the control client did NOT
+            // actively link/track closes — e.g. a window that existed BEFORE this
+            // `-CC` client attached, then is killed on the host or in another
+            // terminal. For the project tree's by-id prune the two are
+            // equivalent: a window with that id is gone. Map both to
+            // [ControlEvent.WindowClose] so the host-detail tree prunes the `[wN]`
+            // node regardless of which variant tmux chose.
+            "%unlinked-window-close" -> parseWindowClose(args)
             "%window-renamed" -> parseWindowRenamed(args)
             "%layout-change" -> parseLayoutChange(args)
             "%pane-mode-changed" -> parsePaneModeChanged(args)

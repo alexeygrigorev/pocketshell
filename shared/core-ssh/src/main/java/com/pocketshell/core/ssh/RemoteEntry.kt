@@ -44,7 +44,50 @@ public data class RemoteEntry(
         public val FOLDERS_FIRST: Comparator<RemoteEntry> =
             compareByDescending<RemoteEntry> { it.type == Type.DIRECTORY }
                 .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+
+        /**
+         * Build the explorer's listing comparator for a chosen [field] +
+         * [ascending] direction (issue #762). Folders are ALWAYS grouped first
+         * (matching Files-by-Google / iOS Files), then the chosen field orders
+         * within each group; name is the stable tie-break so a re-sort never
+         * shuffles equal entries. The header's Sort menu re-sorts the already
+         * fetched list with this — pure, no re-list.
+         */
+        public fun comparator(field: SortField, ascending: Boolean): Comparator<RemoteEntry> {
+            val within: Comparator<RemoteEntry> = when (field) {
+                SortField.NAME ->
+                    Comparator { a, b -> String.CASE_INSENSITIVE_ORDER.compare(a.name, b.name) }
+                SortField.SIZE ->
+                    compareBy<RemoteEntry> { it.sizeBytes }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+                SortField.MODIFIED ->
+                    compareBy<RemoteEntry> { it.modifiedEpochSec ?: 0L }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+            }
+            val directional = if (ascending) within else within.reversed()
+            // Folders-first stays invariant outside the (reversible) field order.
+            // For MODIFIED, entries with NO server mtime always sink to the
+            // bottom of their group regardless of direction (a missing date is
+            // not "oldest" or "newest" — it's unknown), applied as a
+            // direction-independent key BEFORE the reversible field order.
+            val missingMtimeLast: Comparator<RemoteEntry> =
+                if (field == SortField.MODIFIED) {
+                    compareBy { it.modifiedEpochSec == null }
+                } else {
+                    Comparator { _, _ -> 0 }
+                }
+            return compareByDescending<RemoteEntry> { it.type == Type.DIRECTORY }
+                .then(missingMtimeLast)
+                .then(directional)
+        }
     }
+}
+
+/** The field the file explorer's listing is ordered by — issue #762. */
+public enum class SortField {
+    NAME,
+    SIZE,
+    MODIFIED,
 }
 
 /**

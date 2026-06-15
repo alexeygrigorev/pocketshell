@@ -8,6 +8,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.ssh.RemoteEntry
+import com.pocketshell.core.ssh.SortField
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -231,5 +232,93 @@ class FileExplorerScaffoldTest {
             transfer = FileTransferState.Failure("Upload failed: permission denied"),
         )
         compose.onNodeWithText("Upload failed: permission denied").assertIsDisplayed()
+    }
+
+    // --- #762: redesigned rows + Sort menu ---
+
+    @Test
+    fun fileRowShowsSizeAndModifiedSubtitle() {
+        val withMtime = RemoteEntry(
+            name = "report.txt",
+            type = RemoteEntry.Type.FILE,
+            sizeBytes = 1536,
+            // 2024-01-15 — an older year so the date is stable ("Jan 2024").
+            modifiedEpochSec = 1705312800L,
+        )
+        setReady(listOf(withMtime))
+        compose.onNodeWithText("1.5 KB · Jan 2024").assertIsDisplayed()
+    }
+
+    @Test
+    fun readyStateShowsSortAction() {
+        setReady(listOf(dir("sub")))
+        compose.onNodeWithTag(FILE_EXPLORER_SORT_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun sortMenuOffersFieldsAndReportsSelection() {
+        var chosen: Pair<SortField, Boolean>? = null
+        compose.setContent {
+            PocketShellTheme {
+                FileExplorerScaffold(
+                    hostName = "agents",
+                    state = FileExplorerUiState.Ready(
+                        "/home/u/proj",
+                        listOf(dir("sub"), file("a.txt", 1)),
+                        false,
+                    ),
+                    transfer = FileTransferState.Idle,
+                    sort = FileExplorerViewModel.SortMode(SortField.NAME, ascending = true),
+                    onSetSort = { field, asc -> chosen = field to asc },
+                    onBack = {},
+                    onUp = {},
+                    onOpenDirectory = {},
+                    onOpenFile = {},
+                    onDownloadFile = {},
+                    onUpload = {},
+                    onDismissTransfer = {},
+                    onCrumb = {},
+                    onGoToPath = {},
+                    onRetry = {},
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_EXPLORER_SORT_TAG).performClick()
+        compose.onNodeWithTag(FILE_EXPLORER_SORT_ITEM_TAG_PREFIX + SortField.MODIFIED.name)
+            .assertIsDisplayed()
+            .performClick()
+        assertEquals(SortField.MODIFIED to true, chosen)
+    }
+
+    @Test
+    fun reTappingActiveSortFieldFlipsDirection() {
+        var chosen: Pair<SortField, Boolean>? = null
+        compose.setContent {
+            PocketShellTheme {
+                FileExplorerScaffold(
+                    hostName = "agents",
+                    state = FileExplorerUiState.Ready("/home/u", listOf(dir("sub")), false),
+                    transfer = FileTransferState.Idle,
+                    // NAME is already the active ascending sort.
+                    sort = FileExplorerViewModel.SortMode(SortField.NAME, ascending = true),
+                    onSetSort = { field, asc -> chosen = field to asc },
+                    onBack = {},
+                    onUp = {},
+                    onOpenDirectory = {},
+                    onOpenFile = {},
+                    onDownloadFile = {},
+                    onUpload = {},
+                    onDismissTransfer = {},
+                    onCrumb = {},
+                    onGoToPath = {},
+                    onRetry = {},
+                )
+            }
+        }
+        compose.onNodeWithTag(FILE_EXPLORER_SORT_TAG).performClick()
+        compose.onNodeWithTag(FILE_EXPLORER_SORT_ITEM_TAG_PREFIX + SortField.NAME.name)
+            .performClick()
+        // Re-tapping the active field flips to descending.
+        assertEquals(SortField.NAME to false, chosen)
     }
 }

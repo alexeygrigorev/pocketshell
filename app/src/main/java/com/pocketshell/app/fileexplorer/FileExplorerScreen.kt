@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -43,8 +42,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.ssh.RemoteEntry
+import com.pocketshell.core.ssh.SortField
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.FileIconClass
+import com.pocketshell.uikit.components.FileTypeIcon
+import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.ScreenHeader
@@ -54,6 +57,12 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 const val FILE_EXPLORER_SCREEN_TAG = "fileExplorerScreen"
@@ -70,6 +79,8 @@ const val FILE_EXPLORER_ERROR_TAG = "fileExplorerError"
 const val FILE_EXPLORER_RETRY_TAG = "fileExplorerRetry"
 const val FILE_EXPLORER_ROW_TAG_PREFIX = "fileExplorerRow:"
 const val FILE_EXPLORER_UPLOAD_TAG = "fileExplorerUpload"
+const val FILE_EXPLORER_SORT_TAG = "fileExplorerSort"
+const val FILE_EXPLORER_SORT_ITEM_TAG_PREFIX = "fileExplorerSort:"
 const val FILE_EXPLORER_DOWNLOAD_TAG_PREFIX = "fileExplorerDownload:"
 const val FILE_EXPLORER_TRANSFER_TAG = "fileExplorerTransfer"
 const val FILE_EXPLORER_TRANSFER_DISMISS_TAG = "fileExplorerTransferDismiss"
@@ -112,6 +123,7 @@ fun FileExplorerScreen(
     }
     val state by viewModel.state.collectAsState()
     val transfer by viewModel.transfer.collectAsState()
+    val sort by viewModel.sort.collectAsState()
     val context = LocalContext.current
 
     // Upload: pick any device file, resolve its display name + size from the
@@ -159,6 +171,8 @@ fun FileExplorerScreen(
         hostName = hostName,
         state = state,
         transfer = transfer,
+        sort = sort,
+        onSetSort = viewModel::setSort,
         onBack = onBack,
         onUp = viewModel::goUp,
         onOpenDirectory = viewModel::openDirectory,
@@ -187,6 +201,8 @@ internal fun FileExplorerScaffold(
     hostName: String,
     state: FileExplorerUiState,
     transfer: FileTransferState,
+    sort: FileExplorerViewModel.SortMode = FileExplorerViewModel.SortMode(SortField.NAME, ascending = true),
+    onSetSort: (SortField, Boolean) -> Unit = { _, _ -> },
     onBack: () -> Unit,
     onUp: () -> Unit,
     onOpenDirectory: (RemoteEntry) -> Unit,
@@ -216,6 +232,10 @@ internal fun FileExplorerScaffold(
                 // resolved cwd); gate it on Ready.
                 canUpload = state is FileExplorerUiState.Ready &&
                     transfer !is FileTransferState.InProgress,
+                // Sorting only applies to a listed directory; gate on Ready.
+                canSort = state is FileExplorerUiState.Ready,
+                sort = sort,
+                onSetSort = onSetSort,
                 onBack = onBack,
                 onUpload = onUpload,
                 onCrumb = onCrumb,
@@ -291,6 +311,9 @@ private fun FileExplorerHeader(
     hostName: String,
     path: String,
     canUpload: Boolean,
+    canSort: Boolean,
+    sort: FileExplorerViewModel.SortMode,
+    onSetSort: (SortField, Boolean) -> Unit,
     onBack: () -> Unit,
     onUpload: () -> Unit,
     onCrumb: (String) -> Unit,
@@ -322,6 +345,9 @@ private fun FileExplorerHeader(
             },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (canSort) {
+                        SortAction(sort = sort, onSetSort = onSetSort)
+                    }
                     if (canUpload) {
                         HeaderAction(
                             label = "Upload",
@@ -398,6 +424,66 @@ private fun HeaderAction(
             fontWeight = FontWeight.Medium,
         )
     }
+}
+
+/**
+ * The header Sort affordance (issue #762) — a compact text action that opens a
+ * menu of Name / Size / Modified. Tapping a field that is already selected flips
+ * its direction (asc ↔ desc); tapping a different field selects it in ascending
+ * order. The active field shows a direction arrow. Re-sorting is a pure
+ * in-memory reorder in the view-model — no re-list.
+ */
+@Composable
+private fun SortAction(
+    sort: FileExplorerViewModel.SortMode,
+    onSetSort: (SortField, Boolean) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        HeaderAction(
+            label = "Sort",
+            testTag = FILE_EXPLORER_SORT_TAG,
+            onClick = { expanded = true },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(PocketShellColors.SurfaceElev),
+        ) {
+            SortField.values().forEach { field ->
+                val selected = sort.field == field
+                val arrow = if (selected) {
+                    if (sort.ascending) " ↑" else " ↓"
+                } else {
+                    ""
+                }
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = sortFieldLabel(field) + arrow,
+                            color = if (selected) PocketShellColors.Accent else PocketShellColors.Text,
+                            style = PocketShellType.bodyDense,
+                            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        // Re-tap the active field → flip direction; new field →
+                        // ascending.
+                        val ascending = if (selected) !sort.ascending else true
+                        onSetSort(field, ascending)
+                    },
+                    modifier = Modifier.testTag(FILE_EXPLORER_SORT_ITEM_TAG_PREFIX + field.name),
+                )
+            }
+        }
+    }
+}
+
+private fun sortFieldLabel(field: SortField): String = when (field) {
+    SortField.NAME -> "Name"
+    SortField.SIZE -> "Size"
+    SortField.MODIFIED -> "Modified"
 }
 
 /**
@@ -487,7 +573,8 @@ private fun ReadyPanel(
                 ListRow(
                     title = "..",
                     subtitle = "Parent folder",
-                    leading = { GlyphCell("UP") },
+                    leading = { FileTypeIcon(iconClass = FileIconClass.FOLDER) },
+                    trailing = { Chevron() },
                     onClick = onUp,
                     modifier = Modifier.testTag(FILE_EXPLORER_UP_TAG),
                 )
@@ -501,7 +588,7 @@ private fun ReadyPanel(
                 ListRow(
                     title = "No entries",
                     subtitle = "This folder is empty.",
-                    leading = { GlyphCell("--") },
+                    leading = { StatusGlyphCell("–") },
                     modifier = Modifier.testTag(FILE_EXPLORER_EMPTY_TAG),
                 )
             }
@@ -514,6 +601,8 @@ private fun ReadyPanel(
                 entry.type == RemoteEntry.Type.SYMLINK
             // Regular files get a tap-to-download affordance in the trailing
             // slot (issue #643); tapping the row itself still opens the viewer.
+            // Everything else gets a navigational chevron (issue #762) — the
+            // redundant Folder/Link/Other type pills are gone (hard-cut, D22).
             val trailing: (@Composable () -> Unit)? = if (entry.type == RemoteEntry.Type.FILE) {
                 {
                     Box(
@@ -532,12 +621,12 @@ private fun ReadyPanel(
                     }
                 }
             } else {
-                rowBadge(entry)
+                { Chevron() }
             }
             ListRow(
                 title = entry.name,
                 subtitle = rowSubtitle(entry),
-                leading = { GlyphCell(glyphFor(entry.type)) },
+                leading = { FileTypeIcon(iconClass = fileIconClass(entry.name, entry.type)) },
                 trailing = trailing,
                 onClick = {
                     if (navigable) onOpenDirectory(entry) else onOpenFile(entry)
@@ -550,7 +639,7 @@ private fun ReadyPanel(
                 ListRow(
                     title = "Folder truncated",
                     subtitle = "Showing the first ${state.entries.size} entries; this folder has more.",
-                    leading = { GlyphCell("…") },
+                    leading = { StatusGlyphCell("…") },
                     modifier = Modifier.testTag(FILE_EXPLORER_TRUNCATED_TAG),
                 )
             }
@@ -558,10 +647,16 @@ private fun ReadyPanel(
     }
 }
 
+/**
+ * A small text glyph cell for NON-entry status rows (empty / truncated / error)
+ * — issue #762. File/folder entries lead with a [FileTypeIcon] instead; this is
+ * only the `–` / `…` / `!` status marker. `maxLines = 1` + `softWrap = false`
+ * so a short status marker never wraps in the fixed cell.
+ */
 @Composable
-private fun GlyphCell(glyph: String) {
+private fun StatusGlyphCell(glyph: String) {
     Box(
-        modifier = Modifier.width(24.dp),
+        modifier = Modifier.size(24.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -569,6 +664,23 @@ private fun GlyphCell(glyph: String) {
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.labelMono,
             fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
+/** The navigational chevron in the trailing slot for a folder / symlink row. */
+@Composable
+private fun Chevron() {
+    Box(
+        modifier = Modifier.size(PocketShellDensity.tapTargetMin),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "›",
+            color = PocketShellColors.TextMuted,
+            style = MaterialTheme.typography.titleMedium,
         )
     }
 }
@@ -616,7 +728,7 @@ private fun ErrorPanel(
             ListRow(
                 title = "Could not load folder",
                 subtitle = message,
-                leading = { GlyphCell("!") },
+                leading = { StatusGlyphCell("!") },
                 trailing = {
                     Badge(label = "Error", role = BadgeRole.Error, mono = false)
                 },
@@ -645,32 +757,62 @@ private fun ErrorPanel(
     }
 }
 
-private fun glyphFor(type: RemoteEntry.Type): String = when (type) {
-    RemoteEntry.Type.DIRECTORY -> "DIR"
-    RemoteEntry.Type.SYMLINK -> "LNK"
-    RemoteEntry.Type.OTHER -> "OTH"
-    RemoteEntry.Type.FILE -> "FILE"
+/**
+ * The secondary (muted mono) line for a row — issue #762.
+ *
+ * Files: `size · modified` (e.g. `8.6 KB · Jun 12`), surfacing the
+ * `modifiedEpochSec` the model has always carried but never showed. Folders /
+ * symlinks / others: just the modified date when the server reported one. A
+ * `null` mtime collapses cleanly — a file shows just the size; a folder with no
+ * mtime shows no subtitle. Visible-for-test so the composition is pinned.
+ */
+internal fun rowSubtitle(entry: RemoteEntry): String? {
+    val modified = formatModified(entry.modifiedEpochSec)
+    return when (entry.type) {
+        RemoteEntry.Type.FILE -> {
+            val size = formatSize(entry.sizeBytes)
+            if (modified != null) "$size · $modified" else size
+        }
+        else -> modified
+    }
 }
 
-private fun rowSubtitle(entry: RemoteEntry): String? = when (entry.type) {
-    RemoteEntry.Type.DIRECTORY -> null
-    RemoteEntry.Type.SYMLINK -> "link"
-    RemoteEntry.Type.OTHER -> null
-    RemoteEntry.Type.FILE -> formatSize(entry.sizeBytes)
+/**
+ * The coarse 6-bucket icon class for a row leading icon — issue #762. Folders /
+ * symlinks come straight off the SFTP [RemoteEntry.Type]; regular files (and
+ * OTHER) are bucketed by a small extension map into image / code / archive /
+ * binary. Deliberately dev-tool-right granularity (not a per-MIME explosion).
+ * Visible-for-test so the extension buckets are pinned.
+ */
+internal fun fileIconClass(name: String, type: RemoteEntry.Type): FileIconClass = when (type) {
+    RemoteEntry.Type.DIRECTORY -> FileIconClass.FOLDER
+    RemoteEntry.Type.SYMLINK -> FileIconClass.SYMLINK
+    else -> when (extensionOf(name)) {
+        in IMAGE_EXTENSIONS -> FileIconClass.IMAGE
+        in CODE_EXTENSIONS -> FileIconClass.CODE
+        in ARCHIVE_EXTENSIONS -> FileIconClass.ARCHIVE
+        else -> FileIconClass.BINARY
+    }
 }
 
-private fun rowBadge(entry: RemoteEntry): (@Composable () -> Unit)? = when (entry.type) {
-    RemoteEntry.Type.DIRECTORY -> {
-        { Badge(label = "Folder", role = BadgeRole.Idle, mono = false) }
-    }
-    RemoteEntry.Type.SYMLINK -> {
-        { Badge(label = "Link", role = BadgeRole.Shell, mono = false) }
-    }
-    RemoteEntry.Type.OTHER -> {
-        { Badge(label = "Other", role = BadgeRole.Shell, mono = false) }
-    }
-    RemoteEntry.Type.FILE -> null
+/** Lower-cased final extension of a basename, or "" when there is none. */
+private fun extensionOf(name: String): String {
+    val dot = name.lastIndexOf('.')
+    // No dot, leading-dot dotfile (".bashrc"), or trailing dot → no extension.
+    if (dot <= 0 || dot == name.lastIndex) return ""
+    return name.substring(dot + 1).lowercase(Locale.US)
 }
+
+private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico")
+
+private val CODE_EXTENSIONS = setOf(
+    "kt", "java", "js", "ts", "tsx", "jsx", "py", "sh", "bash", "go", "rs",
+    "c", "cpp", "cc", "h", "hpp", "json", "yaml", "yml", "toml", "xml", "html",
+    "css", "scss", "md", "txt", "log", "patch", "diff", "rb", "php", "sql",
+    "gradle", "kts", "properties", "ini", "cfg", "conf",
+)
+
+private val ARCHIVE_EXTENSIONS = setOf("zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "jar")
 
 /**
  * Human-readable byte count for a file row. Visible-for-test so the rounding
@@ -682,3 +824,30 @@ internal fun formatSize(bytes: Long): String = when {
     bytes < 1024L * 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024))
     else -> String.format(Locale.US, "%.1f GB", bytes / (1024.0 * 1024 * 1024))
 }
+
+/**
+ * Compact modified-date label for a row — issue #762. Surfaces
+ * [RemoteEntry.modifiedEpochSec] for the first time. This-year dates read as
+ * `Jun 12`; older dates as `Jan 2024`; a null mtime (server reported none)
+ * returns null so the subtitle collapses. `Locale.US` + system default zone so
+ * the rendering is deterministic and matches the device clock; visible-for-test
+ * via [formatModifiedAt], which pins the "now" reference.
+ */
+internal fun formatModified(epochSec: Long?): String? =
+    formatModifiedAt(epochSec, ZonedDateTime.now(ZoneId.systemDefault()))
+
+/** Testable core of [formatModified] with an injectable [now] reference. */
+internal fun formatModifiedAt(epochSec: Long?, now: ZonedDateTime): String? {
+    if (epochSec == null) return null
+    val moment = Instant.ofEpochSecond(epochSec).atZone(now.zone)
+    return if (moment.year == now.year) {
+        moment.format(THIS_YEAR_FORMAT)
+    } else {
+        moment.format(OLDER_YEAR_FORMAT)
+    }
+}
+
+private val THIS_YEAR_FORMAT: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MMM d", Locale.US)
+private val OLDER_YEAR_FORMAT: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MMM yyyy", Locale.US)

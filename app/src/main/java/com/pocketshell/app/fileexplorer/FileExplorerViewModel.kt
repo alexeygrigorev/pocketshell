@@ -13,6 +13,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshNotADirectoryException
 import com.pocketshell.core.ssh.SshPermissionDeniedException
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SortField
 import com.pocketshell.app.share.FilenameSanitiser
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -126,6 +127,15 @@ class FileExplorerViewModel @Inject constructor(
     private val _transfer = MutableStateFlow<FileTransferState>(FileTransferState.Idle)
     val transfer: StateFlow<FileTransferState> = _transfer.asStateFlow()
 
+    /**
+     * The current listing sort (issue #762). Re-sorting is a pure in-memory
+     * reorder of the already-fetched entries — no re-list, no transport cost —
+     * with folders kept first within any sort. Defaults to Name-ascending so the
+     * listing opens exactly as it did before the Sort menu existed.
+     */
+    private val _sort = MutableStateFlow(SortMode(SortField.NAME, ascending = true))
+    val sort: StateFlow<SortMode> = _sort.asStateFlow()
+
     private var request: Request? = null
     private var loadJob: Job? = null
     private var transferJob: Job? = null
@@ -204,6 +214,28 @@ class FileExplorerViewModel @Inject constructor(
             else -> input
         }
         navigateTo(target, resolveSymbolic = true)
+    }
+
+    /**
+     * Change the listing sort (issue #762). Pure in-memory reorder of the
+     * currently-shown entries (and the cached listing for this directory so a
+     * re-enter keeps the chosen order) — no re-list. Folders stay grouped first
+     * regardless of field/direction.
+     */
+    fun setSort(field: SortField, ascending: Boolean) {
+        val next = SortMode(field, ascending)
+        if (_sort.value == next) return
+        _sort.value = next
+        val current = _state.value
+        if (current is FileExplorerUiState.Ready) {
+            val resorted = current.entries.sortedWith(next.comparator())
+            _state.value = current.copy(entries = resorted)
+            // Keep the cache for this dir consistent with the chosen order so a
+            // back-and-forth paints in the same order it was last shown.
+            listingCache[current.currentPath]?.let { cached ->
+                listingCache[current.currentPath] = cached.copy(entries = resorted)
+            }
+        }
     }
 
     /** Dismiss the transfer banner once the user has seen the result. */
@@ -353,7 +385,8 @@ class FileExplorerViewModel @Inject constructor(
                 path
             }
             val listing = live.listDirectory(absolute)
-            val sorted = listing.entries.sortedWith(RemoteEntry.FOLDERS_FIRST)
+            // Sort by the user's active choice (issue #762); folders stay first.
+            val sorted = listing.entries.sortedWith(_sort.value.comparator())
             absolute to (sorted to listing.truncated)
         }
         return result.fold(
@@ -583,6 +616,18 @@ class FileExplorerViewModel @Inject constructor(
         val entries: List<RemoteEntry>,
         val truncated: Boolean,
     )
+
+    /**
+     * The explorer's listing sort (issue #762): a [field] + a direction. Pairs
+     * with [RemoteEntry.comparator] so folders-first stays invariant within any
+     * field/direction. Default is Name-ascending.
+     */
+    data class SortMode(
+        val field: SortField,
+        val ascending: Boolean,
+    ) {
+        fun comparator(): Comparator<RemoteEntry> = RemoteEntry.comparator(field, ascending)
+    }
 
     /**
      * Host credentials + the start directory for the explorer. Mirrors the

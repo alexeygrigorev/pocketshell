@@ -44,6 +44,74 @@ class RemoteEntryTest {
     }
 
     @Test
+    fun `comparator NAME ascending matches FOLDERS_FIRST default`() {
+        val entries = listOf(file("apple"), dir("zebra"), file("banana"), dir("alpha"))
+        val viaComparator = entries.sortedWith(RemoteEntry.comparator(SortField.NAME, ascending = true))
+        val viaDefault = entries.sortedWith(RemoteEntry.FOLDERS_FIRST)
+        assertEquals(viaDefault.map { it.name }, viaComparator.map { it.name })
+    }
+
+    @Test
+    fun `comparator NAME descending reverses within folders-first`() {
+        val sorted = listOf(file("apple"), dir("zebra"), file("banana"), dir("alpha"))
+            .sortedWith(RemoteEntry.comparator(SortField.NAME, ascending = false))
+        // Folders still first, but each group is reverse-name ordered.
+        assertEquals(listOf("zebra", "alpha", "banana", "apple"), sorted.map { it.name })
+    }
+
+    @Test
+    fun `comparator SIZE orders files by bytes within folders-first`() {
+        val sorted = listOf(
+            file("big", 9000L),
+            file("small", 10L),
+            dir("dir"),
+            file("mid", 500L),
+        ).sortedWith(RemoteEntry.comparator(SortField.SIZE, ascending = true))
+        assertEquals(listOf("dir", "small", "mid", "big"), sorted.map { it.name })
+
+        val desc = listOf(file("big", 9000L), file("small", 10L), file("mid", 500L))
+            .sortedWith(RemoteEntry.comparator(SortField.SIZE, ascending = false))
+        assertEquals(listOf("big", "mid", "small"), desc.map { it.name })
+    }
+
+    @Test
+    fun `comparator MODIFIED orders by mtime and sorts null mtime last`() {
+        val a = RemoteEntry("a", RemoteEntry.Type.FILE, 0L, 100L)
+        val b = RemoteEntry("b", RemoteEntry.Type.FILE, 0L, 300L)
+        val c = RemoteEntry("c", RemoteEntry.Type.FILE, 0L, null)
+        val ascending = listOf(b, c, a)
+            .sortedWith(RemoteEntry.comparator(SortField.MODIFIED, ascending = true))
+        // null mtime always sorts last regardless of direction.
+        assertEquals(listOf("a", "b", "c"), ascending.map { it.name })
+
+        val descending = listOf(b, c, a)
+            .sortedWith(RemoteEntry.comparator(SortField.MODIFIED, ascending = false))
+        assertEquals("c", descending.last().name)
+        assertEquals(listOf("b", "a"), descending.take(2).map { it.name })
+    }
+
+    @Test
+    fun `comparator keeps folders first regardless of field and direction`() {
+        val entries = listOf(
+            file("zfile", 1L),
+            dir("zdir"),
+            file("afile", 9L),
+            dir("adir"),
+        )
+        for (field in SortField.values()) {
+            for (asc in listOf(true, false)) {
+                val sorted = entries.sortedWith(RemoteEntry.comparator(field, asc))
+                val firstTwo = sorted.take(2).map { it.type }
+                assertEquals(
+                    "folders first for $field asc=$asc",
+                    listOf(RemoteEntry.Type.DIRECTORY, RemoteEntry.Type.DIRECTORY),
+                    firstTwo,
+                )
+            }
+        }
+    }
+
+    @Test
     fun `RemoteListing carries entries and truncated flag`() {
         val listing = RemoteListing(entries = listOf(dir("a")), truncated = true)
         assertEquals(1, listing.entries.size)

@@ -149,6 +149,24 @@ class ConnectionStatusProjectionTest {
     }
 
     @Test
+    fun liveController_withPreRevealConnectingInline_followsInlineConnecting() {
+        // #178 (NEW path) dead-session-mid-switch guard: the fast-switch reused-SSH
+        // lease was dead, so the VM dropped the stale frame, escalated the INLINE open
+        // to `Connecting`, and is re-running a genuine FRESH handshake. The fresh
+        // transport's `TransportLive` promotes the controller's silent-heal ladder
+        // straight to `Live` WITHOUT a seed — but the frame is blanked, so projecting
+        // `Connected` here would reveal a dead/blank pane. While the inline open is
+        // still pre-reveal (`Connecting`), the full-screen Connecting overlay must stay
+        // up; the seam follows the inline `Connecting` until the inline reveal gate
+        // (panes seeded) flips the inline status to `Connected`/`Live`. This is the
+        // OPEN-direction sibling of the terminal-state "no premature Failed" guard.
+        assertEquals(
+            ConnectionStatus.Connecting(HOST, PORT, USER),
+            project(ConnectionState.Live(host, sid), inlineConnecting),
+        )
+    }
+
+    @Test
     fun backgroundedController_followsInline() {
         // While backgrounded the user can't see the status; follow the inline state to
         // keep the backgrounded surface byte-identical.

@@ -99,7 +99,31 @@ internal object ConnectionStatusProjection {
                     }
                 }
             is ConnectionState.Live ->
-                ConnectionStatus.Connected(hpu.host, hpu.port, hpu.user)
+                // #178 (NEW path): a `Live` controller normally reveals `Connected`.
+                // The ONE exception is the dead-session-mid-switch fallback: the
+                // fast-switch reused-SSH lease turned out dead, so the VM dropped the
+                // now-stale frame, escalated the INLINE open to `Connecting`, and is
+                // re-running a genuine FRESH handshake. The fresh transport's
+                // `TransportLive` promotes the controller's silent-heal ladder
+                // (`Reattaching`/`Reconnecting`) straight to `Live` WITHOUT a seed —
+                // but there is no frame on screen (we blanked it), so revealing
+                // `Connected` here would paint a dead/blank pane (the #178 violation).
+                // The inline open path is still pre-reveal (`Connecting`) and owns the
+                // authoritative "panes are seeded, safe to reveal" gate
+                // (`awaitPanesReadyForAttach`/`awaitActivePaneSeededOrLoading`); follow
+                // it so the full-screen Connecting overlay stays up until those panes
+                // land. This is the OPEN-direction sibling of [terminalOrInlineStatus]'s
+                // "don't show a premature scary Failed while the inline ladder is still
+                // recovering" guard — here: don't show a premature blank Connected while
+                // the inline open is still handshaking. Every normal cold open reaches
+                // controller `Live` only via the SeedLanded feed (which lands AT the
+                // inline reveal), so the inline status is already past `Connecting`
+                // there and this guard is a no-op for them.
+                if (inlineStatus is ConnectionStatus.Connecting) {
+                    ConnectionStatus.Connecting(hpu.host, hpu.port, hpu.user)
+                } else {
+                    ConnectionStatus.Connected(hpu.host, hpu.port, hpu.user)
+                }
             // BACKGROUNDED: the displayed status while the app is not visible is the
             // INLINE path's decision (keep the prior status, OR a paused
             // auto-reconnect → the manual-retry Failed band). This is NOT one of the

@@ -46,8 +46,8 @@ import org.junit.runner.RunWith
  *     prematurely while a sub-surface is open.
  *  3. The precedence between overlays is deterministic — if multiple
  *     overlays are flagged open in the same composition, the dialog
- *     handler runs first, then the session drawer, then the window
- *     switcher, then the mic sheet, then the snippet picker. This is
+ *     handler runs first, then the session drawer, then the mic sheet,
+ *     then the snippet picker (the #782 window switcher is gone). This is
  *     the order the screen renders them and is the order this test
  *     locks in.
  *
@@ -78,12 +78,10 @@ class TmuxSessionBackHandlerTest {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
-                    windowSwitcherOpen = false,
                     micSheetOpen = false,
                     snippetPickerOpen = false,
                     onDismissDialog = {},
                     onDismissSessionDrawer = {},
-                    onDismissWindowSwitcher = {},
                     onDismissMicSheet = {},
                     onDismissSnippetPicker = {},
                     onBack = { onBackCalls += 1 },
@@ -110,7 +108,6 @@ class TmuxSessionBackHandlerTest {
                 TmuxSessionBackHandler(
                     dialogOpen = dialogOpen,
                     sessionDrawerOpen = false,
-                    windowSwitcherOpen = false,
                     micSheetOpen = false,
                     snippetPickerOpen = false,
                     onDismissDialog = {
@@ -118,7 +115,6 @@ class TmuxSessionBackHandlerTest {
                         dialogOpen = false
                     },
                     onDismissSessionDrawer = {},
-                    onDismissWindowSwitcher = {},
                     onDismissMicSheet = {},
                     onDismissSnippetPicker = {},
                     onBack = { onBackCalls += 1 },
@@ -155,7 +151,6 @@ class TmuxSessionBackHandlerTest {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = drawerOpen,
-                    windowSwitcherOpen = false,
                     micSheetOpen = false,
                     snippetPickerOpen = false,
                     onDismissDialog = {},
@@ -163,7 +158,6 @@ class TmuxSessionBackHandlerTest {
                         dismissCalls += 1
                         drawerOpen = false
                     },
-                    onDismissWindowSwitcher = {},
                     onDismissMicSheet = {},
                     onDismissSnippetPicker = {},
                     onBack = { onBackCalls += 1 },
@@ -181,40 +175,6 @@ class TmuxSessionBackHandlerTest {
     }
 
     @Test
-    fun systemBackDismissesWindowSwitcherBeforeOnBack() {
-        var switcherOpen by mutableStateOf(true)
-        var dismissCalls = 0
-        var onBackCalls = 0
-        compose.setContent {
-            PocketShellTheme {
-                TmuxSessionBackHandler(
-                    dialogOpen = false,
-                    sessionDrawerOpen = false,
-                    windowSwitcherOpen = switcherOpen,
-                    micSheetOpen = false,
-                    snippetPickerOpen = false,
-                    onDismissDialog = {},
-                    onDismissSessionDrawer = {},
-                    onDismissWindowSwitcher = {
-                        dismissCalls += 1
-                        switcherOpen = false
-                    },
-                    onDismissMicSheet = {},
-                    onDismissSnippetPicker = {},
-                    onBack = { onBackCalls += 1 },
-                )
-            }
-        }
-
-        pressSystemBack()
-        assertEquals(1, dismissCalls)
-        assertEquals(0, onBackCalls)
-
-        pressSystemBack()
-        assertEquals(1, onBackCalls)
-    }
-
-    @Test
     fun systemBackDismissesMicSheetBeforeOnBack() {
         var sheetOpen by mutableStateOf(true)
         var dismissCalls = 0
@@ -224,12 +184,10 @@ class TmuxSessionBackHandlerTest {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
-                    windowSwitcherOpen = false,
                     micSheetOpen = sheetOpen,
                     snippetPickerOpen = false,
                     onDismissDialog = {},
                     onDismissSessionDrawer = {},
-                    onDismissWindowSwitcher = {},
                     onDismissMicSheet = {
                         dismissCalls += 1
                         sheetOpen = false
@@ -258,12 +216,10 @@ class TmuxSessionBackHandlerTest {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
-                    windowSwitcherOpen = false,
                     micSheetOpen = false,
                     snippetPickerOpen = pickerOpen,
                     onDismissDialog = {},
                     onDismissSessionDrawer = {},
-                    onDismissWindowSwitcher = {},
                     onDismissMicSheet = {},
                     onDismissSnippetPicker = {
                         dismissCalls += 1
@@ -283,15 +239,14 @@ class TmuxSessionBackHandlerTest {
     }
 
     @Test
-    fun overlayPrecedenceFollowsDialogThenDrawerThenSwitcherThenSheetThenPicker() {
-        // All five overlays are flagged open. The deterministic
-        // dispatch order ([TmuxSessionBackHandler]) is dialog -> drawer
-        // -> switcher -> mic sheet -> snippet picker. We feed back
-        // presses one at a time and lower one flag per press, asserting
-        // each step routed to the right handler and never to onBack.
+    fun overlayPrecedenceFollowsDialogThenDrawerThenSheetThenPicker() {
+        // All four overlays are flagged open. The deterministic dispatch
+        // order ([TmuxSessionBackHandler]) is dialog -> drawer -> mic sheet
+        // -> snippet picker (the #782 window switcher is gone). We feed back
+        // presses one at a time and lower one flag per press, asserting each
+        // step routed to the right handler and never to onBack.
         var dialogOpen by mutableStateOf(true)
         var drawerOpen by mutableStateOf(true)
-        var switcherOpen by mutableStateOf(true)
         var sheetOpen by mutableStateOf(true)
         var pickerOpen by mutableStateOf(true)
         val dismissEvents = mutableListOf<String>()
@@ -301,7 +256,6 @@ class TmuxSessionBackHandlerTest {
                 TmuxSessionBackHandler(
                     dialogOpen = dialogOpen,
                     sessionDrawerOpen = drawerOpen,
-                    windowSwitcherOpen = switcherOpen,
                     micSheetOpen = sheetOpen,
                     snippetPickerOpen = pickerOpen,
                     onDismissDialog = {
@@ -311,10 +265,6 @@ class TmuxSessionBackHandlerTest {
                     onDismissSessionDrawer = {
                         dismissEvents += "drawer"
                         drawerOpen = false
-                    },
-                    onDismissWindowSwitcher = {
-                        dismissEvents += "switcher"
-                        switcherOpen = false
                     },
                     onDismissMicSheet = {
                         dismissEvents += "sheet"
@@ -333,11 +283,10 @@ class TmuxSessionBackHandlerTest {
         pressSystemBack()
         pressSystemBack()
         pressSystemBack()
-        pressSystemBack()
 
         assertEquals(
-            "overlays must close in dialog -> drawer -> switcher -> sheet -> picker order",
-            listOf("dialog", "drawer", "switcher", "sheet", "picker"),
+            "overlays must close in dialog -> drawer -> sheet -> picker order",
+            listOf("dialog", "drawer", "sheet", "picker"),
             dismissEvents.toList(),
         )
         assertEquals(
@@ -346,7 +295,7 @@ class TmuxSessionBackHandlerTest {
             onBackCalls,
         )
 
-        // Sixth back press: all overlays now closed, back routes to onBack.
+        // Fifth back press: all overlays now closed, back routes to onBack.
         pressSystemBack()
         assertEquals(1, onBackCalls)
     }
@@ -365,12 +314,10 @@ class TmuxSessionBackHandlerTest {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
-                    windowSwitcherOpen = false,
                     micSheetOpen = false,
                     snippetPickerOpen = false,
                     onDismissDialog = {},
                     onDismissSessionDrawer = {},
-                    onDismissWindowSwitcher = {},
                     onDismissMicSheet = {},
                     onDismissSnippetPicker = {},
                     onBack = {},

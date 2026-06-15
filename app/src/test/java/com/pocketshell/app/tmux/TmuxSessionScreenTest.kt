@@ -13,7 +13,6 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
-import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -50,46 +49,6 @@ class TmuxSessionScreenTest {
         } finally {
             diagnostics.close()
         }
-    }
-
-    @Test
-    fun toWindowSummariesKeepsFirstPaneOrderAndDeduplicatesWindows() {
-        val panes = listOf(
-            pane(paneId = "%0", windowId = "@1"),
-            pane(paneId = "%1", windowId = "@0"),
-            pane(paneId = "%2", windowId = "@1"),
-            pane(paneId = "%3", windowId = "@2"),
-        )
-
-        val windows = panes.toWindowSummaries()
-
-        // Per #158: title is now a 1-based ordinal derived from
-        // pane-order arrival, not the bare `@N` tmux ID. The
-        // deduplication semantics are unchanged.
-        assertEquals(
-            listOf(
-                WindowSummary(windowId = "@1", title = "Window 1"),
-                WindowSummary(windowId = "@0", title = "Window 2"),
-                WindowSummary(windowId = "@2", title = "Window 3"),
-            ),
-            windows,
-        )
-    }
-
-    @Test
-    fun toWindowSummariesPreservesTmuxWindowIndexForDirectNavigation() {
-        val panes = listOf(
-            pane(paneId = "%0", windowId = "@9", windowIndex = 1),
-            pane(paneId = "%1", windowId = "@4", windowIndex = 0),
-            pane(paneId = "%2", windowId = "@9", windowIndex = 1),
-        )
-
-        val windows = panes.toWindowSummaries()
-
-        assertEquals(
-            listOf(1, 0),
-            windows.map { it.windowIndex },
-        )
     }
 
     // --- Issue #652: tap-A-must-open-A under a unified-pager reorder. ---
@@ -809,21 +768,6 @@ class TmuxSessionScreenTest {
             ),
             keyPath = "/keys/alpha",
             passphrase = null,
-        )
-
-    private fun pane(
-        paneId: String,
-        windowId: String,
-        windowIndex: Int? = null,
-        title: String = paneId,
-    ): TmuxPaneState =
-        TmuxPaneState(
-            paneId = paneId,
-            windowId = windowId,
-            windowIndex = windowIndex,
-            sessionId = "\$0",
-            title = title,
-            terminalState = TerminalSurfaceState(),
         )
 
     private fun claudeDetection(): AgentDetection =

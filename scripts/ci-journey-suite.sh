@@ -267,6 +267,18 @@ JOURNEY_CLASSES=(
   # partial blank is injected LOCALLY on the emulator, no toxiproxy), and does NOT
   # self-skip on CI, so it belongs in this per-push subset.
   "$FQCN_PREFIX.ReconnectPartialBlankReseedJourneyE2eTest"
+  # ADDED (#782, D30 / D28(3)): the pre-existing multi-window `[wN]`
+  # switcher-entry journey. PocketShell no longer manages tmux windows; a session
+  # that already has >1 window on the remote is surfaced as separate `<session>
+  # [wN]` switcher entries, each attaching to THAT window's pane over the warm
+  # lease. This proof taps `[w0]` (its attach-time `capture-pane` seed must paint,
+  # not a black pane — the #662 regression), backs out and taps `[w1]` (ITS own
+  # seed), then re-selects `[w0]` (warm-lease instant re-attach, no reconnect). It
+  # is a load-bearing tmux journey, so per D28(3)/#638/#691 it runs per-push so a
+  # black-pane / wrong-window-content regression can't silently return. It uses
+  # ONLY the deterministic agents:2222 fixture (no toxiproxy) that `tests.yml`
+  # already brings up — no workflow change needed — and does NOT self-skip on CI.
+  "$FQCN_PREFIX.PreExistingMultiWindowSeedE2eTest"
 )
 
 echo "=========================================================="

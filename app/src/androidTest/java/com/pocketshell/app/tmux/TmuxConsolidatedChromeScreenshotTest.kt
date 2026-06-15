@@ -33,28 +33,18 @@ import org.junit.runner.RunWith
 
 /**
  * Issues #189 / #192 screenshot evidence — captures the tmux session
- * top chrome ([ConsolidatedTopChrome] / [CompactBreadcrumb]) plus
- * the per-window navigation strip ([WindowStrip]) and inline
- * Terminal/Conversation toggle in every meaningful permutation so the
- * reviewer and maintainer can eyeball the navigation chrome without
- * driving a live tmux session.
+ * top chrome ([ConsolidatedTopChrome] / [CompactBreadcrumb]) plus the
+ * inline Terminal/Conversation toggle so the reviewer and maintainer can
+ * eyeball the navigation chrome without driving a live tmux session.
  *
- * Three artifacts get written to
- * `<media>/additional_test_output/tmux-consolidated-chrome/`:
- *
- *  - `consolidated-chrome-single-window-no-agent.png` — the minimal
- *    case (no agent, single window). Just back + session name + kebab;
- *    no strip (nothing to switch to), no toggle.
- *  - `consolidated-chrome-multi-window-with-agent.png` — the loaded
- *    case (#303): one 56dp header row containing the
- *    Terminal/Conversation pill + per-window strip below it (active
- *    window pill carries the ✕ kill affordance).
- *  - `consolidated-chrome-ime-up-compact.png` — IME-up compressed
- *    chrome (the [CompactBreadcrumb] 40dp strip, no strip, no toggle).
+ * Issue #782: the per-window navigation strip (WindowStrip) was removed —
+ * PocketShell no longer manages tmux windows, so there is no in-session
+ * window-tab row to screenshot. The only in-session tab dimension is
+ * Terminal/Conversation.
  *
  * Combined with [TmuxSessionScreenImeChromeTest] (which asserts the
  * 56dp height limit and the IME-down/up tag visibility contract), this
- * is the visual gate for the new chrome IA.
+ * is the visual gate for the chrome IA.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxConsolidatedChromeScreenshotTest {
@@ -147,42 +137,25 @@ class TmuxConsolidatedChromeScreenshotTest {
     }
 
     @Test
-    fun captureMultiWindowWithAgentChrome() {
+    fun captureAgentChrome() {
         compose.setContent {
             PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(PocketShellColors.Background)
-                        // Pad below the system status bar so the
-                        // chrome doesn't overlap the system clock /
-                        // notification icons in the screenshot. The
-                        // real screen pulls this padding from its
-                        // root scaffold; here we hard-code a Pixel-7
-                        // status-bar height (24dp) so the test stays
-                        // independent of the device's window insets
-                        // (which createAndroidComposeRule does not
-                        // always populate).
                         .padding(top = 24.dp)
                         .testTag(SCREENSHOT_ROOT_TAG),
                 ) {
-                    // Multi-window + agent: the full #192 IA — header
-                    // row, per-window strip (Window 2 active, carrying
-                    // the ✕ kill affordance), per-window toggle.
+                    // Agent session: header row with the Terminal/Conversation
+                    // toggle. Issue #782: no per-window strip — windows are no
+                    // longer surfaced in the in-session chrome.
                     ConsolidatedTopChrome(
                         sessionName = "claude-main",
                         tabLabels = listOf("Terminal", "Conversation"),
                         selectedTabIndex = 1,
                         onBack = {},
                         onMore = {},
-                    )
-                    WindowStrip(
-                        windows = sampleWindows(3),
-                        currentWindowId = "@2",
-                        onSelectWindow = {},
-                        onOpenWindowMenu = {},
-                        onKillWindow = {},
-                        onNewWindow = {},
                     )
                     PaneProxy()
                 }
@@ -191,7 +164,7 @@ class TmuxConsolidatedChromeScreenshotTest {
         compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
         compose.waitForIdle()
         SystemClock.sleep(200)
-        captureFullDevice(File(artifactDir(), "consolidated-chrome-multi-window-with-agent.png"))
+        captureFullDevice(File(artifactDir(), "consolidated-chrome-with-agent.png"))
     }
 
     @Test
@@ -316,8 +289,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                         moreMenu = {
                             TmuxMoreMenu(
                                 expanded = expanded.value,
-                                currentWindowId = "@1",
-                                multipleWindows = true,
                                 onDismiss = { expanded.value = false },
                                 onCreateSession = {},
                                 onRenameSession = {},
@@ -325,9 +296,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                                 onSwitchSession = {},
                                 onOpenJobs = {},
                                 onOpenUsage = {},
-                                onNewWindow = {},
-                                onRenameWindow = {},
-                                onKillWindow = {},
                                 onDetach = {},
                             )
                         },
@@ -361,9 +329,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                 .padding(12.dp),
         )
     }
-
-    private fun sampleWindows(count: Int): List<WindowSummary> =
-        (1..count).map { idx -> WindowSummary(windowId = "@$idx", title = "Window $idx") }
 
     private fun artifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

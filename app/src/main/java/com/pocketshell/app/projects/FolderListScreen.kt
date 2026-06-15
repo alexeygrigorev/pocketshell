@@ -2148,7 +2148,7 @@ private fun WorkspaceSessionWindowRow(
         // summary + parent badge + per-window badge). One indication per window —
         // the dot + the title — is enough.
         Text(
-            text = windowDisplayTitle(window),
+            text = sessionWindowEntryTitle(sessionName, window),
             color = PocketShellColors.Text,
             style = PocketShellType.bodyDense,
             fontWeight = FontWeight.Medium,
@@ -2541,11 +2541,25 @@ private fun sortedSessionWindows(session: FolderSessionEntry): List<FolderSessio
             .thenBy { it.name.orEmpty() },
     )
 
-internal fun windowDisplayTitle(window: FolderSessionWindowEntry): String {
-    val identity = window.index?.let { "w$it" } ?: "window"
+/**
+ * Issue #782: PocketShell no longer manages tmux windows. When a session has
+ * more than one window (windows can only be created OUTSIDE PocketShell now),
+ * each window is surfaced as its OWN session-like switcher entry suffixed
+ * `[wN]` (e.g. `mysession [w0]`, `mysession [w1]`). The label leads with the
+ * session name so the entry reads as a sibling of the single-window session
+ * rows, with the `[wN]` suffix disambiguating which window it attaches to. An
+ * optional command/name hint trails so an agent window still surfaces what's
+ * running in it.
+ */
+internal fun sessionWindowEntryTitle(
+    sessionName: String,
+    window: FolderSessionWindowEntry,
+): String {
+    val suffix = window.index?.let { "[w$it]" } ?: "[window]"
     val hint = window.command?.trim()?.takeIf { it.isNotEmpty() }
         ?: window.name?.trim()?.takeIf { it.isNotEmpty() }
-    return if (hint == null) identity else "$identity $hint"
+    val base = "$sessionName $suffix"
+    return if (hint == null) base else "$base $hint"
 }
 
 @Composable

@@ -31,8 +31,6 @@ class TmuxMoreMenuSettingsTest {
                 val expanded = mutableStateOf(true)
                 TmuxMoreMenu(
                     expanded = expanded.value,
-                    currentWindowId = "@1",
-                    multipleWindows = true,
                     onDismiss = { expanded.value = false },
                     onCreateSession = {},
                     onRenameSession = {},
@@ -41,11 +39,7 @@ class TmuxMoreMenuSettingsTest {
                     onOpenJobs = {},
                     onOpenUsage = {},
                     onOpenSettings = { settingsClicks++ },
-                    onNewWindow = {},
-                    onRenameWindow = {},
-                    onKillWindow = {},
                     onDetach = {},
-                    onSwitchWindow = {},
                 )
             }
         }

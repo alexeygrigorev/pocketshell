@@ -443,10 +443,13 @@ class FolderListGroupingTest {
     }
 
     @Test
-    fun windowDisplayTitleUsesWindowIndexAndCommand() {
+    fun sessionWindowEntryTitlePrefixesSessionNameAndWnSuffix() {
+        // Issue #782: a multi-window session surfaces each window as its own
+        // `<session> [wN]` switcher entry, with an optional command/name hint.
         assertEquals(
-            "w0 claude",
-            windowDisplayTitle(
+            "mysession [w0] claude",
+            sessionWindowEntryTitle(
+                "mysession",
                 FolderSessionWindowEntry(
                     index = 0,
                     name = "renamed",
@@ -457,8 +460,9 @@ class FolderListGroupingTest {
             ),
         )
         assertEquals(
-            "w1 bash",
-            windowDisplayTitle(
+            "mysession [w1] bash",
+            sessionWindowEntryTitle(
+                "mysession",
                 FolderSessionWindowEntry(
                     index = 1,
                     name = "bash",

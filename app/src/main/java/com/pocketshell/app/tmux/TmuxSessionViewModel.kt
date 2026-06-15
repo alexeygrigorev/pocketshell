@@ -28,12 +28,7 @@ import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.nav.AppDestination
-import com.pocketshell.app.projects.ClaudeProfile
-import com.pocketshell.app.projects.CodexProfile
 import com.pocketshell.app.projects.FolderListGateway
-import com.pocketshell.app.projects.ProfilesGateway
-import com.pocketshell.app.projects.ProfilesResult
-import com.pocketshell.app.projects.RemoteProfile
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationSyncStatus
@@ -103,7 +98,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.trySendBlocking
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -211,11 +205,6 @@ public class TmuxSessionViewModel @Inject constructor(
     // injectable so a burst-ingest test can wire a repository whose tail
     // drain runs on the test scheduler (deterministic batch coalescing).
     private val agentRepository: AgentConversationRepository = AgentConversationRepository(),
-    // Issue #678: host-discovered agent profiles (issue #718) for the new-WINDOW
-    // shell-vs-agent picker. Nullable default keeps existing unit-test
-    // constructors working without the singleton; when absent the picker simply
-    // shows no profile selector (the safe default-only behaviour).
-    private val profilesGateway: ProfilesGateway? = null,
 ) : ViewModel() {
 
     /**
@@ -862,97 +851,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
     private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
     private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
-
-    /**
-     * Issue #188: one-shot user-facing message for a failed `kill-window`
-     * lifecycle command. Mirrors the [killError] pattern that issue #168
-     * established for the sessions dashboard so the user can tell a
-     * silent transport / tmux failure apart from "kill happened but the
-     * WindowStrip refresh hasn't caught up yet". The screen renders this
-     * via a banner slot and clears it via [clearWindowKillError] once
-     * the user dismisses it. Stays null while killing a window succeeds.
-     */
-    private val _windowKillError: MutableStateFlow<String?> = MutableStateFlow(null)
-    public val windowKillError: StateFlow<String?> = _windowKillError.asStateFlow()
-
-    /**
-     * Issue #625: signal emitted after a new-window command creates a window.
-     * Carries the window ID (e.g. `@5`) so the Screen can scroll the pager
-     * to the matching pane. The Screen collects this flow and calls
-     * [selectWindow] + scrolls the pager when a value arrives.
-     */
-    private val _windowSwitchRequest: MutableSharedFlow<String> =
-        MutableSharedFlow(extraBufferCapacity = 4)
-    public val windowSwitchRequest: SharedFlow<String> =
-        _windowSwitchRequest.asSharedFlow()
-
-    /**
-     * Issue #678: host-discovered Claude / Codex agent profiles (issue #718)
-     * for the new-WINDOW shell-vs-agent picker. The screen surfaces the per
-     * engine profile selector only when a list has more than one entry, so an
-     * empty list (no gateway, CLI missing, fetch failure) safely renders the
-     * default-only picker. Mirrors
-     * [com.pocketshell.app.projects.FolderListViewModel.claudeProfiles].
-     */
-    private val _claudeProfiles: MutableStateFlow<List<ClaudeProfile>> =
-        MutableStateFlow(emptyList())
-    public val claudeProfiles: StateFlow<List<ClaudeProfile>> =
-        _claudeProfiles.asStateFlow()
-
-    private val _codexProfiles: MutableStateFlow<List<CodexProfile>> =
-        MutableStateFlow(emptyList())
-    public val codexProfiles: StateFlow<List<CodexProfile>> =
-        _codexProfiles.asStateFlow()
-
-    /**
-     * Issue #678: fetch the host-discovered agent profiles for the new-WINDOW
-     * picker, the same way
-     * [com.pocketshell.app.projects.FolderListViewModel.fetchProfiles] does for
-     * the new-SESSION picker. Called by the screen when the user taps `+ window`
-     * so the picker's per-engine profile selectors are populated. Any non
-     * success result (no gateway in tests, CLI missing, connect/parse failure)
-     * leaves the flows empty so the picker shows the default-only behaviour.
-     */
-    public fun loadAgentProfiles() {
-        val gw = profilesGateway ?: run {
-            _claudeProfiles.value = emptyList()
-            _codexProfiles.value = emptyList()
-            return
-        }
-        val target = activeTarget ?: connectingTarget ?: return
-        val dao = hostDao ?: return
-        viewModelScope.launch {
-            val host = withContext(Dispatchers.IO) { dao.getById(target.hostId) }
-                ?: return@launch
-            val result = withContext(Dispatchers.IO) {
-                gw.listProfiles(
-                    host = host,
-                    keyPath = target.keyPath,
-                    passphrase = target.passphrase,
-                )
-            }
-            // Ignore a stale result if the host changed while fetching.
-            if ((activeTarget ?: connectingTarget)?.hostId != target.hostId) {
-                return@launch
-            }
-            when (result) {
-                is ProfilesResult.Profiles -> applyAgentProfiles(result.profiles)
-                else -> {
-                    _claudeProfiles.value = emptyList()
-                    _codexProfiles.value = emptyList()
-                }
-            }
-        }
-    }
-
-    private fun applyAgentProfiles(profiles: List<RemoteProfile>) {
-        _claudeProfiles.value = profiles
-            .filter { it.engine == RemoteProfile.ENGINE_CLAUDE }
-            .map { ClaudeProfile(name = it.name, default = it.default) }
-        _codexProfiles.value = profiles
-            .filter { it.engine == RemoteProfile.ENGINE_CODEX }
-            .map { CodexProfile(name = it.name, default = it.default) }
-    }
 
     /**
      * Issue #458: sticky state of the key bar's `Ctrl` modifier. When armed
@@ -9838,260 +9736,6 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Issue #625: create a new tmux window and auto-switch the terminal
-     * viewport to it. Mirrors the deterministic event-wait pattern from
-     * [killWindow]: subscribe to [ControlEvent.WindowAdd] BEFORE sending
-     * `new-window` so the notification cannot be missed, then after the
-     * event arrives reconcile the pane list and emit the new window ID
-     * through [windowSwitchRequest] so the Screen scrolls the pager.
-     *
-     * On transport failure or tmux `%error` the command is silently
-     * dropped (matching the pre-#625 fire-and-forget behaviour). A 2s
-     * fallback timeout ensures the UI is never permanently wedged if
-     * tmux never emits the event.
-     */
-    /**
-     * Issue #678: create a new window, optionally rooted at [startDirectory]
-     * and optionally launching an agent (or any) command in it via the same
-     * shell-vs-agent picker the new-SESSION flow uses.
-     *
-     * - [startDirectory]: when non-blank, the window is created with
-     *   `new-window -c '<dir>'` so the new pane's shell starts there. When
-     *   null/blank the command keeps the original `new-window -t '<session>'`
-     *   shape (a plain window in tmux's default cwd) — the unchanged shell
-     *   pick and the bare overflow/long-press default.
-     * - [startCommand]: when non-null, after the `%window-add` event lands we
-     *   `send-keys` it into the freshly created window (targeted by its `@N`
-     *   window ID so it can never race the previously-active window). For an
-     *   agent pick this is the SHORT `pocketshell agent <kind> --dir '<dir>'
-     *   …` wrapper line (issue #703) — identical to the create-session path in
-     *   [com.pocketshell.app.projects.FolderListGateway.createSession].
-     */
-    public fun newWindow(
-        startDirectory: String? = null,
-        startCommand: String? = null,
-    ) {
-        val target = activeTarget?.sessionName ?: return
-        val client = clientRef ?: return
-        val cwd = startDirectory?.trim()?.takeIf { it.isNotBlank() }
-        bridgeScope.launch {
-            // Capture the WindowAdd event's window ID. Subscribe BEFORE
-            // sending the command so we never miss the %window-add
-            // notification (same rationale as killWindow).
-            val capturedWindowId = CompletableDeferred<String?>()
-            val eventJob = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                val event = withTimeoutOrNull(NEW_WINDOW_EVENT_WAIT_MS) {
-                    client.events.first { event ->
-                        event is ControlEvent.WindowAdd
-                    } as? ControlEvent.WindowAdd
-                }
-                capturedWindowId.complete(event?.windowId)
-            }
-
-            val newWindowCommand = buildString {
-                append("new-window -t '${escapeSingleQuoted(target)}'")
-                if (cwd != null) {
-                    append(" -c '${escapeSingleQuoted(cwd)}'")
-                }
-            }
-            val sendResult = runCatching {
-                client.sendCommand(newWindowCommand)
-            }
-            if (sendResult.isFailure) {
-                eventJob.cancel()
-                return@launch
-            }
-            val response = sendResult.getOrNull()
-            if (response != null && response.isError) {
-                eventJob.cancel()
-                return@launch
-            }
-
-            // Wait up to NEW_WINDOW_EVENT_WAIT_MS for tmux's
-            // %window-add notification.
-            eventJob.join()
-
-            // The reconciled pane list now includes the new window.
-            // Emit a switch request so the Screen can scroll the pager.
-            val addedWindowId = capturedWindowId.await()
-
-            // Issue #678: launch the agent (or shell start) command in the new
-            // window. Target the specific @N window ID so the keys land in the
-            // window we just made, not whatever the user is currently viewing.
-            // Mirror the create-session send-keys shape (issue #703).
-            if (startCommand != null && addedWindowId != null) {
-                runCatching {
-                    client.sendCommand(
-                        "send-keys -t $addedWindowId " +
-                            "'${escapeSingleQuoted(startCommand)}' Enter",
-                    )
-                }
-            }
-
-            reconcilePanes()
-
-            if (addedWindowId != null) {
-                _windowSwitchRequest.emit(addedWindowId)
-            }
-        }
-    }
-
-    public fun selectWindow(windowId: String) {
-        if (windowId.isBlank()) return
-        sendLifecycleCommand("select-window -t $windowId")
-    }
-
-    public fun renameWindow(windowId: String, newName: String) {
-        val trimmed = newName.trim()
-        if (windowId.isBlank() || trimmed.isEmpty()) return
-        sendLifecycleCommand("rename-window -t $windowId '${escapeSingleQuoted(trimmed)}'")
-    }
-
-    /**
-     * Kill the tmux window identified by [windowId] (e.g. `@5`) and let the
-     * reconcile path refresh the WindowStrip once tmux acknowledges the
-     * death.
-     *
-     * ## Why this looks different from [killCurrentSession] / [renameWindow]
-     *
-     * Per issue #188, the original implementation wrapped `sendCommand`
-     * inside [sendLifecycleCommand]'s plain [runCatching] and never refreshed
-     * after the kill. That gave the user two visible failure modes:
-     *
-     *  1. **Silent failures.** A transport error (closed client, dropped
-     *     channel) or a tmux `%error` (window already gone, wrong target
-     *     syntax, …) was swallowed — the user kept seeing the kill-target
-     *     window pill in the WindowStrip with no indication of why their tap
-     *     had no effect ("Kill window … but then it will not close it").
-     *  2. **No deterministic refresh.** Even on a successful kill the
-     *     WindowStrip relied on the `%window-close` event eventually
-     *     reaching [onControlEvent] → [reconcilePanes]. If the event fired
-     *     between our launch yielding and our subscriber installing — a
-     *     race on a hot SharedFlow — we'd miss it entirely.
-     *
-     * The fix mirrors issue #168 for `kill-session`:
-     *
-     *  - Install an UNDISPATCHED subscriber on [TmuxClient.events] for the
-     *    matching [ControlEvent.WindowClose] BEFORE issuing the kill, so we
-     *    can never miss the notification.
-     *  - On transport throw or tmux `%error` response, surface a
-     *    user-facing [windowKillError] message and SKIP the refresh — a
-     *    refresh would just re-render the still-alive window and look like
-     *    the bug from #188.
-     *  - On a successful kill, await the `%window-close` event (with a 2s
-     *    fallback so a degenerate tmux can never wedge the UI) and then
-     *    force a [reconcilePanes] round-trip even though the event-handler
-     *    would have done one too — belt-and-braces against the
-     *    "subscription installed but event already past" edge case under
-     *    SharedFlow buffer pressure.
-     *
-     * Debug logging (`windowId` + `client.hashCode()`) covers the
-     * "wrong client" hypothesis the same way it did for #168, so a future
-     * triage of "kill silently does nothing" can grep logcat and confirm
-     * the same client instance issued the kill and saw the event.
-     */
-    public fun killWindow(windowId: String) {
-        if (windowId.isBlank()) return
-        val client = clientRef ?: return
-        val label = labelFor(windowId)
-        bridgeScope.launch {
-            val clientHash = System.identityHashCode(client)
-            Log.i(
-                ISSUE_188_DIAG_TAG,
-                "kill-window-start windowId=$windowId label=$label clientHash=$clientHash",
-            )
-
-            // Subscribe to the deterministic post-kill notification BEFORE
-            // sending the command so we don't miss the event in the race
-            // window between sendCommand returning and our collector
-            // installing. `events` is a hot SharedFlow — late subscription
-            // would drop the notification we care about.
-            //
-            // `start = UNDISPATCHED` guarantees the inner coroutine runs
-            // up to its first suspension point (the `events.first { … }`
-            // collector install) before this launch call returns — same
-            // pattern as the issue #168 kill-session fix.
-            val eventDeferred = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                withTimeoutOrNull(KILL_WINDOW_EVENT_WAIT_MS) {
-                    client.events.first { event ->
-                        event is ControlEvent.WindowClose && event.windowId == windowId
-                    }
-                }
-                Unit
-            }
-
-            val sendResult = runCatching {
-                client.sendCommand("kill-window -t $windowId")
-            }
-            val response = sendResult.getOrNull()
-            val transportFailure = sendResult.exceptionOrNull()
-            if (transportFailure != null) {
-                eventDeferred.cancel()
-                Log.w(
-                    ISSUE_188_DIAG_TAG,
-                    "kill-window-transport-failed windowId=$windowId label=$label " +
-                        "clientHash=$clientHash err=${transportFailure.javaClass.simpleName}: " +
-                        transportFailure.message,
-                )
-                _windowKillError.value = "Couldn't close $label: " +
-                    (transportFailure.message ?: "transport error")
-                return@launch
-            }
-            if (response != null && response.isError) {
-                eventDeferred.cancel()
-                val detail = response.output.joinToString(separator = " ").trim()
-                Log.w(
-                    ISSUE_188_DIAG_TAG,
-                    "kill-window-tmux-error windowId=$windowId label=$label " +
-                        "clientHash=$clientHash detail=$detail",
-                )
-                _windowKillError.value = "Couldn't close $label" +
-                    if (detail.isNotEmpty()) ": $detail" else ""
-                return@launch
-            }
-
-            // Wait up to KILL_WINDOW_EVENT_WAIT_MS for tmux's
-            // `%window-close` notification. The reconcile path
-            // (onControlEvent → reconcilePanes) will already run from the
-            // event-loop side, but we also kick off an explicit
-            // reconcilePanes() afterwards: SharedFlow with replay=0 means a
-            // pathological scheduling order could deliver the event to
-            // *this* collector while skipping the production
-            // [eventsJob] subscriber, and we want the WindowStrip to
-            // refresh deterministically either way.
-            eventDeferred.join()
-            Log.i(
-                ISSUE_188_DIAG_TAG,
-                "kill-window-refresh windowId=$windowId label=$label clientHash=$clientHash",
-            )
-            reconcilePanes()
-        }
-    }
-
-    /**
-     * Issue #188: clear the kill-window error banner. Wired to the
-     * screen's banner dismiss action.
-     */
-    public fun clearWindowKillError() {
-        _windowKillError.value = null
-    }
-
-    /**
-     * Issue #188: derive the human-readable label for [windowId] using the
-     * same 1-based indexing rule [com.pocketshell.app.tmux.toWindowSummaries]
-     * applies, so the error banner reads as "Window 2" rather than
-     * the raw tmux `@5`. Falls back to the raw id when the panes list
-     * doesn't yet know about [windowId] (e.g. kill issued before the
-     * first reconcile completed).
-     */
-    private fun labelFor(windowId: String): String {
-        val ordered = _panes.value
-            .map { it.windowId }
-            .distinct()
-        val index = ordered.indexOf(windowId)
-        return if (index >= 0) "Window ${index + 1}" else windowId
-    }
 
     private fun sendLifecycleCommand(command: String) {
         val client = clientRef ?: return
@@ -12142,23 +11786,6 @@ public data class TmuxRestoreIntentSnapshot(
     val trigger: TmuxConnectTrigger,
     val generation: Long,
 )
-
-/**
- * Issue #188: max time we wait for tmux to emit the post-kill
- * `%window-close` notification before falling back to an unconditional
- * reconcile. 2s mirrors the acceptance criterion in the issue body —
- * tmux's actual window-cleanup latency on a healthy localhost / Docker
- * server is sub-100ms.
- */
-internal const val KILL_WINDOW_EVENT_WAIT_MS: Long = 2_000L
-
-/**
- * Issue #625: how long [TmuxSessionViewModel.newWindow] waits for tmux's
- * `%window-add` notification before falling back to a best-effort reconcile
- * without emitting a switch request. 2s mirrors [KILL_WINDOW_EVENT_WAIT_MS]
- * — tmux's actual window-creation latency on a healthy server is sub-100ms.
- */
-internal const val NEW_WINDOW_EVENT_WAIT_MS: Long = 2_000L
 
 /**
  * Issue #145: process-wide monotonic counter of `connect()` calls that

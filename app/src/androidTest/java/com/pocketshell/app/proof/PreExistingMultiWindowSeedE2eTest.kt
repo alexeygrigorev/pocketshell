@@ -4,15 +4,16 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performSemanticsAction
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -22,8 +23,6 @@ import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
-import com.pocketshell.app.tmux.TMUX_WINDOW_STRIP_PILL_TAG_PREFIX
-import com.pocketshell.app.tmux.TMUX_WINDOW_STRIP_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -49,29 +48,35 @@ import java.io.FileOutputStream
  * a cursor) — switching Window 1 <-> Window 2 does NOT recover content. So the
  * per-window pane content is never seeded from `capture-pane` on attach.
  *
- * Why the existing [TmuxSessionWindowNavigationE2eTest] did NOT catch it: that
- * test creates the second window from inside the app (`+ New window`) and then
- * writes markers into it via live `%output`. The marker content therefore lands
- * through the live stream, NOT through the attach-time `capture-pane` seed. The
- * maintainer's failing path is different: a window whose content existed on the
- * remote BEFORE attach has NO subsequent `%output` for an idle pane — its ONLY
- * source of content is the attach-time `capture-pane` seed. If that seed never
- * paints, the idle window stays black forever.
+ * The failing path: a window whose content existed on the remote BEFORE the app
+ * attaches has NO subsequent `%output` for an idle pane — its ONLY source of
+ * content is the attach-time `capture-pane` seed. If that seed never paints, the
+ * idle window stays black forever. (Markers written into a window via the live
+ * `%output` stream after attach would mask this, so this test relies solely on
+ * pre-existing, idle content seeded at attach time.)
  *
- * This test seeds a session with TWO windows, each carrying a DISTINCT marker
- * printed once and then left idle (`exec sh`), attaches, and asserts:
- *   1. On attach, the first visible window's pane shows its pre-existing marker
- *      (not blank/black).
- *   2. After switching to the OTHER window via the strip, that window's pane
- *      shows ITS pre-existing marker (not blank/black).
- *   3. Switching back shows the first window's marker again.
+ * Issue #782 — PocketShell no longer manages tmux windows. A pre-existing
+ * multi-window session (windows created OUTSIDE the app) is now surfaced in the
+ * host tree as SEPARATE `[wN]` switcher entries (`<session> [w0]`,
+ * `<session> [w1]`), each attaching to THAT window's pane. The old in-session
+ * WindowStrip pills are gone (hard-cut). This test drives the new journey:
+ *
+ *   1. Tap the `[w0]` switcher entry — its pre-existing marker shows (the
+ *      attach-time `capture-pane` seed reached window 0's pane, not blank/black).
+ *   2. Back to the tree, tap the `[w1]` entry — ITS pre-existing marker shows.
+ *   3. Back, tap `[w0]` again — window 0's marker shows again. Re-selecting the
+ *      same session reuses the warm lease (D21 / #636 / #687 instant-switch); the
+ *      `capture-pane`-seeded content renders without a black pane.
  *
  * The markers are printed once at session creation and the shells go idle, so
  * the ONLY way the content can be on screen is the attach-time `capture-pane`
- * seed reaching every window's pane. A black pane fails assertion (1) or (2).
+ * seed reaching every window's pane. A black pane fails an assertion.
  *
- * Regular-CI gate: uses the plain Docker `agents` fixture on host port 2222
- * that `emulator-smoke.yml` brings up. NOT gated out of CI.
+ * Regular-CI gate: this class is listed in the per-push journey subset in
+ * `scripts/ci-journey-suite.sh` (D28(3) / #638 / #691), so it runs on every PR
+ * in `tests.yml`'s emulator-journey job. It uses ONLY the plain Docker `agents`
+ * fixture on host port 2222 that `tests.yml` already brings up — no toxiproxy,
+ * no extra service. It does NOT self-skip on CI.
  */
 @RunWith(AndroidJUnit4::class)
 class PreExistingMultiWindowSeedE2eTest {
@@ -94,7 +99,7 @@ class PreExistingMultiWindowSeedE2eTest {
     }
 
     @Test
-    fun preExistingMultiWindowSessionSeedsEveryWindowFromCapture() = runBlocking {
+    fun preExistingMultiWindowSurfacesPerWindowSwitcherEntriesAndSeedsEach() = runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -104,16 +109,13 @@ class PreExistingMultiWindowSeedE2eTest {
         // capture-pane seed.
         seedMultiWindowSession(key)
 
-        val hostRowTag = seedDockerHost(key, "Issue662 Black Multi-Window")
+        val hostRowTag = seedDockerHost(key, "Issue782 Multi-Window Entries")
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
-        // Attach to the multi-window session. `createEmptyComposeRule()` +
-        // `ActivityScenario.launch` is racy at launch: querying semantics
-        // before setContent runs throws IllegalStateException ("No compose
-        // hierarchies found"), and a bare waitUntil predicate that throws
-        // aborts the wait instead of retrying. Probe defensively so the wait
-        // rides through the brief pre-setContent window.
+        // Open the host tree. `createEmptyComposeRule()` + `ActivityScenario`
+        // is racy at launch (querying semantics before setContent throws), so
+        // probe defensively until the host row exists.
         compose.waitUntil(timeoutMillis = 15_000) {
             runCatching {
                 compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
@@ -122,69 +124,95 @@ class PreExistingMultiWindowSeedE2eTest {
             }.getOrDefault(false)
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForSessionInPicker(rule = compose, sessionName = SESSION, timeoutMs = 20_000)
-        compose.onNodeWithText(SESSION).performClick()
+
+        // Issue #782: the multi-window session is surfaced as SEPARATE
+        // `<session> [wN]` switcher entries in the host tree — NOT a single
+        // session row. Wait for both entries to appear.
+        waitForText(WINDOW_ZERO_ENTRY, "the [w0] switcher entry must appear in the host tree")
+        waitForText(WINDOW_ONE_ENTRY, "the [w1] switcher entry must appear in the host tree")
+        captureFullDevice("issue782-00-switcher-entries")
+
+        // ===== Assertion 1 — tap [w0], its pre-existing marker shows =====
+        tapText(WINDOW_ZERO_ENTRY)
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
-
-        // The multi-window session renders the WindowStrip; wait for both pills.
-        compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty() &&
-                compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
-                    useUnmergedTree = true,
-                ).fetchSemanticsNodes().isNotEmpty() &&
-                compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
-                    useUnmergedTree = true,
-                ).fetchSemanticsNodes().isNotEmpty()
+        waitForVisibleTerminal("window 0 pre-existing marker seeded on [w0] attach") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                WINDOW_ZERO_MARKER,
+                terminalCols = terminalGridSize().columns,
+            )
         }
+        captureViewport("issue782-01-window0-seeded")
 
-        // ===== Assertion 1 — land on window 1, its pre-existing marker shows =====
-        performWindowStripPillClick(1)
-        waitForVisibleTerminal("window 1 pre-existing marker seeded on attach") { transcript ->
+        // ===== Assertion 2 — back to tree, tap [w1], ITS marker shows =====
+        pressBack()
+        waitForText(WINDOW_ONE_ENTRY, "back to the host tree must re-show the [w1] entry")
+        tapText(WINDOW_ONE_ENTRY)
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForVisibleTerminal("window 1 pre-existing marker seeded on [w1] attach") { transcript ->
             TerminalTextMatcher.containsWrapTolerant(
                 transcript,
                 WINDOW_ONE_MARKER,
                 terminalCols = terminalGridSize().columns,
             )
         }
-        captureViewport("issue662-01-window1-seeded")
+        captureViewport("issue782-02-window1-seeded")
 
-        // ===== Assertion 2 — switch to window 2, ITS pre-existing marker shows =====
-        performWindowStripPillClick(2)
-        waitForVisibleTerminal("window 2 pre-existing marker seeded on attach") { transcript ->
-            TerminalTextMatcher.containsWrapTolerant(
-                transcript,
-                WINDOW_TWO_MARKER,
-                terminalCols = terminalGridSize().columns,
-            )
-        }
-        captureViewport("issue662-02-window2-seeded")
-
-        // ===== Assertion 3 — switch back to window 1, its marker still shows =====
-        performWindowStripPillClick(1)
-        waitForVisibleTerminal("window 1 marker still present after switch back") { transcript ->
+        // ===== Assertion 3 — back, tap [w0] again: warm re-select, marker shows =====
+        // Re-selecting the SAME session reuses the warm lease (instant-switch,
+        // D21 / #636 / #687): window 0's capture-seeded content renders again
+        // without a black pane.
+        pressBack()
+        waitForText(WINDOW_ZERO_ENTRY, "back to the host tree must re-show the [w0] entry")
+        tapText(WINDOW_ZERO_ENTRY)
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForVisibleTerminal("window 0 marker still present after re-selecting [w0]") { transcript ->
             val columns = terminalGridSize().columns
             TerminalTextMatcher.containsWrapTolerant(
                 transcript,
-                WINDOW_ONE_MARKER,
+                WINDOW_ZERO_MARKER,
                 terminalCols = columns,
             ) &&
                 !TerminalTextMatcher.containsWrapTolerant(
                     transcript,
-                    WINDOW_TWO_MARKER,
+                    WINDOW_ONE_MARKER,
                     terminalCols = columns,
                 )
         }
-        captureViewport("issue662-03-window1-after-switchback")
+        captureViewport("issue782-03-window0-after-reselect")
 
         Unit
     }
 
     // ---------------------------------------------------------------- Helpers
+
+    private fun waitForText(text: String, message: String) {
+        val ok = runCatching {
+            compose.waitUntil(timeoutMillis = 20_000) {
+                runCatching {
+                    compose.onAllNodesWithText(text, substring = true, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }.getOrDefault(false)
+            }
+            true
+        }.getOrDefault(false)
+        assertTrue(message, ok)
+    }
+
+    private fun tapText(text: String) {
+        compose.onAllNodesWithText(text, substring = true, useUnmergedTree = true)
+            .onFirst()
+            .performClick()
+    }
+
+    private fun pressBack() {
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()
@@ -259,11 +287,11 @@ class PreExistingMultiWindowSeedE2eTest {
             )
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION)} -x 80 -y 24 " +
-                    shellQuote("sh /tmp/issue662-frozen.sh $WINDOW_ONE_MARKER"),
+                    shellQuote("sh /tmp/issue662-frozen.sh $WINDOW_ZERO_MARKER"),
             )
             appendLine(
                 "tmux new-window -t ${shellQuote(SESSION)} " +
-                    shellQuote("sh /tmp/issue662-frozen.sh $WINDOW_TWO_MARKER"),
+                    shellQuote("sh /tmp/issue662-frozen.sh $WINDOW_ONE_MARKER"),
             )
             // Leave window 1 active so attach lands on a deterministic window.
             appendLine("tmux select-window -t ${shellQuote(SESSION)}:0")
@@ -305,13 +333,6 @@ class PreExistingMultiWindowSeedE2eTest {
                 }
             }
         }
-    }
-
-    private fun performWindowStripPillClick(window: Int) {
-        compose.onNodeWithTag(
-            "$TMUX_WINDOW_STRIP_PILL_TAG_PREFIX$window",
-            useUnmergedTree = true,
-        ).performSemanticsAction(SemanticsActions.OnClick)
     }
 
     private fun waitForTerminalViewAttached() {
@@ -390,6 +411,18 @@ class PreExistingMultiWindowSeedE2eTest {
         bitmap?.recycle()
     }
 
+    private fun captureFullDevice(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+        val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        try {
+            writeBitmap(name, bitmap)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     private fun writeBitmap(name: String, bitmap: Bitmap): File {
         val file = artifactFile("$name.png")
         FileOutputStream(file).use { out ->
@@ -435,10 +468,14 @@ class PreExistingMultiWindowSeedE2eTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
-        const val LOG_TAG: String = "Issue662MultiWindowSeed"
-        const val DEVICE_DIR_NAME: String = "issue662-multiwindow-seed"
+        const val LOG_TAG: String = "Issue782MultiWindowEntries"
+        const val DEVICE_DIR_NAME: String = "issue782-multiwindow-entries"
         const val SESSION: String = "black-multiwindow"
+        const val WINDOW_ZERO_MARKER: String = "WINDOW-ZERO-SEEDED"
         const val WINDOW_ONE_MARKER: String = "WINDOW-ONE-SEEDED"
-        const val WINDOW_TWO_MARKER: String = "WINDOW-TWO-SEEDED"
+        // Issue #782: each window is surfaced as a `<session> [wN]` switcher
+        // entry; the test taps these by their visible label.
+        const val WINDOW_ZERO_ENTRY: String = "$SESSION [w0]"
+        const val WINDOW_ONE_ENTRY: String = "$SESSION [w1]"
     }
 }

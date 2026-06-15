@@ -65,7 +65,7 @@ Mosh is explicitly not implemented in the current transport stack. The bootstrap
 
 ### 3. Per-pane terminal rendering, not tiled tmux
 
-Tmux's native split layout is unreadable on a phone. With control mode we know about panes individually — render *one pane at a time* in a real VT emulator, with swipes to move between panes/windows. The user never sees tmux's status bar. PocketShell *is* the status bar.
+Tmux's native split layout is unreadable on a phone. With control mode we know about panes individually — render *one pane at a time* in a real VT emulator, with swipes to move between panes. The user never sees tmux's status bar. PocketShell *is* the status bar. PocketShell does **not** manage tmux windows (D30, issue #782); windows created outside PocketShell are surfaced in the host tree as separate `[wN]` switcher entries (one per window), each attaching to that window's pane via the warm lease.
 
 ## Connection / reconnect / grace (the most critical subsystem — D28)
 
@@ -142,7 +142,7 @@ This needs to be first-class onboarding, not a hidden prerequisite. If we skip t
 | Screen | Purpose |
 |---|---|
 | Workspace dashboard (home) | Hosts (favourites + recent), all tmux sessions across connected hosts sorted by activity, running jobs |
-| Session view | Full-screen terminal for one pane. Swipe L/R = next/prev pane. Swipe up = window switcher. Swipe down = session switcher. Top breadcrumb = `host › session › window › pane`. |
+| Session view | Full-screen terminal for one pane. Swipe L/R = next/prev pane. Swipe down = session switcher. Terminal/Conversation is the only in-session tab dimension; PocketShell does not manage tmux windows (D30, #782) — externally-created windows appear as separate `[wN]` switcher entries in the host tree. |
 | Quick send panel | Send snippet or schedule recurring (delegates to remote `pocketshell jobs add`) |
 | Port panel | Slide-in panel on a host — the existing `ssh-auto-forward-android` table, absorbed |
 | Connection setup | SSH config import, key gen + push via paste/QR, biometric unlock for passphrases |

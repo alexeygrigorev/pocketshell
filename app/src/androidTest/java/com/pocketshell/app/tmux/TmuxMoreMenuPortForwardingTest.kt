@@ -48,8 +48,6 @@ class TmuxMoreMenuPortForwardingTest {
                 val expanded = mutableStateOf(true)
                 TmuxMoreMenu(
                     expanded = expanded.value,
-                    currentWindowId = "@1",
-                    multipleWindows = true,
                     onDismiss = { expanded.value = false },
                     onCreateSession = {},
                     onRenameSession = {},
@@ -58,11 +56,7 @@ class TmuxMoreMenuPortForwardingTest {
                     onOpenJobs = {},
                     onOpenUsage = {},
                     onOpenPortForwarding = { portForwardingClicks++ },
-                    onNewWindow = {},
-                    onRenameWindow = {},
-                    onKillWindow = {},
                     onDetach = {},
-                    onSwitchWindow = {},
                 )
             }
         }
@@ -92,7 +86,6 @@ class TmuxMoreMenuPortForwardingTest {
                 val expanded = mutableStateOf(true)
                 TmuxMoreMenu(
                     expanded = expanded.value,
-                    currentWindowId = "@1",
                     forwardingState = SessionForwardingIndicatorState(
                         active = true,
                         tunnelCount = 4,
@@ -105,9 +98,6 @@ class TmuxMoreMenuPortForwardingTest {
                     onOpenJobs = {},
                     onOpenUsage = {},
                     onOpenPortForwarding = { portForwardingClicks++ },
-                    onNewWindow = {},
-                    onRenameWindow = {},
-                    onKillWindow = {},
                 )
             }
         }

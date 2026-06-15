@@ -423,14 +423,6 @@ public fun TmuxSessionScreen(
     val startDirectoryAutocompleteController =
         rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     val agentConversations by viewModel.agentConversations.collectAsState()
-    // Issue #678: host-discovered agent profiles for the new-WINDOW
-    // shell-vs-agent picker (same data the new-SESSION picker uses).
-    val newWindowClaudeProfiles by viewModel.claudeProfiles.collectAsState()
-    val newWindowCodexProfiles by viewModel.codexProfiles.collectAsState()
-    // Issue #678: when non-null, the new-window shell-vs-agent picker is open,
-    // pre-filled with the active pane's cwd. Choosing 'shell' makes a plain
-    // window; choosing an agent makes the window AND launches the agent in it.
-    var newWindowPicker by remember { mutableStateOf<NewWindowPickerRequest?>(null) }
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     // Issue #463: the in-session project switcher's sibling list, sourced
     // from the warm live `-CC` client only (no SSH handshake) so tapping the
@@ -514,8 +506,6 @@ public fun TmuxSessionScreen(
         viewModel.sessionNameForUnifiedPane(it)
     }
     val currentAgentConversation = currentPane?.paneId?.let { agentConversations[it] }
-    val currentWindowId = currentPane?.windowId
-    val windows = remember(panes) { panes.toWindowSummaries() }
     val scope = rememberCoroutineScope()
 
     // Issue #463: the current session's project path (the active pane's
@@ -562,11 +552,9 @@ public fun TmuxSessionScreen(
     val haptics = LocalHapticFeedback.current
     val verticalSwipeThresholdPx = with(LocalDensity.current) { VerticalSwipeThreshold.toPx() }
     var moreExpanded by remember { mutableStateOf(false) }
-    var windowMenuFor by remember { mutableStateOf<WindowSummary?>(null) }
     var dialogMode by remember { mutableStateOf<TmuxDialogMode?>(null) }
     var dialogText by remember { mutableStateOf("") }
     var dialogStartDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
-    var showWindowSwitcher by remember { mutableStateOf(false) }
     var showSessionSwitcher by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     // Issue #497: in-app file viewer path-entry dialog (kebab "Open file…").
@@ -708,7 +696,6 @@ public fun TmuxSessionScreen(
     TmuxSessionBackHandler(
         dialogOpen = dialogMode != null,
         sessionDrawerOpen = showSessionSwitcher || showSessionDrawer,
-        windowSwitcherOpen = showWindowSwitcher,
         micSheetOpen = showMicSheet,
         snippetPickerOpen = showSnippetPicker,
         onDismissDialog = { dialogMode = null },
@@ -717,7 +704,6 @@ public fun TmuxSessionScreen(
             showSessionDrawer = false
             sessionPickerViewModel.dismiss()
         },
-        onDismissWindowSwitcher = { showWindowSwitcher = false },
         onDismissMicSheet = { showMicSheet = false },
         onDismissSnippetPicker = { showSnippetPicker = false },
         onBack = onBack,
@@ -835,50 +821,24 @@ public fun TmuxSessionScreen(
         dialogStartDirectory = initialStartDirectory
     }
 
-    fun selectWindow(window: WindowSummary) {
-        viewModel.selectWindow(window.windowId)
-        // Issue #626: search the unified pane list for the page index.
-        val page = unifiedPanes.indexOfFirst { it.windowId == window.windowId }
-        if (page >= 0) {
-            scope.launch { pagerState.animateScrollToPage(page) }
-        }
-    }
-
-    // Issue #678: every `+ window` entry point now opens the same shell-vs-agent
-    // picker the new-SESSION flow uses, pre-filled with the active pane's cwd.
-    // Trigger a profile fetch so the picker's per-engine selectors populate.
-    fun openNewWindowPicker() {
-        val cwd = currentPane?.cwd?.takeIf { it.isNotBlank() }
-            ?: DEFAULT_TMUX_START_DIRECTORY
-        viewModel.loadAgentProfiles()
-        newWindowPicker = NewWindowPickerRequest(startDirectory = cwd)
-    }
-
+    // Issue #782: when a `[wN]` switcher entry is tapped, the host tree
+    // routes here with [initialWindowIndex] set to that externally-created
+    // window's tmux index. We scroll the warm unified pager straight to the
+    // matching pane — no reconnect, no server-side window management — so the
+    // attach renders THAT window's content instantly (the warm-lease /
+    // instant-switch contract, D21 / #636 / #687). PocketShell never creates,
+    // switches, renames, or closes tmux windows itself (#782 hard-cut); it only
+    // re-presents windows that already exist on the server.
     var consumedInitialWindowTarget by remember(sessionName, initialWindowIndex) { mutableStateOf(false) }
     LaunchedEffect(unifiedPanes, initialWindowIndex, consumedInitialWindowTarget) {
         val requestedIndex = initialWindowIndex ?: return@LaunchedEffect
         if (consumedInitialWindowTarget) return@LaunchedEffect
         val targetPane = unifiedPanes.firstOrNull { it.windowIndex == requestedIndex } ?: return@LaunchedEffect
         consumedInitialWindowTarget = true
-        viewModel.selectWindow(targetPane.windowId)
         // Issue #626: search the unified pane list.
         val page = unifiedPanes.indexOfFirst { it.windowId == targetPane.windowId }
         if (page >= 0) {
             pagerState.scrollToPage(page)
-        }
-    }
-
-    // Issue #625: auto-switch to a newly created tmux window.
-    // The ViewModel emits the new window's ID after receiving tmux's
-    // %window-add notification and reconciling the pane list.
-    // Issue #626: look up the page in the unified pane list since the
-    // pager now spans all sessions.
-    LaunchedEffect(Unit) {
-        viewModel.windowSwitchRequest.collect { windowId ->
-            val page = unifiedPanes.indexOfFirst { it.windowId == windowId }
-            if (page >= 0) {
-                pagerState.animateScrollToPage(page)
-            }
         }
     }
 
@@ -1026,9 +986,7 @@ public fun TmuxSessionScreen(
     fun AnchoredTmuxMoreMenu() {
         TmuxMoreMenu(
             expanded = moreExpanded,
-            currentWindowId = currentWindowId,
             forwardingState = sessionForwardingState,
-            multipleWindows = windows.size > 1,
             onDismiss = { moreExpanded = false },
             onCreateSession = {
                 moreExpanded = false
@@ -1073,22 +1031,6 @@ public fun TmuxSessionScreen(
                 // so the remote shell expands it to the login home.
                 val paneCwd = currentPane?.cwd?.takeIf { it.isNotBlank() }
                 onBrowseFiles(paneCwd ?: "~")
-            },
-            onNewWindow = {
-                moreExpanded = false
-                openNewWindowPicker()
-            },
-            onRenameWindow = {
-                moreExpanded = false
-                openTextDialog(TmuxDialogMode.RenameWindow, currentWindowId.orEmpty())
-            },
-            onKillWindow = {
-                moreExpanded = false
-                dialogMode = TmuxDialogMode.StopWindow
-            },
-            onSwitchWindow = {
-                moreExpanded = false
-                showWindowSwitcher = true
             },
             onDetach = {
                 // Issue #235: detach the tmux `-CC` client
@@ -1250,25 +1192,12 @@ public fun TmuxSessionScreen(
                                 },
                                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                             )
-                            // Issue #192 / #156: per-window nav strip is
-                            // the primary window switcher. Rendered only
-                            // when there is more than one window — a
-                            // single-window session has nothing to switch
-                            // to, so the strip would be pure chrome. Kill
-                            // / rename live on the pill itself (long-press
-                            // menu + explicit ✕ on the active pill).
-                            if (windows.size > 1) {
-                                WindowStrip(
-                                    windows = windows,
-                                    currentWindowId = currentWindowId,
-                                    onSelectWindow = ::selectWindow,
-                                    onOpenWindowMenu = { window -> windowMenuFor = window },
-                                    onKillWindow = { window ->
-                                        dialogMode = TmuxDialogMode.StopWindowFor(window.windowId)
-                                    },
-                                    onNewWindow = { openNewWindowPicker() },
-                                )
-                            }
+                            // Issue #782: PocketShell no longer manages tmux
+                            // windows. The in-session window-tab row (WindowStrip)
+                            // is gone — windows created outside PocketShell are
+                            // surfaced as separate `[wN]` switcher entries in the
+                            // host tree instead, so the only in-session tab
+                            // dimension is Terminal/Conversation.
                         }
                     }
                     AnimatedVisibility(
@@ -1353,16 +1282,6 @@ public fun TmuxSessionScreen(
                     canReconnect = canReconnect,
                 )
             }
-            // Issue #192: the [WindowStrip] (rendered above with the top
-            // chrome when windows.size > 1) is the primary window
-            // switcher and the home of the kill / rename affordances.
-            // While the IME is up the strip is collapsed, so two fallback
-            // paths stay available for switching windows mid-type:
-            //  1. The page-indicator swipe-up gesture further down this
-            //     Column (opens the WindowSwitcherOverlay).
-            //  2. The kebab menu's "Switch window" item, surfaced only
-            //     when windows.size > 1.
-
             // Per [D6]: render exactly one pane at a time. The
             // HorizontalPager renders only the visible page eagerly by
             // default; sibling panes are pre-loaded into the off-screen
@@ -1771,56 +1690,17 @@ public fun TmuxSessionScreen(
             // Issue #626: use unifiedPanes for the dot indicator count
             // since the pager now spans all sessions.
             if (unifiedPanes.size > 1) {
-                Box(
-                    modifier = Modifier.verticalSwipeInput(
-                        thresholdPx = verticalSwipeThresholdPx,
-                        onBoundary = { haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
-                        onSwipeUp = {
-                            if (windows.size > 1) {
-                                showWindowSwitcher = true
-                            }
-                        },
-                    ),
-                ) {
-                    PageIndicator(
-                        pageCount = unifiedPanes.size,
-                        currentPage = pagerState.currentPage,
-                    )
-                }
+                PageIndicator(
+                    pageCount = unifiedPanes.size,
+                    currentPage = pagerState.currentPage,
+                )
             }
-        }
-
-        WindowSwitcherOverlay(
-            visible = showWindowSwitcher,
-            windows = windows,
-            currentWindowId = currentWindowId,
-            onDismiss = { showWindowSwitcher = false },
-            onSelectWindow = { window ->
-                selectWindow(window)
-                showWindowSwitcher = false
-            },
-        )
-
-        windowMenuFor?.let { window ->
-            WindowContextMenu(
-                window = window,
-                onDismiss = { windowMenuFor = null },
-                onRename = {
-                    windowMenuFor = null
-                    openTextDialog(TmuxDialogMode.RenameWindowFor(window.windowId), window.windowId)
-                },
-                onKill = {
-                    windowMenuFor = null
-                    dialogMode = TmuxDialogMode.StopWindowFor(window.windowId)
-                },
-            )
         }
 
         dialogMode?.let { mode ->
             TmuxLifecycleDialog(
                 mode = mode,
                 sessionName = sessionName,
-                currentWindowId = currentWindowId,
                 text = dialogText,
                 onTextChange = { dialogText = it },
                 startDirectory = dialogStartDirectory,
@@ -1828,7 +1708,7 @@ public fun TmuxSessionScreen(
                 startDirectoryAutocompleteController = startDirectoryAutocompleteController,
                 onDismiss = { dialogMode = null },
                 onConfirm = {
-                    when (val currentMode = mode) {
+                    when (mode) {
                         TmuxDialogMode.CreateSession -> {
                             val creation = resolveTmuxSessionCreation(
                                 rawName = dialogText,
@@ -1844,18 +1724,6 @@ public fun TmuxSessionScreen(
                         TmuxDialogMode.StopSession -> {
                             viewModel.killCurrentSession()
                             onBack()
-                        }
-                        TmuxDialogMode.RenameWindow -> {
-                            viewModel.renameWindow(currentWindowId.orEmpty(), dialogText)
-                        }
-                        is TmuxDialogMode.RenameWindowFor -> {
-                            viewModel.renameWindow(currentMode.windowId, dialogText)
-                        }
-                        TmuxDialogMode.StopWindow -> {
-                            viewModel.killWindow(currentWindowId.orEmpty())
-                        }
-                        is TmuxDialogMode.StopWindowFor -> {
-                            viewModel.killWindow(currentMode.windowId)
                         }
                     }
                     dialogMode = null
@@ -2286,43 +2154,7 @@ public fun TmuxSessionScreen(
         )
     }
 
-    // Issue #678: the `+ window` shell-vs-agent picker. Reuses the exact
-    // SessionTypePickerSheet the new-SESSION flow uses, retargeted to create a
-    // new WINDOW in the current session. Choosing 'shell' makes a plain window
-    // (`new-window -c '<cwd>'`); choosing an agent makes the window AND launches
-    // the agent CLI in it via the same short `pocketshell agent …` wrapper line
-    // (issue #703), sent into the new window after creation.
-    newWindowPicker?.let { request ->
-        SessionTypePickerSheet(
-            folderPath = request.startDirectory,
-            folderLabel = request.startDirectory,
-            title = "New window",
-            onDismiss = { newWindowPicker = null },
-            suggestStartDirectories = suggestStartDirectories,
-            claudeProfiles = newWindowClaudeProfiles,
-            codexProfiles = newWindowCodexProfiles,
-            onCreate = { choice ->
-                newWindowPicker = null
-                viewModel.newWindow(
-                    startDirectory = choice.startDirectory,
-                    startCommand = choice.startCommand(
-                        newWindowClaudeProfiles,
-                        newWindowCodexProfiles,
-                    ),
-                )
-            },
-        )
-    }
 }
-
-/**
- * Issue #678: the open-state of the `+ window` shell-vs-agent picker. Carries
- * the cwd to pre-fill the picker's start-folder field with (the active pane's
- * working directory, or the conventional default when unknown).
- */
-internal data class NewWindowPickerRequest(
-    val startDirectory: String,
-)
 
 internal data class PortForwardNavigationTarget(
     val remotePort: Int,
@@ -3148,35 +2980,6 @@ internal fun sessionSwitcherPages(
     }
 }
 
-internal data class WindowSummary(
-    val windowId: String,
-    val title: String,
-    val windowIndex: Int? = null,
-)
-
-/**
- * Build [WindowSummary] rows for the WindowStrip / WindowSwitcher.
- *
- * Per #158: the previous implementation surfaced the raw tmux `@N`
- * window IDs as the visible label, which the user reported as cryptic.
- * We now number windows by their position in the pane order so the user
- * sees "Window 1", "Window 2", … — stable for the duration of a session
- * because [TmuxSessionViewModel] preserves pane row identity across
- * `%layout-change` notifications (the underlying tmux pane ID is the
- * key). Window renaming via the `%window-renamed` control-mode payload
- * is tracked in #47; once that lands the renamed title can be threaded
- * here without changing the index-based fallback.
- */
-internal fun List<TmuxPaneState>.toWindowSummaries(): List<WindowSummary> =
-    distinctBy { it.windowId }
-        .mapIndexed { index, pane ->
-            WindowSummary(
-                windowId = pane.windowId,
-                title = "Window ${index + 1}",
-                windowIndex = pane.windowIndex,
-            )
-        }
-
 /**
  * Issue #652 (epic #636): decide whether a unified-pager settle event should
  * trigger a cross-session warm switch.
@@ -3236,10 +3039,6 @@ private sealed interface TmuxDialogMode {
     data object CreateSession : TmuxDialogMode
     data object RenameSession : TmuxDialogMode
     data object StopSession : TmuxDialogMode
-    data object RenameWindow : TmuxDialogMode
-    data class RenameWindowFor(val windowId: String) : TmuxDialogMode
-    data object StopWindow : TmuxDialogMode
-    data class StopWindowFor(val windowId: String) : TmuxDialogMode
 }
 
 private val VerticalSwipeThreshold = 72.dp
@@ -3470,36 +3269,6 @@ internal const val TMUX_SWITCHING_LOADING_TAG = "tmux:session:switching-loading"
  */
 internal const val SLOW_CONNECT_HINT_AFTER_MS: Long = 5_000L
 internal const val CANCEL_AVAILABLE_AFTER_MS: Long = 15_000L
-/** Issue #158: the WindowStrip is the per-session window tabs row. Hidden when only one window exists. */
-internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
-/**
- * Issue #158: prefix for the per-pill test tag inside the WindowStrip.
- * The pill index is 1-based, so the first window's pill carries
- * "tmux:window-strip-pill:1", the second "tmux:window-strip-pill:2",
- * etc. Used by [TmuxSessionWindowNavigationE2eTest] so the click
- * does not collide with the same "Window N" string in the breadcrumb.
- */
-internal const val TMUX_WINDOW_STRIP_PILL_TAG_PREFIX = "tmux:window-strip-pill:"
-/**
- * Issue #192: prefix for the explicit ✕ kill affordance on the active
- * window-strip pill. 1-based to mirror
- * [TMUX_WINDOW_STRIP_PILL_TAG_PREFIX] — only the currently-selected
- * window's pill renders one, so exactly one tag in this family exists at
- * a time. Tapping it opens the kill-window confirmation for that window.
- */
-internal const val TMUX_WINDOW_STRIP_KILL_TAG_PREFIX = "tmux:window-strip-kill:"
-/** Issue #158: trailing "+ window" button inside the WindowStrip. */
-internal const val TMUX_NEW_WINDOW_BUTTON_TAG = "tmux:new-window-button"
-/**
- * Issue #189: stable test tag for the WindowSwitcherOverlay root, and
- * a prefix for per-page tap-targets inside the overlay's HorizontalPager.
- * Now that the WindowStrip is hidden in the default chrome, the overlay
- * is the primary tap-driven window switcher; the E2E navigation test
- * drives it via [TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX] entries (1-based
- * to mirror the previous strip-pill convention).
- */
-internal const val TMUX_WINDOW_SWITCHER_OVERLAY_TAG = "tmux:window-switcher"
-internal const val TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX = "tmux:window-switcher-page:"
 internal const val TMUX_SESSION_PAGER_OVERLAY_TAG = "tmux:session-pager"
 internal const val TMUX_SESSION_PAGER_TAG = "tmux:session-pager-control"
 internal const val TMUX_SESSION_PAGER_PAGE_TAG_PREFIX = "tmux:session-pager-page:"
@@ -3531,50 +3300,6 @@ private fun Modifier.verticalSwipeInput(
             callback()
             change.consume()
         },
-    )
-}
-
-/**
- * Build the breadcrumb segments. With tmux we have a real four-level
- * chain (host → session → window → pane), so we surface all four.
- *
- * Per #158: the window + pane labels used to surface the raw tmux
- * `@N` / `%N` IDs, which the user reported as cryptic ("can't find my
- * way back"). We now derive a 1-based ordinal from the
- * [panes] / [windows] lists so the crumb reads
- * `host › session › Window 2 › Pane 3`. The non-blank pane title from
- * `display-message -p '#{pane_title}'` still wins when present.
- * Window renaming via the `%window-renamed` control-mode payload is
- * tracked in #47; until then the ordinal is what we show.
- */
-private fun breadcrumbCrumbs(
-    host: String,
-    sessionName: String,
-    currentPane: TmuxPaneState?,
-    panes: List<TmuxPaneState>,
-    windows: List<WindowSummary>,
-): List<Crumb> {
-    val windowLabel = currentPane?.let { pane ->
-        val match = windows.firstOrNull { it.windowId == pane.windowId }
-        match?.title ?: "Window ?"
-    } ?: "—"
-    val paneLabel = currentPane?.let { pane ->
-        if (pane.title.isNotBlank()) {
-            pane.title
-        } else {
-            // 1-based index within the current window; "Pane 1" is the
-            // first pane of the window the user is looking at.
-            val paneIndexInWindow = panes
-                .filter { it.windowId == pane.windowId }
-                .indexOfFirst { it.paneId == pane.paneId }
-            if (paneIndexInWindow >= 0) "Pane ${paneIndexInWindow + 1}" else "Pane ?"
-        }
-    } ?: "—"
-    return listOf(
-        Crumb(label = host, isCurrent = false, onClick = { /* host root — #18 */ }),
-        Crumb(label = sessionName, isCurrent = false, onClick = { /* session switcher — #47 */ }),
-        Crumb(label = windowLabel, isCurrent = false, onClick = { /* window switcher — #47 */ }),
-        Crumb(label = paneLabel, isCurrent = true, onClick = { /* current pane — no-op */ }),
     )
 }
 
@@ -3977,144 +3702,6 @@ private fun TerminalSurfaceErrorState(
                 modifier = Modifier.testTag(TMUX_TERMINAL_SURFACE_RECREATE_TAG),
             ) {
                 Text(text = "Recreate terminal")
-            }
-        }
-    }
-}
-
-@Composable
-private fun WindowSwitcherOverlay(
-    visible: Boolean,
-    windows: List<WindowSummary>,
-    currentWindowId: String?,
-    onDismiss: () -> Unit,
-    onSelectWindow: (WindowSummary) -> Unit,
-) {
-    val initialPage = windows.indexOfFirst { it.windowId == currentWindowId }.coerceAtLeast(0)
-    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { windows.size })
-
-    LaunchedEffect(visible, currentWindowId, windows) {
-        if (visible) {
-            val page = windows.indexOfFirst { it.windowId == currentWindowId }
-            if (page >= 0) pagerState.scrollToPage(page)
-        }
-    }
-
-    LaunchedEffect(visible, pagerState, windows, currentWindowId) {
-        if (!visible) return@LaunchedEffect
-        snapshotFlow { pagerState.settledPage }.collect { page ->
-            val window = windows.getOrNull(page) ?: return@collect
-            if (window.windowId != currentWindowId) {
-                onSelectWindow(window)
-            }
-        }
-    }
-
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(animationSpec = tween(durationMillis = MotionDurationMs)) +
-            slideInVertically(
-                animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                initialOffsetY = { it / 2 },
-            ),
-        exit = fadeOut(animationSpec = tween(durationMillis = MotionDurationMs)) +
-            slideOutVertically(
-                animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                targetOffsetY = { it / 2 },
-            ),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(PocketShellColors.Background.copy(alpha = 0.92f))
-                .clickable(onClick = onDismiss)
-                .padding(16.dp)
-                .testTag(TMUX_WINDOW_SWITCHER_OVERLAY_TAG),
-        ) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .clickable(onClick = {})
-                    .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
-                    .border(
-                        width = 1.dp,
-                        color = PocketShellColors.BorderSoft,
-                        shape = PocketShellShapes.extraSmall,
-                    )
-                    .padding(14.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "Windows",
-                        color = PocketShellColors.Text,
-                        fontSize = 15.sp,
-                    )
-                    Spacer(modifier = Modifier.weight(1f))
-                    TextButton(onClick = onDismiss) {
-                        Text("Close")
-                    }
-                }
-
-                HorizontalPager(
-                    state = pagerState,
-                    // Issue #216: compose every page so the semantic
-                    // tree always contains all per-page tags. Without
-                    // this, [HorizontalPager]'s default
-                    // `beyondViewportPageCount = 0` only composes the
-                    // currently-visible page; tests that drive the
-                    // overlay by tapping `${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}N`
-                    // would race the swipe-and-settle path. Each page
-                    // is a single Column with two short Text labels
-                    // (<200 bytes), so composing all pages eagerly is
-                    // a negligible memory cost even for tmux sessions
-                    // with many windows (typical 2–10). It also makes
-                    // the overlay swipe feel instant since no adjacent
-                    // page has to compose mid-gesture.
-                    beyondViewportPageCount = Int.MAX_VALUE,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(104.dp)
-                        .padding(top = 8.dp),
-                ) { page ->
-                    val window = windows[page]
-                    val selected = window.windowId == currentWindowId
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 4.dp)
-                            .background(
-                                color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
-                                shape = PocketShellShapes.extraSmall,
-                            )
-                            .clickable(
-                                role = androidx.compose.ui.semantics.Role.Tab,
-                                onClick = { onSelectWindow(window) },
-                            )
-                            .padding(16.dp)
-                            // Issue #189: per-window stable test tag so
-                            // the E2E switch test can address Window 2
-                            // directly without depending on horizontal
-                            // pager swipe gymnastics. Index is 1-based
-                            // to match TMUX_WINDOW_STRIP_PILL_TAG_PREFIX.
-                            .testTag("$TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX${page + 1}"),
-                        verticalArrangement = Arrangement.Center,
-                    ) {
-                        Text(
-                            text = window.title,
-                            color = if (selected) PocketShellColors.Background else PocketShellColors.Text,
-                            fontSize = 18.sp,
-                        )
-                        Text(
-                            text = "${page + 1} / ${windows.size}",
-                            color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
             }
         }
     }
@@ -4835,7 +4422,6 @@ private val SystemNoteHeadStyle = TextStyle(
 @Composable
 internal fun TmuxMoreMenu(
     expanded: Boolean,
-    currentWindowId: String?,
     forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
         com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
     onDismiss: () -> Unit,
@@ -4860,54 +4446,20 @@ internal fun TmuxMoreMenu(
     // port-forward panel. Defaulted so existing direct callers / tests
     // of TmuxMoreMenu stay source-compatible.
     onOpenPortForwarding: () -> Unit = {},
-    onNewWindow: () -> Unit,
-    onRenameWindow: () -> Unit,
-    onKillWindow: () -> Unit,
     // Issue #235: user-driven detach. Tears the `-CC` control client
     // down (server-clean — uses the same `detach-client` round-trip
     // [TmuxSessionViewModel.detachAndExit] runs internally) and pops
     // back to the sessions dashboard. The session itself stays alive
     // on the remote; reattach via the normal sessions-list path.
     onDetach: () -> Unit = {},
-    // Issue #189: now that the WindowStrip is hidden in the default
-    // chrome, the kebab is one of the discoverable paths into the
-    // window switcher. Surfaced only when the session actually has
-    // more than one window — single-window sessions get nothing to
-    // switch to.
-    multipleWindows: Boolean = false,
-    onSwitchWindow: () -> Unit = {},
 ) {
     DropdownMenu(
         expanded = expanded,
         onDismissRequest = onDismiss,
     ) {
-        // Per #158: visually group the destructive / scope-confusing
-        // affordances so "session" and "window" aren't a flat
-        // alphabet soup. Header rows are not clickable; the dividers
-        // separate the three families: in-this-session window ops,
-        // on-this-host session ops, and cross-host shortcuts.
-        DropdownMenuSectionHeader(text = "In this session")
-        DropdownMenuItem(text = { Text("+ New window") }, onClick = onNewWindow)
-        if (multipleWindows) {
-            // Issue #189: WindowStrip is gone, so the kebab is one
-            // of the three paths into the switcher. Only shown when
-            // there is actually somewhere to switch to.
-            DropdownMenuItem(
-                text = { Text("Switch window") },
-                onClick = onSwitchWindow,
-            )
-        }
-        DropdownMenuItem(
-            text = { Text("Rename window") },
-            onClick = onRenameWindow,
-            enabled = currentWindowId != null,
-        )
-        DropdownMenuItem(
-            text = { Text("Stop window") },
-            onClick = onKillWindow,
-            enabled = currentWindowId != null,
-        )
-        HorizontalDivider()
+        // Issue #782: PocketShell no longer manages tmux windows, so the kebab
+        // has no "In this session" window group — the only session-scoped ops
+        // left are on-this-host session lifecycle + host shortcuts.
         DropdownMenuSectionHeader(text = "On this host")
         DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
         DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
@@ -5008,11 +4560,12 @@ private fun DropdownMenuSectionHeader(text: String) {
  * Issues #189 / #192: a single-row 56dp consolidated top chrome on
  * [TmuxSessionScreen].
  *
- * Per the #192 information-architecture rework the window is the user's
- * primary mental unit, so window switching lives on the dedicated
- * [WindowStrip] row below this chrome — NOT inside this breadcrumb. The
- * Terminal/Conversation toggle remains per-window in state, but issue
- * #303 renders it inline here so it does not cost a separate row.
+ * Per decision D30 (issue #782) PocketShell no longer manages tmux windows,
+ * so there is NO window-tab row: Terminal/Conversation is the only in-session
+ * tab dimension. Issue #303 renders that toggle inline in this chrome so it
+ * does not cost a separate row. Windows that already exist on the server are
+ * surfaced in the host tree as separate `[wN]` switcher entries, not as an
+ * in-session strip.
  *
  * Layout (left → right inside one 56dp [Row]):
  * - 48dp back affordance (chevron).
@@ -5402,12 +4955,10 @@ private fun ConsolidatedTabPill(
 internal fun TmuxSessionBackHandler(
     dialogOpen: Boolean,
     sessionDrawerOpen: Boolean,
-    windowSwitcherOpen: Boolean,
     micSheetOpen: Boolean,
     snippetPickerOpen: Boolean,
     onDismissDialog: () -> Unit,
     onDismissSessionDrawer: () -> Unit,
-    onDismissWindowSwitcher: () -> Unit,
     onDismissMicSheet: () -> Unit,
     onDismissSnippetPicker: () -> Unit,
     onBack: () -> Unit,
@@ -5416,7 +4967,6 @@ internal fun TmuxSessionBackHandler(
         when {
             dialogOpen -> onDismissDialog()
             sessionDrawerOpen -> onDismissSessionDrawer()
-            windowSwitcherOpen -> onDismissWindowSwitcher()
             micSheetOpen -> onDismissMicSheet()
             snippetPickerOpen -> onDismissSnippetPicker()
             else -> onBack()
@@ -5614,181 +5164,10 @@ internal fun recordTmuxReconnectUiStateRendered(
     }
 }
 
-/**
- * Issues #192 / #156: the per-window navigation strip — the primary
- * window switcher on the tmux session screen.
- *
- * Each window is a rounded pill (Chrome-tab pattern). The active pill
- * carries an explicit ✕ that opens the kill-window confirmation in one
- * tap; every pill also long-presses into a [WindowContextMenu] for
- * Rename / Kill. So the kill control is always ≤ 1 tap (active pill ✕)
- * or 1 tap-and-hold (any pill) away from the window itself — never two
- * levels up in the kebab (#192).
- *
- * Issue #156 finding 6.1: the strip scrolls horizontally, so with many
- * windows the rightmost pills fall off-screen. We draw a right-edge
- * fade gradient ([Modifier.rightEdgeFade]) as the overflow indicator
- * that signals "scroll right for more" whenever the content extends
- * beyond the viewport.
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-internal fun WindowStrip(
-    windows: List<WindowSummary>,
-    currentWindowId: String?,
-    onSelectWindow: (WindowSummary) -> Unit,
-    onOpenWindowMenu: (WindowSummary) -> Unit,
-    onKillWindow: (WindowSummary) -> Unit,
-    onNewWindow: () -> Unit,
-) {
-    val scrollState = rememberScrollState()
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            // Issue #156 (6.1): right-edge fade signals horizontal
-            // overflow. Drawn on the clipping container (before the
-            // scroll modifier) so the fade stays pinned to the viewport
-            // edge while the pills scroll underneath it.
-            .rightEdgeFade(active = scrollState.canScrollForward)
-            .horizontalScroll(scrollState)
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-            .testTag(TMUX_WINDOW_STRIP_TAG),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        windows.forEachIndexed { index, window ->
-            val selected = window.windowId == currentWindowId
-            val pillShape = PocketShellShapes.extraSmall
-            Row(
-                modifier = Modifier
-                    .background(
-                        color = if (selected) {
-                            PocketShellColors.Accent
-                        } else {
-                            PocketShellColors.SurfaceElev
-                        },
-                        shape = pillShape,
-                    )
-                    .combinedClickable(
-                        role = androidx.compose.ui.semantics.Role.Tab,
-                        onClick = { onSelectWindow(window) },
-                        onLongClick = { onOpenWindowMenu(window) },
-                    )
-                    .padding(start = 12.dp, end = if (selected) 4.dp else 12.dp, top = 5.dp, bottom = 5.dp)
-                    // Per #158: each pill carries a stable, unique
-                    // test tag so the E2E test can address it without
-                    // colliding with the breadcrumb crumb that also
-                    // reads "Window N".
-                    .testTag("${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}${index + 1}"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Text(
-                    text = window.title,
-                    color = if (selected) PocketShellColors.Background else PocketShellColors.Text,
-                    fontSize = 12.sp,
-                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                )
-                // Issue #192: explicit ✕ on the active pill — the
-                // Chrome-tab close pattern. One tap opens the
-                // kill-window confirmation for THIS window. Only the
-                // active pill carries it so the strip stays readable;
-                // inactive windows are killed via the long-press menu.
-                if (selected) {
-                    Box(
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clickable(
-                                role = androidx.compose.ui.semantics.Role.Button,
-                                onClick = { onKillWindow(window) },
-                            )
-                            .testTag("${TMUX_WINDOW_STRIP_KILL_TAG_PREFIX}${index + 1}"),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "×",
-                            color = PocketShellColors.Background,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                        )
-                    }
-                }
-            }
-        }
-        // Per #158: the trailing "+" used to be ambiguous (window vs
-        // session). The visible label is now "+ window" so the user can
-        // tell at a glance this affordance adds a window to the current
-        // session — host-level "+ New session" lives in the drawer.
-        TextButton(
-            onClick = onNewWindow,
-            modifier = Modifier.testTag(TMUX_NEW_WINDOW_BUTTON_TAG),
-        ) {
-            Text("+ window")
-        }
-    }
-}
-
-/**
- * Issue #156 (6.1): right-edge fade-out gradient used as the
- * window-strip overflow indicator. When [active] is true (the strip can
- * still scroll forward, i.e. more pills exist past the right edge) the
- * rightmost ~28dp of the row fades into the strip background so the user
- * reads "there is more to the right". The fade is painted with
- * [BlendMode.DstIn] over the already-drawn content so it darkens the
- * pills toward transparent instead of overpainting a solid band; an
- * offscreen compositing layer keeps the blend scoped to this element.
- */
-private fun Modifier.rightEdgeFade(active: Boolean): Modifier =
-    if (!active) {
-        this
-    } else {
-        this
-            .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
-            .drawWithContent {
-                drawContent()
-                val fadeWidth = 28.dp.toPx().coerceAtMost(size.width)
-                drawRect(
-                    brush = Brush.horizontalGradient(
-                        colors = listOf(Color.Black, Color.Transparent),
-                        startX = size.width - fadeWidth,
-                        endX = size.width,
-                    ),
-                    blendMode = BlendMode.DstIn,
-                )
-            }
-    }
-
-@Composable
-private fun WindowContextMenu(
-    window: WindowSummary,
-    onDismiss: () -> Unit,
-    onRename: () -> Unit,
-    onKill: () -> Unit,
-) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.TopEnd,
-    ) {
-        DropdownMenu(
-            expanded = true,
-            onDismissRequest = onDismiss,
-        ) {
-            // Per #158: use the readable window title ("Window 2") instead
-            // of the cryptic `@N` tmux ID. The user reached this menu by
-            // long-pressing the strip's "Window N" pill, so the label
-            // here must match what they tapped.
-            DropdownMenuItem(text = { Text("Rename ${window.title}") }, onClick = onRename)
-            DropdownMenuItem(text = { Text("Stop ${window.title}") }, onClick = onKill)
-        }
-    }
-}
-
 @Composable
 private fun TmuxLifecycleDialog(
     mode: TmuxDialogMode,
     sessionName: String,
-    currentWindowId: String?,
     text: String,
     onTextChange: (String) -> Unit,
     startDirectory: String,
@@ -5801,23 +5180,13 @@ private fun TmuxLifecycleDialog(
         TmuxDialogMode.CreateSession -> "New session"
         TmuxDialogMode.RenameSession -> "Rename session"
         TmuxDialogMode.StopSession -> "Stop session"
-        TmuxDialogMode.RenameWindow -> "Rename window"
-        is TmuxDialogMode.RenameWindowFor -> "Rename window"
-        TmuxDialogMode.StopWindow -> "Stop window"
-        is TmuxDialogMode.StopWindowFor -> "Stop window"
     }
     val confirm = when (mode) {
-        TmuxDialogMode.StopSession,
-        TmuxDialogMode.StopWindow,
-        is TmuxDialogMode.StopWindowFor,
-        -> "Stop"
+        TmuxDialogMode.StopSession -> "Stop"
         else -> "Save"
     }
-    val isRenameWindowMode = mode == TmuxDialogMode.RenameWindow ||
-        mode is TmuxDialogMode.RenameWindowFor
     val isTextMode = mode == TmuxDialogMode.CreateSession ||
-        mode == TmuxDialogMode.RenameSession ||
-        isRenameWindowMode
+        mode == TmuxDialogMode.RenameSession
     val isCreateMode = mode == TmuxDialogMode.CreateSession
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -5859,13 +5228,11 @@ private fun TmuxLifecycleDialog(
                     value = text,
                     onValueChange = onTextChange,
                     singleLine = true,
-                    label = { Text(if (isRenameWindowMode) "Window name" else "Session name") },
+                    label = { Text("Session name") },
                 )
             } else {
                 val target = when (mode) {
                     TmuxDialogMode.StopSession -> sessionName
-                    TmuxDialogMode.StopWindow -> currentWindowId.orEmpty()
-                    is TmuxDialogMode.StopWindowFor -> mode.windowId
                     else -> ""
                 }
                 Text("This will close $target.")

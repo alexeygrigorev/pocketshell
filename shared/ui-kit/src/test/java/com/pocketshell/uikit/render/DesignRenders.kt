@@ -661,17 +661,22 @@ class DesignRenders {
                     .padding(start = 16.dp),
             )
 
-            // Window child rows: dot + `w<n> claude` title, NO per-row badge.
-            DeclutteredWindowRow(title = "w0 claude")
-            DeclutteredWindowRow(title = "w1 claude")
+            // Issue #782: each window is now a `<session> [wN]` switcher entry —
+            // a sibling of the single-window session rows, tapped to attach to
+            // THAT window. The `[wN]` suffix disambiguates the window; the
+            // command hint trails. (PocketShell no longer manages windows; these
+            // entries only surface windows created OUTSIDE the app.)
+            DeclutteredWindowRow(title = "git-ai-shipping-labs-workshops-raw [w0] claude")
+            DeclutteredWindowRow(title = "git-ai-shipping-labs-workshops-raw [w1] claude")
         }
     }
 
     /**
-     * Mirror of the app's `WorkspaceSessionWindowRow` AFTER #675: an indented
-     * window child row that leads with a status dot and the `w<n> claude` title
-     * and carries NO trailing agent badge (the dot + the title already name the
-     * agent — repeating it on a badge was the third duplication).
+     * Mirror of the app's `WorkspaceSessionWindowRow` AFTER #782: an indented
+     * per-window switcher entry that leads with a status dot and the
+     * `<session> [wN] claude` title (issue #782's `[wN]` suffix) and carries NO
+     * trailing agent badge (the dot + the title already name the agent —
+     * repeating it on a badge was the third duplication, #675).
      */
     @Composable
     private fun DeclutteredWindowRow(title: String) {

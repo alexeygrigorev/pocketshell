@@ -59,8 +59,8 @@ import org.junit.runner.RunWith
  *
  * Per #303 the Terminal/Conversation toggle is rendered inside the
  * fixed 56dp toolbar row when an agent/locked conversation is present.
- * The WindowStrip remains outside this chrome region and is owned by
- * [TmuxSessionWindowNavigationE2eTest].
+ * Issue #782 removed the in-session window-tab row entirely, so the only
+ * in-session tab dimension is Terminal/Conversation.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxSessionScreenImeChromeTest {
@@ -81,7 +81,6 @@ class TmuxSessionScreenImeChromeTest {
         // Plain shell: no agent/locked conversation, so no inline pill
         // and no reserved tab row.
         compose.onNodeWithTag(TMUX_TABS_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(TMUX_WINDOW_STRIP_TAG).assertDoesNotExist()
     }
 
     @Test
@@ -100,7 +99,6 @@ class TmuxSessionScreenImeChromeTest {
 
         compose.onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG).assertIsDisplayed()
         compose.onNodeWithTag(TMUX_TABS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(TMUX_WINDOW_STRIP_TAG).assertDoesNotExist()
 
         compose.onNodeWithText("Conversation").performClick()
         assertTrue("Conversation segment should select index 1", selectedIndex == 1)
@@ -121,7 +119,6 @@ class TmuxSessionScreenImeChromeTest {
         compose.onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG).assertIsNotDisplayed()
         compose.onNodeWithTag(TMUX_COMPACT_BREADCRUMB_TAG).assertIsDisplayed()
         compose.onNodeWithTag(TMUX_TABS_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(TMUX_WINDOW_STRIP_TAG).assertDoesNotExist()
     }
 
     @Test
@@ -428,8 +425,6 @@ class TmuxSessionScreenImeChromeTest {
         val menu: @Composable () -> Unit = {
             TmuxMoreMenu(
                 expanded = expanded.value,
-                currentWindowId = "@1",
-                multipleWindows = true,
                 onDismiss = { expanded.value = false },
                 onCreateSession = {},
                 onRenameSession = {},
@@ -437,9 +432,6 @@ class TmuxSessionScreenImeChromeTest {
                 onSwitchSession = {},
                 onOpenJobs = {},
                 onOpenUsage = {},
-                onNewWindow = {},
-                onRenameWindow = {},
-                onKillWindow = {},
                 onDetach = {},
             )
         }

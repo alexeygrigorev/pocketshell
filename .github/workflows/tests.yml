@@ -518,6 +518,25 @@ jobs:
       # is surfaced as an explicit "infra flake recovered" note in the log so a
       # degrading-flake trend stays visible (parity with the suite script's
       # JOURNEY_FLAKE_RECOVERED marker), not silently hidden.
+      #
+      # Issue #771: when BOTH attempts fail, AUTO-CLASSIFY infra-abort vs genuine
+      # test-failure from the suite's own artifact instead of telling the human to
+      # go read logs. scripts/ci-journey-suite.sh only writes
+      # artifacts/ci-journey/summary.md AFTER it has run journey classes to
+      # verdicts — which requires a booted emulator + adb + a working gradle
+      # connected-test. So when both attempts fail:
+      #   * a summary that contains a `JOURNEY_FAILED` / "Failed BOTH attempts"
+      #     section => the emulator booted, the suite ran, and a class genuinely
+      #     failed twice => GENUINE TEST FAILURE (an app-code regression, NOT the
+      #     #771 emulator-infra failure class).
+      #   * NO summary file at all (the suite script aborted before writing it,
+      #     i.e. the emulator never reached `device` / adb never came up so gradle
+      #     could not run) => an EMULATOR INFRA UNAVAILABLE abort — the failure
+      #     class issue #771 targets.
+      # Either branch keeps the job RED (exit 1) — this only LABELS the red so a
+      # real test regression cannot hide behind an "infra" message and an infra
+      # abort cannot be mislabeled as a test regression. It NEVER turns a failure
+      # green (no #636/#638 false-green).
       - name: Classify emulator-journey result (infra-abort vs test-failure)
         if: always()
         run: |
@@ -533,7 +552,22 @@ jobs:
             echo "::warning title=Emulator infra flake recovered::The first emulator bringup failed but a second cold boot passed (issue #760). Treating as a recovered infra flake, NOT a test failure. Watch for a degrading trend."
             exit 0
           fi
-          echo "::error title=Emulator journey FAILED (both attempts)::The journey suite failed on BOTH cold-boot attempts. If the logs show the emulator never reached 'device' (boot/adb infra), this is EMULATOR INFRA UNAVAILABLE; otherwise it is a genuine test failure. See the per-class verdicts in the suite summary above."
+          # Both attempts failed — classify from the suite's own summary artifact.
+          summary="artifacts/ci-journey/summary.md"
+          if [[ -f "$summary" ]] && grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary"; then
+            # The emulator booted and the suite ran to a verdict: a journey class
+            # failed twice. This is a GENUINE test failure (app-code regression),
+            # NOT the #771 emulator-infra abort.
+            failed_classes="$(awk '/Failed BOTH attempts/{f=1; next} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
+            echo "::error title=Emulator journey FAILED — genuine test failure::A load-bearing journey class failed on BOTH cold-boot attempts AFTER the emulator booted and the suite ran to a verdict. This is a real test regression (NOT a #771 emulator-infra abort). Failing class(es):"
+            [[ -n "$failed_classes" ]] && printf '%s\n' "$failed_classes"
+            exit 1
+          fi
+          # No suite summary (the script aborted before any class reached a
+          # verdict): the emulator never reached `device` / adb never came up, so
+          # gradle could not run. This is the EMULATOR INFRA UNAVAILABLE class that
+          # issue #771 targets.
+          echo "::error title=EMULATOR INFRA UNAVAILABLE::Both cold-boot attempts failed and the journey suite wrote NO summary (artifacts/ci-journey/summary.md missing), so no journey class ever ran to a verdict — the emulator never reached 'device' / adb never came up (boot/adb infra, issue #771). This is an infra abort, NOT a test regression."
           exit 1
 
       - name: Collect Docker logs

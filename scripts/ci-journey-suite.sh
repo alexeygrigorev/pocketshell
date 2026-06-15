@@ -267,6 +267,20 @@ JOURNEY_CLASSES=(
   # partial blank is injected LOCALLY on the emulator, no toxiproxy), and does NOT
   # self-skip on CI, so it belongs in this per-push subset.
   "$FQCN_PREFIX.ReconnectPartialBlankReseedJourneyE2eTest"
+  # ADDED (epic #687 slice 2, #717 — reveal/reflow-heal absorbed from #658): after a
+  # voice-send the active pane must NEVER go black. The composer/keyboard dismissal
+  # shrinks the IME inset → `resizeRemotePty` → `maybeRefreshControlClientSize`; for an
+  # IDLE full-screen agent pane the reflow during the IME transition wipes the LOCAL
+  # emulator while the idle agent emits no fresh `%output`, AND when the dismiss resolves
+  # to the SAME grid dims already applied the whole resize block SHORT-CIRCUITS so no
+  # heal ran at all. The journey models the black pane DIRECTLY on the retained emulator
+  # (a local `CSI 2J`+`CSI H` wipe — the REMOTE tmux grid still holds the banner) and
+  # drives the EXACT same-dimension short-circuit production branch. RED on base (the
+  # short-circuit returns blindly → banner never restored); GREEN after slice 2 (the
+  # active-pane heal re-captures the full viewport, and the post-reflow heal is now the
+  # UNCONDITIONAL `reseedActivePaneForReattach`, not blank-only). Uses ONLY the
+  # deterministic agents:2222 fixture (no toxiproxy) and does NOT self-skip on CI.
+  "$FQCN_PREFIX.VoiceSendActivePaneStaysVisibleE2eTest"
   # ADDED (#782, D30 / D28(3)): the pre-existing multi-window `[wN]`
   # switcher-entry journey. PocketShell no longer manages tmux windows; a session
   # that already has >1 window on the remote is surfaced as separate `<session>

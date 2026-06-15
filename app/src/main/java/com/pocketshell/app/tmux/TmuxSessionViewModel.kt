@@ -7265,6 +7265,34 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * EPIC #687 slice 2 (#717) test seam: deterministically reproduce the
+     * SAME-DIMENSION resize short-circuit of [maybeRefreshControlClientSize] —
+     * the production branch where a composer/keyboard dismissal after a
+     * voice-send resizes the grid back to dims ALREADY applied
+     * (`cols == appliedControlClientColumns && rows == appliedControlClientRows`),
+     * so no `refresh-client -C` wire op fires. On base `origin/main` that branch
+     * returns blindly, leaving an active pane the IME transition wiped BLACK; the
+     * fix runs a cheap active-pane heal there.
+     *
+     * This seam pins the applied control-client dims to the CURRENT phone grid
+     * (so a `resizeRemotePty(sameCols, sameRows)` would hit the short-circuit) and
+     * then drives the exact short-circuit branch via [maybeHealActivePaneOnNoOpResize].
+     * A passthrough to the production branch — no test-only behavior. Returns false
+     * when nothing is attached.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun triggerSameDimensionResizeHealForTest(): Boolean {
+        val client = clientRef ?: return false
+        val target = activeTarget ?: return false
+        // Pin the applied dims to the current phone grid so this models a resize
+        // to ALREADY-applied dims (the short-circuit precondition).
+        appliedControlClientColumns = remoteColumns
+        appliedControlClientRows = remoteRows
+        maybeHealActivePaneOnNoOpResize(client, target)
+        return true
+    }
+
+    /**
      * Issue #722 (characterization test seam): arm [armConnectedBlankWatchdog]
      * directly against the supplied guard. A passthrough — no production logic.
      */
@@ -9397,7 +9425,22 @@ public class TmuxSessionViewModel @Inject constructor(
         val cols = remoteColumns
         val rows = remoteRows
         if (cols <= 0 || rows <= 0) return
-        if (cols == appliedControlClientColumns && rows == appliedControlClientRows) return
+        if (cols == appliedControlClientColumns && rows == appliedControlClientRows) {
+            // EPIC #687 slice 2 (#717): same-dimension short-circuit. A repeated
+            // resize to dims already applied does NOT need another
+            // `refresh-client -C` (the #285 intent: Compose layout churn must not
+            // spam tmux). BUT a composer/keyboard dismissal after a voice-send can
+            // resize to the SAME grid while the idle full-screen agent's redraw was
+            // lost on the IME transition — leaving the active pane BLACK with no
+            // wire op to heal it. So instead of returning blindly, run a cheap
+            // active-pane heal (a single `capture-pane`, no `refresh-client`) when
+            // the active pane is actually blank/suspect. A normally-painted pane is
+            // a no-op (the pre-check below avoids a capture on every keyboard
+            // toggle of an already-good pane). tmux's grid is authoritative, so the
+            // re-capture restores the lost frame keyed to the target session id.
+            maybeHealActivePaneOnNoOpResize(client, target)
+            return
+        }
         val attachGeneration = connectGeneration
         val generation = ++controlClientSizeGeneration
         Log.i(
@@ -9489,13 +9532,35 @@ public class TmuxSessionViewModel @Inject constructor(
             // pager) the reflow can leave the LOCAL emulator blank (the seeded
             // pre-resize frame is wiped and the idle app emits no fresh redraw),
             // which is the maintainer's every-window-black symptom. tmux's grid
-            // still HOLDS the reflowed content, so re-seed ONLY the panes whose
-            // emulator is now blank from a fresh `capture-pane`. Runs on every
-            // attach path (cold, warm, fast-switch, reconnect) because all of
-            // them flow through this resize-completion block; a no-op for panes
-            // that already render content. Skipped if the runtime moved on.
+            // still HOLDS the reflowed content, so re-seed the visible panes from
+            // a fresh `capture-pane`. Runs on every attach path (cold, warm,
+            // fast-switch, reconnect) because all of them flow through this
+            // resize-completion block. Skipped if the runtime moved on.
+            //
+            // EPIC #687 slice 2 (#717/#651, absorbing #658's reflow-heal plan):
+            // extend the P3 within-grace UNCONDITIONAL full-viewport reseed
+            // ([reseedActivePaneForReattach]) to this reflow boundary instead of
+            // the blank-ONLY [reseedBlankVisiblePanes]. Two render bugs share this
+            // locus:
+            //  * #717 (black pane after voice-send): composer/keyboard dismissal
+            //    reflows the grid; an idle full-screen agent's redraw is lost and
+            //    the active pane goes BLACK. The blank-net would heal a fully-blank
+            //    pane here, but the same-dimension short-circuit at the top of
+            //    [maybeRefreshControlClientSize] can skip this block entirely (see
+            //    the active-pane heal added there).
+            //  * #651 (garbled / mis-wrapped at wrong size): the post-reflow active
+            //    pane is FULLY populated but wrapped at the stale width — NOT blank,
+            //    so [reseedBlankVisiblePanes] `continue`s past it and the garble
+            //    persists until a manual tmux refresh. tmux's grid is authoritative
+            //    post-reflow, and [seedPaneFromCapture] -> [toTerminalViewportBytes]
+            //    prepends `ESC[H ESC[2J` (full clear+repaint), so an unconditional
+            //    active-pane re-capture authoritatively wipes the stale mis-wrapped
+            //    rows and re-fits them to the new grid — no manual refresh needed.
+            // [reseedActivePaneForReattach] does the unconditional active-pane
+            // re-capture THEN runs the blank-net backstop over the other panes, so
+            // background panes keep the #640/#662 reveal-time blank safety net.
             if (clientRef === client) {
-                reseedBlankVisiblePanes(
+                reseedActivePaneForReattach(
                     RuntimeRefreshGuard(
                         generation = attachGeneration,
                         target = target,
@@ -9503,6 +9568,48 @@ public class TmuxSessionViewModel @Inject constructor(
                     ),
                 )
             }
+        }
+    }
+
+    /**
+     * EPIC #687 slice 2 (#717): heal the active pane on a same-dimension (no-op)
+     * resize. A composer/keyboard dismissal after a voice-send can resize the
+     * grid back to dims already applied — so [maybeRefreshControlClientSize]
+     * short-circuits with no `refresh-client -C` — yet the IME transition lost
+     * the idle full-screen agent's redraw and left the active pane BLACK. tmux's
+     * server grid still holds the content, so re-capture the active pane from a
+     * fresh `capture-pane` (which [seedPaneFromCapture] -> [toTerminalViewportBytes]
+     * replays as a full clear+repaint) — but ONLY when the pane is actually
+     * blank/suspect, so a routine keyboard toggle on an already-painted pane stays
+     * a no-op (no capture). Keyed to the target session id via the runtime guard,
+     * so a late heal can never paint a switched-away session. No `refresh-client`
+     * is issued because the grid dims did not change.
+     */
+    private fun maybeHealActivePaneOnNoOpResize(client: TmuxClient, target: ConnectionTarget) {
+        if (client.disconnected.value) return
+        val activePane = activeVisiblePane() ?: return
+        // Only pay for a capture when the active pane looks lost (fully blank or
+        // the "one live line, rest blank" partial-blank). A normally-painted pane
+        // needs no heal — this keeps the no-op resize cheap.
+        val blank = activePane.terminalState.visibleScreenIsBlank()
+        val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
+        if (!blank && !partialBlank) return
+        val attachGeneration = connectGeneration
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-noop-resize-active-pane-heal pane=${activePane.paneId} " +
+                "window=${activePane.windowId} session=${target.sessionName} " +
+                "blank=$blank partialBlank=$partialBlank",
+        )
+        bridgeScope.launch {
+            if (clientRef !== client) return@launch
+            reseedActivePaneForReattach(
+                RuntimeRefreshGuard(
+                    generation = attachGeneration,
+                    target = target,
+                    client = client,
+                ),
+            )
         }
     }
 

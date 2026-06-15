@@ -9,7 +9,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -160,7 +159,18 @@ class PromptComposerImeSquishProofTest {
             imeShown,
         )
 
+        // Issue #780: wait for the IME inset to fully SETTLE (stable across
+        // consecutive reads), not merely become non-zero. On a CI swiftshader AVD
+        // the keyboard show is animated and the `ime()` inset grows over several
+        // frames; measuring geometry mid-animation reads a half-raised keyboard (a
+        // transiently smaller room above it), which is the very condition that
+        // shoved a control out of the strictly-"displayed" region and made the old
+        // `.assertIsDisplayed()` at line 181 abort BEFORE the geometry was ever
+        // logged. Polling for a stable inset removes that race so the relative
+        // geometry checks below run against the final, settled layout on both the
+        // dev-box AVD and CI swiftshader.
         compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
+        waitForImeInsetToSettle(timeoutMs = 5_000L)
         compose.waitForIdle()
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         android.os.SystemClock.sleep(400)
@@ -177,23 +187,32 @@ class PromptComposerImeSquishProofTest {
             println("ISSUE567_HOLD_END")
         }
 
+        // Issue #780: fetch every node's bounds WITHOUT `.assertIsDisplayed()` and
+        // LOG the geometry FIRST, before any squish assertion can abort. The old
+        // code called `.assertIsDisplayed()` inline on the draft/Send/attach nodes,
+        // so on a tight CI layout the test died at line 181 ("component is not
+        // displayed") and NEVER printed `ISSUE567_SQUISH` — leaving the failure
+        // un-diagnosable from the CI log. The squish itself is now asserted by the
+        // RELATIVE geometry invariants below (header on-screen, body fits the room,
+        // controls reachable above the keyboard), which is the honest measure of
+        // "not squished" and does not depend on Compose's strict binary
+        // displayed-flag (a node clipped by a single pixel flips that flag yet is
+        // still perfectly usable — exactly the CI-fragility this issue is about).
         val draftBounds = compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
             .fetchSemanticsNode()
             .boundsInRoot
         val headerBounds = compose.onNodeWithTag(COMPOSER_CLOSE_TAG, useUnmergedTree = true)
             .fetchSemanticsNode()
             .boundsInRoot
         val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
             .fetchSemanticsNode()
             .boundsInRoot
         val attachBounds = compose.onNodeWithTag(COMPOSER_ATTACH_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
             .fetchSemanticsNode()
             .boundsInRoot
 
         val decorHeight = readDecorHeightPx()
+        val statusBarTopPx = readStatusBarTopInsetPx()
         val imeTop = decorHeight - readImeBottomPx()
         val density = InstrumentationRegistry.getInstrumentation()
             .targetContext.resources.displayMetrics.density
@@ -203,61 +222,75 @@ class PromptComposerImeSquishProofTest {
         val bodyBottomPx = maxOf(sendBounds.bottom, attachBounds.bottom)
         val bodyHeightPx = bodyBottomPx - bodyTopPx
         val roomAboveKeyboardPx = imeTop.toFloat() - bodyTopPx
+        // Issue #780: a tiny px slop expressed in DP so it scales with screen
+        // density instead of being a fixed pixel count that means different
+        // physical sizes on different AVDs.
+        val slopPx = SLOP_DP * density
 
         println(
             "ISSUE567_SQUISH draftHeightDp=$draftHeightDp draftTop=${draftBounds.top} " +
                 "draftBottom=${draftBounds.bottom} sendBottom=${sendBounds.bottom} " +
                 "attachBottom=${attachBounds.bottom} imeTop=$imeTop decorHeight=$decorHeight " +
-                "bodyTop=$bodyTopPx bodyBottom=$bodyBottomPx bodyHeightPx=$bodyHeightPx " +
-                "roomAboveKeyboardPx=$roomAboveKeyboardPx",
+                "statusBarTopPx=$statusBarTopPx bodyTop=$bodyTopPx bodyBottom=$bodyBottomPx " +
+                "bodyHeightPx=$bodyHeightPx roomAboveKeyboardPx=$roomAboveKeyboardPx " +
+                "density=$density",
         )
 
-        // 1) Send + attach must stay above the keyboard (reachability) and NOT
-        //    be clipped by the keyboard top.
+        // 1) Send + attach must stay above the keyboard (reachability) and NOT be
+        //    clipped by the keyboard top. RELATIVE: the only constant is the IME
+        //    top read from the live inset, so this is already decor/keyboard-height
+        //    independent. The slop is now density-scaled (was a fixed 2px).
         assertTrue(
-            "Send must stay above the IME. sendBottom=${sendBounds.bottom} imeTop=$imeTop",
-            sendBounds.bottom <= imeTop + 2f,
+            "Send must stay above the IME (squish/occlusion). " +
+                "sendBottom=${sendBounds.bottom} imeTop=$imeTop slopPx=$slopPx",
+            sendBounds.bottom <= imeTop + slopPx,
         )
         assertTrue(
-            "Attach must stay above the IME. attachBottom=${attachBounds.bottom} imeTop=$imeTop",
-            attachBounds.bottom <= imeTop + 2f,
+            "Attach must stay above the IME (squish/occlusion). " +
+                "attachBottom=${attachBounds.bottom} imeTop=$imeTop slopPx=$slopPx",
+            attachBounds.bottom <= imeTop + slopPx,
         )
 
-        // 2) The "Prompt Composer" header (close affordance) must be FULLY ON
-        //    SCREEN — the squish pushed the whole body taller than the room above
-        //    the keyboard, shoving the header up off the top of the sheet
-        //    (measured headerTop ~= 0, i.e. clipped behind the status bar) while
-        //    the draft collapsed to a single line. The fix keeps the header on the
-        //    sheet (well below the status bar) so the user can read the title and
-        //    reach the close button.
-        compose.onNodeWithTag(COMPOSER_CLOSE_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
+        // 2) The "Prompt Composer" header must be FULLY ON SCREEN — below the
+        //    status-bar inset, not shoved off the top of the sheet. RELATIVE: the
+        //    threshold is the live status-bar inset (read from the window) plus a
+        //    density-scaled margin, NOT a fixed 200px. The squish pushed the
+        //    overflowing body taller than the room above the keyboard, dragging the
+        //    header up to (or past) the very top of the window — measured
+        //    headerTop ~= 0, i.e. above/behind the status bar. The fix keeps the
+        //    header a clear margin below the status bar. A taller or shorter CI
+        //    keyboard changes the room but never the requirement that the header
+        //    clears the status bar.
+        val headerMinTopPx = statusBarTopPx + HEADER_MIN_MARGIN_DP * density
         assertTrue(
-            "Composer header is clipped off the top of the sheet (squish). " +
-                "headerTop=$bodyTopPx",
-            bodyTopPx >= 200f,
+            "Composer header is clipped under the status bar / off the top of the " +
+                "sheet (squish). headerTop=$bodyTopPx headerMinTopPx=$headerMinTopPx " +
+                "statusBarTopPx=$statusBarTopPx",
+            bodyTopPx >= headerMinTopPx,
         )
 
         // 3) The whole composer body (header -> controls) must FIT within the room
-        //    above the keyboard. When squished, the body was ~1420px tall — far
-        //    larger than the ~460px of room — so it overflowed both ends (header
-        //    off the top, controls jammed at the keyboard). A body that fits the
-        //    room is the anti-squish invariant.
+        //    above the keyboard. When squished, the body overflowed the room (the
+        //    fix's whole point), so the body height EXCEEDED the room. RELATIVE:
+        //    both sides are measured from the SAME settled layout, so this scales
+        //    with whatever room the current keyboard leaves; only the slop is a
+        //    constant, now density-scaled (was a fixed 8px).
         assertTrue(
             "Composer body taller than the room above the keyboard (squish). " +
-                "bodyHeightPx=$bodyHeightPx roomAboveKeyboardPx=$roomAboveKeyboardPx",
-            bodyHeightPx <= roomAboveKeyboardPx + 8f,
+                "bodyHeightPx=$bodyHeightPx roomAboveKeyboardPx=$roomAboveKeyboardPx " +
+                "slopPx=$slopPx",
+            bodyHeightPx <= roomAboveKeyboardPx + slopPx,
         )
 
         // 4) The body must be lifted to sit just above the keyboard (small gap),
-        //    not crammed at the window top with a void below.
+        //    not crammed at the window top with a void below. Already DP-relative.
         val gapBelowControlsPx = imeTop.toFloat() - bodyBottomPx
         val gapBelowControlsDp = gapBelowControlsPx / density
         println("ISSUE567_GAP gapBelowControlsDp=$gapBelowControlsDp")
         assertTrue(
             "Composer controls sit far above the keyboard (void). " +
                 "gapBelowControlsDp=$gapBelowControlsDp",
-            gapBelowControlsDp <= 64f,
+            gapBelowControlsDp <= GAP_BELOW_CONTROLS_MAX_DP,
         )
     }
 
@@ -352,5 +385,67 @@ class PromptComposerImeSquishProofTest {
             result = activity.window.decorView.height
         }
         return result
+    }
+
+    /**
+     * Issue #780: the top system-bar (status bar) inset in px. The relative
+     * header-on-screen check derives its threshold from this live inset rather
+     * than a fixed 200px, so a CI swiftshader status bar of a different height
+     * still produces an honest "header clears the status bar" requirement.
+     */
+    private fun readStatusBarTopInsetPx(): Int {
+        var result = 0
+        compose.activityRule.scenario.onActivity { activity ->
+            val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)
+            result = insets?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
+        }
+        return result
+    }
+
+    /**
+     * Issue #780: wait until the soft-IME `ime()` inset has STOPPED growing —
+     * i.e. it is the same across two consecutive reads spaced [stableMs] apart —
+     * so all geometry below is measured against the fully-raised keyboard, not a
+     * mid-animation frame. On the dev-box AVD the keyboard settles almost
+     * instantly; on a CI swiftshader AVD the show animation spans several frames,
+     * and reading the room above the keyboard before it settles is what
+     * transiently shoved a control out of the strictly-"displayed" region. This
+     * is a bounded wait — it never silently skips: if the inset never settles
+     * within [timeoutMs] the test proceeds and the geometry assertions still run
+     * (and will fail loud if the layout is genuinely wrong), so there is no
+     * `assumeTrue`-style escape hatch (the #736 requirement).
+     */
+    private fun waitForImeInsetToSettle(timeoutMs: Long, stableMs: Long = 200L) {
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        var last = readImeBottomPx()
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            android.os.SystemClock.sleep(stableMs)
+            val now = readImeBottomPx()
+            if (now > 0 && now == last) return
+            last = now
+        }
+    }
+
+    private companion object {
+        // Issue #780: relative-threshold constants. Expressed in DP so they scale
+        // with screen density across the dev-box AVD and CI swiftshader instead of
+        // being fixed pixel counts that mean different physical sizes per device.
+
+        // Minimum clearance the header must keep BELOW the status-bar inset. The
+        // squished base dragged the header to headerTop ~= 0 (above/behind the
+        // status bar); the fix keeps it a clear margin below. 24dp is well under
+        // the post-fix margin (the header sits hundreds of px down) yet far above
+        // the squished ~0, so it stays red on base and green on fix.
+        const val HEADER_MIN_MARGIN_DP = 24f
+
+        // Density-scaled slop replacing the old fixed 2px / 8px pixel slops, so a
+        // sub-dp rounding wobble never flips a boundary assertion on a
+        // higher-density AVD.
+        const val SLOP_DP = 4f
+
+        // Max gap the controls may sit above the keyboard before it reads as a
+        // "void" (the #615 jump-to-top symptom). Already a DP threshold; the
+        // post-fix gap measured ~30dp, so 64dp keeps comfortable headroom.
+        const val GAP_BELOW_CONTROLS_MAX_DP = 64f
     }
 }

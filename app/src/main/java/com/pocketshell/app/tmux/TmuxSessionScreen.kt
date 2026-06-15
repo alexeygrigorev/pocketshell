@@ -143,15 +143,12 @@ import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
-import com.pocketshell.app.agentcommands.AgentCommandSheet
-import com.pocketshell.app.agentcommands.SessionControlAction
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.snippets.snippetDispatchText
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
-import com.pocketshell.app.voice.AGENT_COMMANDS_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.SessionBottomControlsMinHeight
@@ -599,8 +596,6 @@ public fun TmuxSessionScreen(
     // soft keyboard) toggled from the terminal bottom controls; survives
     // recomposition only (a fresh attach starts closed, the right default).
     var showHotkeysPanel by remember { mutableStateOf(false) }
-    // Issue #436 (Slice A): agent slash-command quick-send palette state.
-    var showAgentCommands by remember { mutableStateOf(false) }
     // Issue #462: a "sticky" last-known agent for the visible pane, so the
     // always-visible "/ commands" header affordance does not flicker out on a
     // transient detection miss. Live agent detection round-trips can briefly
@@ -1662,9 +1657,6 @@ public fun TmuxSessionScreen(
                     ) {
                         { showSnippetPicker = true }
                     } else null,
-                    onAgentCommandsTap = if (paletteAgent != null) {
-                        { showAgentCommands = true }
-                    } else null,
                     // Issue #628: one-tap toggle to switch back to the
                     // previous tmux session on this host.
                     previousSessionName = previousSessionName,
@@ -2055,50 +2047,13 @@ public fun TmuxSessionScreen(
         )
     }
 
-    // Issue #436 (Slice A): agent slash-command quick-send palette. Filtered
-    // to the agent detected in the visible pane; each row routes through the
-    // existing `sendToAgentPane` path (literal `send-keys -l` + Enter, with
-    // the Codex submit delay already handled there). When detection is null
-    // (plain shell pane) the "/ commands" chip is not offered, so the sheet
-    // only ever opens with a non-null agent.
-    // Issue #462: use the flicker-resilient `paletteAgent` (live detection, or
-    // the sticky last-known agent for this pane) so the sheet still opens with
-    // the right catalog if a transient detection miss nulled the live row at
-    // the moment of the tap.
-    val agentForCommands = paletteAgent
-    if (showAgentCommands && agentForCommands != null) {
-        AgentCommandSheet(
-            agent = agentForCommands,
-            onDismiss = { showAgentCommands = false },
-            onCommandSend = { command ->
-                // Issue #249: same liveness guard as the snippet picker —
-                // never write into a dead pane and lose the tap.
-                if (sessionLive) {
-                    currentPane?.let { pane ->
-                        viewModel.sendToAgentPane(pane.paneId, command.command)
-                    }
-                }
-            },
-            // Issue #453/#543: Claude-only `Ctrl-C x2` / `Ctrl-D x2` controls
-            // live at the bottom of this palette. Map each to the control
-            // bytes sent into the focused pane.
-            onControlSend = { action ->
-                if (sessionLive) {
-                    currentPane?.let { pane ->
-                        val byte = when (action) {
-                            SessionControlAction.Interrupt -> CtrlCByte
-                            SessionControlAction.EndInput -> CtrlDByte
-                        }
-                        viewModel.sendControlInputToPane(
-                            pane.paneId,
-                            byte,
-                            repeatCount = 2,
-                        )
-                    }
-                }
-            },
-        )
-    }
+    // Issue #787: the standalone agent slash-command palette (`AgentCommandSheet`)
+    // and the bottom `/ commands` chip were a hard-cut here (D22). Slash-command
+    // entry now lives ONLY in the composer (its `/` button + type-`/`
+    // autocomplete). The palette's `Ctrl-C ×2` / `Ctrl-D ×2` interrupt/EOF
+    // controls were re-homed into the hotkeys panel's "INTERRUPT / EOF" section
+    // (see [TmuxHotkeyInterruptX2Label] / [TmuxHotkeyEofX2Label]) so no function
+    // was lost.
 
     // Issue #784: the dedicated terminal-hotkeys panel — its OWN bottom-sheet
     // surface (not inside the composer, not part of the soft keyboard). Shows
@@ -5292,7 +5247,6 @@ internal fun TmuxTerminalBottomControls(
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
-    onAgentCommandsTap: (() -> Unit)? = null,
     // Issue #628: toggle chip for switching back to the previous tmux session.
     previousSessionName: String? = null,
     onTogglePreviousSession: (() -> Unit)? = null,
@@ -5353,11 +5307,9 @@ internal fun TmuxTerminalBottomControls(
                     chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                     onChipTap = onChipTap,
                     onDictateTap = onDictateTap,
-                    onAgentCommandsTap = onAgentCommandsTap,
                     onEnterTap = if (!showConversation) onEnterTap else null,
                     onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
                     onAddSnippetTap = onAddSnippetTap,
-                    agentCommandsLabel = AgentCommandsChip,
                     addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
                     addSnippetIcon = SnippetsChipIcon,
                     // Project navigation on tmux panes is a separate
@@ -5451,6 +5403,16 @@ internal fun tmuxTerminalKeyboardChromeMode(
  */
 internal const val TmuxHotkeyEnterLabel: String = "Enter"
 
+// Issue #787: the DOUBLED interrupt/EOF controls, re-homed into the hotkeys
+// panel from the deleted `/ commands` palette (where they were the only home —
+// originally #453/#543). The double-press is a DISTINCT sequence from the single
+// `^C`/`^D` above: Claude Code (and many REPLs) treat the first `^C`/`^D` as
+// "press again to interrupt / exit", so the doubled byte is what actually stops
+// the running agent / sends EOF. `onKeyBarKey` maps these two labels to
+// `sendControlInputToPane(..., repeatCount = 2)`.
+internal const val TmuxHotkeyInterruptX2Label: String = "^C×2"
+internal const val TmuxHotkeyEofX2Label: String = "^D×2"
+
 internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.HotkeySection> = listOf(
     com.pocketshell.uikit.components.HotkeySection(
         title = "KEYS",
@@ -5475,6 +5437,17 @@ internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.Hotk
         ),
         columns = 4,
     ),
+    // Issue #787: interrupt / EOF doubled chords (re-homed from the deleted
+    // palette). Distinct from the single `^C`/`^D` above — these send the byte
+    // TWICE so they actually stop the running agent / exit the REPL.
+    com.pocketshell.uikit.components.HotkeySection(
+        title = "INTERRUPT / EOF",
+        keys = listOf(
+            KeyBinding(label = TmuxHotkeyInterruptX2Label, kind = KeyKind.Regular),
+            KeyBinding(label = TmuxHotkeyEofX2Label, kind = KeyKind.Regular),
+        ),
+        columns = 2,
+    ),
     com.pocketshell.uikit.components.HotkeySection(
         title = "ARROWS",
         keys = listOf(
@@ -5487,21 +5460,12 @@ internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.Hotk
     ),
 )
 
-internal const val CtrlC2Chip: String = "Ctrl-C x2"
-internal const val CtrlD2Chip: String = "Ctrl-D x2"
-
-// Issue #436 (Slice A): the agent slash-command quick-send palette
-// ([AgentCommandSheet]). Reopened issue #462 moves this affordance back to the
-// bottom input/control area so the top-right tmux kebab remains the only
-// screen-level overflow at that edge.
-internal const val AgentCommandsChip: String = AGENT_COMMANDS_CHIP_LABEL
-
 // Issue #454: the agent-pane bottom band is decluttered to the composer
 // launcher plus primary controls. Slash commands are no longer part of the
-// scrollable chip list; issue #462 renders them as a primary bottom-control
-// affordance near Enter/show-keyboard/keybar. The former `Ctrl-C x2` /
-// `Ctrl-D x2` interrupt/EOF chips already moved into the "/ commands" palette
-// as session-control rows (see [AgentCommandSheet] `onControlSend`).
-// `CtrlC2Chip` / `CtrlD2Chip` are kept as the literal labels the palette
-// controls map to, but no longer appear in the band.
+// scrollable chip list — and as of #787 the standalone slash palette + bottom
+// `/ commands` chip are gone entirely (the only slash entry now lives in the
+// composer: its `/` button + type-`/` autocomplete). The former `Ctrl-C ×2` /
+// `Ctrl-D ×2` interrupt/EOF chips' function is preserved in the hotkeys panel's
+// "INTERRUPT / EOF" section (see [TmuxHotkeyInterruptX2Label] /
+// [TmuxHotkeyEofX2Label] and [onKeyBarKey]).
 internal val AgentExitChips: List<String> = emptyList()

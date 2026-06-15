@@ -153,6 +153,17 @@ class DesignRenders {
                         ),
                         columns = 4,
                     ),
+                    // Issue #787: the doubled interrupt/EOF chords re-homed from
+                    // the deleted `/ commands` palette (distinct from single
+                    // `^C`/`^D` — these send the byte twice).
+                    com.pocketshell.uikit.components.HotkeySection(
+                        title = "INTERRUPT / EOF",
+                        keys = listOf(
+                            KeyBinding("^C×2", KeyKind.Regular),
+                            KeyBinding("^D×2", KeyKind.Regular),
+                        ),
+                        columns = 2,
+                    ),
                     com.pocketshell.uikit.components.HotkeySection(
                         title = "ARROWS",
                         keys = listOf(

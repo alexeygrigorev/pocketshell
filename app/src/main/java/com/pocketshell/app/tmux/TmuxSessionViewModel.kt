@@ -9787,6 +9787,21 @@ public class TmuxSessionViewModel @Inject constructor(
                 sendControlInputToPane(paneId, CtrlDByte)
                 null
             }
+            // Issue #787 (re-home from the deleted `/ commands` palette,
+            // originally #453/#543): the DOUBLED interrupt/EOF chords. These are
+            // distinct from a single `^C`/`^D` — Claude Code (and many REPLs)
+            // treat the first `^C`/`^D` as "press again to interrupt/exit", so
+            // the doubled byte is what actually stops the running agent / sends
+            // EOF. Routed as two raw bytes (`repeatCount = 2`) on the same
+            // `send-keys -H` overlay path.
+            TmuxHotkeyInterruptX2Label -> {
+                sendControlInputToPane(paneId, CtrlCByte, repeatCount = 2)
+                null
+            }
+            TmuxHotkeyEofX2Label -> {
+                sendControlInputToPane(paneId, CtrlDByte, repeatCount = 2)
+                null
+            }
             "^E", "Ctrl-E" -> {
                 sendControlInputToPane(paneId, CtrlEByte)
                 null

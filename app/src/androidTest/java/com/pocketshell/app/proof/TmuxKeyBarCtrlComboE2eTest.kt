@@ -148,7 +148,8 @@ class TmuxKeyBarCtrlComboE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        listOf("Esc", "Tab", "Enter", "^A", "^B", "^C", "^D", "^E", "^L", "^R", "←", "→")
+        // Issue #787: the re-homed doubled interrupt/EOF controls are present too.
+        listOf("Esc", "Tab", "Enter", "^A", "^B", "^C", "^D", "^E", "^L", "^R", "^C×2", "^D×2", "←", "→")
             .forEach { label ->
                 assertTrue(
                     "expected the hotkeys panel to show '$label'",
@@ -215,6 +216,48 @@ class TmuxKeyBarCtrlComboE2eTest {
             transcript.contains(RESUME_MARKER)
         }
         captureViewport("issue784-05-prompt-resumed")
+
+        // ===== Issue #787: the re-homed DOUBLED ^C×2 interrupt control ========
+        // The `/ commands` palette (the only prior home of `Ctrl-C ×2` /
+        // `Ctrl-D ×2`) was hard-cut; those controls moved into the hotkeys panel's
+        // INTERRUPT / EOF section. Prove the doubled control still interrupts a
+        // live process: start a fresh flood, tap `^C×2`, confirm it stops.
+        SystemClock.sleep(750)
+        sendCommandThroughTerminalInput(
+            "i=0; while true; do i=\$((i+1)); echo $FLOOD_MARKER-\$i; sleep 0.3; done",
+            "flood-start-x2",
+        )
+        waitForVisibleTerminal("flood-running-x2", timeoutMillis = 20_000) { transcript ->
+            // Count ticks AFTER the resume marker so we don't re-match the first
+            // flood's lines that are still in the scrollback.
+            transcript.substringAfterLast(RESUME_MARKER).split(FLOOD_MARKER).size >= 4
+        }
+        captureViewport("issue784-05d-process-running-before-x2")
+        val gridBeforeX2 = terminalGridSize()
+        val interruptX2At = SystemClock.elapsedRealtime()
+        // Tap the doubled-interrupt control (`^C×2`) in the hotkeys panel.
+        compose.onNode(
+            hasText("^C×2")
+                .and(hasClickAction())
+                .and(hasAnyAncestor(hasTestTag(TERMINAL_HOTKEYS_PANEL_TAG))),
+        ).performClick()
+        waitForFloodToStop()
+        recordTiming("ctrl_c_x2_interrupt_to_quiescent_ms", SystemClock.elapsedRealtime() - interruptX2At)
+        val gridAfterX2 = terminalGridSize()
+        captureViewport("issue784-05e-after-ctrl-c-x2")
+        // No reflow across the doubled control either (still a `send-keys -H`
+        // control-channel command, never a resize).
+        assertTrue(
+            "expected no terminal reflow across ^C×2: grid before=$gridBeforeX2 after=$gridAfterX2",
+            gridBeforeX2 == gridAfterX2,
+        )
+        // The shell must be interactive again after the doubled interrupt.
+        SystemClock.sleep(750)
+        sendCommandThroughTerminalInput("echo $RESUME_X2_MARKER", "post-x2-echo")
+        waitForVisibleTerminal("resume-x2-echo", timeoutMillis = 20_000) { transcript ->
+            transcript.contains(RESUME_X2_MARKER)
+        }
+        captureViewport("issue784-05f-prompt-resumed-after-x2")
 
         // ===== Enter key (issue #527): submit a pending line via the panel ====
         // Type a command WITHOUT a trailing newline so it sits as a pending,
@@ -290,6 +333,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         appendLine("no_reflow=${gridBefore == gridAfter}")
         appendLine("flood_marker=$FLOOD_MARKER")
         appendLine("resume_marker=$RESUME_MARKER")
+        appendLine("resume_x2_marker=$RESUME_X2_MARKER")
         appendLine("enter_marker=$ENTER_MARKER")
         appendLine("artifacts:")
         listOf(
@@ -298,6 +342,9 @@ class TmuxKeyBarCtrlComboE2eTest {
             "issue784-03-process-running",
             "issue784-04-after-ctrl-c",
             "issue784-05-prompt-resumed",
+            "issue784-05d-process-running-before-x2",
+            "issue784-05e-after-ctrl-c-x2",
+            "issue784-05f-prompt-resumed-after-x2",
             "issue784-05b-enter-pending",
             "issue784-05c-enter-executed",
         ).forEach { appendLine("  $it-viewport.png + $it-visible-terminal.txt") }
@@ -610,6 +657,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         const val READY_MARKER: String = "KEYBAR-READY"
         val FLOOD_MARKER: String = "FLOOD-${System.currentTimeMillis().toString().takeLast(6)}"
         val RESUME_MARKER: String = "RESUMED-${System.currentTimeMillis().toString().takeLast(6)}"
+        val RESUME_X2_MARKER: String = "RESUMEDX2-${System.currentTimeMillis().toString().takeLast(6)}"
         val ENTER_MARKER: String = "ENTERKEY-${System.currentTimeMillis().toString().takeLast(6)}"
     }
 }

@@ -4627,13 +4627,16 @@ class TmuxSessionViewModelTest {
     @Test
     fun hotkeyPanelSectionsAreDeDupedAndCarryTheAuditedSet() {
         // Issue #784: the dedicated panel set — no duplicate `/`, no lone
-        // `Ctrl`, `^B` present, clean arrow glyphs. Verify the curated set is
-        // exactly what we expect and has no duplicate labels.
+        // `Ctrl`, `^B` present, clean arrow glyphs. Issue #787 added the
+        // INTERRUPT / EOF doubled chords (`^C×2` / `^D×2`), re-homed from the
+        // deleted palette. Verify the curated set is exactly what we expect and
+        // has no duplicate labels.
         val labels = TmuxHotkeyPanelSections.flatMap { it.keys }.map { it.label }
         assertEquals(
             listOf(
                 "Esc", "Tab", "Enter",
                 "^A", "^B", "^C", "^D", "^E", "^L", "^R", "^Z",
+                TmuxHotkeyInterruptX2Label, TmuxHotkeyEofX2Label,
                 "←", "↑", "↓", "→",
             ),
             labels,
@@ -4646,10 +4649,42 @@ class TmuxSessionViewModelTest {
         assertFalse(labels.contains("/"))
         // ^B (tmux prefix) restored.
         assertTrue(labels.contains("^B"))
+        // Issue #787: the doubled interrupt/EOF chords are present and DISTINCT
+        // from the single `^C`/`^D` (they're not aliases of the same label).
+        assertTrue(labels.contains(TmuxHotkeyInterruptX2Label))
+        assertTrue(labels.contains(TmuxHotkeyEofX2Label))
+        assertTrue(labels.contains("^C"))
+        assertTrue(labels.contains("^D"))
         // The arrow section uses the clean glyphs, marked as Arrow kind.
         val arrows = TmuxHotkeyPanelSections.last().keys
         assertEquals(listOf("←", "↑", "↓", "→"), arrows.map { it.label })
         assertTrue(arrows.all { it.kind == KeyKind.Arrow })
+    }
+
+    @Test
+    fun onKeyBarKeyInterruptAndEofDoubledChordsSendByteTwice() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Issue #787: the re-homed `^C×2` / `^D×2` hotkeys are DISTINCT from the
+        // single `^C`/`^D` — they send the control byte TWICE (`repeatCount = 2`)
+        // so they actually interrupt the running agent / send EOF (Claude Code
+        // and many REPLs treat the first press as "press again to interrupt/exit").
+        vm.onKeyBarKey("%0", TmuxHotkeyInterruptX2Label)
+        vm.onKeyBarKey("%0", TmuxHotkeyEofX2Label)
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        // `sendControlInputToPane(..., repeatCount = 2)` emits one `send-keys -H`
+        // carrying the byte twice (03 03 for Ctrl-C, 04 04 for Ctrl-D).
+        assertEquals(
+            listOf(
+                "send-keys -H -t %0 03 03",
+                "send-keys -H -t %0 04 04",
+            ),
+            sent,
+        )
     }
 
     @Test

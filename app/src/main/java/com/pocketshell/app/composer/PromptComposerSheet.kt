@@ -729,23 +729,31 @@ internal fun SheetContent(
         val keyboardIntrusionDp = (imeBottomDp - navBarsBottomDp).coerceAtLeast(0.dp)
         val availableAboveKeyboard = (maxHeight - keyboardIntrusionDp).coerceAtLeast(0.dp)
         val keyboardUp = keyboardIntrusionDp > 0.dp
-        // Issue #765: the height of the scrollable region (draft + banners +
+        // Issue #790: the MAX height of the scrollable region (draft + banners +
         // attachment tiles) when the keyboard is up — the room above the keyboard
         // MINUS the pinned header + the sticky controls + the body's bottom
-        // padding ([PROMPT_SCROLL_REGION_IME_CHROME_RESERVE]). Giving the region a
-        // definite height (rather than a wrap-content weight that collapses) lets
-        // the `fillMaxHeight` draft inside claim a real viewport and self-scroll to
-        // the caret, while the whole body still fits exactly above the keyboard.
-        // Floored so the draft is never crushed to nothing on a very short screen.
+        // padding ([PROMPT_SCROLL_REGION_IME_CHROME_RESERVE]). This is a CAP, not a
+        // fixed height: the region WRAPS its content (so a short / empty draft sits
+        // compactly just above the keyboard — no reserved dead band, the #790
+        // symptom) and only grows up to this cap as the draft lengthens, at which
+        // point it scrolls WITHIN the cap so the sticky Send / attach row stays
+        // above the keyboard (the #682 long-draft invariant). Floored so even a
+        // long draft on a very short screen keeps a usable viewport.
+        //
+        // Issue #765 history (now superseded by #790): the region was a FIXED
+        // `height(imeScrollRegionHeight)` so the `fillMaxHeight` draft could claim
+        // a definite viewport. But with an empty / short draft the field stayed at
+        // its 96dp min and the rest of that fixed region rendered as a large empty
+        // dark band down to the keyboard — exactly the maintainer's #790
+        // screenshot. Capping (wrap-content up to the cap) removes the void while
+        // still bounding a long draft.
         //
         // Issue #784 (hard-cut, D22): the terminal key bar that #755 had wedged
         // into this column is GONE — it now lives in the dedicated
         // `TerminalHotkeysPanel` bottom sheet. So the sticky bottom chrome here is
         // just the action controls again, and the scroll region reclaims the slice
-        // the key bar used to reserve. This is what un-squishes the composer with
-        // the keyboard up: the field gets its full height back, and Send / mic /
-        // attach stay fully visible above the IME.
-        val imeScrollRegionHeight =
+        // the key bar used to reserve.
+        val imeScrollRegionMaxHeight =
             (availableAboveKeyboard - PROMPT_SCROLL_REGION_IME_CHROME_RESERVE)
                 .coerceAtLeast(PROMPT_SCROLL_REGION_IME_MIN_HEIGHT)
         Column(
@@ -839,21 +847,22 @@ internal fun SheetContent(
                     // row off-screen / under the keyboard). The header is PINNED
                     // above this region (#765) so it never scrolls away.
                     //
-                    // Issue #765: when the keyboard is UP, give this region a
-                    // DEFINITE height equal to the room left after the pinned
-                    // header + the sticky controls + paddings
-                    // ([imeScrollRegionHeight]). A definite height (vs the old
-                    // `weight(1f, fill=false)`, which collapsed to content and left
-                    // the draft a thin strip) lets the `fillMaxHeight` draft inside
-                    // claim the WHOLE region — so the editor gets a real viewport
-                    // and self-scrolls to the caret, while the region as a whole
-                    // still fits exactly the room above the keyboard. When the
-                    // keyboard is DOWN we keep the wrap-content
-                    // `weight(1f, fill=false).heightIn(max=360)` so the sheet stays
-                    // compact at partial-expand (#234).
+                    // Issue #790: when the keyboard is UP, WRAP this region's
+                    // content up to [imeScrollRegionMaxHeight] (the room left after
+                    // the pinned header + the sticky controls + paddings) — it is a
+                    // CAP, not a fixed height. With an empty / short draft the
+                    // region collapses to the field's natural height and the whole
+                    // sheet sits compactly just above the keyboard (no reserved dead
+                    // band — the #790 symptom the old fixed `height(...)` produced).
+                    // As the draft lengthens the region grows up to the cap and then
+                    // the `verticalScroll` below absorbs the overflow, so the sticky
+                    // Send / attach row never leaves the area above the keyboard (the
+                    // #682 long-draft invariant). When the keyboard is DOWN we keep
+                    // the wrap-content `weight(1f, fill=false).heightIn(max=360)` so
+                    // the sheet stays compact at partial-expand (#234).
                     .then(
                         if (keyboardUp) {
-                            Modifier.height(imeScrollRegionHeight)
+                            Modifier.heightIn(max = imeScrollRegionMaxHeight)
                         } else {
                             Modifier
                                 .weight(1f, fill = false)

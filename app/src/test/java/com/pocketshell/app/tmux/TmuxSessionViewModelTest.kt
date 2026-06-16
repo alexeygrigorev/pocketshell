@@ -111,8 +111,15 @@ class TmuxSessionViewModelTest {
     // Keep the existing UnconfinedTestDispatcher Main semantics (eager-on-advance)
     // that this suite's assertions already rely on — but bind it to the SHARED
     // scheduler so Main, runTest, and the lease clock stay in lockstep.
+    // Hold the exact instance so the #576 reconcile/apply dispatcher pins can
+    // reference the SAME dispatcher the rule installs as Main — the ViewModel's
+    // `applyOnMain` inline-detection compares interceptor identity, and under
+    // `Dispatchers.setMain(x)` the running coroutine's interceptor is `x`, not
+    // the `Dispatchers.Main` delegate.
+    private val testMainDispatcher = UnconfinedTestDispatcher(scheduler)
+
     @get:Rule
-    val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher(scheduler))
+    val mainDispatcherRule = MainDispatcherRule(testMainDispatcher)
 
     // factoryScope stays on REAL `Dispatchers.IO`: the TmuxClientFactory drives a
     // genuine background IO read/feed loop that the terminal-feed integration
@@ -152,7 +159,28 @@ class TmuxSessionViewModelTest {
             sshLeaseManager = sshLeaseManager,
             sessionLifecycleSignals = sessionLifecycleSignals,
             agentRepository = agentRepository,
-        ).also { createdViewModels += it }
+        ).also {
+            // Issue #576 (Slice A of #792): pin the structural-reconcile
+            // dispatcher to Main (the MainDispatcherRule's
+            // UnconfinedTestDispatcher on the shared scheduler). Using the SAME
+            // Main dispatcher instance makes `withContext(reconcileDispatcher)`
+            // a no-op from a bridgeScope (Main) coroutine, so the reconcile
+            // runs inline on the virtual clock exactly as it did before this
+            // slice — preserving the suite's synchronous-ordering assertions.
+            // With the production default (Dispatchers.Default = a real
+            // background thread) a structural event would race the test
+            // scheduler.
+            // Issue #576 (Slice A of #792): pin BOTH the reconcile and the
+            // reconcile-APPLY dispatcher to the EXACT instance the rule installs
+            // as Main. Both equal the running coroutine's interceptor, so
+            // `applyOnMain` takes its inline branch (no `withContext` re-dispatch)
+            // and the suite's synchronous-ordering assertions hold byte-for-byte
+            // as before this slice. (A storm test overrides the reconcile
+            // dispatcher to a separate off-Main one to exercise the hop.)
+            it.setReconcileDispatcherForTest(testMainDispatcher)
+            it.setReconcileApplyDispatcherForTest(testMainDispatcher)
+            createdViewModels += it
+        }
 
     /**
      * Issue #640: the seed capture command. [TmuxClient.captureWithCursor] now
@@ -1135,6 +1163,174 @@ class TmuxSessionViewModelTest {
 
         assertEquals(1, client.sentCommands.count { it.startsWith("capture-pane") })
     }
+
+    /**
+     * Issue #576 (Slice A of #792): MAIN-THREAD RESPONSIVENESS under a Codex
+     * `%layout-change` storm — the on-device ANR reproduced through the REAL
+     * collector wiring (`bindClientObservers` → coalescer → off-main
+     * `reconcilePanes`), then proven fixed.
+     *
+     * The freeze was head-of-line blocking: the old path ran a synchronous
+     * `reconcilePanes()` (`list-panes` round-trip) on the Main collector thread
+     * for EVERY structural event, so a burst of N `%layout-change` events
+     * serialised N `list-panes` round-trips on the UI thread → ANR.
+     *
+     * This test makes the `list-panes` round-trip SLOW (parked behind a gate)
+     * and runs it on a SEPARATE [reconcileDispatcher] (modelling the production
+     * `Dispatchers.Default`). It then fires a 5_000-event storm through the real
+     * collector and HARD-asserts, while the reconcile is still parked:
+     *  - a concurrently-posted MAIN task runs to completion (the Main thread is
+     *    NOT wedged behind the storm) — the responsiveness contract;
+     *  - the whole storm was OFFERED non-blockingly (the collector did not stall
+     *    one-`list-panes`-per-event);
+     *  - at most a handful of `list-panes` round-trips were started for the
+     *    5_000 events — coalescing, not O(N).
+     * Then it releases the gate and asserts the FINAL pane layout is correct
+     * (the settled layout after the burst is never dropped).
+     *
+     * RED on base: with the pre-fix synchronous per-event main-thread reconcile,
+     * the collector `emit` of the FIRST gated event would suspend the Main
+     * collector on the gate `await()`; the marker task posted afterwards on Main
+     * would NOT complete under `runCurrent()` (Main wedged) and the 5_000 emits
+     * would each queue a blocking reconcile. GREEN with the coalescer +
+     * off-main reconcile.
+     *
+     * No `assumeTrue` / `isRunningOnCi` skip (F3): the gate + virtual clock make
+     * the head-of-line property deterministic on every machine and on CI.
+     */
+    @Test
+    fun codexLayoutChangeStormKeepsMainThreadResponsiveAndSettlesFinalLayout() =
+        runTest(scheduler) {
+            val vm = newVm()
+            // Model production: the structural reconcile IO runs OFF the Main
+            // collector thread. A queued StandardTestDispatcher on the shared
+            // scheduler stands in for Dispatchers.Default — work runs only when
+            // the scheduler pumps it, never eagerly on the collector's stack.
+            vm.setReconcileDispatcherForTest(StandardTestDispatcher(scheduler))
+            // Apply stays on the test Main (the production
+            // Dispatchers.Main.immediate analogue) so the `_panes` mutation is
+            // single-threaded on the UI thread. Because the coalescer scope runs
+            // on the separate StandardTestDispatcher above (≠ this apply
+            // dispatcher), `applyOnMain` genuinely HOPS from off-Main back to
+            // Main — the production behaviour under test.
+            vm.setReconcileApplyDispatcherForTest(testMainDispatcher)
+
+            val client = FakeTmuxClient()
+            // Park EVERY `list-panes` round-trip behind a gate so a reconcile,
+            // once started, is "slow" — the per-event cost that wedged the UI
+            // thread on the old path. (attachClientForTest does NOT itself run a
+            // reconcile; only the structural events below do, so the gate is
+            // armed up-front and the storm reconcile is what parks on it.)
+            val listPanesGate = CompletableDeferred<Unit>()
+            client.sendCommandGatePrefix = "list-panes"
+            client.sendCommandGate = listPanesGate
+
+            // Each coalesced reconcile re-reads the authoritative pane list via
+            // list-panes; both storm-driven reconciles see the SETTLED two-pane
+            // layout (the last write after the burst). capture-pane seeds the
+            // newly-discovered editor pane.
+            val settledLayout = CommandResponse(
+                number = 0L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tshell\t0",
+                    "%1\t@1\t\$0\twork\teditor\t0",
+                ),
+                isError = false,
+            )
+            repeat(4) { client.responses.addLast(settledLayout) }
+            repeat(4) {
+                client.capturePaneResponses.addLast(
+                    CommandResponse(number = 0L, output = listOf("seed"), isError = false),
+                )
+                client.cursorQueryResponses.addLast(
+                    CommandResponse(number = 0L, output = listOf("0,0"), isError = false),
+                )
+            }
+
+            vm.attachClientForTest(client)
+            runCurrent()
+
+            // ---- the storm ------------------------------------------------
+            // Fire the storm from a child coroutine and bound it: the coalescer
+            // `offer` is non-blocking so the whole storm completes promptly.
+            // On the OLD synchronous per-event path the FIRST gated reconcile
+            // suspends the (UNDISPATCHED) Main collector mid-`emit`, so the
+            // SharedFlow `emit`s block and this never completes — surfacing as a
+            // FAST explicit failure here instead of the 1m runTest watchdog.
+            val stormSize = 5_000
+            val stormDone = AtomicInteger(0)
+            val stormJob = launch {
+                repeat(stormSize) {
+                    client.emittedEvents.emit(
+                        ControlEvent.LayoutChange(
+                            sessionId = "",
+                            windowId = "@0",
+                            layout = "burst-$it",
+                        ),
+                    )
+                }
+                stormDone.incrementAndGet()
+            }
+            // Let the collector drain all offers and let ONE coalesced reconcile
+            // start (it parks on the gated list-panes). Do NOT release the gate
+            // yet — we assert responsiveness WHILE a reconcile is in flight.
+            runCurrent()
+            assertEquals(
+                "the entire 5_000-event layout-change storm must be OFFERED " +
+                    "non-blockingly — the collector must NOT head-of-line-block on " +
+                    "the gated reconcile (the ANR)",
+                1,
+                stormDone.get(),
+            )
+            assertTrue("storm coroutine completed", stormJob.isCompleted)
+
+            // RESPONSIVENESS: post a marker task on Main and assert it completes
+            // even though a reconcile is parked on the gated list-panes. On the
+            // old synchronous path the Main collector itself would be suspended
+            // on the gate, so this marker could not run.
+            val mainTaskRan = AtomicInteger(0)
+            CoroutineScope(Dispatchers.Main).launch { mainTaskRan.incrementAndGet() }
+            runCurrent()
+            assertEquals(
+                "a Main task posted during the layout-change storm must run — the " +
+                    "Main thread must NOT be wedged behind the gated reconcile (the ANR)",
+                1,
+                mainTaskRan.get(),
+            )
+
+            // COALESCING: despite 5_000 events, only a handful of list-panes
+            // round-trips were STARTED (the rest collapsed). Count how many have
+            // reached the gated client so far.
+            val listPanesStartedDuringStorm =
+                client.sentCommands.count { it.startsWith("list-panes") }
+            assertTrue(
+                "5_000-event storm must collapse to a handful of list-panes " +
+                    "round-trips, started=$listPanesStartedDuringStorm",
+                listPanesStartedDuringStorm in 1..3,
+            )
+
+            // FINAL LAYOUT: release the gate and let the settled reconcile apply.
+            // The reconcile that runs after the burst re-reads list-panes and
+            // must produce the final two-pane layout (the last write is never
+            // dropped).
+            listPanesGate.complete(Unit)
+            advanceUntilIdle()
+
+            val finalPaneIds = vm.panes.value.map { it.paneId }
+            assertEquals(
+                "the final pane layout after the storm settles must be correct " +
+                    "(both panes present, last write not dropped), was $finalPaneIds",
+                listOf("%0", "%1"),
+                finalPaneIds,
+            )
+            // And the coalesced reconciles never ran one-list-panes-per-event.
+            val totalListPanes = client.sentCommands.count { it.startsWith("list-panes") }
+            assertTrue(
+                "total list-panes for a 5_000-event storm must stay a small constant, " +
+                    "was $totalListPanes",
+                totalListPanes in 1..4,
+            )
+        }
 
     @Test
     fun reconcileScopesPanesAndWindowSummariesToActiveSession() = runTest(scheduler) {

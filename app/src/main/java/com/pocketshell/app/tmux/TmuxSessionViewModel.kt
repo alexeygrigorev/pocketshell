@@ -79,6 +79,7 @@ import com.pocketshell.core.terminal.input.BracketedPaste
 import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.LayoutChangeCoalescer
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -89,11 +90,13 @@ import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.trySendBlocking
@@ -114,6 +117,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.ContinuationInterceptor
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
@@ -205,6 +210,46 @@ public class TmuxSessionViewModel @Inject constructor(
     // drain runs on the test scheduler (deterministic batch coalescing).
     private val agentRepository: AgentConversationRepository = AgentConversationRepository(),
 ) : ViewModel() {
+
+    /**
+     * Issue #576 (Slice A of #792): the dispatcher the structural pane
+     * reconcile (`reconcilePanes`: list-panes + capture-pane round-trips +
+     * `_panes`/recompose churn) runs on. Defaults to [Dispatchers.Default] so
+     * a Codex `%layout-change` storm no longer head-of-line-blocks the UI
+     * thread (the on-device ANR). NOT a constructor parameter so the Hilt
+     * `@Inject` graph stays free of a bare `CoroutineDispatcher` binding; a
+     * unit test pins it to its virtual-clock scheduler via
+     * [setReconcileDispatcherForTest] before attaching a client.
+     */
+    private var reconcileDispatcher: CoroutineDispatcher = Dispatchers.Default
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setReconcileDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        reconcileDispatcher = dispatcher
+    }
+
+    /**
+     * Issue #576 (Slice A of #792): the dispatcher the structural reconcile's
+     * pane-state APPLY step runs on. The `list-panes`/`capture-pane` IO runs
+     * off-main on [reconcileDispatcher], but the resulting `_panes` /
+     * `paneRows` / recompose-driving StateFlow mutation MUST land back on the
+     * single UI thread so concurrent reconciles (the off-main coalesced one and
+     * the inline attach/refresh ones) can never interleave a torn read/write of
+     * the pane state nor lose the last-write of a settled burst. Defaults to
+     * [Dispatchers.Main.immediate] — the same thread `bridgeScope`/`_panes`
+     * already publish on — so an apply that is already on Main runs inline (no
+     * extra dispatch hop) while an apply arriving from the off-main reconcile
+     * hops back to Main and serialises behind any in-flight apply. NOT a
+     * constructor parameter, for the same Hilt-graph reason as
+     * [reconcileDispatcher]; a unit test pins it to its virtual-clock Main via
+     * [setReconcileApplyDispatcherForTest].
+     */
+    private var reconcileApplyDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setReconcileApplyDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        reconcileApplyDispatcher = dispatcher
+    }
 
     /**
      * Issue #526: test override for the configured agent-submit Enter delay
@@ -921,6 +966,16 @@ public class TmuxSessionViewModel @Inject constructor(
     private var appActive: Boolean = true
     private var screenStartedForCleared: Boolean = true
     private var eventsJob: Job? = null
+
+    // Issue #576 (Slice A of #792): collapse a Codex `%layout-change` storm into
+    // ~1 off-main reconcile per frame instead of N synchronous main-thread
+    // reconciles. Re-created per client bind in [bindClientObservers]; the
+    // structural-event branch of the collector offers into it rather than
+    // calling `reconcilePanes()` inline.
+    @Volatile
+    private var layoutChangeCoalescer: LayoutChangeCoalescer? = null
+    private var layoutCoalescerScope: CoroutineScope? = null
+
     private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
     private var passiveDisconnectGraceJob: Job? = null
@@ -5032,9 +5087,57 @@ public class TmuxSessionViewModel @Inject constructor(
         // Cancel any previous subscription before re-binding (idempotency
         // for tests that swap clients on the same ViewModel instance).
         eventsJob?.cancel()
+
+        // Issue #576 (Slice A of #792): stand up a fresh coalescer + its
+        // off-main drain scope for this client. Structural control events
+        // (`%layout-change`/`%window-add`/`%window-close`/`%pane-mode-changed`)
+        // are OFFERED into it; a Codex `/new` storm of N of them collapses to
+        // ~1 reconcile per frame on [reconcileDispatcher], so the UI thread is
+        // no longer head-of-line-blocked behind N `list-panes`/`capture-pane`
+        // round-trips (the ANR). `%output` and everything else still flow
+        // through `onControlEvent` synchronously on the collector.
+        layoutChangeCoalescer?.stop()
+        layoutCoalescerScope?.cancel()
+        // The coalescer drain loop gets its OWN child Job parented to
+        // bridgeScope (NOT a bare `bridgeScope.coroutineContext`, which would
+        // REUSE bridgeScope's Job — then `coalescerScope.cancel()` on the next
+        // re-bind / teardown would cancel bridgeScope itself and tear down the
+        // event collector AND the cached-runtime refresh launches). A child
+        // SupervisorJob isolates the drain loop's lifecycle and dispatches it on
+        // [reconcileDispatcher] (off-main in production).
+        val coalescerScope = CoroutineScope(
+            bridgeScope.coroutineContext +
+                SupervisorJob(bridgeScope.coroutineContext[Job]) +
+                reconcileDispatcher,
+        )
+        layoutCoalescerScope = coalescerScope
+        val coalescer = LayoutChangeCoalescer(
+            reconcile = {
+                // Only reconcile while this client is still the active one;
+                // a stale coalescer must not drive a reconcile for a torn-down
+                // client (the bind cancels the prior scope, but guard anyway).
+                if (clientRef === client) {
+                    reconcilePanes()
+                }
+            },
+            onReconcileError = { t ->
+                Log.w(ISSUE_576_COALESCER_TAG, "Coalesced reconcilePanes failed", t)
+            },
+        )
+        coalescer.start(coalescerScope)
+        layoutChangeCoalescer = coalescer
+
         val job = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
             client.events.collect { event ->
-                onControlEvent(event)
+                // Structural events drive a `list-panes` reconcile; route them
+                // through the coalescer (non-blocking offer) so a burst collapses
+                // to ~1 off-main reconcile per frame. Everything else
+                // (notably `%output`) keeps the existing synchronous path.
+                if (LayoutChangeCoalescer.isStructural(event)) {
+                    coalescer.offer(event)
+                } else {
+                    onControlEvent(event)
+                }
             }
         }
         eventsJob = job
@@ -6550,23 +6653,21 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Process one event from the bus.
+     * Process one NON-structural event from the bus.
      *
-     * Per the issue body the structural events of interest are
-     * [ControlEvent.WindowAdd] / [ControlEvent.WindowClose] /
-     * [ControlEvent.LayoutChange]: each one triggers a session-scoped
-     * `list-panes` round-trip that re-derives the pane list authoritatively. We do not
-     * try to mutate [_panes] in-place from event payloads — see the
-     * class-level docs for the rationale on why a round-trip is the
-     * right call here.
+     * Issue #576 (Slice A of #792): the structural events
+     * ([ControlEvent.WindowAdd] / [ControlEvent.WindowClose] /
+     * [ControlEvent.LayoutChange] / [ControlEvent.PaneModeChanged]) that each
+     * trigger a session-scoped `list-panes` reconcile are NOT handled here —
+     * the collector in [bindClientObservers] routes them through
+     * [layoutChangeCoalescer] instead, so a Codex `%layout-change` storm
+     * collapses to ~1 off-main reconcile per frame rather than N synchronous
+     * main-thread reconciles (the ANR). [LayoutChangeCoalescer.isStructural]
+     * is the single source of truth for that classification. This function
+     * handles the remaining events (notably `%output` logging).
      */
     private suspend fun onControlEvent(event: ControlEvent) {
         when (event) {
-            is ControlEvent.WindowAdd,
-            is ControlEvent.WindowClose,
-            is ControlEvent.LayoutChange,
-            is ControlEvent.PaneModeChanged,
-            -> reconcilePanes()
             is ControlEvent.Output -> {
                 logFirstPaneOutput(event)
             }
@@ -6594,11 +6695,23 @@ public class TmuxSessionViewModel @Inject constructor(
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
             return PaneReconcileResult.NoClient
         }
+        // Issue #576 (Slice A of #792): the `list-panes` round-trip runs on
+        // WHATEVER dispatcher the caller is on. For the Codex `%layout-change`
+        // storm — the ANR — that caller is the [LayoutChangeCoalescer]'s drain
+        // loop, whose scope is dispatched on [reconcileDispatcher]
+        // (`Dispatchers.Default` in production); so a coalesced reconcile's
+        // `list-panes`/`capture-pane` round-trips already run OFF the Main event
+        // collector, and the collector's non-blocking `offer` never
+        // head-of-line-blocks behind the burst backlog. The direct callers
+        // (attach / cached-runtime refresh) run on Main and keep `list-panes` on
+        // Main inline, preserving their existing suspension-point semantics — we
+        // do NOT add an inner `withContext(reconcileDispatcher)` hop here, which
+        // would (a) be redundant for the off-main storm path and (b) re-dispatch
+        // the on-Main direct callers and break their ordering. Off-main-ness is
+        // a property of the COALESCER SCOPE, not of this round-trip.
         val listPanesStartedAtMs = SystemClock.elapsedRealtime()
         val response = try {
-            client.sendCommand(
-                buildListPanesCommand(target),
-            )
+            client.sendCommand(buildListPanesCommand(target))
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             return PaneReconcileResult.Failed(t)
@@ -6636,9 +6749,50 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
         }
-        val newPanes = applyParsedPanes(parsed, refreshGuard)
-        preloadVisibleContentForNewPanes(newPanes, refreshGuard)
-        return PaneReconcileResult.Ready(_panes.value.size)
+        // Issue #576 (Slice A of #792): apply the parsed list + run the
+        // capture-pane seed back on the MAIN dispatcher (via [applyOnMain]) so
+        // every `_panes`/`paneRows`/recompose mutation stays single-threaded —
+        // the coalesced (off-main IO) reconcile and the attach/refresh
+        // reconciles can never interleave a torn write into the pane state.
+        // No mutex is required because all mutation funnels through one thread.
+        return applyOnMain {
+            // Re-check the runtime guard after the dispatcher hop: a newer
+            // selection may have landed while the list-panes IO was in flight.
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+                return@applyOnMain PaneReconcileResult.NoClient
+            }
+            val newPanes = applyParsedPanes(parsed, refreshGuard)
+            preloadVisibleContentForNewPanes(newPanes, refreshGuard)
+            PaneReconcileResult.Ready(_panes.value.size)
+        }
+    }
+
+    /**
+     * Issue #576 (Slice A of #792): run [block] on [reconcileApplyDispatcher]
+     * (Main). The structural reconcile's `list-panes`/`capture-pane` IO runs on
+     * the caller's dispatcher — for the coalesced Codex-storm path that is the
+     * coalescer scope's [reconcileDispatcher] (`Dispatchers.Default`, off-main);
+     * the resulting `_panes`/`paneRows`/recompose mutation MUST then hop back to
+     * the single Main thread so concurrent reconciles (the off-main coalesced
+     * one and the inline attach/refresh ones) can never interleave a torn
+     * read/write of the pane state nor lose a settled burst's last write.
+     *
+     * When the caller is ALREADY on [reconcileApplyDispatcher] (the
+     * attach/cached-refresh paths run directly on Main; the unit suite pins both
+     * dispatchers to Main) we run [block] INLINE — no `withContext`, hence no
+     * re-dispatch hop. That keeps those callers' suspension-point/ordering
+     * semantics byte-for-byte identical to the pre-slice synchronous path; only
+     * the genuinely-off-main coalescer caller actually hops. Detected by
+     * comparing the running coroutine's [ContinuationInterceptor] to the apply
+     * dispatcher (the dispatcher IS the interceptor).
+     */
+    private suspend fun <T> applyOnMain(block: suspend () -> T): T {
+        val current = coroutineContext[ContinuationInterceptor]
+        return if (current === reconcileApplyDispatcher) {
+            block()
+        } else {
+            withContext(reconcileApplyDispatcher) { block() }
+        }
     }
 
     private fun buildListPanesCommand(target: ConnectionTarget?): String = buildString {
@@ -10407,6 +10561,12 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob = null
         eventsJob?.cancel()
         eventsJob = null
+        // Issue #576 (Slice A of #792): tear down the layout-change coalescer +
+        // its off-main drain scope with the rest of the per-connection state.
+        layoutChangeCoalescer?.stop()
+        layoutChangeCoalescer = null
+        layoutCoalescerScope?.cancel()
+        layoutCoalescerScope = null
         outputOverflowJob?.cancel()
         outputOverflowJob = null
         disconnectedJob?.cancel()
@@ -11730,6 +11890,13 @@ internal const val TMUX_INPUT_MAX_PENDING_CHUNKS: Int =
 internal const val ISSUE_145_RECONNECT_TAG: String = "PsTmuxReconnect"
 
 internal const val ISSUE_548_NETWORK_TAG: String = "PsTmuxNetwork"
+
+/**
+ * Issue #576 (Slice A of #792): logcat tag for the layout-change coalescer
+ * (Codex `%layout-change` burst → ~1 off-main reconcile per frame). Within the
+ * 23-character `Log.isLoggable` cap.
+ */
+internal const val ISSUE_576_COALESCER_TAG: String = "PsTmuxCoalescer"
 
 /**
  * Issue #235: logcat tag for the auto-detach-on-background +

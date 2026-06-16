@@ -1986,7 +1986,7 @@ class DesignRenders {
                     .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
                     .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp)),
             ) {
-                SlashCommandMirrorRow("Compact context", "Summarise the conversation to free up context.", "/compact", arg = true)
+                SlashCommandMirrorRow("/compact", "Summarise the conversation to free up context.", arg = true)
             }
             Spacer(Modifier.height(12.dp))
             // Header.
@@ -2107,6 +2107,88 @@ class DesignRenders {
     }
 
     /**
+     * Issue #791: the redesigned slash-command dropdown for the Claude Code
+     * catalog — command token leading (mono + accent), inline `<arg>` hints on
+     * argument-taking commands, wrapping descriptions, no duplicate badge. Rows
+     * mirror the production [SlashCommandDropdown]; the keyboard-up emulator
+     * screenshot is the acceptance. Three catalogs are rendered separately so
+     * the maintainer can confirm the design reads consistently across agents.
+     */
+    @Test
+    fun composerSlashDropdownClaude() = render("composer-slash-dropdown-claude") {
+        Spacer(Modifier.height(120.dp))
+        SlashCommandPaletteFrame {
+            SlashCommandMirrorDropdown(
+                listOf(
+                    Triple("/clear", "Start a fresh conversation (clears current context).", false),
+                    Triple("/compact", "Summarise the conversation to free up context.", true),
+                    Triple("/goal", "Set a persistent objective for the session.", true),
+                    Triple("/rewind", "Roll back to an earlier point in the conversation.", false),
+                    Triple("/model", "Switch the active model.", false),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun composerSlashDropdownCodex() = render("composer-slash-dropdown-codex") {
+        Spacer(Modifier.height(120.dp))
+        SlashCommandPaletteFrame {
+            SlashCommandMirrorDropdown(
+                listOf(
+                    Triple("/new", "Start a fresh conversation in this CLI session.", false),
+                    Triple("/compact", "Summarise the conversation to free up context.", true),
+                    Triple("/goal", "Set a persistent objective for the session.", true),
+                    Triple("/diff", "Show the working-tree diff.", false),
+                    Triple("/status", "Show the current session status.", false),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun composerSlashDropdownOpenCode() = render("composer-slash-dropdown-opencode") {
+        Spacer(Modifier.height(120.dp))
+        SlashCommandPaletteFrame {
+            SlashCommandMirrorDropdown(
+                listOf(
+                    Triple("/new", "Start a fresh conversation (clears current context).", false),
+                    Triple("/compact", "Summarise the conversation to free up context.", true),
+                    Triple("/sessions", "Browse and resume previous sessions.", false),
+                    Triple("/undo", "Undo the last change.", false),
+                    Triple("/share", "Create a shareable link for the session.", false),
+                ),
+            )
+        }
+    }
+
+    // Issue #791: a composer-surface frame so each catalog render reads in
+    // context — the dropdown floating above a draft field on the composer card.
+    @Composable
+    private fun SlashCommandPaletteFrame(dropdown: @Composable () -> Unit) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+        ) {
+            dropdown()
+            Spacer(Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(72.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                    .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            ) {
+                Text(text = "/", color = PocketShellColors.Text, fontSize = 14.sp)
+            }
+        }
+    }
+
+    /**
      * #704: compact transcript tool-call rows. ui-kit cannot import the
      * app-level `ConversationToolCallChatCard`, so this replicates its layout
      * with the SAME design tokens (post-#704 compact: 6dp vertical padding,
@@ -2131,42 +2213,67 @@ class DesignRenders {
         }
     }
 
-    // Issue #767: a single mirror row of the `/`-autocomplete dropdown — label +
-    // description + the command badge, matching the app-level
-    // `SlashCommandDropdown` row visuals (which ui-kit can't import).
+    // Issue #791: a single mirror row of the redesigned `/`-autocomplete
+    // dropdown — the command token leads (mono + agent-accent), an inline
+    // `<arg>` hint follows for argument-taking commands, and a short wrapping
+    // description sits below. No right-side badge (it duplicated the token).
+    // Mirrors the app-level `SlashCommandDropdown` row visuals (which ui-kit
+    // cannot import).
     @Composable
     private fun SlashCommandMirrorRow(
-        label: String,
-        description: String,
         command: String,
+        description: String,
         arg: Boolean = false,
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
-                    text = label,
-                    color = PocketShellColors.Text,
-                    fontSize = 14.sp,
+                    text = command,
+                    color = PocketShellColors.Accent,
+                    style = PocketShellType.bodyMono,
                     fontWeight = FontWeight.SemiBold,
                 )
-                Text(
-                    text = description,
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (arg) {
+                    Text(
+                        text = "<${command.removePrefix("/")}>",
+                        color = PocketShellColors.TextMuted,
+                        style = PocketShellType.bodyMono,
+                    )
+                }
             }
-            if (arg) {
-                Text(text = "+arg", color = PocketShellColors.TextSecondary, fontSize = 11.sp)
+            Text(
+                text = description,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 15.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    // Issue #791: the redesigned dropdown showing several rows for ONE agent
+    // catalog, so the three-catalog render cases can each eyeball a full,
+    // realistic list above the composer field.
+    @Composable
+    private fun SlashCommandMirrorDropdown(rows: List<Triple<String, String, Boolean>>) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp)),
+        ) {
+            rows.forEach { (command, description, arg) ->
+                SlashCommandMirrorRow(command = command, description = description, arg = arg)
             }
-            Badge(label = command, role = BadgeRole.Agent, mono = false)
         }
     }
 

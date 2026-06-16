@@ -119,8 +119,6 @@ import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.agentcommands.AgentCommand
 import com.pocketshell.app.voice.DictateDotIcon
-import com.pocketshell.uikit.components.Badge
-import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
@@ -1271,11 +1269,14 @@ internal fun SheetContent(
  * the maintainer asked for: type `/` and a filtered command list appears, tap a
  * row to insert it into the field, ready to review + Send.
  *
- * Each row reuses the palette's label + description + command-badge visuals so
- * the catalog reads the same wherever it appears. The list is height-capped and
- * self-scrolls so a long catalog never pushes the field/controls off the screen;
- * arg-bearing commands carry a small "+arg" hint so the user knows the chosen
- * command still needs an argument typed after it.
+ * Issue #791 redesign: each row reads like a clean command palette — the
+ * command token (`/clear`) LEADS in mono + agent-accent as the primary
+ * affordance, an inline `<arg>` hint follows for argument-taking commands
+ * (so `/goal <goal>` reads as one signature), and a short human description
+ * wraps below (≤2 lines, no mid-word truncation). There is exactly ONE command
+ * per row — the old duplicate right-side command badge is gone (D22 hard-cut).
+ * The list is height-capped and self-scrolls so a long catalog never pushes the
+ * field/controls off the screen.
  */
 @Composable
 internal fun SlashCommandDropdown(
@@ -1283,6 +1284,16 @@ internal fun SlashCommandDropdown(
     onPick: (AgentCommand) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Issue #791: a clean command-palette dropdown. Each row LEADS with the
+    // command token (the thing the user is selecting) in mono, accent-coloured
+    // text — argument-taking commands append an inline `<placeholder>` hint so
+    // `/goal <goal>` reads as one signature instead of a bare `+arg` chip — with
+    // a short human description below that WRAPS (≤2 lines) instead of truncating
+    // mid-word. The old design's right-side `Badge` duplicated the token, so it
+    // is gone (D22 hard-cut): the leading mono token is the single, prominent
+    // command per row. Rows are tighter (8dp vertical padding) so more commands
+    // fit above the keyboard.
+    val agentAccent = LocalPocketShellSemantic.current.agentAccent
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -1298,44 +1309,60 @@ internal fun SlashCommandDropdown(
             .testTag(COMPOSER_SLASH_DROPDOWN_TAG),
     ) {
         commands.forEach { command ->
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(role = Role.Button) { onPick(command) }
                     .testTag(composerSlashCommandRowTag(command.command))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                // Primary affordance: the command token, mono + accent, with an
+                // inline `<arg>` hint when the command takes one so the argument
+                // is communicated as part of the command signature.
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
-                        text = command.label,
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
+                        text = command.command,
+                        color = agentAccent,
+                        style = PocketShellType.bodyMono,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        text = command.description,
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    command.argument?.let {
+                        Text(
+                            text = slashArgumentHint(command.command),
+                            color = PocketShellColors.TextMuted,
+                            style = PocketShellType.bodyMono,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-                if (command.argument != null) {
-                    Text(
-                        text = "+arg",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 11.sp,
-                    )
-                }
-                Badge(label = command.command, role = BadgeRole.Agent, mono = false)
+                Text(
+                    text = command.description,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 15.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
 }
+
+/**
+ * Issue #791: a short, lower-case inline argument hint for an argument-taking
+ * slash command, e.g. `/goal` → `<goal>`. Derived from the command token (drop
+ * the leading `/`) so the hint always matches the command and stays terse — the
+ * verbose [AgentCommandArgument.placeholder] is the field-level prompt shown
+ * once the argument is actually being typed, not the one-glance dropdown hint.
+ */
+private fun slashArgumentHint(command: String): String =
+    "<${command.removePrefix("/")}>"
 
 /**
  * Issue #453 / #508: the Recording-state surface that replaces the editable

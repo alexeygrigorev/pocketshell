@@ -480,6 +480,13 @@ private fun PrimaryChipCluster(
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
+    // Issue #789: compact terminal-hotkeys launcher. The full-width
+    // "⌨ Terminal hotkeys" bar (#784) wasted a whole row of vertical space;
+    // the launcher is now a compact chip inline in this cluster. Null on
+    // surfaces with no raw pane to receive control bytes (e.g. raw-SSH /
+    // conversation), so it only renders on the tmux terminal route.
+    onShowHotkeysTap: (() -> Unit)? = null,
+    hotkeysLauncherTag: String = HOTKEYS_CHIP_TAG,
     enterLabel: String = ENTER_CHIP_LABEL,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
@@ -488,7 +495,8 @@ private fun PrimaryChipCluster(
     if (
         onEnterTap == null &&
         onShowKeyboardTap == null &&
-        onAddSnippetTap == null
+        onAddSnippetTap == null &&
+        onShowHotkeysTap == null
     ) return
     Row(
         // Issue #641 (reopened): the primary cluster is rendered at its NATURAL
@@ -522,6 +530,18 @@ private fun PrimaryChipCluster(
                 onClick = onShowKeyboardTap,
                 icon = KeyboardChipIcon,
                 modifier = Modifier.testTag(SHOW_KEYBOARD_CHIP_TAG),
+            )
+        }
+        // Issue #789: the compact terminal-hotkeys launcher. Replaces the
+        // deleted full-width `TerminalHotkeysLauncherBar` — a single tappable
+        // chip opening the same dedicated `TerminalHotkeysSheet` panel. Carries
+        // the stable `tmux:hotkeys-launcher` tag so existing tests still find it.
+        if (onShowHotkeysTap != null) {
+            CommandChip(
+                label = HOTKEYS_CHIP_LABEL,
+                onClick = onShowHotkeysTap,
+                icon = HotkeysChipIcon,
+                modifier = Modifier.testTag(hotkeysLauncherTag),
             )
         }
         if (onAddSnippetTap != null) {
@@ -572,6 +592,10 @@ internal fun BottomChipControls(
     onEnterTap: (() -> Unit)? = null,
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
+    // Issue #789: compact terminal-hotkeys launcher chip, rendered inline in the
+    // primary chip cluster (replacing the deleted full-width launcher bar).
+    onShowHotkeysTap: (() -> Unit)? = null,
+    hotkeysLauncherTag: String = HOTKEYS_CHIP_TAG,
     enterLabel: String = ENTER_CHIP_LABEL,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
@@ -694,6 +718,12 @@ internal fun BottomChipControls(
                 },
                 onShowKeyboardTap = onShowKeyboardTap,
                 onAddSnippetTap = onAddSnippetTap,
+                // Issue #789: the hotkeys launcher must stay tappable even while
+                // disconnected/reconnecting so the panel can still be opened
+                // (the panel itself gates control-byte writes on the live pane),
+                // matching how `show keyboard` / `snippets` are not gated here.
+                onShowHotkeysTap = onShowHotkeysTap,
+                hotkeysLauncherTag = hotkeysLauncherTag,
                 enterLabel = enterLabel,
                 addSnippetLabel = addSnippetLabel,
                 addSnippetIcon = addSnippetIcon,
@@ -1052,6 +1082,90 @@ private fun ImageVector.Builder.addKeyboardPath(fill: SolidColor): ImageVector.B
     builder.lineToRelative(10f, 0f)
     builder.lineToRelative(0f, 1.5f)
     builder.lineToRelative(-10f, 0f)
+    builder.close()
+
+    addPath(
+        pathData = builder.nodes,
+        fill = fill,
+        pathFillType = androidx.compose.ui.graphics.PathFillType.EvenOdd,
+    )
+    return this
+}
+
+/**
+ * Issue #789: visible label + stable test tag for the compact terminal-hotkeys
+ * launcher chip. The launcher replaces the deleted full-width
+ * `TerminalHotkeysLauncherBar` (#784) — it now lives inline in
+ * [PrimaryChipCluster] as a single tappable chip that opens the same dedicated
+ * `TerminalHotkeysSheet` panel. The tag is an alias of the original launcher tag
+ * ([com.pocketshell.app.tmux.TERMINAL_HOTKEYS_LAUNCHER_TAG] = `"tmux:hotkeys-launcher"`)
+ * so the existing connected tests that locate the launcher by that tag keep
+ * working unchanged.
+ */
+internal const val HOTKEYS_CHIP_LABEL: String = "hotkeys"
+internal const val HOTKEYS_CHIP_TAG: String = "tmux:hotkeys-launcher"
+
+/**
+ * Issue #789: a 24x24 "keycap" glyph used as the leading icon on the compact
+ * `hotkeys` launcher chip. A rounded-square keycap outline with a small filled
+ * inner mark reads as "a key / shortcut" and is visually distinct from the
+ * adjacent multi-key [KeyboardChipIcon] on the `show keyboard` chip, so the two
+ * neighbouring chips are not confused. Hand-traced for the same reason as
+ * [KeyboardChipIcon] — one glyph, no `material-icons-extended` dependency.
+ */
+internal val HotkeysChipIcon: ImageVector = ImageVector.Builder(
+    name = "TerminalHotkeys",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).addHotkeysPath(
+    fill = SolidColor(Color.White),
+).build()
+
+/**
+ * Trace a single rounded-square keycap with an inner mark into this
+ * [ImageVector.Builder], rendered as one even-odd filled path so the keycap
+ * border is a hollow outline and the inner mark is a small filled square.
+ *
+ * Geometry:
+ *  - Outer keycap: rounded rectangle, x in [4, 20], y in [4, 20], corner
+ *    radius 3 (clockwise).
+ *  - Inner cut: rounded rectangle, x in [6, 18], y in [6, 18], corner radius 2
+ *    (counter-clockwise) to hollow the border.
+ *  - Centre mark: a 4x4 filled rounded square centred on (12, 12).
+ */
+private fun ImageVector.Builder.addHotkeysPath(fill: SolidColor): ImageVector.Builder {
+    val builder = PathBuilder()
+
+    // Outer keycap (clockwise).
+    builder.moveTo(7f, 4f)
+    builder.lineToRelative(10f, 0f)
+    builder.arcToRelative(3f, 3f, 0f, false, true, 3f, 3f)
+    builder.lineToRelative(0f, 10f)
+    builder.arcToRelative(3f, 3f, 0f, false, true, -3f, 3f)
+    builder.lineToRelative(-10f, 0f)
+    builder.arcToRelative(3f, 3f, 0f, false, true, -3f, -3f)
+    builder.lineToRelative(0f, -10f)
+    builder.arcToRelative(3f, 3f, 0f, false, true, 3f, -3f)
+    builder.close()
+
+    // Inner cut (counter-clockwise) → hollow border via even-odd fill.
+    builder.moveTo(7f, 6f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, -1f, 1f)
+    builder.lineToRelative(0f, 10f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, 1f, 1f)
+    builder.lineToRelative(10f, 0f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, 1f, -1f)
+    builder.lineToRelative(0f, -10f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, -1f, -1f)
+    builder.close()
+
+    // Centre mark (a small filled square inside the hollow keycap).
+    builder.moveTo(10f, 10f)
+    builder.lineToRelative(4f, 0f)
+    builder.lineToRelative(0f, 4f)
+    builder.lineToRelative(-4f, 0f)
     builder.close()
 
     addPath(

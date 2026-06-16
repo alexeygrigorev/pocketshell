@@ -13,7 +13,6 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -151,9 +150,11 @@ import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
-import com.pocketshell.app.voice.SessionBottomControlsMinHeight
+import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
+import com.pocketshell.app.voice.HotkeysChipIcon
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.app.voice.AssistantStrip
+import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
@@ -5205,10 +5206,12 @@ private fun PageIndicator(pageCount: Int, currentPage: Int) {
  * `…` expander, and squished the compose field. It is now the dedicated
  * [com.pocketshell.uikit.components.TerminalHotkeysPanel] in its OWN bottom
  * sheet ([TerminalHotkeysSheet]), opened from this surface's hotkeys launcher.
- * With the keyboard UP this control area renders a SLIM launcher bar
- * ([TerminalHotkeysLauncherBar]) above the IME — one tap to open the panel; the
- * keyboard-DOWN chip band ([BottomChipControls]) gains the same launcher above
- * it.
+ *
+ * Issue #789 (D22 hard-cut): the launcher is a COMPACT chip, not the deleted
+ * full-width bar — its row of vertical space wasted too much room. With the
+ * keyboard UP this control area renders a single right-pinned `hotkeys` chip
+ * above the IME (one tap to open the panel); with the keyboard DOWN the same
+ * compact chip lives inline in the [BottomChipControls] primary cluster.
  *
  * Issue #673: staged composer attachments are NOT rendered here. They are
  * visible only inside the Prompt Composer sheet; the staged-attachment STATE
@@ -5230,11 +5233,12 @@ internal fun TmuxTerminalBottomControls(
     // Issue #628: toggle chip for switching back to the previous tmux session.
     previousSessionName: String? = null,
     onTogglePreviousSession: (() -> Unit)? = null,
-    // Issue #784: open the dedicated terminal-hotkeys panel. Reachable both with
-    // the keyboard down (a chip next to the others) and with the keyboard UP (a
-    // slim launcher bar above the IME), so the user can summon the full hotkey
-    // grid whenever they are interacting with the terminal. Null on surfaces
-    // with no pane to receive control bytes (e.g. the Conversation tab).
+    // Issue #784/#789: open the dedicated terminal-hotkeys panel. Reachable as a
+    // COMPACT chip both with the keyboard down (inline in the chip cluster) and
+    // with the keyboard UP (a right-pinned chip above the IME), so the user can
+    // summon the full hotkey grid whenever they are interacting with the
+    // terminal. Null on surfaces with no pane to receive control bytes (e.g. the
+    // Conversation tab).
     onShowHotkeysTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -5254,94 +5258,88 @@ internal fun TmuxTerminalBottomControls(
         // (the #755/#784 occlusion + cram complaints), just a single launcher.
         TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> {
             if (onShowHotkeysTap != null) {
-                // Wrap in a Box carrying the host's layout modifier so the
-                // launcher keeps its OWN test tag (a chained `testTag` on the
-                // launcher would otherwise be shadowed by a tag on `modifier`).
-                Box(modifier = modifier.fillMaxWidth()) {
-                    TerminalHotkeysLauncherBar(
+                // Issue #789 (hard-cut, D22): above the soft keyboard the
+                // launcher is a COMPACT chip pinned to the right edge — NOT the
+                // deleted full-width bar — so it occupies a single short row and
+                // reclaims the vertical space the bar wasted. It sits on the
+                // surface band so it reads above the IME, and opens the same
+                // dedicated [TerminalHotkeysSheet]. The host's layout modifier
+                // (which carries `imePadding()` upstream) keeps it above the
+                // keyboard. The chip carries the stable `tmux:hotkeys-launcher`
+                // tag so existing tests still find it.
+                Row(
+                    modifier = modifier
+                        .fillMaxWidth()
+                        .background(color = PocketShellColors.Surface)
+                        .border(width = 1.dp, color = PocketShellColors.Border)
+                        .padding(
+                            horizontal = PocketShellSpacing.sm,
+                            vertical = PocketShellSpacing.sm,
+                        ),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CommandChip(
+                        label = HOTKEYS_CHIP_LABEL,
                         onClick = onShowHotkeysTap,
-                        enabled = sessionLive,
+                        icon = HotkeysChipIcon,
+                        modifier = Modifier.testTag(TERMINAL_HOTKEYS_LAUNCHER_TAG),
                     )
                 }
             }
         }
         TmuxTerminalKeyboardChromeMode.HiddenImeControls -> {
-            Column(
-                modifier = modifier
-                    .fillMaxWidth()
-                    .heightIn(min = SessionBottomControlsMinHeight)
-                    .background(color = PocketShellColors.Surface),
-            ) {
-                // Issue #784: the hotkeys-panel launcher above the chip band
-                // (terminal tab only — the panel writes control bytes to the
-                // raw pane). Keeps the launcher reachable with the keyboard
-                // down without expanding the shared `BottomChipControls`
-                // surface (out of this issue's scope).
-                if (!showConversation && onShowHotkeysTap != null) {
-                    TerminalHotkeysLauncherBar(
-                        onClick = onShowHotkeysTap,
-                        enabled = sessionLive,
-                    )
-                }
-                BottomChipControls(
-                    chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
-                    onChipTap = onChipTap,
-                    onDictateTap = onDictateTap,
-                    onEnterTap = if (!showConversation) onEnterTap else null,
-                    onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
-                    onAddSnippetTap = onAddSnippetTap,
-                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                    addSnippetIcon = SnippetsChipIcon,
-                    // Project navigation on tmux panes is a separate
-                    // follow-up — see #123 notes on per-pane cwd /
-                    // project-root wiring.
-                    onProjectNavigationTap = null,
-                    // Issue #628: toggle chip for switching back to
-                    // the previous tmux session. Only shown when
-                    // previousSessionName differs from the current
-                    // session and a callback is provided.
-                    previousSessionName = previousSessionName,
-                    onTogglePreviousSession = onTogglePreviousSession,
-                    inputEnabled = sessionLive,
-                )
-            }
+            // Issue #789 (hard-cut, D22): the full-width
+            // `TerminalHotkeysLauncherBar` (#784) is GONE. The launcher is now a
+            // COMPACT chip inline in the [BottomChipControls] primary cluster, so
+            // the dedicated bar row's vertical space is reclaimed. The chip opens
+            // the same dedicated [TerminalHotkeysSheet]. Terminal tab only — the
+            // panel writes control bytes to the raw pane, so the launcher is null
+            // in conversation mode.
+            BottomChipControls(
+                chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
+                onChipTap = onChipTap,
+                onDictateTap = onDictateTap,
+                onEnterTap = if (!showConversation) onEnterTap else null,
+                onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
+                onAddSnippetTap = onAddSnippetTap,
+                // Issue #789: the compact hotkeys launcher chip (terminal tab
+                // only). Reclaims the deleted full-width bar's row.
+                onShowHotkeysTap = if (!showConversation) onShowHotkeysTap else null,
+                addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+                addSnippetIcon = SnippetsChipIcon,
+                // Project navigation on tmux panes is a separate
+                // follow-up — see #123 notes on per-pane cwd /
+                // project-root wiring.
+                onProjectNavigationTap = null,
+                // Issue #628: toggle chip for switching back to
+                // the previous tmux session. Only shown when
+                // previousSessionName differs from the current
+                // session and a callback is provided.
+                previousSessionName = previousSessionName,
+                onTogglePreviousSession = onTogglePreviousSession,
+                inputEnabled = sessionLive,
+                modifier = modifier,
+            )
         }
     }
 }
 
 /**
- * Issue #784: the slim launcher bar above the soft keyboard. ONE tappable row
- * ("⌨ Terminal hotkeys") that opens the dedicated [TerminalHotkeysPanel]. It
- * deliberately holds nothing else — no crammed key grid above the IME, which is
- * the #755 cram the maintainer rejected. The full grid is in the panel sheet.
+ * Issue #789 (hard-cut, D22): the full-width `TerminalHotkeysLauncherBar` (#784)
+ * was DELETED — the maintainer reported the dedicated bar row wasted vertical
+ * space. The launcher is now a COMPACT chip ([com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL])
+ * rendered inline in the primary chip cluster ([com.pocketshell.app.voice.BottomChipControls])
+ * with the keyboard down, and as a compact right-pinned chip above the IME with
+ * the keyboard up — both opening the same dedicated [TerminalHotkeysSheet].
+ *
+ * The stable test tag is kept as an alias of
+ * [com.pocketshell.app.voice.HOTKEYS_CHIP_TAG] (`"tmux:hotkeys-launcher"`) so the
+ * existing connected tests that locate the launcher by this tag keep working
+ * unchanged.
  */
-@Composable
-private fun TerminalHotkeysLauncherBar(
-    onClick: () -> Unit,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(BorderStroke(1.dp, PocketShellColors.Border))
-            .let { if (enabled) it.clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick) else it }
-            .testTag(TERMINAL_HOTKEYS_LAUNCHER_TAG)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        Text(
-            text = "⌨  Terminal hotkeys",
-            color = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
-    }
-}
-
-internal const val TERMINAL_HOTKEYS_LAUNCHER_TAG: String = "tmux:hotkeys-launcher"
+internal const val TERMINAL_HOTKEYS_LAUNCHER_TAG: String =
+    com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 
 internal enum class TmuxTerminalKeyboardChromeMode {
     HiddenImeControls,

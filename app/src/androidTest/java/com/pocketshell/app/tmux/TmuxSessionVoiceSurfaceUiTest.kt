@@ -32,6 +32,7 @@ import com.pocketshell.app.voice.AssistantDictationTextEvent
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
+import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
@@ -39,6 +40,7 @@ import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.app.voice.SnippetsChipIcon
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -136,6 +138,103 @@ class TmuxSessionVoiceSurfaceUiTest {
         // The grid panel itself is a separate sheet — not rendered inline here.
         compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertDoesNotExist()
         compose.onNodeWithText("^B").assertDoesNotExist()
+    }
+
+    @Test
+    fun tmuxKeyboardUpHotkeysLauncherIsCompactNotFullWidthBar() {
+        // Issue #789: with the IME up on a terminal pane, the launcher is a
+        // COMPACT chip (the deleted #784 full-width bar is gone). It carries the
+        // `hotkeys` label and the stable `tmux:hotkeys-launcher` tag, is fully
+        // within the host root (not pushed off any edge), and is narrower than the
+        // full host width — proving the dedicated full-width bar's space is
+        // reclaimed. The old bar's "Terminal hotkeys" caption no longer appears.
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = true,
+                    showConversation = false,
+                    sessionLive = true,
+                    isAgentPane = false,
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    onShowHotkeysTap = {},
+                    modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
+                )
+            }
+        }
+
+        // The old full-width bar's caption is gone (hard-cut, D22).
+        compose.onNodeWithText("Terminal hotkeys").assertDoesNotExist()
+
+        // The compact launcher chip is present, labelled, tappable, and FULLY
+        // within the host root (issue #657 / F1 containment, not a bare displayed).
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG)
+            .assertExists()
+            .assertHasClickAction()
+            .assertTextContains(HOTKEYS_CHIP_LABEL)
+        compose.assertNodeFullyWithinRoot(TERMINAL_HOTKEYS_LAUNCHER_TAG)
+
+        // The compact chip is meaningfully narrower than the host band — proving
+        // it is NOT the old full-width bar. (Sanity: <70% of the host width.)
+        val bandBounds = compose.onNodeWithTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG)
+            .getUnclippedBoundsInRoot()
+        val chipBounds = compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG)
+            .getUnclippedBoundsInRoot()
+        val bandWidth = bandBounds.right - bandBounds.left
+        val chipWidth = chipBounds.right - chipBounds.left
+        assertTrue(
+            "Hotkeys launcher must be a compact chip, not a full-width bar. " +
+                "chipWidth=$chipWidth bandWidth=$bandWidth",
+            chipWidth < bandWidth * 0.7f,
+        )
+    }
+
+    @Test
+    fun tmuxKeyboardDownHotkeysLauncherChipInlineInChipRowOpensSheet() {
+        // Issue #789: with the keyboard DOWN on a terminal pane, the compact
+        // hotkeys launcher chip lives INLINE in the bottom chip row (next to
+        // Enter / show keyboard / snippets). Tapping it requests opening the same
+        // dedicated hotkeys sheet, and the chip is fully on-screen — not the old
+        // dedicated full-width bar row above the chips (that row is reclaimed).
+        var launched = false
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = false,
+                    showConversation = false,
+                    sessionLive = true,
+                    isAgentPane = false,
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    onShowHotkeysTap = { launched = true },
+                )
+            }
+        }
+
+        captureViewportArtifact("issue789-kbdown-compact-hotkeys-chip.png")
+
+        // No old full-width bar caption.
+        compose.onNodeWithText("Terminal hotkeys").assertDoesNotExist()
+
+        // The compact chip sits inline alongside the other primary chips, fully
+        // within the root and tappable.
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .assertTextContains(HOTKEYS_CHIP_LABEL)
+        compose.assertNodeFullyWithinRoot(TERMINAL_HOTKEYS_LAUNCHER_TAG)
+
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG).performClick()
+        compose.waitForIdle()
+        assertTrue("Tapping the compact chip should request opening the sheet", launched)
     }
 
     @Test

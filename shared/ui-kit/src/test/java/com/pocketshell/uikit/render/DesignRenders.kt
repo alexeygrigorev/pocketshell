@@ -51,6 +51,7 @@ import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.Breadcrumb
+import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.HostCard
@@ -1795,6 +1796,45 @@ class DesignRenders {
      * keyboard-up screenshot (`PromptComposerImeSquishProofTest`) is the
      * acceptance.
      */
+    /**
+     * Issue #789: the terminal bottom chip row AFTER collapsing the full-width
+     * `⌨ Terminal hotkeys` launcher bar (#784) into a COMPACT chip. The launcher
+     * is now a single `hotkeys` chip inline with `Enter` / `show keyboard` /
+     * `snippets`, so the dedicated full-width bar's row of vertical space is
+     * reclaimed. This is the BEFORE/AFTER fast-render check the maintainer's
+     * "this is taking too much space" feedback motivated.
+     *
+     * Caveat (#555): the real `TmuxTerminalBottomControls` / `BottomChipControls`
+     * live in `:app`, which this ui-kit harness cannot import, so this is a
+     * STATIC visual mirror using the real ui-kit [CommandChip] primitive. The
+     * full-device emulator screenshots (keyboard up + down) are the acceptance.
+     */
+    @Test
+    fun terminalBottomChipsWithCompactHotkeys() =
+        render("terminal-bottom-chips-with-compact-hotkeys") {
+            Spacer(Modifier.height(560.dp))
+            // The reclaimed space: NO full-width bar row here anymore — just the
+            // single chip band below, with the compact `hotkeys` chip inline.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(PocketShellColors.Surface)
+                    .border(1.dp, PocketShellColors.Border)
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // The flexible static-chip strip yields/scrolls in production;
+                // the primary cluster (incl. the new compact `hotkeys` chip) is
+                // pinned to the right and always fully visible.
+                CommandChip(label = "clear", onClick = {})
+                Spacer(Modifier.weight(1f))
+                CommandChip(label = "Enter", onClick = {})
+                CommandChip(label = "hotkeys", onClick = {})
+                CommandChip(label = "snippets", onClick = {})
+            }
+        }
+
     @Test
     fun composerKeyboardUpNoKeyBar() = render("composer-keyboard-up-no-key-bar") {
         Spacer(Modifier.height(260.dp))

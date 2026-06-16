@@ -100,6 +100,72 @@ class CommandTimeoutGateIdleDeadlineTest {
     }
 
     @Test
+    fun `pre-command silence does NOT shorten the command window (issue 794)`() = runBlocking {
+        // #794: a steady foreground hold leaves the control channel genuinely
+        // idle for far longer than the timeout window — the reader has parsed
+        // no events because the shell is quiet, NOT because the link is dead.
+        // The last-reader-activity timestamp is therefore deep in the past.
+        // A command issued now must still get its FULL window before the
+        // deadline can fire; the prior silence must not be charged against it.
+        // The old gate fired instantly here, escalating a read-only poll to a
+        // FATAL transport teardown every ~timeoutMs (the ~11s flap).
+        val staleActivity = System.nanoTime() - 10_000_000_000L // 10s in the past
+        val gate = CommandTimeoutGate.realTime { staleActivity }
+
+        // The response lands quickly (50ms) — a healthy channel that simply had
+        // not spoken for a while. It MUST win because the deadline window
+        // (300ms) runs from the command start, not from the stale activity.
+        val response = CompletableDeferred<String>()
+        val responder = launch {
+            delay(50)
+            response.complete("ok")
+        }
+
+        val result = withTimeout(2_000) {
+            gate.run<String>(timeoutMs = 300) { checkpoint ->
+                checkpoint.writeCompleted()
+                response.await()
+            }
+        }
+        responder.join()
+
+        assertEquals(
+            "a quick reply on a long-idle-but-healthy channel must win — the " +
+                "gate must not count pre-command silence against the command",
+            "ok",
+            result,
+        )
+    }
+
+    @Test
+    fun `silent command on a long-idle channel fires after a full window from dispatch (issue 794)`() = runBlocking {
+        // Even when pre-command silence is not charged, a command that itself
+        // never gets a reply must STILL fire — after a full window measured
+        // from its own dispatch — so dead-peer / wedged-channel detection is
+        // preserved and the gate never hangs forever.
+        val staleActivity = System.nanoTime() - 10_000_000_000L // 10s in the past
+        val gate = CommandTimeoutGate.realTime { staleActivity }
+
+        val response = CompletableDeferred<String>() // never completes
+
+        val started = System.nanoTime()
+        val result = withTimeout(3_000) {
+            gate.run<String>(timeoutMs = 200) { checkpoint ->
+                checkpoint.writeCompleted()
+                response.await()
+            }
+        }
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+
+        assertNull("a never-answered command must still trip the idle deadline", result)
+        assertTrue(
+            "the deadline must fire only after ~a full window from dispatch " +
+                "(fired at ${elapsedMs}ms), not instantly from stale pre-command silence",
+            elapsedMs >= 180,
+        )
+    }
+
+    @Test
     fun `does NOT re-arm on local write completion alone (dead peer still fires)`() = runBlocking {
         // Activity (reader-side) frozen in the past: simulates a blackholed link
         // that delivers zero bytes. The body completes its WRITE (checkpoint)

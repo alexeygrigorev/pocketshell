@@ -316,6 +316,80 @@ class LongRunningSessionStabilityTest {
         Unit
     }
 
+    /**
+     * Issue #794 fast regression: a ~90s STEADY foreground hold that
+     * reproduces the ~11s app-initiated transport disconnect+reattach flap in
+     * a fraction of the 10-minute gate's runtime, so it can run in the regular
+     * connected suite (and a tight implementer/reviewer loop) rather than only
+     * the opt-in release gate.
+     *
+     * The flap fired because the idle-deadline [CommandTimeoutGate] charged
+     * pre-command channel silence against the dashboard's periodic
+     * `list-sessions` poll: on a quiet hold the control channel is legitimately
+     * silent for >10s, so the poll was judged "timed out" the instant it was
+     * dispatched, escalated to a FATAL transport teardown, and the session
+     * reattached — every ~11s. A healthy steady hold must produce ZERO
+     * `ssh-read-eof` / `ssh-read-failed` transport-teardown events.
+     *
+     * Holds long enough to cover several 10s `list-sessions` poll cycles (the
+     * flap reproduced reliably within ~20s in the v0.4.3 release-gate logcat).
+     * No `assumeTrue`/CI self-skip on the load-bearing assertion — it is a hard
+     * assertEquals(0, reconnectEvents).
+     */
+    @Test
+    fun steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        execShellCommand("logcat -c")
+
+        val marker = "fl${System.currentTimeMillis().toString(36).takeLast(5)}"
+        val sessionName = "lr-$marker"
+        val workDir = "/tmp/ps-lr-$marker"
+        val hostRowTag = seedDockerHost(key, "Steady Hold $marker")
+
+        prepareTmuxSession(key, sessionName, marker, workDir)
+        try {
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+
+            openHostPickerAndAttachTmux(
+                hostRowTag,
+                "Steady Hold $marker",
+                workDir,
+                sessionName,
+            )
+
+            // Land one tick so the pane has content, then hold quietly. The
+            // quiet hold is the load-bearing condition: no `%output`, so the
+            // control channel goes silent and the periodic `list-sessions`
+            // poll is the only traffic. Cover several 10s poll cycles.
+            sendTickAndAssertVisible(tickIndex = 0)
+            SystemClock.sleep(STEADY_HOLD_MS)
+
+            // A late tick must still land — proves the (single, un-flapped)
+            // transport is still live and routing input at the end of the hold.
+            sendTickAndAssertVisible(tickIndex = 1)
+
+            val logcatTail = captureLogcatTail()
+            val reconnectEvents = countReconnectEventLines(logcatTail)
+            writeText("steady-hold-logcat-tail.txt", logcatTail.takeLast(MAX_LOGCAT_ARTIFACT_BYTES))
+            writeText("steady-hold-visible-terminal.txt", visibleTerminalText().takeLast(8_000))
+
+            assertEquals(
+                "expected ZERO SSH transport teardown events (ssh-read-eof / " +
+                    "ssh-read-failed) during the ${STEADY_HOLD_MS / 1000}s steady " +
+                    "foreground hold (issue #794 ~11s flap); see " +
+                    "steady-hold-logcat-tail.txt",
+                0L,
+                reconnectEvents.toLong(),
+            )
+        } finally {
+            runCatching { cleanupTmuxSession(key, sessionName, workDir) }
+        }
+        Unit
+    }
+
     // ---------------- helpers ----------------
 
     private fun assumeLongRunningTestEnabled() {
@@ -820,6 +894,15 @@ class LongRunningSessionStabilityTest {
         const val TICK_INTERVAL_MS: Long = 120_000L
         const val LAST_TICK_INDEX: Int = 5
         const val TOTAL_DURATION_MS: Long = TICK_INTERVAL_MS * LAST_TICK_INDEX
+
+        /**
+         * Issue #794 fast regression hold. 90s covers ~8 of the dashboard's
+         * 10s `list-sessions` poll cycles — the v0.4.3 release-gate logcat
+         * showed the flap firing reliably within the first ~20s, so 90s leaves
+         * a wide margin while staying cheap enough for the regular connected
+         * suite (vs the opt-in 10-minute gate above).
+         */
+        const val STEADY_HOLD_MS: Long = 90_000L
 
         /**
          * Mirror of the `internal const val DEFAULT_KEEP_ALIVE_SECONDS`

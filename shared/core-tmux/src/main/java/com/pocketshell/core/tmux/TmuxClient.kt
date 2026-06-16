@@ -377,21 +377,40 @@ internal interface CommandTimeoutGate {
         private val NOOP_CHECKPOINT = Checkpoint { }
 
         /**
-         * Issue #576 (P4): the production gate is an **idle/inactivity**
+         * Issue #576 (P4) + #794: the production gate is an **idle/inactivity**
          * deadline, not a fixed wall-clock one. [timeoutMs] is the maximum
-         * tolerated *silence* on the control channel: the deadline re-arms
-         * whenever [readerActivityNanos] advances (the reader parsed another
-         * event), so the gate fires only after [timeoutMs] elapses with NO
-         * reader-side progress. A heavy `%output` redraw backlog keeps the
-         * reader continuously busy, so a command waiting behind it never
-         * self-inflicts a timeout while bytes are still flowing — fixing the
-         * #576 "busy link tears down a healthy session" regression.
+         * tolerated *silence* on the control channel **measured from the moment
+         * this command started waiting**: the deadline re-arms whenever
+         * [readerActivityNanos] advances (the reader parsed another event), so
+         * the gate fires only after [timeoutMs] elapses with NO reader-side
+         * progress *since the command was issued*. A heavy `%output` redraw
+         * backlog keeps the reader continuously busy, so a command waiting
+         * behind it never self-inflicts a timeout while bytes are still flowing
+         * — the #576 "busy link tears down a healthy session" regression.
+         *
+         * #794: the idle baseline is anchored at
+         * `max(commandStart, lastReaderActivity)`, NOT at the raw
+         * last-reader-activity timestamp. Without this anchor a command issued
+         * on a genuinely-idle-but-HEALTHY channel (a steady foreground hold
+         * with no `%output` — the reader has legitimately been quiet for far
+         * longer than [timeoutMs]) was judged "already timed out" the instant it
+         * was dispatched, because `now - lastReaderActivity` was ALREADY past
+         * the window before the command's own reply had any chance to land. That
+         * fired the deadline before the write even completed, escalating a
+         * read-only `list-sessions` poll to a FATAL transport teardown every
+         * ~[timeoutMs] (the #794 ~11s connection flap). Anchoring at the command
+         * start gives every command its full window from dispatch; activity
+         * that arrives AFTER dispatch still re-arms (the #576 busy-link
+         * protection is preserved), and a truly silent command still fires after
+         * a full window from its own start.
          *
          * Crucially the signal is **reader-side** progress only: a blackholed
-         * / dead peer parses zero events, so [readerActivityNanos] stalls and
-         * the deadline fires exactly as a fixed timeout would. Dead-peer
+         * / dead peer parses zero events, so [readerActivityNanos] never
+         * advances past the command start and the deadline fires after a full
+         * window from dispatch — exactly as a fixed timeout would. Dead-peer
          * detection (sshj keepalive, a separate layer) is therefore unaffected
-         * — this gate cannot mask a genuinely silent channel.
+         * — this gate cannot mask a genuinely silent channel, it just no longer
+         * counts *pre-command* silence against the command.
          *
          * @param readerActivityNanos supplies the latest reader-progress
          *   timestamp (`System.nanoTime()` units). Read on each poll tick.
@@ -400,6 +419,11 @@ internal interface CommandTimeoutGate {
             object : CommandTimeoutGate {
                 override suspend fun <T> run(timeoutMs: Long, body: suspend (Checkpoint) -> T): T? =
                     coroutineScope {
+                        // #794: anchor the idle baseline at the moment the
+                        // command starts waiting so prior channel silence is
+                        // never counted against THIS command. Captured before
+                        // the body starts.
+                        val commandStartNanos = System.nanoTime()
                         val bodyDeferred = async(start = CoroutineStart.UNDISPATCHED) {
                             body(NOOP_CHECKPOINT)
                         }
@@ -415,7 +439,14 @@ internal interface CommandTimeoutGate {
                             // timeoutMs, capped so tiny timeouts still tick.
                             val tickMs = (timeoutMs / 10).coerceIn(1L, 250L)
                             while (true) {
-                                val idleNanos = System.nanoTime() - readerActivityNanos()
+                                // #794: the idle clock runs from the LATER of
+                                // the command start and the last reader event —
+                                // reader activity after dispatch re-arms (#576),
+                                // but silence that predates the command is not
+                                // charged to it.
+                                val idleBaseline =
+                                    maxOf(commandStartNanos, readerActivityNanos())
+                                val idleNanos = System.nanoTime() - idleBaseline
                                 if (idleNanos >= timeoutNanos) return@async
                                 val remainingNanos = timeoutNanos - idleNanos
                                 val sleepMs = (remainingNanos / 1_000_000L)

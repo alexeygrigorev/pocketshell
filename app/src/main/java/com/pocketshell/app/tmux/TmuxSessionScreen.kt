@@ -1352,13 +1352,35 @@ public fun TmuxSessionScreen(
             // on the reattach screen, so the centered spinner is the SOLE attach
             // affordance and the top line is removed. Input stays gated because
             // [Switching] is not [Connected].
-            (status as? ConnectionStatus.Reconnecting)?.let {
-                ReconnectingProgressRow(
-                    status = it,
-                    sessionLabel = "tmux $sessionName",
-                    onRetryNow = { viewModel.reconnect() },
-                    onCancel = { viewModel.cancelConnect() },
-                )
+            //
+            // Issue #750 (post-#766 regression): the SAME two-loaders symptom came
+            // back on the RECONNECT/REATTACH screen. The #766 connection migration
+            // made the controller the authoritative status source: a recoverable
+            // drop projects [ConnectionStatus.Reconnecting] (this top
+            // [ReconnectingProgressRow] bar) WHILE the id-keyed [RevealStateMachine]
+            // maps the controller's `Reattaching`/`Reconnecting` to
+            // [RevealState.Seeding] → [effectiveHidesTerminal] is true → the
+            // centered "Attaching…" [SwitchingLoadingPlaceholder] is already up in
+            // the surface Box below. Two indicators at once. Gate the top bar on
+            // `!effectiveHidesTerminal` so it is suppressed exactly while the
+            // centered hold is showing — the centered "Attaching…" is then the SOLE
+            // reattach affordance, matching the [Switching] fix above. The top bar
+            // is NOT the sole indicator for any other state: it ONLY renders for
+            // [ConnectionStatus.Reconnecting], and every reconnect/reattach keeps
+            // the terminal held (the reveal machine never reveals Live for a
+            // Reattaching/Reconnecting controller state — see RevealStateMachine
+            // §"loading" mapping), so suppressing it here never leaves a reconnect
+            // with zero indicators. (Reconnect speed/behaviour is untouched — this
+            // is presentation-only.)
+            if (shouldShowReconnectingProgressRow(status, effectiveHidesTerminal)) {
+                (status as ConnectionStatus.Reconnecting).let {
+                    ReconnectingProgressRow(
+                        status = it,
+                        sessionLabel = "tmux $sessionName",
+                        onRetryNow = { viewModel.reconnect() },
+                        onCancel = { viewModel.cancelConnect() },
+                    )
+                }
             }
             // Issue #145: render a user-facing error band (status text +
             // Reconnect affordance) when the SSH transport drops
@@ -3022,6 +3044,31 @@ internal fun handleTmuxSessionSelection(
     onDismiss()
     onReplace(selectedSessionName)
 }
+
+/**
+ * Issue #750: the single-indicator gate for the top under-header
+ * [ReconnectingProgressRow] progress line.
+ *
+ * The reconnect/reattach screen must show EXACTLY ONE loading indicator — the
+ * centered "Attaching…" [SwitchingLoadingPlaceholder]. After the #766
+ * connection migration the controller projects [ConnectionStatus.Reconnecting]
+ * (this top bar) at the SAME time the id-keyed [RevealStateMachine] holds the
+ * terminal in [RevealState.Seeding] ([effectiveHidesTerminal] == true) and
+ * paints the centered spinner — the two-loaders regression.
+ *
+ * This pure predicate makes the invariant a unit-testable wiring guard rather
+ * than a comment: the top bar renders ONLY for a [ConnectionStatus.Reconnecting]
+ * status AND only when the terminal is NOT held (so the centered spinner is not
+ * up). Every real reconnect/reattach holds the terminal, so in practice the
+ * centered spinner is the sole reattach affordance — but the predicate keeps the
+ * top bar as a (currently unreached) fallback for any future reconnect that does
+ * keep a live frame painted, so suppressing it can never leave a reconnect with
+ * zero indicators.
+ */
+internal fun shouldShowReconnectingProgressRow(
+    status: ConnectionStatus,
+    effectiveHidesTerminal: Boolean,
+): Boolean = status is ConnectionStatus.Reconnecting && !effectiveHidesTerminal
 
 /**
  * Issue #463: the short leaf label for the header project crumb, derived

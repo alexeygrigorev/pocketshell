@@ -12,7 +12,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -95,6 +97,26 @@ class TmuxConnectingStatesScreenshotTest {
 
     @Test
     fun captureAttachingReattachStateSingleIndicator() {
+        // #750 (post-#766 regression): a reconnect/reattach projects
+        // [ConnectionStatus.Reconnecting] (the top [ReconnectingProgressRow] bar)
+        // WHILE the id-keyed reveal machine holds the terminal — the centered
+        // "Attaching…" spinner. This mounts the screen's REAL two-render-site
+        // layout (the actual [ReconnectingProgressRow] guarded by the screen's
+        // real [shouldShowReconnectingProgressRow] gate, plus the centered
+        // spinner) so the capture proves the GATE — not a copied body — leaves a
+        // single indicator. `effectiveHidesTerminal = true` is the reconnect/
+        // reattach reality (reveal machine maps Reattaching/Reconnecting →
+        // Seeding), so the top bar must be suppressed.
+        val reconnecting = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
+            host = "hetzner.example",
+            port = 22,
+            user = "alex",
+            attempt = 1,
+            maxAttempts = 3,
+            retryDelayMs = 0L,
+            reason = "Reconnecting…",
+        )
+        val effectiveHidesTerminal = true
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -109,9 +131,18 @@ class TmuxConnectingStatesScreenshotTest {
                         onBack = {},
                         onMore = {},
                     )
-                    // Exact body of SwitchingLoadingPlaceholder (#750): a
-                    // full-surface box with the canonical centered labelled
-                    // spinner — the SOLE attach indicator (no top progress line).
+                    // The screen's REAL top-bar render site, behind the REAL gate.
+                    // With the terminal held this evaluates false → no top line.
+                    if (shouldShowReconnectingProgressRow(reconnecting, effectiveHidesTerminal)) {
+                        ReconnectingProgressRow(
+                            status = reconnecting,
+                            sessionLabel = "tmux claude-main",
+                            onRetryNow = {},
+                            onCancel = {},
+                        )
+                    }
+                    // The centered "Attaching…" hold (SwitchingLoadingPlaceholder
+                    // body) — the SOLE indicator that should remain visible.
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -129,6 +160,14 @@ class TmuxConnectingStatesScreenshotTest {
             }
         }
         compose.onNodeWithText("Attaching…").assertExists()
+        // Hard wiring assertion: the top under-header progress line is ABSENT
+        // while the centered hold is up — exactly one indicator on screen.
+        compose
+            .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose
+            .onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
         compose.waitForIdle()
         SystemClock.sleep(300)
         captureFullDevice(File(artifactDir(), "tmux-reattach-attaching-single-indicator.png"))

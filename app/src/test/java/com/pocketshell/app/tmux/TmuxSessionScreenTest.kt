@@ -1131,4 +1131,71 @@ class TmuxSessionScreenTest {
         // obstruction. It must not be erased by a larger nav-bar inset.
         assertEquals(30, imeKeyboardPanOffsetPx(imeBottomPx = 30, navBarBottomPx = 48))
     }
+
+    // --- Issue #750: single-indicator gate on the top ReconnectingProgressRow. ---
+
+    private val reconnectingStatus = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
+        host = "alpha.example",
+        port = 22,
+        user = "alex",
+        attempt = 1,
+        maxAttempts = 3,
+        retryDelayMs = 0L,
+        reason = "Reconnecting…",
+    )
+
+    @Test
+    fun topReconnectBarSuppressedWhileTerminalHeldDuringReattach() {
+        // Regression for the post-#766 two-loaders symptom: a recoverable drop
+        // projects Reconnecting (the top bar) WHILE the reveal machine holds the
+        // terminal in Seeding (effectiveHidesTerminal == true) and paints the
+        // centered "Attaching…" spinner. The top bar MUST be suppressed so only the
+        // centered indicator shows.
+        assertEquals(
+            false,
+            shouldShowReconnectingProgressRow(
+                status = reconnectingStatus,
+                effectiveHidesTerminal = true,
+            ),
+        )
+    }
+
+    @Test
+    fun topReconnectBarShownWhenReconnectingWithTerminalNotHeld() {
+        // The top bar is the fallback indicator for a (currently unreached)
+        // reconnect that keeps a live frame painted (terminal NOT held): it then
+        // renders so a reconnect is never left with zero indicators.
+        assertTrue(
+            shouldShowReconnectingProgressRow(
+                status = reconnectingStatus,
+                effectiveHidesTerminal = false,
+            ),
+        )
+    }
+
+    @Test
+    fun topReconnectBarNeverShownForNonReconnectingStatus() {
+        // The top bar renders ONLY for Reconnecting — so it is never the sole
+        // indicator for any other state. Connecting has its own full-screen
+        // overlay; Connected/Switching/Failed/Idle drive their own affordances.
+        val nonReconnecting = listOf(
+            TmuxSessionViewModel.ConnectionStatus.Idle,
+            TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u"),
+            TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u"),
+            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+            TmuxSessionViewModel.ConnectionStatus.Failed("boom"),
+        )
+        nonReconnecting.forEach { status ->
+            assertEquals(
+                "no top progress bar for $status",
+                false,
+                shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = false),
+            )
+            assertEquals(
+                "no top progress bar for $status (terminal held)",
+                false,
+                shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = true),
+            )
+        }
+    }
 }

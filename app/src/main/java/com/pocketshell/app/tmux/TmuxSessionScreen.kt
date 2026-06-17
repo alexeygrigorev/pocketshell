@@ -116,8 +116,7 @@ import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
-import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
-import com.pocketshell.app.layout.rememberHostImeBottomPx
+import com.pocketshell.app.layout.rememberTmuxImeLayoutState
 import com.pocketshell.app.projects.SessionTypePickerSheet
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
@@ -442,23 +441,45 @@ public fun TmuxSessionScreen(
     // window's IME inset is reliable; `rememberHostImeBottomPx` is the single
     // shared source (composer + terminal) so they can never drift. Hard-cut: the
     // old `WindowInsets.ime` read is gone (D22, no fallback).
-    val imeBottomPx by rememberHostImeBottomPx()
+    // Issue #796 (H4): the host-IME inset is written on EVERY inset change, and
+    // the keyboard-show/hide animation emits a BURST of interpolated inset
+    // frames. Reading the `State<Int>` value DIRECTLY in this composable body
+    // (the old `val imeBottomPx by rememberHostImeBottomPx()` delegate) made the
+    // whole `TmuxSessionScreen` function — including the `HorizontalPager` of
+    // `TerminalSurface`s (the terminal-render subtree) — a subscriber, so every
+    // inset frame recomposed a large slice of the screen on the main thread.
+    // When a Codex `%output` burst is in flight at the same moment, that
+    // IME-recomposition storm and the terminal render share one main thread and
+    // stack toward the ANR threshold (the maintainer's keyboard-up ANR).
+    //
+    // Fix (the Compose-recommended deferred-read pattern for animated insets),
+    // encapsulated in [TmuxImeLayoutState]:
+    //  - Hold the `State<Int>` inside the holder WITHOUT a delegated read here,
+    //    so the screen body never subscribes to the raw int.
+    //  - Read the raw pixel inset ONLY via `imeLayout.panOffsetPx()` inside the
+    //    pan `graphicsLayer { ... }` lambda (deferred to layout/draw time, not
+    //    composition) — see the terminal column's `.graphicsLayer` below. The
+    //    interpolated inset frames then re-run only the GPU layer block, never
+    //    recomposition.
+    //  - `imeLayout.isImeVisible` is `derivedStateOf`-backed, so reading it only
+    //    invalidates the reader when the inset CROSSES the 0 boundary (keyboard
+    //    show/hide), not on every interpolation frame. The chrome / composer /
+    //    KeyBar that genuinely depend on keyboard-up recompose once per
+    //    transition, never per frame.
     val navBarBottomPx = WindowInsets.navigationBars.getBottom(density)
-    val isImeVisible = imeBottomPx > 0
-    // Issue #457 (Part 1): the height in pixels that the soft keyboard
-    // overlaps the terminal column's content area. The root Surface no
-    // longer consumes the IME inset (see MainActivity), so the whole
-    // terminal column keeps its IME-down height while the keyboard is up —
-    // critically the embedded TerminalView never shrinks, so the vendored
-    // `TerminalView.updateSize()` never recomputes a smaller grid and no
-    // tmux pane resize / full reflow + redraw fires. Instead we PAN: the
-    // column is translated up by this overlap so the bottom rows + cursor +
-    // key bar stay visible above the keyboard. Some devices report IME and
-    // navigation-bar insets separately; panning by the full IME inset keeps the
-    // terminal accessory usable on those devices instead of leaving only its
-    // top border above the keyboard. Clamped at 0 so a hidden keyboard leaves
-    // the column un-panned.
-    val imePanOffsetPx = imeKeyboardPanOffsetPx(imeBottomPx, navBarBottomPx)
+    val imeLayout = rememberTmuxImeLayoutState(navBarBottomPx)
+    val isImeVisible = imeLayout.isImeVisible
+    // Issue #457 (Part 1): the terminal column is PANNED up by the keyboard
+    // overlap (NOT resized) so the embedded TerminalView never shrinks and no
+    // tmux pane resize / full reflow + redraw fires. Issue #796 (H4): the pan
+    // offset is now read DEFERRED inside the terminal column's
+    // `.graphicsLayer { ... }` lambda below (`imeBottomPxState.value` at
+    // layout/draw time) rather than computed here in composition — so the burst
+    // of interpolated inset frames re-runs only the GPU pan layer, never a
+    // recomposition of this screen (which would drag the terminal-render subtree
+    // with it). The `imeKeyboardPanOffsetPx` helper deliberately ignores the
+    // nav-bar inset (panning by the full IME inset keeps the accessory row
+    // usable on devices that report IME and nav-bar separately).
     // Issue #184: while the soft keyboard is up, the user is in
     // "typing-focus" mode — the breadcrumb / window-strip / tabs chrome
     // up top eats vertical room that the terminal viewport (and the
@@ -466,6 +487,19 @@ public fun TmuxSessionScreen(
     // when the IME is visible and restore it on hide. Mirrors Telegram's
     // chrome-while-typing behaviour and matches issue #184's Layer 2.
     val chromeCompressed = isImeVisible
+
+    // Issue #796 (H4): count re-executions of the TmuxSessionScreen function
+    // ROOT restart group — the group that reads the IME state and HOSTS the
+    // terminal-render subtree (the `HorizontalPager` of `TerminalSurface`s).
+    // This is the "large slice" the research spike (#796 §3) flagged. The
+    // deferred-read fix above (via [TmuxImeLayoutState]) keeps this root group
+    // OFF the per-inset-frame invalidation path. The #796 H4 full-journey
+    // regression proof reads this counter as a production-side diagnostic of how
+    // many times the real screen root group recomposes; the deterministic
+    // per-frame recomposition-scoping assertion lives in the structural proof
+    // (which composes the production [TmuxImeLayoutState] and drives a controlled
+    // inset burst). Pure counter, no behaviour change; production never reads it.
+    TmuxRenderRecompositionProbe.Record()
 
     // Issue #626: the unified pager shows panes from all sessions.
     // currentUnifiedPane is what the pager is actually displaying.
@@ -1039,8 +1073,29 @@ public fun TmuxSessionScreen(
                 // cursor + key bar pan up above the keyboard. The IME-up chrome
                 // is already collapsed ([chromeCompressed]) so the small slice
                 // that pans off the top is never user-facing content.
-                .graphicsLayer { translationY = -imePanOffsetPx.toFloat() },
+                //
+                // Issue #796 (H4): read the IME pan offset via
+                // `imeLayout.panOffsetPx()` INSIDE this lambda — a deferred read
+                // at layout/draw time, not in composition. The keyboard
+                // animation's burst of interpolated inset frames re-runs only
+                // this GPU layer block per frame; it does NOT recompose
+                // `TmuxSessionScreen` (and therefore never drags the
+                // `HorizontalPager` terminal-render subtree through a redundant
+                // recomposition while a Codex `%output` burst is in flight).
+                .graphicsLayer {
+                    translationY = imeLayout.panOffsetPx()
+                },
         ) {
+            // Issue #796 (H4): count recompositions of the terminal-render
+            // COLUMN subtree (this Column hosts the top chrome, the
+            // `HorizontalPager` of `TerminalSurface`s, and the bottom controls —
+            // the heavy render-critical subtree). The H4 regression proof asserts
+            // a soft-keyboard show animation (a burst of interpolated IME inset
+            // frames) does NOT recompose this subtree on each frame. On the
+            // pre-fix delegated `val imeBottomPx by rememberHostImeBottomPx()`
+            // read the whole TmuxSessionScreen body — this Column included —
+            // re-ran once per inset frame; the deferred-read fix keeps it off the
+            // per-frame inset-invalidation path.
             // Issue #256: gate the inline Conversation tab on the
             // currently visible pane only. A sibling pane/window's agent
             // no longer keeps Conversation mounted or routes sends away

@@ -507,19 +507,39 @@ public fun TmuxSessionScreen(
     // Issue #626: determine whether the current unified pane belongs to
     // the active session or a cached session.
     val isActiveSessionPane = currentUnifiedPane?.let { viewModel.isActiveSessionPane(it) } ?: true
-    // The active-session pane is used for agent conversations, key bar
-    // input, etc. When viewing a cached-session pane, these features are
-    // disabled until the warm switch completes.
+    // The active-session pane. `currentPane` is non-null ONLY when the visible
+    // pager page belongs to the active session (its panes are in `_panes.value`,
+    // so the active `clientRef` owns its bytes/detection). Kept for the places
+    // that genuinely require the active runtime to already own the pane.
     val currentPane = if (isActiveSessionPane) currentUnifiedPane else null
     // Keep a reference to the actual active session pane for cases that
     // need it regardless of what the pager is showing (e.g. session switch).
     val activeSessionPane = panes.firstOrNull()
+    // Issue #797 (Shape A): the pane that drives the COMPOSER SURFACE +
+    // Conversation tab + detection lookup + send/input routing. Unlike
+    // `currentPane` (active-only), this follows the VISIBLE pane — including a
+    // settled CACHED pane — so the composer launcher and Conversation tab never
+    // vanish while the user is parked on a real pane that the warm switch has
+    // not yet promoted to active. Suppressed only while a cross-session switch
+    // is hiding the terminal (never surface/route to the leaving session — the
+    // #661/#634/#636 stale-bleed guard). Routing always targets THIS pane's own
+    // `paneId`, never a stale leaving-session pane; the companion
+    // promotion-on-settle path rebinds `clientRef`/`_panes.value` to it so input
+    // + detection actually work. See [tmuxSessionSurfacePane].
+    val surfacePane = tmuxSessionSurfacePane(
+        visibleUnifiedPane = currentUnifiedPane,
+        switchHidesTerminal = effectiveHidesTerminal,
+    )
     // Issue #626: derive session name for the unified pane, used to detect
     // cross-session swipes.
     val currentUnifiedPaneSessionName = currentUnifiedPane?.let {
         viewModel.sessionNameForUnifiedPane(it)
     }
-    val currentAgentConversation = currentPane?.paneId?.let { agentConversations[it] }
+    // Issue #797: detection/conversation lookup follows the SURFACE pane (the
+    // visible pane), not the active-only `currentPane` — so a cached-pane
+    // detection (once promotion fires) and the presumed-agent default both reach
+    // the surface the user is looking at.
+    val currentAgentConversation = surfacePane?.paneId?.let { agentConversations[it] }
     val scope = rememberCoroutineScope()
 
     // Issue #463: the current session's project path (the active pane's
@@ -634,7 +654,11 @@ public fun TmuxSessionScreen(
     // `detection == null` leaves the recorded value intact, so the header
     // affordance and the palette keep working through the gap.
     val liveAgentForPane = currentAgentConversation?.detection?.agent
-    val currentPaneId = currentPane?.paneId
+    // Issue #797: the sticky/palette agent key follows the SURFACE pane so the
+    // last-known agent kind sticks to the visible pane (active OR cached),
+    // keeping the agent affordances and presumed-agent default reachable across
+    // a switch onto a cached pane.
+    val currentPaneId = surfacePane?.paneId
     LaunchedEffect(currentPaneId, liveAgentForPane) {
         val paneId = currentPaneId
         if (paneId != null && liveAgentForPane != null) {
@@ -668,7 +692,15 @@ public fun TmuxSessionScreen(
     // returns Shell on mere absence of an agent match — the bug Slice C fixes),
     // so `confirmedShell` is always false here and the surface stays available.
     // See [tmuxSessionPresumedAgent].
-    val presumedAgent = currentPane != null &&
+    // Issue #797: gate on the SURFACE pane (visible pane), not the active-only
+    // `currentPane`. The previous `currentPane != null` short-circuit forced
+    // `presumedAgent == false` whenever the user was settled on a cached pane
+    // (`currentPane == null`), which emptied the Conversation tab AND — paired
+    // with the `surfacePane?.let` composer wrapper below — hid the composer
+    // launcher. Keying off the visible pane lets the #716/#744 optimistic
+    // default keep the composer/Conversation surface available on a cached pane
+    // exactly as it does on a fresh active pane.
+    val presumedAgent = surfacePane != null &&
         tmuxSessionPresumedAgent(
             hasLiveDetection = currentAgentConversation?.detection != null,
             stickyAgent = paletteAgent,
@@ -744,12 +776,12 @@ public fun TmuxSessionScreen(
     // [pinTerminalToBottom] helper which lives in core-terminal next
     // to the show-keyboard helper so the [TerminalView] import does
     // not leak into the app module.
-    LaunchedEffect(isImeVisible, currentPane?.paneId) {
+    LaunchedEffect(isImeVisible, surfacePane?.paneId) {
         if (isImeVisible) {
             com.pocketshell.core.terminal.ui.pinTerminalToBottom(
                 composeRootView,
                 onLocalTerminalError = { cause ->
-                    currentPane?.paneId?.let { paneId ->
+                    surfacePane?.paneId?.let { paneId ->
                         viewModel.reportTerminalSurfaceFailure(paneId, cause)
                     }
                 },
@@ -768,7 +800,10 @@ public fun TmuxSessionScreen(
     // some stale pane id captured at first composition. Prompt-mode bytes
     // go straight to the pane via `send-keys`; Command-mode bytes go
     // through the planner for explicit review (mirroring SessionScreen).
-    val focusedPaneId = currentPane?.paneId
+    // Issue #797: inline-dictation routes to the SURFACE (visible) pane so a
+    // dictation while parked on a settled cached pane reaches the session the
+    // user is looking at once promotion makes it active — not a no-op.
+    val focusedPaneId = surfacePane?.paneId
     LaunchedEffect(inlineDictationViewModel, dictationState.mode, focusedPaneId) {
         inlineDictationViewModel.transcriptions.collect { text ->
             val paneId = focusedPaneId ?: return@collect
@@ -959,18 +994,45 @@ public fun TmuxSessionScreen(
     // notify the ViewModel so it can emit sessionSwitchRequest. Settles that
     // arrive before the pager has realigned to the nav target are stale-index
     // artifacts of a just-completed switch and are ignored.
+    //
+    // Issue #797: ALSO promote a settled CACHED pane that the user is genuinely
+    // parked on even WITHOUT a fresh drag. The drag-gated swipe path
+    // ([settleSessionSwitchTarget]) requires a recorded drag to avoid the
+    // #661/#634/#636 stale-settle yank, but that left the maintainer's
+    // PERSISTENT-STALL hole: a cached pane the user is sitting on (input dead,
+    // not detected as an agent, composer follows the cached state) never
+    // promotes, so it stays half-attached "until I switch sessions several
+    // times". Promotion is what rebinds `clientRef`/`_panes.value` (and thus
+    // input + detection) to the visible pane. Safe against stale-bleed because
+    // (a) it fires only when the pager is ALIGNED and at rest on a genuinely
+    // OTHER (cached) session's pane and (b) the VM side
+    // ([onUnifiedPageSettled]) still independently suppresses a promote toward
+    // anything other than an in-flight deliberate connect destination
+    // (`connectingTarget`/`connectJob`). See
+    // [tmuxSessionShouldPromoteSettledCachedPane].
     LaunchedEffect(unifiedPanes, sessionName) {
         snapshotFlow { pagerState.settledPage }.collect { page ->
             val aligned = pagerAlignedSession == sessionName
-            val settledSession = unifiedPanes.getOrNull(page)
+            val settledPane = unifiedPanes.getOrNull(page)
+            val settledSession = settledPane
                 ?.let { viewModel.sessionNameForUnifiedPane(it) }
+            val settledPaneIsActive = settledPane
+                ?.let { viewModel.isActiveSessionPane(it) } ?: true
             val switchTo = settleSessionSwitchTarget(
                 settledPaneSession = settledSession,
                 navTargetSession = sessionName,
                 pagerAlignedToNavTarget = aligned,
                 userDraggedSinceAlignment = userDraggedSinceAlignment,
             )
-            if (switchTo != null) {
+            val shouldPromoteStalledCachedPane =
+                tmuxSessionShouldPromoteSettledCachedPane(
+                    settledPaneSession = settledSession,
+                    navTargetSession = sessionName,
+                    settledPaneIsActiveSession = settledPaneIsActive,
+                    pagerAlignedToNavTarget = aligned,
+                    switchHidesTerminal = effectiveHidesTerminal,
+                )
+            if (switchTo != null || shouldPromoteStalledCachedPane) {
                 viewModel.onUnifiedPageSettled(page)
             }
         }
@@ -1112,13 +1174,17 @@ public fun TmuxSessionScreen(
                     // shows a "waiting for agent" placeholder until the transcript
                     // seeds. Gated on `showsConversationTab` so a confirmed shell
                     // (no tab) can never reach this path.
-                    currentPane
+                    // Issue #797: record the tab choice on the SURFACE pane so a
+                    // Conversation tap on a settled cached presumed-agent pane is
+                    // honoured (the row's `selectedTab` drives the placeholder /
+                    // transcript via the surface-keyed `currentAgentConversation`).
+                    surfacePane
                         ?.takeIf { tabState.showsConversationTab }
                         ?.let { pane ->
                         viewModel.selectSessionTab(pane.paneId, SessionTab.Conversation)
                     }
                 } else {
-                    currentPane?.let { pane ->
+                    surfacePane?.let { pane ->
                         viewModel.selectSessionTab(pane.paneId, SessionTab.Terminal)
                     }
                 }
@@ -1321,7 +1387,14 @@ public fun TmuxSessionScreen(
             // visible pane has no detected agent, this falls back to the
             // terminal pager with no cross-window follow or explanation
             // banner.
-            val visibleConversation = currentPane?.paneId?.let { agentConversations[it] }
+            // Issue #797: the conversation-row lookup follows the SURFACE pane
+            // (visible pane) so a Conversation-tab tap / "waiting for agent"
+            // placeholder is honoured on a settled cached pane too, not only on
+            // an active pane. The heavyweight transcript ([showConversation])
+            // still additionally requires the pane to be ACTIVE (`currentPane`)
+            // because a real transcript only exists once the warm switch
+            // promoted the pane and detection seeded on the active runtime.
+            val visibleConversation = surfacePane?.paneId?.let { agentConversations[it] }
             // Whether to render the Conversation *content* (real transcript) in
             // place of the terminal pager. This is the actual content swap,
             // distinct from whether the Conversation *tab* exists (#716
@@ -1331,7 +1404,8 @@ public fun TmuxSessionScreen(
             // the #605 Conversation→Terminal swap latch, which keys off the real
             // pane mounting/unmounting (the lightweight placeholder below never
             // mounts that pane, so it cannot trigger the same-frame teardown
-            // race).
+            // race). Still gated on the ACTIVE `currentPane`: the transcript
+            // mounts only for the promoted active runtime's pane (#797).
             val showConversation = currentPane != null &&
                 visibleConversation?.detection != null &&
                 visibleConversation.selectedTab == SessionTab.Conversation
@@ -1344,7 +1418,10 @@ public fun TmuxSessionScreen(
             // paints the placeholder). The real [TmuxConversationPane]
             // (`showConversation`) takes over the instant detection seeds. Gated
             // on `presumedAgent` so a confirmed shell can never show this.
-            val showConversationPlaceholder = currentPane != null &&
+            // Issue #797: the placeholder follows the SURFACE pane so the
+            // "waiting for agent" state is shown on a settled cached presumed-
+            // agent pane too (the Conversation tab is no longer empty there).
+            val showConversationPlaceholder = surfacePane != null &&
                 presumedAgent &&
                 visibleConversation?.detection == null &&
                 visibleConversation?.selectedTab == SessionTab.Conversation
@@ -1613,7 +1690,17 @@ public fun TmuxSessionScreen(
                 onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
-            currentPane?.let { pane ->
+            // Issue #797: the bottom controls + composer launcher wrap the
+            // SURFACE pane, not the active-only `currentPane`. This is the fix
+            // for the maintainer's "composer button gone" symptom: on a settled
+            // cached pane `currentPane == null` skipped this whole block, so the
+            // composer launcher was simply not in the tree. The chip / key / send
+            // callbacks below route to `pane.paneId` — which is the pane the user
+            // is parked on; the promotion-on-settle path makes that pane active
+            // (rebinding `clientRef`/`_panes.value`) so the bytes actually reach
+            // it, never a stale leaving session (surfacePane is null while a
+            // switch hides the terminal — the #661 bleed guard).
+            surfacePane?.let { pane ->
                 // Issue #716: agent-aware chips/affordances follow presumed-agent,
                 // not just live detection, so they don't flip to shell chips
                 // during the slow-detection window.
@@ -1667,9 +1754,7 @@ public fun TmuxSessionScreen(
                         showTerminalSoftKeyboard(
                             composeRootView,
                             onLocalTerminalError = { cause ->
-                                currentPane?.paneId?.let { paneId ->
-                                    viewModel.reportTerminalSurfaceFailure(paneId, cause)
-                                }
+                                viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
                             },
                         )
                     },
@@ -1992,7 +2077,15 @@ public fun TmuxSessionScreen(
                 // control channel dropped while the composer was open, let
                 // the ViewModel kick/reuse reconnect and wait for the live
                 // client before returning failure to the composer.
-                val pane = currentPane
+                // Issue #797: route the send to the SURFACE (visible) pane, NOT
+                // the active-only `currentPane`. The visible pane IS the user's
+                // intended session (they are parked on it); the promotion-on-
+                // settle path has made it the active runtime's pane, so
+                // `paneId`-targeted sends reach it. This never routes to a stale
+                // leaving session: while a switch hides the terminal `surfacePane`
+                // is null (the composer is itself suppressed), so a send can only
+                // land on the session the user is actually looking at.
+                val pane = surfacePane
                 if (pane == null) {
                     false
                 } else {
@@ -2070,8 +2163,10 @@ public fun TmuxSessionScreen(
             onSnippetSend = { snippet, withEnter ->
                 // Issue #249: same liveness guard as the prompt composer —
                 // never write a snippet into a dead pane and lose the tap.
+                // Issue #797: route to the SURFACE (visible) pane like the
+                // composer send, so a snippet on a settled (promoted) pane lands.
                 if (sessionLive) {
-                    currentPane?.let { pane ->
+                    surfacePane?.let { pane ->
                         viewModel.writeInputToPane(
                             pane.paneId,
                             snippetDispatchText(snippet, withEnter).toByteArray(Charsets.UTF_8),
@@ -2098,7 +2193,10 @@ public fun TmuxSessionScreen(
     // routes through [TmuxSessionViewModel.onKeyBarKey]. The panel stays open
     // after a tap so the user can fire several keys (e.g. arrow navigation,
     // `^B ^B`) without re-opening; `×` / scrim / back dismiss it.
-    val hotkeysPane = currentPane
+    // Issue #797: the hotkeys panel (opened from the surface-pane bottom
+    // controls) routes its control bytes to the SURFACE pane so a `^C`/arrow on
+    // a settled (promoted) pane reaches the session the user is looking at.
+    val hotkeysPane = surfacePane
     if (showHotkeysPanel && hotkeysPane != null) {
         TerminalHotkeysSheet(
             sections = TmuxHotkeyPanelSections,
@@ -2743,6 +2841,101 @@ internal fun tmuxSessionShowsSnippetChip(
     hasLiveDetection: Boolean,
     hasStickyAgent: Boolean,
 ): Boolean = hasHost && !hasLiveDetection && !hasStickyAgent
+
+/**
+ * Issue #797 (Shape A — surface-follows-visible-pane): the pane that drives the
+ * COMPOSER SURFACE + Conversation tab + detection lookup + send/input routing.
+ *
+ * The bug: the old gate keyed every one of those off `currentPane`, which is
+ * `null` whenever the unified pager is settled on a CACHED (non-active) session
+ * pane (`TmuxSessionViewModel.isActiveSessionPane` checks only `_panes.value`).
+ * When a warm switch had not yet promoted the target into `_panes.value`, the
+ * user was parked on a cached pane with `currentPane == null` → the
+ * presumed-agent default (#716/#744) short-circuited to false → the composer
+ * launcher vanished AND the Conversation tab emptied (the maintainer's live
+ * repro: "composer button gone, Conversation tab shows nothing, not detected as
+ * an agent"). Both symptoms collapse to the single `currentPane == null`
+ * condition.
+ *
+ * The surface must follow the VISIBLE pane (whether active or cached) so the
+ * composer + Conversation tab never vanish while the user is settled on a real
+ * pane. The ONE exception is while a cross-session switch is hiding the terminal
+ * (`switchHidesTerminal` — the reveal-hold overlay): the visible pane is then
+ * the LEAVING session and we must NOT route anything to it (#661/#634/#636
+ * stale-session content-bleed hazard), so the surface is suppressed for that
+ * brief switch-in-flight window only and reappears the instant the target is
+ * revealed/promoted.
+ *
+ * Returning the visible cached pane here is SAFE for routing because the cached
+ * pane is exactly the session the user is parked on (their intended target) and
+ * the companion promotion path ([tmuxSessionShouldPromoteSettledCachedPane])
+ * promotes it to active — once active, `clientRef`/`_panes.value` bind input +
+ * detection to it. Routing always targets the surface pane's own `paneId`, never
+ * a stale leaving-session pane.
+ *
+ * @param visibleUnifiedPane the pane the pager is actually showing
+ *   (`unifiedPanes[currentPage]`), active or cached.
+ * @param switchHidesTerminal true while a cross-session switch holds the reveal
+ *   (the leaving session's content must not be routed to or surfaced).
+ */
+internal fun tmuxSessionSurfacePane(
+    visibleUnifiedPane: TmuxPaneState?,
+    switchHidesTerminal: Boolean,
+): TmuxPaneState? = if (switchHidesTerminal) null else visibleUnifiedPane
+
+/**
+ * Issue #797 (promotion-on-settle): decide whether a unified-pager settle that
+ * came to rest on a CACHED (non-active) pane should trigger a warm switch
+ * (pane-promotion) so input routing + agent detection are RESTORED for the
+ * visible session.
+ *
+ * Why this is needed beyond the surface fix: a cached pane's bytes/detection are
+ * owned by a DIFFERENT tmux runtime client than the active `clientRef`, so
+ * showing a composer over a not-yet-promoted cached pane would be the
+ * "fixed-but-still-broken" trap — the composer reappears but Send can't reach
+ * the session and detection never fires. Promotion (the existing warm switch,
+ * `sessionSwitchRequest` → connect → `clientRef`/`_panes.value` adopt the
+ * target) is what actually rebinds input + detection.
+ *
+ * The drag-gated swipe path ([settleSessionSwitchTarget]) intentionally requires
+ * a fresh user drag to avoid the #661/#634/#636 stale-settle yank. But that left
+ * the PERSISTENT-STALL hole the maintainer hit: a cached pane the user is
+ * genuinely parked on (no recorded drag, e.g. it became cached via a reconcile /
+ * reorder) never promotes, so input stays dead "until I switched sessions several
+ * times". This helper closes that hole WITHOUT reintroducing the stale-settle
+ * bleed: it fires only when the pager is ALIGNED to the nav target and at rest on
+ * a genuinely-cached OTHER session's pane. The #661 stale-during-connect artifact
+ * is still guarded independently on the VM side
+ * ([TmuxSessionViewModel.onUnifiedPageSettled]'s `connectingTarget`/`connectJob`
+ * check), which suppresses a promote toward anything other than an in-flight
+ * deliberate destination — so a stale index observed while a connect to a
+ * DIFFERENT session runs never promotes the wrong session.
+ *
+ * @param settledPaneSession the session owning the settled pane (`null` when
+ *   unresolved / mid-rebuild).
+ * @param navTargetSession the nav destination's session (the screen's target).
+ * @param settledPaneIsActiveSession whether the settled pane already belongs to
+ *   the active session (`_panes.value`); if so there is nothing to promote.
+ * @param pagerAlignedToNavTarget whether the pager has realigned to the nav
+ *   target since the last target change (settles before realignment are
+ *   stale-index artifacts).
+ * @param switchHidesTerminal true while a switch holds the reveal — never promote
+ *   off a stale settle while a deliberate switch is already in flight.
+ */
+internal fun tmuxSessionShouldPromoteSettledCachedPane(
+    settledPaneSession: String?,
+    navTargetSession: String,
+    settledPaneIsActiveSession: Boolean,
+    pagerAlignedToNavTarget: Boolean,
+    switchHidesTerminal: Boolean,
+): Boolean {
+    if (switchHidesTerminal) return false
+    if (!pagerAlignedToNavTarget) return false
+    if (settledPaneIsActiveSession) return false
+    if (settledPaneSession == null) return false
+    if (settledPaneSession == navTargetSession) return false
+    return true
+}
 
 internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,

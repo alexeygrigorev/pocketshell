@@ -756,6 +756,330 @@ class TmuxSessionScreenTest {
         )
     }
 
+    // ─── Issue #797: composer + Conversation tab + input-routing + detection ──
+    // must survive a switch onto a settled CACHED (non-active) pane, where the
+    // active-only `currentPane` is null. These proofs drive the PRODUCTION gate
+    // helpers exactly as `TmuxSessionScreen` wires them (surface-pane → presumed
+    // agent → tab state → send route), in the maintainer's reported cached-pane
+    // state — NOT the pure presumed-agent helper in isolation (the #797
+    // test-validity gap the research spike flagged: the old tests exercised a
+    // proxy that could never reproduce the symptom). ──────────────────────────
+
+    /**
+     * The user-visible outcome of the composer / Conversation / input gate for a
+     * given pager/switch state, derived through the SAME production helpers and
+     * in the SAME order as [TmuxSessionScreen] (#797). Modelling the gate here —
+     * rather than calling [tmuxSessionPresumedAgent] alone — reproduces the
+     * call-site short-circuit that was the actual bug (`presumedAgent =
+     * surfacePane != null && …` and the `surfacePane?.let { }` composer wrapper).
+     */
+    private data class SessionSurfaceOutcome(
+        val composerShown: Boolean,
+        val conversationTabShown: Boolean,
+        val sendRouteTargetPaneId: String?,
+    )
+
+    private fun sessionSurfaceOutcome(
+        visibleUnifiedPane: TmuxPaneState?,
+        switchHidesTerminal: Boolean,
+        agentConversations: Map<String, AgentConversationUiState>,
+        stickyAgentByPaneId: Map<String, AgentKind>,
+    ): SessionSurfaceOutcome {
+        // 1. Surface pane (#797 Shape A): follows the VISIBLE pane unless a
+        //    switch is hiding the terminal.
+        val surfacePane = tmuxSessionSurfacePane(
+            visibleUnifiedPane = visibleUnifiedPane,
+            switchHidesTerminal = switchHidesTerminal,
+        )
+        // 2. Detection lookup + sticky/palette agent follow the surface pane.
+        val currentAgentConversation = surfacePane?.paneId?.let { agentConversations[it] }
+        val liveAgent = currentAgentConversation?.detection?.agent
+        val paletteAgent = liveAgent
+            ?: surfacePane?.paneId?.let { stickyAgentByPaneId[it] }
+        // 3. Presumed-agent gate (the line that was `currentPane != null && …`).
+        val presumedAgent = surfacePane != null &&
+            tmuxSessionPresumedAgent(
+                hasLiveDetection = currentAgentConversation?.detection != null,
+                stickyAgent = paletteAgent,
+                confirmedShell = false,
+            )
+        // 4. Conversation tab state.
+        val tabState = tmuxSessionTabState(currentAgentConversation, presumedAgent)
+        // 5. Composer launcher: the `surfacePane?.let { }` wrapper at the bottom
+        //    controls — present iff there is a surface pane.
+        val composerShown = surfacePane != null
+        // 6. Send route target paneId: the surface pane's id (the visible/intended
+        //    session). Null when no surface pane (switch in flight).
+        return SessionSurfaceOutcome(
+            composerShown = composerShown,
+            conversationTabShown = tabState.showsConversationTab,
+            sendRouteTargetPaneId = surfacePane?.paneId,
+        )
+    }
+
+    private fun fakePane(paneId: String): TmuxPaneState =
+        TmuxPaneState(
+            paneId = paneId,
+            windowId = "@0",
+            sessionId = "\$0",
+            title = "work",
+            cwd = "/repo",
+            currentCommand = "bash",
+            paneTty = "/dev/pts/1",
+            terminalState = com.pocketshell.core.terminal.ui.TerminalSurfaceState(),
+        )
+
+    /**
+     * The ORIGIN/MAIN (pre-#797) gate outcome: composer / Conversation tab /
+     * send route were all keyed on the active-only `currentPane` (null for a
+     * cached pane). This baseline reproduces the BUG so the fix's RED→GREEN is
+     * visible in one file: with a cached pane (`currentPane == null`) it returns
+     * composer hidden + tab empty + no route, exactly the maintainer's symptom.
+     */
+    private fun originMainCachedPaneGateIsBroken(): SessionSurfaceOutcome {
+        // currentPane == null for a cached pane (origin/main:
+        // `val currentPane = if (isActiveSessionPane) currentUnifiedPane else null`).
+        val currentPane: TmuxPaneState? = null
+        val agentConversations = emptyMap<String, AgentConversationUiState>()
+        val currentAgentConversation = currentPane?.paneId?.let { agentConversations[it] }
+        // origin/main: `presumedAgent = currentPane != null && …`.
+        val presumedAgent = currentPane != null &&
+            tmuxSessionPresumedAgent(
+                hasLiveDetection = currentAgentConversation?.detection != null,
+                stickyAgent = null,
+                confirmedShell = false,
+            )
+        val tabState = tmuxSessionTabState(currentAgentConversation, presumedAgent)
+        return SessionSurfaceOutcome(
+            // origin/main: composer wrapped in `currentPane?.let { }`.
+            composerShown = currentPane != null,
+            conversationTabShown = tabState.showsConversationTab,
+            // origin/main: send used `val pane = currentPane`.
+            sendRouteTargetPaneId = currentPane?.paneId,
+        )
+    }
+
+    @Test
+    fun originMainBaselineReproducesTheBugOnACachedPane() {
+        // RED baseline: the pre-#797 gate (active-only `currentPane`) on a cached
+        // pane hides the composer, empties the Conversation tab, and has no send
+        // route — the exact reported state. The #797 fix
+        // ([settledCachedPaneKeepsComposerAndConversationTabAndRoutesInput])
+        // flips all three to the restored state with the SAME cached-pane input.
+        val broken = originMainCachedPaneGateIsBroken()
+        assertTrue("baseline: composer hidden on cached pane", !broken.composerShown)
+        assertTrue(
+            "baseline: Conversation tab empty on cached pane",
+            !broken.conversationTabShown,
+        )
+        assertNull("baseline: no input route on cached pane", broken.sendRouteTargetPaneId)
+    }
+
+    @Test
+    fun settledCachedPaneKeepsComposerAndConversationTabAndRoutesInput() {
+        // #797 PRIMARY proof (warm-switch-STALLS path): the pager is settled on a
+        // genuine CACHED pane (its paneId is NOT in the active `_panes.value`, so
+        // production sets `currentPane == null`) and the switch is NOT hiding the
+        // terminal (the user is parked there indefinitely — the maintainer's
+        // "until I switched several times" stall). The composer launcher MUST be
+        // present, the Conversation tab MUST be available, and a send MUST route
+        // to the VISIBLE cached pane's own id (the intended session) — not vanish
+        // and not target a stale/null pane.
+        //
+        // RED on origin/main: `tmuxSessionSurfacePane` did not exist; the gate
+        // used active-only `currentPane`, which was null here → composer hidden,
+        // tab empty, no route. GREEN with the surface-pane fix.
+        val cachedPane = fakePane("%cached")
+        val outcome = sessionSurfaceOutcome(
+            visibleUnifiedPane = cachedPane,
+            switchHidesTerminal = false,
+            // Detection only runs over the ACTIVE session's panes, so the cached
+            // pane has NO conversation row — exactly the maintainer's "not
+            // detected as an agent / Conversation tab shows nothing" condition.
+            agentConversations = emptyMap(),
+            stickyAgentByPaneId = emptyMap(),
+        )
+
+        assertTrue(
+            "composer launcher must stay present on a settled cached pane",
+            outcome.composerShown,
+        )
+        assertTrue(
+            "Conversation tab must stay available on a settled cached pane " +
+                "(presumed-agent default), not empty",
+            outcome.conversationTabShown,
+        )
+        assertEquals(
+            "a send must route to the VISIBLE cached pane's own id (intended " +
+                "session), restoring input routing",
+            "%cached",
+            outcome.sendRouteTargetPaneId,
+        )
+    }
+
+    @Test
+    fun settledCachedPaneWithStickyAgentSurfacesAgentSurface() {
+        // #797: a cached pane the user is parked on that WAS detected as an agent
+        // (sticky kind recorded for its paneId) keeps the agent surface — the
+        // presumed-agent default plus its sticky kind drive the composer + tab.
+        val cachedPane = fakePane("%cached-agent")
+        val outcome = sessionSurfaceOutcome(
+            visibleUnifiedPane = cachedPane,
+            switchHidesTerminal = false,
+            agentConversations = emptyMap(),
+            stickyAgentByPaneId = mapOf("%cached-agent" to AgentKind.ClaudeCode),
+        )
+
+        assertTrue(outcome.composerShown)
+        assertTrue(outcome.conversationTabShown)
+        assertEquals("%cached-agent", outcome.sendRouteTargetPaneId)
+    }
+
+    @Test
+    fun warmSwitchCompletedActivePaneKeepsComposerAndTabAndRoutes() {
+        // #797 (warm-switch-COMPLETES path): once promotion lands, the visible
+        // pane is the ACTIVE pane (its row is now present with live detection).
+        // The surface still shows the composer + tab and routes to that pane —
+        // i.e. the fix does not regress the normal active-pane case.
+        val activePane = fakePane("%active")
+        val outcome = sessionSurfaceOutcome(
+            visibleUnifiedPane = activePane,
+            switchHidesTerminal = false,
+            agentConversations = mapOf(
+                "%active" to AgentConversationUiState(
+                    detection = claudeDetection(),
+                    selectedTab = SessionTab.Terminal,
+                ),
+            ),
+            stickyAgentByPaneId = emptyMap(),
+        )
+
+        assertTrue(outcome.composerShown)
+        assertTrue(outcome.conversationTabShown)
+        assertEquals("%active", outcome.sendRouteTargetPaneId)
+    }
+
+    @Test
+    fun switchInFlightSuppressesSurfaceSoNoStaleSessionBleed() {
+        // #797 no-content-bleed proof (#661/#634/#636): while a cross-session
+        // switch is hiding the terminal, the VISIBLE pane is the LEAVING session.
+        // The surface MUST be suppressed so neither the composer nor a send can
+        // route to / leak from the stale leaving session. Composer hidden +
+        // tab hidden + NO send-route target during the switch-in-flight window;
+        // it reappears the instant the target is revealed (the active-pane test
+        // above).
+        val leavingSessionPane = fakePane("%leaving")
+        val outcome = sessionSurfaceOutcome(
+            visibleUnifiedPane = leavingSessionPane,
+            switchHidesTerminal = true,
+            // The leaving session even still has a live agent row — must NOT be
+            // surfaced or routed to during the switch.
+            agentConversations = mapOf(
+                "%leaving" to AgentConversationUiState(
+                    detection = claudeDetection(),
+                    selectedTab = SessionTab.Conversation,
+                ),
+            ),
+            stickyAgentByPaneId = mapOf("%leaving" to AgentKind.ClaudeCode),
+        )
+
+        assertTrue(
+            "composer must be suppressed while a switch hides the terminal " +
+                "(no stale-session surface)",
+            !outcome.composerShown,
+        )
+        assertTrue(
+            "Conversation tab must be suppressed while a switch hides the terminal",
+            !outcome.conversationTabShown,
+        )
+        assertNull(
+            "no send may route to the leaving session while a switch is in flight",
+            outcome.sendRouteTargetPaneId,
+        )
+    }
+
+    // ─── Issue #797: promotion-on-settle restores input routing + detection ───
+    // for a settled cached pane WITHOUT reintroducing the #661 stale-settle yank.
+
+    @Test
+    fun settledCachedPaneIsPromotedToRestoreRoutingAndDetection() {
+        // The persistent-stall fix: a pager settled (aligned, at rest) on a
+        // genuinely CACHED other-session pane must trigger pane-promotion (warm
+        // switch) so `clientRef`/`_panes.value` rebind input + detection to it.
+        // This is what makes the surface-shown composer actually able to send and
+        // be detected as an agent (not the "fixed-but-still-broken" trap).
+        assertTrue(
+            tmuxSessionShouldPromoteSettledCachedPane(
+                settledPaneSession = "project-b",
+                navTargetSession = "project-a",
+                settledPaneIsActiveSession = false,
+                pagerAlignedToNavTarget = true,
+                switchHidesTerminal = false,
+            ),
+        )
+    }
+
+    @Test
+    fun activeSettledPaneIsNotPromoted() {
+        // Nothing to promote when the settled pane already belongs to the active
+        // session (input + detection already bound).
+        assertTrue(
+            !tmuxSessionShouldPromoteSettledCachedPane(
+                settledPaneSession = "project-a",
+                navTargetSession = "project-a",
+                settledPaneIsActiveSession = true,
+                pagerAlignedToNavTarget = true,
+                switchHidesTerminal = false,
+            ),
+        )
+    }
+
+    @Test
+    fun unalignedSettleIsNotPromoted() {
+        // #661/#634/#636: a settle before the pager realigns to the nav target is
+        // a stale-index artifact of a just-completed switch — never promote it
+        // (that is the wrong/stale-session content-bleed the guard exists for).
+        assertTrue(
+            !tmuxSessionShouldPromoteSettledCachedPane(
+                settledPaneSession = "project-b",
+                navTargetSession = "project-a",
+                settledPaneIsActiveSession = false,
+                pagerAlignedToNavTarget = false,
+                switchHidesTerminal = false,
+            ),
+        )
+    }
+
+    @Test
+    fun switchInFlightSettleIsNotPromoted() {
+        // Never promote off a settle while a cross-session switch is already
+        // hiding the terminal — the visible pane is the leaving session.
+        assertTrue(
+            !tmuxSessionShouldPromoteSettledCachedPane(
+                settledPaneSession = "project-b",
+                navTargetSession = "project-a",
+                settledPaneIsActiveSession = false,
+                pagerAlignedToNavTarget = true,
+                switchHidesTerminal = true,
+            ),
+        )
+    }
+
+    @Test
+    fun settleOnNavTargetSessionIsNotPromoted() {
+        // A settle resolving to the nav target's own session is a no-op (already
+        // the intended session); only a genuinely OTHER cached session promotes.
+        assertTrue(
+            !tmuxSessionShouldPromoteSettledCachedPane(
+                settledPaneSession = "project-a",
+                navTargetSession = "project-a",
+                settledPaneIsActiveSession = false,
+                pagerAlignedToNavTarget = true,
+                switchHidesTerminal = false,
+            ),
+        )
+    }
+
     private fun pickerRequest(): HostTmuxSessionPickerRequest =
         HostTmuxSessionPickerRequest(
             host = HostEntity(

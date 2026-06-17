@@ -313,6 +313,26 @@ JOURNEY_CLASSES=(
   # lives under com.pocketshell.app.projects, not the proof prefix, so it carries
   # its fully-qualified name directly.
   "com.pocketshell.app.projects.FolderListWindowCloseAfterStopPollingDockerTest"
+  # ADDED (#795, follow-up to #794): the ~90s STEADY-HOLD no-flap proof. #794
+  # fixed the ~11s app-initiated SSH transport flap (the maintainer's
+  # black-screen / "conversations don't work" report): on a quiet foreground
+  # hold the dashboard's 10s `list-sessions` poll tripped the CommandTimeoutGate
+  # idle-deadline watchdog, which escalated the poll to a FATAL transport
+  # teardown and reattached every ~11s. The regression proof
+  # (LongRunningSessionStabilityTest#steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds)
+  # holds the session foreground quietly for ~90s — covering ~8 of the 10s poll
+  # cycles — and HARD-asserts ZERO `ssh-read-eof` / `ssh-read-failed` transport
+  # teardowns (no assumeTrue self-skip on the load-bearing assertEquals(0, ...)).
+  # It shipped in #794 but ran ONLY in the opt-in release gate, so the flap could
+  # silently regress at PR time. Per the "load-bearing connection-lifecycle
+  # journeys run in regular per-PR CI" mandate (#638/#691), it joins this subset.
+  # Target the SINGLE @Test method by FQCN#method so the sibling opt-in
+  # 10-minute `tenMinuteForegroundHold…` test (which self-skips without
+  # `pocketshellLongRunningTest=1`) is NOT even selected here. It drives ONLY the
+  # deterministic agents:2222 fixture (DEFAULT_HOST/DEFAULT_PORT/DEFAULT_USER ->
+  # 10.0.2.2:2222) that `tests.yml` already brings up — no new Docker
+  # service/port, no toxiproxy — and does NOT self-skip on CI.
+  "$FQCN_PREFIX.LongRunningSessionStabilityTest#steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds"
   # ADDED (#785, EPIC #687 slice 3 / D28(3)): the attachment -> NO-reconnect journey.
   # Tapping the 📎 attach button launches the separate-process `OpenMultipleDocuments`
   # picker, briefly backgrounding the app WITHIN the 60s grace window; on return the

@@ -134,6 +134,10 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+    // Issue #796: virtual-clock contract test for the render-frame coalescer
+    // (RenderFrameCoalescerTest) — runTest + advanceTimeBy, the same harness
+    // LayoutChangeCoalescerTest uses in core-tmux.
+    testImplementation(libs.kotlinx.coroutines.test)
 
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.core)

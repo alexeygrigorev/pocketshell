@@ -248,6 +248,20 @@ fun TerminalSurface(
 
     val context = LocalContext.current
 
+    // Issue #796 (Slice B of #792): frame-gate the redraw signal that drives the
+    // main-thread render consumers (the TerminalView repaint AND the per-render
+    // full-viewport URL / file-path / engine-command scans). `state.renderRequests`
+    // fires once per emulator tick; a Codex `%output` burst makes that O(N)
+    // repaints + O(N) viewport scans back-to-back on the UI thread — the
+    // keyboard-up ANR (#796). [coalescePerFrame] collapses a burst to ≤1 emission
+    // per frame while NEVER dropping the settled final frame (the cursor/spinner
+    // state after the burst still paints — its last-frame-after-idle guarantee
+    // mirrors LayoutChangeCoalescer). The same coalesced flow feeds the repaint,
+    // the URL scan, and the SmartSelection/FilePath/EngineCommand overlays, so
+    // every per-render scan is gated, not just the repaint. Remembered per
+    // `state` so the operator (and its conflating channel) survives recomposition.
+    val coalescedRenderRequests = remember(state) { state.renderRequests.coalescePerFrame() }
+
     LaunchedEffect(terminalKeyboardMode, terminalView) {
         val view = terminalView ?: return@LaunchedEffect
         val imm = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -303,9 +317,14 @@ fun TerminalSurface(
         onDispose { state.setSmartTextStagingBridge(null) }
     }
 
-    LaunchedEffect(state, terminalView) {
+    LaunchedEffect(state, terminalView, coalescedRenderRequests) {
         val view = terminalView ?: return@LaunchedEffect
-        state.renderRequests.collect {
+        // Issue #796: drive the repaint off the FRAME-COALESCED redraw signal
+        // (≤1 repaint per frame), not the raw per-emulator-tick `renderRequests`.
+        // A Codex `%output` burst no longer turns into O(N) `onScreenUpdated()`
+        // repaints on the UI thread. The coalescer never drops the final frame,
+        // so the settled cursor/spinner state still paints after the burst.
+        coalescedRenderRequests.collect {
             runCatching { view.onScreenUpdated() }
                 .onFailure { onLocalTerminalError?.invoke(it) }
         }
@@ -365,7 +384,7 @@ fun TerminalSurface(
     // supplies a tap sink and a non-empty command set for the detected engine.
     val engineCommandsEnabled = onEngineCommandTap != null && engineCommands.isNotEmpty()
 
-    LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick) {
+    LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick, coalescedRenderRequests) {
         val view = terminalView
         if (view == null || effectiveUrlTap == null) {
             visibleUrls = emptyList()
@@ -376,7 +395,12 @@ fun TerminalSurface(
                 onLocalTerminalError?.invoke(cause)
                 emptyList()
             }
-        state.renderRequests.collect {
+        // Issue #796: scan the full viewport for URLs at most once per frame, not
+        // once per emulator tick. `findVisibleUrls` reads the live TerminalView
+        // renderer/emulator, so it must run on the UI thread (the view is not
+        // thread-safe); the win here is frame-gating the scan count, which is the
+        // dominant per-tick cost during a burst. Only the diff is published.
+        coalescedRenderRequests.collect {
             val fresh = runCatching { findVisibleUrls(view) }
                 .getOrElse { cause ->
                     onLocalTerminalError?.invoke(cause)
@@ -520,7 +544,8 @@ fun TerminalSurface(
             if (matchListener != null || effectiveUrlTap != null) {
                 SmartSelectionAffordanceOverlay(
                     view = terminalView,
-                    renderRequests = state.renderRequests,
+                    // Issue #796: gate the per-render match scan to ≤1/frame.
+                    renderRequests = coalescedRenderRequests,
                     viewportChangeKey = viewportTick,
                     matcher = state.currentMatcher(),
                     onMatchesChanged = { visibleMatchRegions = it },
@@ -530,7 +555,8 @@ fun TerminalSurface(
             if (onFilePathTap != null) {
                 FilePathOverlay(
                     view = terminalView,
-                    renderRequests = state.renderRequests,
+                    // Issue #796: gate the per-render file-path scan to ≤1/frame.
+                    renderRequests = coalescedRenderRequests,
                     viewportChangeKey = viewportTick,
                     onFilePathsChanged = { visibleFilePaths = it },
                 )
@@ -539,7 +565,8 @@ fun TerminalSurface(
             if (engineCommandsEnabled) {
                 EngineCommandOverlay(
                     view = terminalView,
-                    renderRequests = state.renderRequests,
+                    // Issue #796: gate the per-render engine-command scan to ≤1/frame.
+                    renderRequests = coalescedRenderRequests,
                     knownCommands = engineCommands,
                     viewportChangeKey = viewportTick,
                     onEngineCommandsChanged = { visibleEngineCommands = it },

@@ -284,6 +284,32 @@ scripts/connected-test.sh --pool --suffix iB $CLASS &   # -> emulator-5558
 wait
 ```
 
+#### Targeting a `shared:*` module's connected test — `--module` (issue #798)
+
+`scripts/connected-test.sh` defaults to the app module's
+`:app:connectedDebugAndroidTest`. Some connected/androidTest classes live in a
+`shared:*` library module instead — e.g. the #796 proof
+`CodexOutputBurstImeMainThreadProofTest` is under
+`shared/core-terminal/src/androidTest/`. Pass `--module <gradle-module>` to run
+that module's `connectedDebugAndroidTest` under the SAME AVD `flock` +
+per-worktree `-PpocketshellAppIdSuffix` coexistence as an app-module run, instead
+of a hand-rolled `./gradlew` invocation outside the lock:
+
+```bash
+scripts/connected-test.sh --module shared:core-terminal --suffix i798 \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.terminal.core.CodexOutputBurstImeMainThreadProofTest
+```
+
+The wrapper owns the `:connectedDebugAndroidTest` task name (the suffix + lock
+plumbing assumes that exact task), so pass only the module path — either Gradle
+path syntax (`shared:core-terminal`) or a leading-colon path
+(`:shared:core-terminal`). The wrapper resolves it to
+`:shared:core-terminal:connectedDebugAndroidTest`, acquires the AVD lock,
+auto-pins/pools the serial exactly as for an app run, and threads
+`-PpocketshellAppIdSuffix=<token>` through. Omit `--module` for the unchanged
+`:app:connectedDebugAndroidTest` default. `scripts/connected-test.sh --help`
+prints the full flag list.
+
 ### Fixture JSONLs for agent tests
 
 The agent target seeds `testuser`'s home with recent deterministic fixtures on

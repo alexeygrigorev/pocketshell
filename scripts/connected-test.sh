@@ -17,9 +17,16 @@ set -euo pipefail
 #      coexist on ONE emulator without uninstalling each other.
 #
 # Usage:
-#   scripts/connected-test.sh [--suffix <token>] [--pool|--no-pool] [gradle args...]
+#   scripts/connected-test.sh [--suffix <token>] [--module <gradle-module>] \
+#     [--pool|--no-pool] [gradle args...]
 #   POCKETSHELL_APP_ID_SUFFIX=i672 scripts/connected-test.sh \
 #     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SomeTest
+#
+#   # Run a shared:* module's androidTest under the SAME lock + suffix machinery
+#   # (issue #798) — the #796 proof CodexOutputBurstImeMainThreadProofTest lives
+#   # in shared/core-terminal/src/androidTest/:
+#   scripts/connected-test.sh --module shared:core-terminal --suffix i798 \
+#     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.terminal.core.CodexOutputBurstImeMainThreadProofTest
 #
 #   scripts/connected-test.sh --cleanup-suffixes   # uninstall leftover
 #                                                   # com.pocketshell.app.i* apps
@@ -38,6 +45,18 @@ set -euo pipefail
 #                        [A-Za-z0-9._]+.  Default empty -> base package, so the
 #                        wrapper is identical to a plain connectedDebugAndroidTest
 #                        when no suffix is given.
+#   --module <module>    Gradle module whose connectedDebugAndroidTest task to run
+#                        (issue #798). Accepts either Gradle path syntax
+#                        (shared:core-terminal) or a leading-colon path
+#                        (:shared:core-terminal). The wrapper appends
+#                        :connectedDebugAndroidTest itself, so a shared:* module's
+#                        androidTest runs under the SAME AVD flock +
+#                        -PpocketshellAppIdSuffix coexistence as the app-module
+#                        default. Default empty -> :app:connectedDebugAndroidTest
+#                        (byte-for-byte the legacy behaviour). Pass the module path
+#                        WITHOUT a trailing :connectedDebugAndroidTest; that task
+#                        name is fixed because the suffix/lock plumbing assumes a
+#                        connectedDebugAndroidTest target.
 #   --pool               Lane pool mode (issues #674 + #724): claim a full
 #                        ISOLATED lane = (a free emulator serial + a free agents
 #                        fixture port). It (1) claims the first FREE emulator
@@ -72,8 +91,10 @@ set -euo pipefail
 #                        Prevents install pile-up across worktrees.
 #
 # Everything after the recognised flags is forwarded verbatim to gradle's
-# :app:connectedDebugAndroidTest task (e.g. instrumentation-runner-argument
-# filters). The base package (no suffix) and release build are never touched.
+# connectedDebugAndroidTest task (e.g. instrumentation-runner-argument filters).
+# The task defaults to :app:connectedDebugAndroidTest and is overridable per
+# --module (issue #798). The base package (no suffix) and release build are
+# never touched.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -93,7 +114,53 @@ source "$ROOT_DIR/scripts/lib/scope-run.sh"
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 
+print_usage() {
+  cat >&2 <<'USAGE'
+Lock-wrapped ad-hoc connected-test runner (issues #672/#724/#798).
+
+Usage:
+  scripts/connected-test.sh [--suffix <token>] [--module <gradle-module>] \
+    [--pool|--no-pool] [gradle args...]
+  scripts/connected-test.sh --cleanup-suffixes
+  scripts/connected-test.sh --help
+
+Flags:
+  --suffix <token>     Per-worktree applicationIdSuffix token (e.g. i672).
+                       Overrides POCKETSHELL_APP_ID_SUFFIX. Token must match
+                       [A-Za-z0-9._]+. Default empty -> base package.
+  --module <module>    Gradle module whose connectedDebugAndroidTest task to run
+                       (issue #798). Accepts shared:core-terminal or
+                       :shared:core-terminal; the wrapper appends
+                       :connectedDebugAndroidTest itself so a shared:* module's
+                       androidTest runs under the SAME AVD flock +
+                       -PpocketshellAppIdSuffix coexistence as the app default.
+                       Default empty -> :app:connectedDebugAndroidTest (unchanged).
+  --pool               Lane pool mode: claim an isolated (emulator, agents-port)
+                       lane for parallel journey testing (issues #674 + #724).
+  --no-pool            Force the legacy single-lane path.
+  --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i* package
+                       from the target device, then exit.
+  --help, -h           Print this help and exit.
+
+Examples:
+  # App-module proof (default task :app:connectedDebugAndroidTest):
+  scripts/connected-test.sh --suffix i672 \
+    -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SomeTest
+
+  # shared:* module proof (task :shared:core-terminal:connectedDebugAndroidTest):
+  scripts/connected-test.sh --module shared:core-terminal --suffix i798 \
+    -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.terminal.core.CodexOutputBurstImeMainThreadProofTest
+
+Everything after the recognised flags is forwarded verbatim to gradle's
+connectedDebugAndroidTest task. The base package (no suffix) and release build
+are never touched.
+USAGE
+}
+
 SUFFIX="${POCKETSHELL_APP_ID_SUFFIX:-}"
+# Gradle module whose connectedDebugAndroidTest task to run (issue #798). Empty
+# -> the :app default below. Set via --module.
+MODULE=""
 CLEANUP_ONLY=0
 USE_POOL=0
 # 0 = unset (auto-decide), 1 = caller forced --pool, -1 = caller forced --no-pool.
@@ -102,6 +169,10 @@ GRADLE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help|-h)
+      print_usage
+      exit 0
+      ;;
     --suffix)
       [[ $# -ge 2 ]] || { printf 'FAIL: --suffix needs a value\n' >&2; exit 2; }
       SUFFIX="$2"
@@ -109,6 +180,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --suffix=*)
       SUFFIX="${1#--suffix=}"
+      shift
+      ;;
+    --module)
+      [[ $# -ge 2 ]] || { printf 'FAIL: --module needs a value\n' >&2; exit 2; }
+      MODULE="$2"
+      shift 2
+      ;;
+    --module=*)
+      MODULE="${1#--module=}"
       shift
       ;;
     --pool)
@@ -142,6 +222,38 @@ if [[ -n "$SUFFIX" ]]; then
     printf 'FAIL: suffix must match [A-Za-z0-9._]+ (got: %s)\n' "$SUFFIX" >&2
     exit 2
   }
+fi
+
+# Resolve the gradle connectedDebugAndroidTest task (issue #798). Default is the
+# app module; --module redirects to a shared:* (or any) module's task while the
+# rest of the wrapper — the AVD flock, the serial pin, and -PpocketshellAppIdSuffix
+# — applies unchanged. We OWN the :connectedDebugAndroidTest task name: the suffix
+# + lock plumbing assumes that exact task, so the caller passes only the module
+# path and we append the task. Normalise both `shared:core-terminal` and
+# `:shared:core-terminal`, and tolerate a redundant trailing
+# `:connectedDebugAndroidTest`.
+CONNECTED_TASK=":app:connectedDebugAndroidTest"
+if [[ -n "$MODULE" ]]; then
+  module_path="$MODULE"
+  # Strip a leading colon so we can re-add exactly one.
+  module_path="${module_path#:}"
+  # Strip any trailing colons (e.g. `shared:core-terminal:`).
+  while [[ "$module_path" == *: ]]; do module_path="${module_path%:}"; done
+  # Strip a redundant trailing task suffix if the caller included it, then any
+  # trailing colons it leaves behind (`shared:core-terminal:connectedDebugAndroidTest:`).
+  module_path="${module_path%:connectedDebugAndroidTest}"
+  while [[ "$module_path" == *: ]]; do module_path="${module_path%:}"; done
+  if [[ -z "$module_path" ]]; then
+    printf 'FAIL: --module needs a gradle module path (e.g. shared:core-terminal)\n' >&2
+    exit 2
+  fi
+  # Gradle module paths are colon-separated segments of [A-Za-z0-9._-]; reject
+  # anything else so a typo can't smuggle in an arbitrary task or shell content.
+  if [[ ! "$module_path" =~ ^[A-Za-z0-9._-]+(:[A-Za-z0-9._-]+)*$ ]]; then
+    printf 'FAIL: invalid --module path (got: %s). Expected e.g. shared:core-terminal\n' "$MODULE" >&2
+    exit 2
+  fi
+  CONNECTED_TASK=":${module_path}:connectedDebugAndroidTest"
 fi
 
 # Count emulators currently online (issue #776). Used to decide whether to
@@ -384,9 +496,9 @@ fi
 GRADLE_SUFFIX_ARGS=()
 if [[ -n "$SUFFIX" ]]; then
   GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$SUFFIX")
-  printf 'Running connectedDebugAndroidTest as com.pocketshell.app.%s\n' "$SUFFIX" >&2
+  printf 'Running %s as com.pocketshell.app.%s\n' "$CONNECTED_TASK" "$SUFFIX" >&2
 else
-  printf 'Running connectedDebugAndroidTest as com.pocketshell.app (no suffix)\n' >&2
+  printf 'Running %s as com.pocketshell.app (no suffix)\n' "$CONNECTED_TASK" >&2
 fi
 
 # Issue #724: thread the claimed (or caller-preset) agents fixture port into the
@@ -481,7 +593,7 @@ trap 'forward_signal INT' INT
 trap 'forward_signal TERM' TERM
 
 pocketshell_scope_run "$SCOPE_UNIT" \
-  ./gradlew --no-daemon :app:connectedDebugAndroidTest \
+  ./gradlew --no-daemon "$CONNECTED_TASK" \
   "${GRADLE_INIT_ARGS[@]}" \
   "${GRADLE_SUFFIX_ARGS[@]}" \
   "${GRADLE_ARGS[@]}" &

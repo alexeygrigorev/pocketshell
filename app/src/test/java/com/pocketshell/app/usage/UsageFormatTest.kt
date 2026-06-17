@@ -105,6 +105,73 @@ class UsageFormatTest {
     }
 
     @Test
+    fun formatResetRelative_twentyEightHoursReadsOneDay() {
+        // Issue #802: the maintainer's exact instants. Reset is ~28h out
+        // (lands on tomorrow's date), so it must read "in 1 day", not the
+        // "in 2 days" the old ceil produced.
+        assertEquals(
+            "in 1 day",
+            formatResetRelative(
+                now = Instant.parse("2026-06-17T15:28:00Z"),
+                resetAt = Instant.parse("2026-06-18T19:28:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_fortySevenHoursReadsOneDay() {
+        // 47h out but only one calendar day later (next day, late) → "in 1 day".
+        assertEquals(
+            "in 1 day",
+            formatResetRelative(
+                now = Instant.parse("2026-06-17T00:00:00Z"),
+                resetAt = Instant.parse("2026-06-18T23:00:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_fortyNineHoursReadsTwoDays() {
+        // 49h out crosses two calendar days → "in 2 days".
+        assertEquals(
+            "in 2 days",
+            formatResetRelative(
+                now = Instant.parse("2026-06-17T00:00:00Z"),
+                resetAt = Instant.parse("2026-06-19T01:00:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_twentyFiveHoursReadsOneDay() {
+        // 25h out, next calendar day → "in 1 day".
+        assertEquals(
+            "in 1 day",
+            formatResetRelative(
+                now = Instant.parse("2026-06-17T00:00:00Z"),
+                resetAt = Instant.parse("2026-06-18T01:00:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_twentyThreeFiftyNineStaysOnHoursPath() {
+        // 23h59m is still sub-24h, so it stays on the hours/minutes path.
+        assertEquals(
+            "in 23h 59m",
+            formatResetRelative(
+                now = Instant.parse("2026-06-17T00:00:00Z"),
+                resetAt = Instant.parse("2026-06-17T23:59:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
     fun formatResetRelative_pastResetReadsNow() {
         assertEquals(
             "now",

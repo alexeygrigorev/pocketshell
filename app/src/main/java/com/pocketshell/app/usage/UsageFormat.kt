@@ -7,6 +7,7 @@ import com.pocketshell.core.usage.UsageWindow
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.max
@@ -198,11 +199,12 @@ internal const val RESET_PLACEHOLDER: String = "—"
  *  - null `resetAt`  → [RESET_PLACEHOLDER] ("—")
  *
  * Deterministic: the caller injects [now] and [zoneId]; nothing reads
- * the wall clock. Day bucketing is computed on the local calendar
- * (zone-aware), matching the #467 day-formatting pattern, so a reset at
- * 23:30 tonight reads "in 1 day" rather than "in 7h" only when it
- * crosses far enough — here we keep the sub-24h path as elapsed time and
- * switch to calendar-free day counts past 24h to stay predictable.
+ * the wall clock. The sub-24h path is elapsed time. Past 24h we count
+ * the difference in *local calendar days* (zone-aware, matching the #467
+ * day-formatting pattern) so the relative string never overshoots how a
+ * human reads the absolute date below it (issue #802): a reset ~28h out
+ * that lands on tomorrow's date reads "in 1 day", not "in 2 days".
+ * `ceil` on the raw seconds was the bug — 1.16 days rounded up to 2.
  */
 internal fun formatResetRelative(now: Instant, resetAt: Instant?, zoneId: ZoneId): String {
     if (resetAt == null) return RESET_PLACEHOLDER
@@ -219,7 +221,13 @@ internal fun formatResetRelative(now: Instant, resetAt: Instant?, zoneId: ZoneId
             else -> "in ${minutes}m"
         }
     }
-    val days = ceil(seconds / 86_400.0).toLong()
+    // >= 24h: count whole local calendar days so the relative string
+    // matches the absolute date shown beneath it. The seconds >= 86_400
+    // branch guarantees the dates differ by at least one calendar day, so
+    // this is always >= 1.
+    val nowDate = now.atZone(zoneId).toLocalDate()
+    val resetDate = resetAt.atZone(zoneId).toLocalDate()
+    val days = max(1L, ChronoUnit.DAYS.between(nowDate, resetDate))
     return if (days == 1L) "in 1 day" else "in $days days"
 }
 

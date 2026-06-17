@@ -163,6 +163,23 @@ public class SshTerminalBridge(
     @Volatile
     private var remoteStdin: OutputStream? = null
 
+    /**
+     * Issue #803: owns the frame-budgeted main-looper drain of the
+     * process→terminal queue. The off-main live `%output` path writes chunks to
+     * the queue and then calls [MainThreadDrainScheduler.requestDrain]; the
+     * scheduler parses at most one per-frame byte budget on the main thread per
+     * turn and yields to the next frame, so a dense colored-diff burst cannot pin
+     * the looper in one unbounded back-to-back VT parse (the #803 ANR). Lazily
+     * built so it captures the session's main-looper handler after construction.
+     */
+    private val drainScheduler: MainThreadDrainScheduler by lazy {
+        MainThreadDrainScheduler(
+            handler = SessionReflection.getMainThreadHandler(session),
+            msgNewInput = MSG_NEW_INPUT,
+            availableBytes = { SessionReflection.availableProcessOutputBytes(session) },
+        )
+    }
+
     init {
         // Install the pre-built emulator on the session so `updateSize`'s
         // null-check fails and the JNI-spawning branch is skipped.
@@ -262,9 +279,17 @@ public class SshTerminalBridge(
                 )
                 if (!written) return
                 if (isHandlerLooper) {
+                    // On-main seed/reattach feed: drain it fully + synchronously
+                    // (the `capture-pane` snapshot must paint before live `%output`
+                    // flows). This is a one-shot, not the burst path.
                     dispatchMainLooperDrains(handler = handler, queuedBytes = chunkLength)
                 } else {
-                    handler.sendEmptyMessage(MSG_NEW_INPUT)
+                    // Off-main live `%output`: hand continuation to the #803
+                    // frame-budgeted scheduler. requestDrain() is idempotent across
+                    // a burst — many chunks collapse into AT MOST one pending
+                    // main-looper drain turn, which parses one per-frame budget and
+                    // yields, so a dense colored diff can't pin the main thread.
+                    drainScheduler.requestDrain()
                 }
                 chunkOffset += chunkLength
                 remaining -= chunkLength
@@ -315,7 +340,11 @@ public class SshTerminalBridge(
                         traceSink.onDirectDrainDispatched(bytes = bytes, durationNanos = durationNanos)
                     }
                 } else {
-                    handler.sendEmptyMessage(MSG_NEW_INPUT)
+                    // Off-main live `%output`: #803 frame-budgeted scheduler owns
+                    // continuation (see [feedBytesUntraced]). The per-slice trace
+                    // callbacks (onProcessOutputDrained / onScreenUpdated) still
+                    // fire from each scheduler-driven slice drain.
+                    drainScheduler.requestDrain()
                 }
                 chunkOffset += chunkLength
                 remaining -= chunkLength
@@ -420,6 +449,9 @@ public class SshTerminalBridge(
      */
     public fun stop() {
         if (!stopped.compareAndSet(false, true)) return
+        // Issue #803: drop any scheduled main-looper drain turn so a torn-down
+        // session leaves no posted runnable behind.
+        drainScheduler.cancel()
         SessionReflection.closeTerminalToProcessQueue(session)
         inputDrainerThread?.interrupt()
         inputDrainerThread = null
@@ -675,6 +707,15 @@ private object SessionReflection {
         resolveField(TerminalSession::class.java, "mMainThreadHandler")
     }
 
+    private val availableProcessOutputBytesMethod by lazy {
+        // `TerminalSession.availableProcessOutputBytes() -> int` (package-private,
+        // added for #803). Reflected so the bridge + scheduler can live outside
+        // `com.termux.terminal`.
+        TerminalSession::class.java
+            .getDeclaredMethod("availableProcessOutputBytes")
+            .apply { isAccessible = true }
+    }
+
     private val byteQueueWriteMethod by lazy {
         // `ByteQueue.write(byte[] buffer, int offset, int length) -> boolean`
         // Package-private class; access via reflection so the bridge does
@@ -708,6 +749,15 @@ private object SessionReflection {
 
     fun getMainThreadHandler(session: TerminalSession): Handler {
         return mMainThreadHandlerField.get(session) as Handler
+    }
+
+    /**
+     * Issue #803: bytes still buffered in the process→terminal queue (not yet
+     * parsed by the emulator). The [MainThreadDrainScheduler] reads this on the
+     * main looper to drive frame-budgeted drain continuation.
+     */
+    fun availableProcessOutputBytes(session: TerminalSession): Int {
+        return availableProcessOutputBytesMethod.invoke(session) as Int
     }
 
     /**

@@ -154,7 +154,13 @@ class TerminalSurfaceStateInputRoutingTest {
 
             val completed = withTimeoutOrNull(5_000) {
                 while (sender.isActive) {
-                    shadowOf(Looper.getMainLooper()).idle()
+                    // Issue #803: the off-main live drain is frame-paced — the
+                    // MainThreadDrainScheduler postDelays its continuation one frame
+                    // between parse turns to guarantee the looper a servicing gap.
+                    // Under Robolectric PAUSED looper a plain `idle()` only runs DUE
+                    // tasks, so advance the virtual clock one frame per pump to fire
+                    // the delayed continuations and let the blocked producer drain.
+                    shadowOf(Looper.getMainLooper()).idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
                     delay(10)
                 }
                 sender.join()
@@ -165,7 +171,9 @@ class TerminalSurfaceStateInputRoutingTest {
                 "terminal producer must not wait behind a slow TerminalSurfaceState.output collector",
                 completed,
             )
-            shadowOf(Looper.getMainLooper()).idle()
+            // Drain the frame-paced tail (the final scheduled continuations) so the
+            // end marker reaches the emulator before asserting on the transcript.
+            repeat(64) { shadowOf(Looper.getMainLooper()).idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS) }
             assertTrue(
                 "slow side-channel collector should prove at least one output subscriber was active",
                 observedSideChannelChunks.get() > 0,

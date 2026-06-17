@@ -334,6 +334,17 @@ public final class TerminalSession extends TerminalOutput {
         return result;
     }
 
+    /**
+     * PocketShell #803: bytes currently buffered in the process→terminal queue
+     * and not yet parsed by the emulator. Read on the main thread by the
+     * PocketShell MainThreadDrainScheduler to drive frame-budgeted drain
+     * continuation (yield-and-continue while &gt; 0, stop when 0). Reflected into
+     * by SshTerminalBridge so the scheduler can live outside this package.
+     */
+    int availableProcessOutputBytes() {
+        return mProcessToTerminalIOQueue.getAvailable();
+    }
+
     @SuppressLint("HandlerLeak")
     class MainThreadHandler extends Handler {
 
@@ -348,7 +359,17 @@ public final class TerminalSession extends TerminalOutput {
         @Override
         public void handleMessage(Message msg) {
             if (msg.what == MSG_NEW_INPUT) {
-                drainProcessOutput();
+                // PocketShell #803: one MSG_NEW_INPUT dispatch drains exactly ONE
+                // 16 KB slice and does NOT self-re-post. Continuation across the
+                // rest of the queue is owned by the PocketShell
+                // MainThreadDrainScheduler, which applies a per-frame byte budget
+                // and yields the main looper between budgeted turns so a dense
+                // colored-diff burst cannot pin the thread in one unbounded
+                // back-to-back parse run (the #803 ANR). The scheduler is the SOLE
+                // poster of MSG_NEW_INPUT in PocketShell (the upstream local-PTY
+                // input reader in initializeEmulator is never started — the bridge
+                // pre-installs the emulator).
+                drainProcessOutputSlice();
             }
 
             if (msg.what == MSG_PROCESS_EXITED) {
@@ -372,17 +393,6 @@ public final class TerminalSession extends TerminalOutput {
                 notifyScreenUpdate();
 
                 mClient.onSessionFinished(TerminalSession.this);
-            }
-        }
-
-        private void drainProcessOutput() {
-            removeMessages(MSG_NEW_INPUT);
-
-            int bytesRead = drainProcessOutputSlice();
-            if (bytesRead <= 0) return;
-
-            if (bytesRead == mReceiveBuffer.length) {
-                sendEmptyMessage(MSG_NEW_INPUT);
             }
         }
 

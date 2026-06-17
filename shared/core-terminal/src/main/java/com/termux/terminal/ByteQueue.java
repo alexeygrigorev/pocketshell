@@ -17,6 +17,17 @@ final class ByteQueue {
         notify();
     }
 
+    /**
+     * PocketShell #803: the number of bytes currently buffered and not yet read.
+     * The PocketShell MainThreadDrainScheduler reads this on the main thread to
+     * decide whether a frame-budgeted drain turn must yield-and-continue (more
+     * bytes pending) or has emptied the queue. Synchronized for the same
+     * happens-before guarantees as {@link #read} / {@link #write}.
+     */
+    public synchronized int getAvailable() {
+        return mStoredBytes;
+    }
+
     public synchronized int read(byte[] buffer, boolean block) {
         while (mStoredBytes == 0 && mOpen) {
             if (block) {

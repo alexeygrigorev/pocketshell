@@ -577,10 +577,51 @@ for fqcn in "${JOURNEY_CLASSES[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# Issue #803: core-terminal VT-append main-thread responsiveness proof.
+#
+# The load-bearing classes above are all `:app` connected tests (FQCN-targeted
+# via `:app:connectedDebugAndroidTest`). The #803 regression proof lives in the
+# `shared:core-terminal` module (it composes the production TerminalSurface +
+# the real vendored TerminalView and drives a dense colored-diff `%output`
+# append burst), so it runs as its OWN module connected-test task. It HARD-
+# asserts (no assumeTrue / CI self-skip — process.md F3) that a heavy
+# colored-diff burst keeps the main thread responsive AND renders the final
+# diff state correctly (byte order + final byte preserved — the #651/#658
+# ordering guard). Per the "load-bearing journeys run at PR time" principle
+# (#638/#657) it joins the per-push set so a future regression that reintroduces
+# an unbounded back-to-back VT-append drain, or breaks ordering, is caught here.
+# Uses NO Docker fixture (in-process Compose UI test, no SSH/tmux).
+CORE_TERMINAL_APPEND_BURST_CLASS="com.pocketshell.core.terminal.ui.CodexAppendBurstMainThreadProofTest"
+APPEND_BURST_STATUS="PASS"
+
+run_core_terminal_append_burst() {
+  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_APPEND_BURST_CLASS" \
+    --stacktrace
+}
+
+echo "=========================================================="
+echo ">>> CORE-TERMINAL #803 APPEND-BURST PROOF: $CORE_TERMINAL_APPEND_BURST_CLASS (attempt 1)"
+echo "=========================================================="
+append_burst_start=$SECONDS
+if run_core_terminal_append_burst; then
+  echo "APPEND_BURST_PASS: passed on attempt 1 (elapsed $((SECONDS - append_burst_start))s)"
+else
+  echo ">>> APPEND-BURST PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+  if run_core_terminal_append_burst; then
+    echo "APPEND_BURST_FLAKE_RECOVERED: passed on retry (attempt 2)"
+  else
+    echo "APPEND_BURST_FAILED: #803 proof failed twice"
+    APPEND_BURST_STATUS="FAIL"
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
-# The job is red iff at least one class failed BOTH attempts.
-if [[ "${#FAILED_CLASSES[@]}" -eq 0 ]]; then
+# The job is red iff at least one class failed BOTH attempts, OR the #803
+# append-burst proof failed.
+if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$APPEND_BURST_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 else
@@ -608,6 +649,9 @@ echo "=========================================================="
   for c in "${JOURNEY_CLASSES[@]}"; do
     echo "- \`$c\`"
   done
+  echo
+  echo "Core-terminal #803 append-burst proof (\`shared:core-terminal\`): **$APPEND_BURST_STATUS**"
+  echo "- \`$CORE_TERMINAL_APPEND_BURST_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -615,12 +659,26 @@ echo "=========================================================="
       echo "- \`$c\`"
     done
   fi
-  if [[ "${#FAILED_CLASSES[@]}" -gt 0 ]]; then
+  # Emit the `JOURNEY_FAILED` / "Failed BOTH attempts" section whenever ANY
+  # load-bearing check failed twice — the journey classes AND/OR the #803
+  # append-burst proof. The workflow's classify step
+  # (.github/workflows/tests.yml "Classify emulator-journey result") greps this
+  # summary for `JOURNEY_FAILED|Failed BOTH attempts` to distinguish a genuine
+  # test regression from a #771 EMULATOR INFRA UNAVAILABLE abort, and its `awk`
+  # extracts the failing class names from under this exact header. If the
+  # append-burst proof failed but all journey classes passed, FAILED_CLASSES is
+  # empty — so we MUST still write the header (with the append-burst class)
+  # here, otherwise an append-burst-only regression falls through to the grep's
+  # else-branch and is mislabeled as an infra abort, burying the real cause.
+  if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" ]]; then
     echo
     echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
     for c in "${FAILED_CLASSES[@]}"; do
       echo "- \`$c\`"
     done
+    if [[ "$APPEND_BURST_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_APPEND_BURST_CLASS\` (#803 append-burst proof)"
+    fi
   fi
 } > "$SUMMARY"
 

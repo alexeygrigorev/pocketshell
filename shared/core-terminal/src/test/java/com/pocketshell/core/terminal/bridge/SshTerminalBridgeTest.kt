@@ -46,11 +46,16 @@ class SshTerminalBridgeTest {
                 feed.isDone,
             )
 
-            shadowOf(Looper.getMainLooper()).idle()
+            // Issue #803: the drain is now frame-paced (the scheduler postDelays
+            // its continuation one frame between parse turns), so advance the
+            // virtual clock per frame until the producer's blocked write unblocks
+            // and the whole payload drains — a single `idle()` would only run the
+            // first posted slice.
+            drainMainLooperUntil(feed::isDone)
 
             feed.get(2, TimeUnit.SECONDS)
             assertTrue("large feed must complete once the posted drain runs", feed.isDone)
-            shadowOf(Looper.getMainLooper()).idle()
+            drainMainLooperUntil { trace.outputDrainSnapshot().sum() >= payload.bytes.size }
 
             assertEquals(payload.transcriptText, bridge.emulator.screen.transcriptText)
             assertTrue(
@@ -533,14 +538,22 @@ class SshTerminalBridgeTest {
             SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
 
     private fun drainMainLooperUntil(done: () -> Boolean) {
-        val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (!done()) {
-            shadowOf(Looper.getMainLooper()).idle()
+            // Issue #803: the off-main live drain is now frame-paced — the
+            // MainThreadDrainScheduler `postDelayed`s its continuation one frame
+            // (16ms) out so the main looper is guaranteed a servicing gap between
+            // parse turns. Under Robolectric PAUSED looper a plain `idle()` only
+            // runs tasks already DUE, so advance the virtual clock one frame per
+            // pump to fire the delayed continuations and let the whole queue drain.
+            shadowOf(Looper.getMainLooper()).idleFor(16L, TimeUnit.MILLISECONDS)
             if (System.nanoTime() > deadlineNanos) {
                 throw AssertionError("timed out waiting for feedBytes burst to drain")
             }
-            Thread.sleep(10)
+            Thread.sleep(1)
         }
+        // Final flush: drain any trailing scheduled continuation.
+        shadowOf(Looper.getMainLooper()).idleFor(64L, TimeUnit.MILLISECONDS)
     }
 
     private class RecordingTraceSink : SshTerminalBridge.TraceSink() {

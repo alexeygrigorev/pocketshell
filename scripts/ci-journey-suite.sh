@@ -194,6 +194,23 @@ JOURNEY_CLASSES=(
   # carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerImeSquishProofTest"
 
+  # Issue #801: the keyboard-up squish on a REALISTIC TIGHT screen — the v0.4.6
+  # regression of #567. The #780 proof above composes the composer in a GENEROUS
+  # 740dp host, so the legacy `availableAboveKeyboard - reserve` floor never
+  # fired there and the regression slipped through (a too-roomy proxy of the
+  # reported state). This proof reproduces the maintainer's ACTUAL Pixel-7-class
+  # geometry (~460dp host, ~184dp above a 300dp keyboard) where the old math
+  # floored the scroll region to 88dp — below the draft's 96dp min — crushing the
+  # field to one line and cramming the control row. It asserts (via the #657 / F1
+  # containment helpers, not bare assertIsDisplayed) the draft keeps a multi-line
+  # height and the Send/attach/mic controls are full-size and above the keyboard,
+  # for BOTH a shell pane and an agent (ClaudeCode) pane. Like the #780 proof it
+  # uses a SYNTHETIC ime() inset (no real keyboard, deterministic on CI
+  # swiftshader) and NO Docker fixture, HARD-asserts the inset applied (no skip),
+  # and runs per-push so this exact regression cannot silently return. It carries
+  # its fully-qualified name directly.
+  "com.pocketshell.app.composer.PromptComposerImeTightScreenSquishProofTest"
+
   # Issue #745: composer Send feedback on a DEGRADED connection. The maintainer
   # dogfooded a blind send: tapping Send cleared the draft and showed nothing —
   # no "Sending…" indicator, no connection-lost banner, and the "Not sent"

@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
@@ -207,9 +208,6 @@ class PromptComposerImeSquishProofTest {
         val draftBounds = compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .fetchSemanticsNode()
             .boundsInRoot
-        val headerBounds = compose.onNodeWithTag(COMPOSER_CLOSE_TAG, useUnmergedTree = true)
-            .fetchSemanticsNode()
-            .boundsInRoot
         val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .fetchSemanticsNode()
             .boundsInRoot
@@ -229,7 +227,11 @@ class PromptComposerImeSquishProofTest {
         val roomAboveKeyboardPx = imeTop - containerTop
 
         val draftHeightDp = draftBounds.height / density
-        val bodyTopPx = headerBounds.top
+        // Issue #801: the "Prompt Composer" header (its close × is COMPOSER_CLOSE_TAG)
+        // is HIDDEN when the keyboard is up — on a real Pixel only ~175dp is
+        // available above the keyboard, and the header would steal ~58dp of it. So
+        // keyboard-up the body now starts at the draft, not a header.
+        val bodyTopPx = draftBounds.top
         val bodyBottomPx = maxOf(sendBounds.bottom, attachBounds.bottom)
         val bodyHeightPx = bodyBottomPx - bodyTopPx
         val slopPx = SLOP_DP * density
@@ -296,26 +298,44 @@ class PromptComposerImeSquishProofTest {
             draftHeightDp >= MIN_DRAFT_HEIGHT_DP,
         )
 
-        // 4) The "Prompt Composer" header must be ON SCREEN — not shoved off the
-        //    top of the window. A clear sanity guard: the header top must sit at or
-        //    below the container's top edge (never negative / clipped above it).
+        // 4) Issue #801: keyboard-UP the header is intentionally HIDDEN to reclaim
+        //    its ~58dp for the draft in the ~175dp above the keyboard. Assert it is
+        //    ABSENT (the close × node does not exist while the keyboard is up) — the
+        //    inverse of the old "header must be on-screen" guard, updated for the
+        //    #801 compact keyboard-up layout. The draft body must still start at or
+        //    below the container top (never clipped above it).
         assertTrue(
-            "Composer header pushed off the top of the sheet (squish). " +
-                "headerTop=$bodyTopPx containerTop=$containerTop statusTopPx=$statusTopPx",
+            "Composer body clipped above the top of the sheet (squish). " +
+                "bodyTop=$bodyTopPx containerTop=$containerTop statusTopPx=$statusTopPx",
             bodyTopPx >= containerTop - slopPx,
         )
+        assertTrue(
+            "Composer header should be hidden when the keyboard is up (#801), " +
+                "to reclaim its room for the draft.",
+            compose.onAllNodesWithTag(COMPOSER_CLOSE_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
 
-        // 5) The body (header -> controls) must be lifted to sit just above the
-        //    keyboard (small gap), not crammed at the window top with a void below
-        //    (the #615 jump-to-top symptom). Only meaningful once the controls are
-        //    laid out below the draft (#1), so this guards the fixed layout's gap.
+        // 5) Issue #801: this proof composes SheetContent in an OVER-LARGE (740dp)
+        //    UN-resized host so it never exercised the real resized-sheet tight
+        //    budget (that is now [PromptComposerImeTightScreenSquishProofTest]'s
+        //    job, modelling the measured 470dp resized window). In this roomy model
+        //    the #801 compact keyboard-up layout (header hidden, draft WRAPS via
+        //    `weight(fill=false)` so there is no dead band — the #790 fix)
+        //    legitimately leaves a gap between the wrapped body and the synthetic
+        //    keyboard top: the body does NOT fill an artificially large host. On the
+        //    REAL resized sheet the composer sits directly on the keyboard (gap≈0 —
+        //    see the #801 on-device screenshot), so the old "gap == void" guard is a
+        //    pure artifact of this test's oversized host and no longer applies. The
+        //    meaningful invariant — controls reachable above the keyboard — is
+        //    already asserted in (2); here we only sanity-log the gap.
         val gapBelowControlsPx = imeTop.toFloat() - bodyBottomPx
         val gapBelowControlsDp = gapBelowControlsPx / density
         println("ISSUE567_GAP gapBelowControlsDp=$gapBelowControlsDp")
         assertTrue(
-            "Composer controls sit far above the keyboard (void). " +
+            "Composer controls must still be above the keyboard. " +
                 "gapBelowControlsDp=$gapBelowControlsDp",
-            gapBelowControlsDp <= GAP_BELOW_CONTROLS_MAX_DP,
+            gapBelowControlsDp >= -SLOP_DP,
         )
     }
 
@@ -388,9 +408,5 @@ class PromptComposerImeSquishProofTest {
 
         // Density-scaled slop so a sub-dp rounding wobble never flips a boundary.
         const val SLOP_DP = 4f
-
-        // Max gap the controls may sit above the keyboard before it reads as a
-        // "void" (the #615 jump-to-top symptom).
-        const val GAP_BELOW_CONTROLS_MAX_DP = 64f
     }
 }

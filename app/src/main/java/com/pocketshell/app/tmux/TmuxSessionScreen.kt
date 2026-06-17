@@ -47,6 +47,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -164,6 +165,7 @@ import com.pocketshell.core.terminal.selection.LocalhostUrl
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Badge
@@ -684,6 +686,45 @@ public fun TmuxSessionScreen(
             AgentCommandCatalog.commandsFor(agent).map { it.command }.toSet()
         } ?: emptySet()
     }
+
+    // Issue #796 (H3): STABLE callback instances for the hoisted, skippable
+    // [TmuxTerminalPager]. Each is `remember`ed (keyed on its stable captured
+    // references) so the SAME instance is passed on every body recomposition. If
+    // these were re-allocated each composition (the old inline-pager shape),
+    // `TerminalSurface` would be non-skippable and a composer-open
+    // (`showMicSheet`) body recomposition would drag the heavy terminal subtree
+    // (AndroidView update + viewport scanners, all main-thread) through a
+    // recomposition — the exact ANR collision the maintainer pinpointed (bursting
+    // Codex pane + opening the Prompt Composer). `viewModel` /
+    // `promptComposerViewModel` / `onOpenFile` are stable references and the
+    // `showMicSheet` setter is stable, so these lambdas never change identity for
+    // the life of the screen — the pager stays skipped across overlay toggles.
+    val stableSessionNameForUnifiedPane: (TmuxPaneState) -> String? =
+        remember(viewModel) { viewModel::sessionNameForUnifiedPane }
+    val stableResizeRemotePty: (Int, Int) -> Unit =
+        remember(viewModel) { viewModel::resizeRemotePty }
+    val stableReportTerminalSurfaceFailure: (String, Throwable) -> Unit =
+        remember(viewModel) {
+            { paneId, cause -> viewModel.reportTerminalSurfaceFailure(paneId, cause) }
+        }
+    val stableRecreateTerminalSurface: (String) -> Unit =
+        remember(viewModel) {
+            { paneId -> viewModel.recreateTerminalSurface(paneId) }
+        }
+    val stableFilePathTap: (path: String, paneCwd: String) -> Unit =
+        remember(onOpenFile) {
+            { path, paneCwd ->
+                val cwd = cwdForDetectedFilePath(path, paneCwd)
+                onOpenFile(path, cwd)
+            }
+        }
+    val stableEngineCommandTap: (String) -> Unit =
+        remember(promptComposerViewModel) {
+            { command ->
+                promptComposerViewModel.prefillEngineCommand(command)
+                showMicSheet = true
+            }
+        }
 
     // Issue #716 (Slice A): default to presumed-agent during detection
     // uncertainty so the composer / Conversation tab / agent-aware chips never
@@ -1462,40 +1503,54 @@ public fun TmuxSessionScreen(
             // (loopback) link goes through the port-forward flow; a real-host
             // link opens in the browser. Used by both the Terminal surface and
             // the Conversation link-tap sink so the two tabs behave identically.
-            val handleUrlTap: (String) -> Unit = { url ->
-                val local = com.pocketshell.core.terminal.selection
-                    .classifyLocalhostUrl(url)
-                if (local == null) {
-                    DiagnosticEvents.record(
-                        "action",
-                        "open_url",
-                        "mode" to "tmux",
-                        "kind" to "external",
-                    )
-                    com.pocketshell.core.terminal.ui
-                        .openUrlWithFallback(context, url)
-                } else {
-                    val localPort = sessionForwardingIndicatorViewModel
-                        .forwardedLocalPortFor(hostId, local.remotePort)
-                    if (localPort != null) {
+            //
+            // Issue #796 (H3): `remember`ed so the SAME lambda instance is fed to
+            // [TmuxTerminalPager] across body recompositions. A fresh lambda each
+            // composition would make `TerminalSurface` non-skippable, so toggling
+            // the composer (`showMicSheet`) would recompose the terminal subtree —
+            // the exact main-thread work this slice removes. Keyed on the stable
+            // captured references; `context`, the VM, and the `pendingLocalhostForward`
+            // setter are all stable.
+            val handleUrlTap: (String) -> Unit = remember(
+                context,
+                sessionForwardingIndicatorViewModel,
+                hostId,
+            ) {
+                { url: String ->
+                    val local = com.pocketshell.core.terminal.selection
+                        .classifyLocalhostUrl(url)
+                    if (local == null) {
                         DiagnosticEvents.record(
                             "action",
                             "open_url",
                             "mode" to "tmux",
-                            "kind" to "localhost_forwarded",
-                            "remotePort" to local.remotePort,
+                            "kind" to "external",
                         )
                         com.pocketshell.core.terminal.ui
-                            .openUrlWithFallback(context, local.toLocalUrl(localPort))
+                            .openUrlWithFallback(context, url)
                     } else {
-                        DiagnosticEvents.record(
-                            "action",
-                            "open_url",
-                            "mode" to "tmux",
-                            "kind" to "localhost_needs_forward",
-                            "remotePort" to local.remotePort,
-                        )
-                        pendingLocalhostForward = local
+                        val localPort = sessionForwardingIndicatorViewModel
+                            .forwardedLocalPortFor(hostId, local.remotePort)
+                        if (localPort != null) {
+                            DiagnosticEvents.record(
+                                "action",
+                                "open_url",
+                                "mode" to "tmux",
+                                "kind" to "localhost_forwarded",
+                                "remotePort" to local.remotePort,
+                            )
+                            com.pocketshell.core.terminal.ui
+                                .openUrlWithFallback(context, local.toLocalUrl(localPort))
+                        } else {
+                            DiagnosticEvents.record(
+                                "action",
+                                "open_url",
+                                "mode" to "tmux",
+                                "kind" to "localhost_needs_forward",
+                                "remotePort" to local.remotePort,
+                            )
+                            pendingLocalhostForward = local
+                        }
                     }
                 }
             }
@@ -1647,100 +1702,40 @@ public fun TmuxSessionScreen(
                 } else if (unifiedPanes.isEmpty()) {
                     EmptyPanesPlaceholder()
                 } else {
-                    HorizontalPager(
-                        state = pagerState,
-                        key = { pageIndex -> unifiedPanes[pageIndex].paneId },
-                        modifier = Modifier.fillMaxSize(),
-                    ) { pageIndex ->
-                        val pane = unifiedPanes[pageIndex]
-                        // Issue #626: compute session boundary per-page.
-                        val paneSession = viewModel.sessionNameForUnifiedPane(pane)
-                        // EPIC #687 P1 (#686/#658): the rendered screen is keyed
-                        // STRICTLY to the target session id — a pane belonging to ANY
-                        // non-target session must never paint its terminal surface OR
-                        // its `SessionBoundaryDivider` (the stray mid-pane label bearing
-                        // the leaving session's name was the maintainer's
-                        // wrong-session-on-switch symptom). Render the loading
-                        // placeholder for a non-target pane instead, so a late frame
-                        // from the previous session can never bleed into the shown pane.
-                        val paneIsForTarget = paneSession == null ||
-                            paneSession == sessionName
-                        if (!paneIsForTarget) {
-                            SwitchingLoadingPlaceholder()
-                            return@HorizontalPager
-                        }
-                        val prevSession = unifiedPanes.getOrNull(pageIndex - 1)
-                            ?.let { viewModel.sessionNameForUnifiedPane(it) }
-                        val isBoundary = paneSession != null &&
-                            paneSession != prevSession && paneSession != sessionName
-                        // Issue #626: session boundary marker above the
-                        // terminal surface for the first pane of a different
-                        // session.
-                        if (isBoundary && paneSession != null) {
-                            SessionBoundaryDivider(sessionName = paneSession)
-                        }
-                        if (pane.surfaceError) {
-                            // Issue #423: the local terminal surface kept
-                            // failing (IME/resize/render recovery storm) but
-                            // SSH/tmux is still alive. Render an actionable
-                            // error state instead of an indefinite reconnect
-                            // loop or a frozen, redrawing terminal. The
-                            // recreate control rebuilds the surface and
-                            // reattaches to the live tmux pane.
-                            TerminalSurfaceErrorState(
-                                onRecreate = { viewModel.recreateTerminalSurface(pane.paneId) },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(horizontal = 2.dp, vertical = 4.dp),
-                            )
-                        } else {
-                            TerminalSurface(
-                                state = pane.terminalState,
-                                terminalKeyboardMode = appSettings.terminalKeyboardMode,
-                                // Issue #240: cache the phone grid so the
-                                // view model can compare it with tmux's
-                                // current window size and offer an explicit
-                                // Resize prompt instead of resizing
-                                // automatically on attach.
-                                onTerminalSizeChanged = viewModel::resizeRemotePty,
-                                onLocalTerminalError = { cause ->
-                                    viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
-                                },
-                                // Issue #488: a tapped URL is routed through the
-                                // shared [handleUrlTap] so server-local
-                                // (loopback) links go through the port-forward
-                                // flow instead of a dead browser open, while a
-                                // real-host URL opens in the browser.
-                                onUrlTap = handleUrlTap,
-                                // Issue #500: detect file paths the agent
-                                // emits in the terminal and make them tappable
-                                // → open in the in-app file viewer (#497). The
-                                // pane's cwd resolves project-relative paths
-                                // (`out/report.png`) server-side in the viewer.
-                                onFilePathTap = { path ->
-                                    val cwd = cwdForDetectedFilePath(path, pane.cwd)
-                                    onOpenFile(path, cwd)
-                                },
-                                // Issue #770: engine slash-commands the agent
-                                // rendered (e.g. Claude Code's `/clear`) become
-                                // tappable. Tapping one pre-fills the prompt
-                                // composer with it (caret ready, leading slash
-                                // token) and opens the composer so the user
-                                // reviews + taps Send — instead of nothing
-                                // happening. The command set is the catalog for
-                                // the visible pane's detected engine; a shell
-                                // pane has an empty set and the affordance is off.
-                                engineCommands = engineCommandSet,
-                                onEngineCommandTap = { command ->
-                                    promptComposerViewModel.prefillEngineCommand(command)
-                                    showMicSheet = true
-                                },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(horizontal = 2.dp, vertical = 4.dp),
-                            )
-                        }
-                    }
+                    // Issue #796 (H3): the terminal-render pager is hoisted into a
+                    // dedicated, SKIPPABLE composable. The trigger the maintainer
+                    // pinpointed is "opening the Prompt Composer over a bursting Codex
+                    // pane freezes": tapping the composer launcher flips `showMicSheet`
+                    // (and the other overlay-visibility booleans), all read in the
+                    // `TmuxSessionScreen` body root group — so the whole body
+                    // re-executes, and because the OLD inline pager allocated FRESH
+                    // `TerminalSurface` callbacks on every body recomposition,
+                    // `TerminalSurface` (its `AndroidView` update + the viewport URL /
+                    // file-path / engine-command scanners, all main-thread) recomposed
+                    // too. Stacked on a Codex `%output` burst that is the ANR.
+                    // `aff7ac45` (H4) only decoupled the IME-INSET frame burst from the
+                    // body; it did NOT stop the composer-open body recomposition from
+                    // dragging the terminal subtree. [TmuxTerminalPager] finishes that
+                    // decoupling: all its inputs are STABLE (the data classes + the
+                    // remembered lambdas built once below), so when only the
+                    // overlay-visibility state toggles the pager is SKIPPED entirely —
+                    // opening the composer over a bursting pane does ZERO main-thread
+                    // terminal recomposition work (D22 hard-cut: the inline
+                    // fresh-lambda block is deleted, not kept as a fallback).
+                    TmuxTerminalPager(
+                        unifiedPanes = unifiedPanes,
+                        pagerState = pagerState,
+                        sessionName = sessionName,
+                        terminalKeyboardMode = appSettings.terminalKeyboardMode,
+                        engineCommands = engineCommandSet,
+                        sessionNameForUnifiedPane = stableSessionNameForUnifiedPane,
+                        onTerminalSizeChanged = stableResizeRemotePty,
+                        onSurfaceError = stableReportTerminalSurfaceFailure,
+                        onRecreateSurface = stableRecreateTerminalSurface,
+                        onUrlTap = handleUrlTap,
+                        onFilePathTap = stableFilePathTap,
+                        onEngineCommandTap = stableEngineCommandTap,
+                    )
                 }
             }
 
@@ -3964,6 +3959,158 @@ private fun SessionBoundaryDivider(sessionName: String) {
  * pane — no SSH reconnect, no force-restart. The rest of the app stays
  * navigable because only this pane's surface is affected.
  */
+/**
+ * Issue #796 (H3) — the terminal-render [HorizontalPager], hoisted out of the
+ * [TmuxSessionScreen] body into its OWN restart group so that toggling an
+ * overlay-visibility flag in the body (opening the Prompt Composer flips
+ * `showMicSheet`; the snippet picker, dialogs, the kebab menu, etc.) does NOT
+ * recompose the heavy terminal subtree.
+ *
+ * ## Why this is the H3 fix the maintainer's repro needs
+ *
+ * The maintainer pinpointed the freeze: a Codex pane streaming a `%output` burst
+ * + tapping the composer launcher = ANR. Tapping the launcher flips `showMicSheet`,
+ * which is read in the `TmuxSessionScreen` body root group. So the whole body
+ * re-executes. In the OLD inline pager, the `TerminalSurface` callbacks
+ * (`onTerminalSizeChanged`, `onLocalTerminalError`, `onUrlTap`, `onFilePathTap`,
+ * `onEngineCommandTap`) were allocated FRESH on every body recomposition, which
+ * made `TerminalSurface` un-skippable — so the composer-open body recomposition
+ * dragged `TerminalSurface` (its `AndroidView` update + the per-render viewport
+ * URL / file-path / engine-command scanners, ALL main-thread) through a
+ * recomposition. Stacked on the in-flight `%output` burst, the main thread blocks
+ * past the ANR threshold.
+ *
+ * `aff7ac45` (H4) decoupled only the IME-INSET frame burst (deferred-read of the
+ * pan offset). It did NOT stop the composer-open `showMicSheet` body recomposition
+ * from re-running the inline pager.
+ *
+ * ## How extracting it fixes it (Compose recomposition scoping)
+ *
+ * A child `@Composable` is its own restart group: it is SKIPPED when all its
+ * arguments compare equal to the previous composition. Every parameter here is
+ * stable — the [TmuxPaneState] data classes, the value types, and the callbacks
+ * which the caller builds ONCE via `remember` (see the `stable*` lambdas in
+ * [TmuxSessionScreen]). So when only an overlay-visibility flag toggles in the
+ * parent body, none of this composable's inputs change → it is skipped → ZERO
+ * main-thread terminal recomposition work while the composer opens over a
+ * bursting pane. (D22 hard-cut: the old inline fresh-lambda pager is deleted, not
+ * kept as a fallback.)
+ *
+ * [TmuxTerminalPagerRecompositionProbe.Record] is invoked here so the #796 H3
+ * regression proof can assert this subtree recomposes O(1), not once per overlay
+ * toggle.
+ */
+@Composable
+internal fun TmuxTerminalPager(
+    unifiedPanes: List<TmuxPaneState>,
+    pagerState: PagerState,
+    sessionName: String,
+    terminalKeyboardMode: TerminalKeyboardMode,
+    engineCommands: Set<String>,
+    sessionNameForUnifiedPane: (TmuxPaneState) -> String?,
+    onTerminalSizeChanged: (columns: Int, rows: Int) -> Unit,
+    onSurfaceError: (paneId: String, cause: Throwable) -> Unit,
+    onRecreateSurface: (paneId: String) -> Unit,
+    onUrlTap: (String) -> Unit,
+    onFilePathTap: (path: String, paneCwd: String) -> Unit,
+    onEngineCommandTap: (String) -> Unit,
+) {
+    // Issue #796 (H3): observe recompositions of THIS hoisted terminal-render
+    // subtree so the regression proof can assert an overlay-visibility toggle
+    // (composer open) does not recompose it. Pure counter, no behaviour change.
+    TmuxTerminalPagerRecompositionProbe.Record()
+    HorizontalPager(
+        state = pagerState,
+        key = { pageIndex -> unifiedPanes[pageIndex].paneId },
+        modifier = Modifier.fillMaxSize(),
+    ) { pageIndex ->
+        val pane = unifiedPanes[pageIndex]
+        // Issue #626: compute session boundary per-page.
+        val paneSession = sessionNameForUnifiedPane(pane)
+        // EPIC #687 P1 (#686/#658): the rendered screen is keyed
+        // STRICTLY to the target session id — a pane belonging to ANY
+        // non-target session must never paint its terminal surface OR
+        // its `SessionBoundaryDivider` (the stray mid-pane label bearing
+        // the leaving session's name was the maintainer's
+        // wrong-session-on-switch symptom). Render the loading
+        // placeholder for a non-target pane instead, so a late frame
+        // from the previous session can never bleed into the shown pane.
+        val paneIsForTarget = paneSession == null ||
+            paneSession == sessionName
+        if (!paneIsForTarget) {
+            SwitchingLoadingPlaceholder()
+            return@HorizontalPager
+        }
+        val prevSession = unifiedPanes.getOrNull(pageIndex - 1)
+            ?.let { sessionNameForUnifiedPane(it) }
+        val isBoundary = paneSession != null &&
+            paneSession != prevSession && paneSession != sessionName
+        // Issue #626: session boundary marker above the
+        // terminal surface for the first pane of a different
+        // session.
+        if (isBoundary && paneSession != null) {
+            SessionBoundaryDivider(sessionName = paneSession)
+        }
+        if (pane.surfaceError) {
+            // Issue #423: the local terminal surface kept
+            // failing (IME/resize/render recovery storm) but
+            // SSH/tmux is still alive. Render an actionable
+            // error state instead of an indefinite reconnect
+            // loop or a frozen, redrawing terminal. The
+            // recreate control rebuilds the surface and
+            // reattaches to the live tmux pane.
+            TerminalSurfaceErrorState(
+                onRecreate = { onRecreateSurface(pane.paneId) },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 2.dp, vertical = 4.dp),
+            )
+        } else {
+            TerminalSurface(
+                state = pane.terminalState,
+                terminalKeyboardMode = terminalKeyboardMode,
+                // Issue #240: cache the phone grid so the
+                // view model can compare it with tmux's
+                // current window size and offer an explicit
+                // Resize prompt instead of resizing
+                // automatically on attach.
+                onTerminalSizeChanged = onTerminalSizeChanged,
+                onLocalTerminalError = { cause ->
+                    onSurfaceError(pane.paneId, cause)
+                },
+                // Issue #488: a tapped URL is routed through the
+                // shared [onUrlTap] so server-local
+                // (loopback) links go through the port-forward
+                // flow instead of a dead browser open, while a
+                // real-host URL opens in the browser.
+                onUrlTap = onUrlTap,
+                // Issue #500: detect file paths the agent
+                // emits in the terminal and make them tappable
+                // → open in the in-app file viewer (#497). The
+                // pane's cwd resolves project-relative paths
+                // (`out/report.png`) server-side in the viewer.
+                onFilePathTap = { path ->
+                    onFilePathTap(path, pane.cwd)
+                },
+                // Issue #770: engine slash-commands the agent
+                // rendered (e.g. Claude Code's `/clear`) become
+                // tappable. Tapping one pre-fills the prompt
+                // composer with it (caret ready, leading slash
+                // token) and opens the composer so the user
+                // reviews + taps Send — instead of nothing
+                // happening. The command set is the catalog for
+                // the visible pane's detected engine; a shell
+                // pane has an empty set and the affordance is off.
+                engineCommands = engineCommands,
+                onEngineCommandTap = onEngineCommandTap,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 2.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun TerminalSurfaceErrorState(
     onRecreate: () -> Unit,

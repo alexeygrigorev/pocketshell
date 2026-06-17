@@ -72,3 +72,51 @@ internal object TmuxRenderRecompositionProbe {
         counter.incrementAndGet()
     }
 }
+
+/**
+ * Issue #796 (H3) — an observability hook that counts how many times the
+ * **hoisted [TmuxTerminalPager]** restart group re-executes. That composable owns
+ * the `HorizontalPager` of `TerminalSurface`s (the heavy, main-thread
+ * `AndroidView` + viewport scanners). Its re-execution count is the faithful
+ * measure of "did opening the Prompt Composer (or toggling any overlay-visibility
+ * flag in the [TmuxSessionScreen] body) recompose the terminal subtree?".
+ *
+ * ## Why this is separate from [TmuxRenderRecompositionProbe]
+ *
+ * [TmuxRenderRecompositionProbe] counts the `TmuxSessionScreen` body ROOT group
+ * (the H4 amplifier metric). [TmuxTerminalPager] is now its OWN restart group
+ * (the H3 fix), so the two counts diverge by design: a composer-open
+ * (`showMicSheet`) toggle re-runs the body root group (root probe increments) but
+ * — because every [TmuxTerminalPager] argument is stable — must SKIP the pager
+ * (this probe does NOT increment). That divergence is exactly what the H3
+ * regression proof asserts.
+ *
+ * One [AtomicLong.incrementAndGet] per pager recomposition — a few nanoseconds, no
+ * allocation, no behaviour change. Production never reads [count]; only the #796
+ * H3 regression proof does. D22-clean: no alternate code path.
+ */
+internal object TmuxTerminalPagerRecompositionProbe {
+
+    private val counter = AtomicLong(0L)
+
+    /** The number of [TmuxTerminalPager] recompositions observed so far. */
+    val count: Long
+        get() = counter.get()
+
+    /** Reset the counter (test setup only). */
+    fun reset() {
+        counter.set(0L)
+    }
+
+    /**
+     * Records one recomposition of the enclosing [TmuxTerminalPager]. Reads
+     * [currentComposer] so the Compose compiler cannot treat the call as
+     * skippable/constant and elide it.
+     */
+    @Composable
+    fun Record() {
+        @Suppress("UNUSED_EXPRESSION")
+        currentComposer
+        counter.incrementAndGet()
+    }
+}

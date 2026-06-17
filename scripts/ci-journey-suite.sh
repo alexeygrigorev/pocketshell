@@ -366,6 +366,25 @@ JOURNEY_CLASSES=(
   # ONLY the deterministic agents:2222 fixture (no toxiproxy) that `tests.yml` already
   # brings up — no workflow change needed — and does NOT self-skip on CI.
   "$FQCN_PREFIX.AttachmentNoReconnectE2eTest"
+  # ADDED (#796 H3): the composer-open -> terminal-relayout collision regression
+  # catcher. The maintainer's exact v0.4.6 Codex freeze: a bursting Codex pane +
+  # OPENING the Prompt Composer (showMicSheet toggles in the body root group)
+  # recomposed the heavy terminal subtree on the main thread -> ANR. The H3 fix
+  # hoists the terminal HorizontalPager into the SKIPPABLE TmuxTerminalPager fed
+  # stable inputs, so a composer-open toggle skips it (zero main-thread terminal
+  # recomposition work). This DETERMINISTIC scope proof drives 12 composer-open
+  # toggles against the REAL production TmuxTerminalPager (real TerminalSurface,
+  # no stand-in) and HARD-asserts O(1) pager recompositions (production stable =
+  # 0), with a sibling RED guard pinning the pre-fix inline fresh-lambda shape at
+  # ~N (=24). It uses NO Docker fixture (in-process Compose UI test, unattached
+  # TerminalSurfaceState) and does NOT self-skip on CI (no assumeTrue /
+  # assumeFalse(isRunningOnCi()) on the load-bearing assertion — process.md F3).
+  # Per the "load-bearing journeys run at PR time" principle (#638/#657) it runs
+  # per-push so the composer-open ANR collision cannot silently return. It lives
+  # under com.pocketshell.app.tmux, not the proof prefix, so it carries its
+  # fully-qualified name directly. The heavier live-burst on-device acceptance
+  # (Issue796ComposerOpenDuringCodexBurstProofTest) stays out of this fast subset.
+  "com.pocketshell.app.tmux.Issue796ComposerOpenTerminalScopeProofTest"
 )
 
 echo "=========================================================="

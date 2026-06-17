@@ -29,6 +29,37 @@ public enum class AgentConversationSyncStatus {
 }
 
 /**
+ * Issue #793: lifecycle of the *initial transcript load* for an
+ * agent-conversation pane — distinct from [AgentConversationSyncStatus],
+ * which describes the freshness of an already-loaded transcript relative to
+ * the live log.
+ *
+ * The Conversation tab previously had only "detection landed → render the
+ * feed" vs. "detection pending → spin a `Waiting for agent…` placeholder".
+ * That conflated two different things and let the placeholder spin forever
+ * when the first tail read never completed (e.g. the transport flap in epic
+ * #792). This enum gives the screen a concrete, terminal state machine for
+ * the open-an-existing-conversation journey:
+ *
+ *  - [Loading]   — the first-paint tail read is in flight. Shown as
+ *    "Loading conversation…" (NOT "Waiting for agent…", which is reserved
+ *    for a genuinely-pending live agent turn).
+ *  - [Ready]     — the tail rendered; the feed is populated (or live-tailing
+ *    will populate it as the agent writes).
+ *  - [Empty]     — the load completed but the transcript has no events yet
+ *    (a fresh agent with no turns). A clear terminal state, not a spinner.
+ *  - [Failed]    — the first-paint read could not complete (transport drop /
+ *    log unavailable). A clear terminal state with a retry affordance, not an
+ *    infinite spinner.
+ */
+public enum class ConversationLoadState {
+    Loading,
+    Ready,
+    Empty,
+    Failed,
+}
+
+/**
  * UI state for the agent-conversation pane.
  *
  * @property detection the detected agent runtime, or null when no agent is
@@ -49,6 +80,30 @@ public data class AgentConversationUiState(
     val selectedTab: SessionTab = SessionTab.Terminal,
     val syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
     val searchQuery: String = "",
+    /**
+     * Issue #793: lifecycle of the initial tail load. The screen consults
+     * this to show "Loading conversation…", a clear empty/failed terminal
+     * state, or the populated feed — instead of an infinite
+     * "Waiting for agent…" spinner. Defaults to [ConversationLoadState.Ready]
+     * so the many pre-existing callers that synthesize a populated state
+     * (tests, restored runtimes, optimistic seeds) keep rendering the feed
+     * without opting in; the production initial-load path explicitly moves
+     * the row through [ConversationLoadState.Loading] → terminal.
+     */
+    val loadState: ConversationLoadState = ConversationLoadState.Ready,
+    /**
+     * Issue #793: true when older messages exist *before* the currently
+     * loaded tail window and can be paged in on upward scroll. The tail-first
+     * load deliberately fetches only the most recent messages on open; this
+     * flag tells the pane to surface a "load older" affordance / trigger.
+     */
+    val hasMoreOlderEvents: Boolean = false,
+    /**
+     * Issue #793: true while a page-older fetch is in flight, so the pane can
+     * show a top-of-list progress row and avoid firing duplicate paging
+     * requests for the same scroll.
+     */
+    val isPagingOlder: Boolean = false,
 )
 
 /**

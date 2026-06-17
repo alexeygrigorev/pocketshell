@@ -245,6 +245,49 @@ internal const val DEFAULT_MAX_AGENT_EVENTS: Int = 500
  */
 internal const val JSONL_RAW_LINES_PER_EVENT: Int = 8
 
+/**
+ * Issue #793: first-paint message budget for the tail-first conversation
+ * load. Opening the Conversation tab reads only the most recent
+ * [FIRST_PAINT_MESSAGE_BUDGET] messages so the tail paints quickly instead of
+ * blocking on the whole history (the old [DEFAULT_MAX_AGENT_EVENTS]-wide read
+ * pulled ~500 messages × [JSONL_RAW_LINES_PER_EVENT] raw lines before showing
+ * a single row). Older messages are paged in lazily on upward scroll via
+ * [AgentConversationRepository.readEventsWindow]. Sized to comfortably fill
+ * the viewport plus a scroll buffer on a phone.
+ */
+internal const val FIRST_PAINT_MESSAGE_BUDGET: Int = 30
+
+/**
+ * Issue #793: message budget for a stream RE-FETCH (the user tapped Retry on a
+ * Stale/LogUnavailable feed). A retry re-reads a transcript the user was
+ * already viewing, so it uses the legacy 200-message window (not the small
+ * first-paint tail) to preserve the prior #460 behaviour of keeping user turns
+ * visible amidst a heavy tool flood. The first-OPEN path stays on the small
+ * [FIRST_PAINT_MESSAGE_BUDGET].
+ */
+internal const val DEFAULT_RETRY_MESSAGE_BUDGET: Int = 200
+
+/**
+ * Issue #793: how much the loaded window grows on each upward-scroll page.
+ * Each page roughly triples the message budget (capped at
+ * [DEFAULT_MAX_AGENT_EVENTS]) so a user scrolling up reaches older turns
+ * quickly without ever paying for the full history up front.
+ */
+internal const val OLDER_PAGE_GROWTH_FACTOR: Int = 3
+
+/**
+ * Issue #793: result of a windowed tail read. Carries the parsed [events] for
+ * the requested window plus [hasMoreOlder] — whether the on-server transcript
+ * holds messages OLDER than the oldest event returned, i.e. whether an upward
+ * scroll can page in more. The flag is derived from the raw line/row count the
+ * read scanned vs. the total available, so the UI never shows a dead "load
+ * older" affordance once the whole history is in the window.
+ */
+public data class ConversationEventsWindow(
+    val events: List<ConversationEvent>,
+    val hasMoreOlder: Boolean,
+)
+
 private const val PROCESS_TREE_SCAN_COMMAND: String =
     "ps -eo pid,ppid,tty,comm,args 2>/dev/null | " +
         "grep -E 'claude|codex|opencode|node' | grep -v grep || true"
@@ -625,6 +668,97 @@ public class AgentConversationRepository internal constructor(
             "tail -n $rawLineBudget ${shellQuote(detection.sourcePath)} 2>/dev/null || true",
         )
         return result.stdout.lineSequence().flatMap { parser.parseLine(it) }.toList()
+    }
+
+    /**
+     * Issue #793: tail-first windowed read. Returns the most recent
+     * [maxMessages] messages of the transcript PLUS whether older messages
+     * exist before the window (so the UI can offer upward paging). This is the
+     * fast-open primitive: the Conversation tab calls it with the small
+     * [FIRST_PAINT_MESSAGE_BUDGET] for first paint, then re-calls it with a
+     * larger budget as the user scrolls up — never reading the whole history
+     * up front.
+     *
+     * The `hasMoreOlder` signal is derived per engine from the raw line/row
+     * count the read scanned vs. the total available, so a window that already
+     * covers the entire transcript reports `hasMoreOlder = false` and the pane
+     * stops trying to page.
+     */
+    suspend fun readEventsWindow(
+        session: SshSession,
+        detection: AgentDetection,
+        maxMessages: Int,
+    ): ConversationEventsWindow {
+        val budget = maxMessages.coerceAtLeast(1)
+        if (detection.isOpenCodeSqlite()) {
+            val output = exportOpenCodeSqliteRows(session, detection, maxMessages = budget)
+            val events = OpenCodeReader().parseSqliteJsonRows(output)
+            // The SQL LIMIT is on the `message` table; distinct message ids in
+            // the window approximate "rows read". If we filled the limit there
+            // are (very likely) older messages we did not pull.
+            val distinctMessages = events.asSequence().map { it.id }.distinct().count()
+            return ConversationEventsWindow(
+                events = events,
+                hasMoreOlder = distinctMessages >= budget,
+            )
+        }
+        if (detection.agent == AgentKind.Codex) {
+            val rawBudget = (budget * JSONL_RAW_LINES_PER_EVENT).coerceAtLeast(budget)
+            val (events, rawLineCount) = readCodexWindow(session, detection, budget)
+            return ConversationEventsWindow(
+                events = events,
+                hasMoreOlder = rawLineCount >= rawBudget,
+            )
+        }
+        val parser = parserFor(detection.agent)
+            ?: return ConversationEventsWindow(emptyList(), hasMoreOlder = false)
+        val rawLineBudget = (budget * JSONL_RAW_LINES_PER_EVENT).coerceAtLeast(budget)
+        // ONE round-trip: emit the total line count, a sentinel, then the tail
+        // window. We compare the total against the window size to know whether
+        // older raw lines (hence older turns) exist before the window.
+        val sentinel = "@@PS_WINDOW@@"
+        val result = session.exec(
+            "wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0; " +
+                "printf '%s\\n' $sentinel; " +
+                "tail -n $rawLineBudget ${shellQuote(detection.sourcePath)} 2>/dev/null || true",
+        )
+        val lines = result.stdout.split("\n")
+        val sentinelIndex = lines.indexOf(sentinel)
+        val totalLines = if (sentinelIndex >= 0) {
+            lines.take(sentinelIndex).joinToString("").trim().toLongOrNull() ?: 0L
+        } else {
+            0L
+        }
+        val tailRawLines = if (sentinelIndex >= 0) {
+            lines.drop(sentinelIndex + 1)
+        } else {
+            lines
+        }
+        val events = tailRawLines.asSequence().flatMap { parser.parseLine(it) }.toList()
+        return ConversationEventsWindow(
+            events = events,
+            hasMoreOlder = totalLines > rawLineBudget,
+        )
+    }
+
+    private suspend fun readCodexWindow(
+        session: SshSession,
+        detection: AgentDetection,
+        maxMessages: Int,
+    ): Pair<List<ConversationEvent>, Int> {
+        val sessionId = detection.sessionId?.takeIf { it.isNotBlank() }
+            ?: detection.sourcePath.substringAfterLast('/').substringBeforeLast('.')
+        if (sessionId.isBlank()) return emptyList<ConversationEvent>() to 0
+        val boundedMaxLines = (maxMessages * JSONL_RAW_LINES_PER_EVENT)
+            .coerceAtLeast(maxMessages)
+            .coerceAtLeast(1)
+        val output = session.exec(
+            "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
+                "--json --tail $boundedMaxLines 2>/dev/null || true",
+        ).stdout
+        val lines = parseAgentLogEnvelopeLines(output)
+        val parser = CodexParser()
+        return lines.asSequence().flatMap { parser.parseLine(it) }.toList() to lines.size
     }
 
     fun tailEvents(

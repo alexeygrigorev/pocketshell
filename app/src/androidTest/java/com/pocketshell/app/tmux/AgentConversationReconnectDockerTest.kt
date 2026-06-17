@@ -368,7 +368,7 @@ class AgentConversationReconnectDockerTest {
      * forever, so the OLD code would have swallowed the Conversation tap
      * indefinitely. We assert the tap is now honoured end-to-end: the VM records
      * `selectedTab = Conversation` on a detection-less row (the state that drives
-     * the "Waiting for agent…" placeholder), and `agentForWindow` stays null
+     * the "Loading conversation…" placeholder), and `agentForWindow` stays null
      * (proving we exercised the no-detection placeholder path, not the
      * real-transcript path).
      */

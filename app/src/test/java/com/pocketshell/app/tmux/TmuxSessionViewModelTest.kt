@@ -10,6 +10,9 @@ import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationSyncStatus
+import com.pocketshell.app.session.ConversationLoadState
+import com.pocketshell.app.session.FIRST_PAINT_MESSAGE_BUDGET
+import com.pocketshell.app.session.JSONL_RAW_LINES_PER_EVENT
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -5517,6 +5520,191 @@ class TmuxSessionViewModelTest {
         sessionId = "xyz",
         confidence = AgentDetection.Confidence.ProcessConfirmed,
     )
+
+    // ─── Issue #793: tail-first conversation load + load state machine ───
+
+    @Test
+    fun openingLargeConversationLoadsTailWithoutFetchingWholeHistory() = runTest(scheduler) {
+        // REGRESSION PROOF (#793): a LARGE transcript (5000 raw lines on the
+        // server). Opening the Conversation tab must render the TAIL quickly
+        // WITHOUT fetching the whole history first, and report that older
+        // messages remain to page in.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        // The tail window the server returns: only the most recent turns.
+        val tailJsonl = listOf(
+            """{"type":"user","uuid":"u4999","message":{"role":"user","content":"the latest question"}}""",
+            """{"type":"assistant","uuid":"a4999","message":{"role":"assistant","content":"the latest answer"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(
+            wcOutput = "5000\n",
+            initialEventsOutput = tailJsonl,
+        )
+
+        vm.startAgentConversationForPaneForTest(
+            paneId = "%0",
+            session = session,
+            detection = detection,
+        )
+        advanceUntilIdle()
+
+        val state = vm.agentConversations.value["%0"]!!
+        // The tail rendered.
+        assertEquals(
+            listOf("the latest question", "the latest answer"),
+            state.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+        // Load resolved to a clear terminal state (Ready), NOT a stuck spinner.
+        assertEquals(ConversationLoadState.Ready, state.loadState)
+        // Older messages remain → the pane offers upward paging.
+        assertTrue("older messages must be pageable", state.hasMoreOlderEvents)
+
+        // The CORE assertion: the open did NOT fetch the whole history. The
+        // only window read is capped at the first-paint raw budget
+        // (FIRST_PAINT_MESSAGE_BUDGET * JSONL_RAW_LINES_PER_EVENT raw lines),
+        // far below the 5000-line file.
+        val windowCommand = session.execCommands.single { it.contains("@@PS_WINDOW@@") }
+        val firstPaintRawBudget = FIRST_PAINT_MESSAGE_BUDGET * JSONL_RAW_LINES_PER_EVENT
+        assertTrue(
+            "expected a first-paint-budget tail; got $windowCommand",
+            windowCommand.contains("tail -n $firstPaintRawBudget "),
+        )
+        // No wide 500-message (=4000 raw line) eager read was issued.
+        val eagerRawBudget = 500 * JSONL_RAW_LINES_PER_EVENT
+        assertFalse(
+            "the eager full-history read path must be gone (D22 hard-cut)",
+            session.execCommands.any { it.contains("tail -n $eagerRawBudget ") },
+        )
+    }
+
+    @Test
+    fun openingExistingConversationStartsInLoadingThenReady() = runTest(scheduler) {
+        // Problem 1/2 (#793): the Conversation tab shows a "Loading
+        // conversation…" state (loadState == Loading) while the tail read is in
+        // flight, and resolves to Ready — never a stuck "Waiting for agent…".
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "node", paneIndex = 0)),
+        )
+        val detection = newClaudeDetection()
+        val execGate = CompletableDeferred<Unit>()
+        val session = FakeSshSession(
+            wcOutput = "10\n",
+            initialEventsOutput =
+                """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"hi"}}""",
+            execGate = execGate,
+        )
+
+        // Realistic flow: the user opens the Conversation tab (seeds a Loading
+        // placeholder row), THEN detection lands and the transcript loads.
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+        assertEquals(ConversationLoadState.Loading, vm.agentConversations.value["%0"]!!.loadState)
+
+        val loadJob = backgroundScope.launch {
+            vm.startAgentConversationForPaneForTest("%0", session, detection)
+        }
+        runCurrent()
+        // While the read is gated (in flight), the row is still Loading.
+        assertEquals(ConversationLoadState.Loading, vm.agentConversations.value["%0"]!!.loadState)
+
+        // Release the read; it resolves to Ready.
+        execGate.complete(Unit)
+        advanceUntilIdle()
+        loadJob.join()
+        assertEquals(ConversationLoadState.Ready, vm.agentConversations.value["%0"]!!.loadState)
+    }
+
+    @Test
+    fun conversationLoadWatchdogFlipsLoadingToFailedSoItNeverSpinsForever() = runTest(scheduler) {
+        // Problem 2 (#793): a never-completing load (the transport flap symptom)
+        // must surface a clear Failed terminal state, not an infinite spinner.
+        // Drive the detection-pending placeholder path (selectSessionTab seeds a
+        // detection-less Loading row + arms the watchdog).
+        val vm = newVm()
+        vm.setConversationLoadTimeoutForTest(1_000L)
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "node", paneIndex = 0)),
+        )
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+        assertEquals(ConversationLoadState.Loading, vm.agentConversations.value["%0"]!!.loadState)
+
+        // Time passes with no detection/transcript ever landing.
+        advanceTimeBy(1_500L)
+        runCurrent()
+        assertEquals(
+            "the watchdog must flip a never-completing load to Failed",
+            ConversationLoadState.Failed,
+            vm.agentConversations.value["%0"]!!.loadState,
+        )
+    }
+
+    @Test
+    fun emptyTranscriptResolvesToEmptyTerminalStateNotSpinner() = runTest(scheduler) {
+        // Problem 2 (#793): a successful read of an empty transcript surfaces a
+        // clear Empty state, not a stuck spinner.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        val session = FakeSshSession(wcOutput = "0\n", initialEventsOutput = "")
+
+        vm.startAgentConversationForPaneForTest("%0", session, detection)
+        advanceUntilIdle()
+
+        val state = vm.agentConversations.value["%0"]!!
+        assertEquals(ConversationLoadState.Empty, state.loadState)
+        assertTrue(state.events.isEmpty())
+        assertFalse(state.hasMoreOlderEvents)
+    }
+
+    @Test
+    fun loadingOlderEventsWidensWindowAndPrependsOlderMessages() = runTest(scheduler) {
+        // AC3 (#793): older messages page in lazily on upward scroll, preserving
+        // the already-loaded tail (the merge keeps newer events in place).
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        // First paint: a large file, small tail.
+        val firstPaintTail =
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":"recent"}}"""
+        val session = FakeSshSession(
+            wcOutput = "5000\n",
+            initialEventsOutput = firstPaintTail,
+        )
+        // loadOlderAgentConversationEvents reads sessionRef + activeTarget, so
+        // wire the same session as the live runtime session for the pane.
+        vm.attachSessionForAgentRetryForTest(session)
+        vm.startAgentConversationForPaneForTest("%0", session, detection)
+        advanceUntilIdle()
+        assertTrue(vm.agentConversations.value["%0"]!!.hasMoreOlderEvents)
+
+        // The page-older read returns a WIDER window that includes an older
+        // message AHEAD of the recent one.
+        session.setInitialEventsOutput(
+            listOf(
+                """{"type":"user","uuid":"u1","message":{"role":"user","content":"older"}}""",
+                """{"type":"user","uuid":"u2","message":{"role":"user","content":"recent"}}""",
+            ).joinToString("\n"),
+        )
+        session.setWcOutput("12\n") // now the wider window covers the whole file
+
+        vm.loadOlderAgentConversationEvents("%0")
+        advanceUntilIdle()
+
+        val state = vm.agentConversations.value["%0"]!!
+        assertEquals(
+            "older message must be prepended ahead of the recent one",
+            listOf("older", "recent"),
+            state.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+        assertFalse("the whole file is now in the window", state.hasMoreOlderEvents)
+        assertFalse(state.isPagingOlder)
+    }
 
     @Test
     fun detectedAgentConversationStartsWithoutHintPopupState() = runTest(scheduler) {
@@ -11542,8 +11730,10 @@ class TmuxSessionViewModelTest {
         private val isConnectedValue: Boolean = true,
         private val tailJob: CompletableJob = Job(),
         private val execGate: CompletableDeferred<Unit>? = null,
-        private val wcOutput: String = "0\n",
-        private val initialEventsOutput: String = "",
+        // Issue #793: mutable so a paging test can widen the window the fake
+        // returns between the first-paint read and a load-older read.
+        private var wcOutput: String = "0\n",
+        private var initialEventsOutput: String = "",
         private val agentLogLines: List<String>? = null,
         private val execFailure: Throwable? = null,
         private val tailFailure: Throwable? = null,
@@ -11560,6 +11750,10 @@ class TmuxSessionViewModelTest {
 
         val execCommands = mutableListOf<String>()
 
+        // Issue #793: let a paging test reprogram the window the fake returns.
+        fun setWcOutput(value: String) { wcOutput = value }
+        fun setInitialEventsOutput(value: String) { initialEventsOutput = value }
+
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
 
@@ -11571,6 +11765,12 @@ class TmuxSessionViewModelTest {
                 command.contains("ss -tlnp") ->
                     ssListeningPorts.joinToString("\n") { "0.0.0.0:$it users:((\"server\",pid=1,fd=3))" }
                 command.contains("netstat -tlnp") || command.contains("ss -tln") -> ""
+                // Issue #793: the windowed read (readEventsWindow) combines
+                // wc -l + a sentinel + the tail into ONE round-trip. Answer in
+                // that shape so the repository can split total-lines from the
+                // tail window.
+                command.contains("@@PS_WINDOW@@") ->
+                    "${wcOutput.trim()}\n@@PS_WINDOW@@\n$initialEventsOutput"
                 command.contains("wc -l < ") -> wcOutput
                 command.contains("pocketshell agent-log") -> agentLogEnvelope(command) ?: initialEventsOutput
                 command.startsWith("tail -n ") -> initialEventsOutput

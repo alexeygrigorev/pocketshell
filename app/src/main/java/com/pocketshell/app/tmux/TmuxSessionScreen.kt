@@ -119,6 +119,7 @@ import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.layout.rememberTmuxImeLayoutState
 import com.pocketshell.app.projects.SessionTypePickerSheet
 import com.pocketshell.app.session.AgentConversationSyncStatus
+import com.pocketshell.app.session.ConversationLoadState
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.ConversationLinkAction
 import com.pocketshell.app.session.ConversationSyncStatusRow
@@ -1521,6 +1522,30 @@ public fun TmuxSessionScreen(
                     // attaches on the NEXT frame, never sharing a frame with the
                     // teardown. The latch self-clears after one frame.
                     SwitchingLoadingPlaceholder()
+                } else if (showConversation &&
+                    visibleConversation.events.isEmpty() &&
+                    visibleConversation.loadState == ConversationLoadState.Loading
+                ) {
+                    // Issue #793: detection landed but the first-paint tail read
+                    // is still in flight and no events are in yet — show
+                    // "Loading conversation…" instead of a misleading
+                    // "No conversation events yet." for a transcript that DOES
+                    // have history. The pane takes over the instant the tail
+                    // seeds (or the load resolves Empty/Failed below).
+                    ConversationDetectingPlaceholder(
+                        loadState = ConversationLoadState.Loading,
+                    )
+                } else if (showConversation &&
+                    visibleConversation.events.isEmpty() &&
+                    visibleConversation.loadState == ConversationLoadState.Failed
+                ) {
+                    // Issue #793: the initial load could not complete — a clear
+                    // terminal error with Retry, never an infinite spinner.
+                    val paneIdForSend = currentPane!!.paneId
+                    ConversationDetectingPlaceholder(
+                        loadState = ConversationLoadState.Failed,
+                        onRetry = { viewModel.retryAgentConversationLoad(paneIdForSend) },
+                    )
                 } else if (showConversation) {
                     val paneIdForSend = currentPane!!.paneId
                     // Issue #459: the Conversation pane is now read-only
@@ -1547,6 +1572,14 @@ public fun TmuxSessionScreen(
                         },
                         paneId = paneIdForSend,
                         syncStatus = visibleConversation.syncStatus,
+                        // Issue #793: tail-first paging. The pane fires this when
+                        // the user scrolls near the top; the VM widens the loaded
+                        // window and prepends older messages, preserving position.
+                        hasMoreOlderEvents = visibleConversation.hasMoreOlderEvents,
+                        isPagingOlder = visibleConversation.isPagingOlder,
+                        onLoadOlderEvents = {
+                            viewModel.loadOlderAgentConversationEvents(paneIdForSend)
+                        },
                         onRetryAgentStream = {
                             viewModel.retryAgentConversationStreamForPane(paneIdForSend)
                         },
@@ -1596,10 +1629,21 @@ public fun TmuxSessionScreen(
                 } else if (showConversationPlaceholder) {
                     // Issue #778: the user tapped Conversation on a presumed-agent
                     // pane before live detection landed. Render a lightweight
-                    // "waiting for agent" placeholder (no [TmuxConversationPane],
-                    // so no empty-transcript crash and no #605 teardown race). The
-                    // real conversation replaces this the instant detection seeds.
-                    ConversationDetectingPlaceholder()
+                    // loading placeholder (no [TmuxConversationPane], so no
+                    // empty-transcript crash and no #605 teardown race). The real
+                    // conversation replaces this the instant detection seeds.
+                    // Issue #793: surface the row's load state — "Loading
+                    // conversation…" while detection/transcript is in flight, or
+                    // a clear Failed terminal state (with Retry) once the
+                    // watchdog trips, instead of an infinite "Waiting for agent…"
+                    // spinner.
+                    ConversationDetectingPlaceholder(
+                        loadState = visibleConversation?.loadState
+                            ?: ConversationLoadState.Loading,
+                        onRetry = {
+                            surfacePane?.paneId?.let { viewModel.retryAgentConversationLoad(it) }
+                        },
+                    )
                 } else if (unifiedPanes.isEmpty()) {
                     EmptyPanesPlaceholder()
                 } else {
@@ -3259,9 +3303,19 @@ internal const val TMUX_SESSION_DRAWER_CREATE_TAG = "tmux:session-drawer:create"
 internal const val TMUX_SESSION_DRAWER_REFRESH_TAG = "tmux:session-drawer:refresh"
 internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
 
-// Issue #778: test tag on the "waiting for agent" placeholder shown when the
-// user taps Conversation on a presumed-agent pane before live detection lands.
+// Issue #778: test tag on the conversation-loading placeholder shown when the
+// user taps Conversation before the transcript is ready. Issue #793 widened
+// this placeholder to a full load state machine (Loading / Failed / Empty).
 internal const val TMUX_CONVERSATION_DETECTING_TAG = "tmux:conversation:detecting"
+
+// Issue #793: test tags on the terminal conversation-load states (no infinite
+// spinner). Failed = clear error + retry; Empty = clear "no events" state.
+internal const val TMUX_CONVERSATION_LOAD_FAILED_TAG = "tmux:conversation:load-failed"
+internal const val TMUX_CONVERSATION_LOAD_RETRY_TAG = "tmux:conversation:load-retry"
+internal const val TMUX_CONVERSATION_LOAD_EMPTY_TAG = "tmux:conversation:load-empty"
+// Issue #793: top-of-list progress row shown while older messages page in on
+// upward scroll (tail-first windowed load).
+internal const val TMUX_CONVERSATION_PAGING_OLDER_TAG = "tmux:conversation:paging-older"
 
 // Issue #423: actionable terminal-surface error state. Shown for a pane
 // whose local Termux surface failed to recover after a recovery storm
@@ -3777,7 +3831,15 @@ internal fun FailedConnectionRow(
  * Conversation tap lands before detection.
  */
 @Composable
-internal fun ConversationDetectingPlaceholder() {
+internal fun ConversationDetectingPlaceholder(
+    // Issue #793: the full-screen state shown BEFORE the transcript renders.
+    // Loading → "Loading conversation…" (NOT "Waiting for agent…", which is
+    // reserved for a genuinely-pending live agent turn). Failed → a clear
+    // terminal error with a Retry, never an infinite spinner. Empty → a clear
+    // "no messages yet" terminal state.
+    loadState: ConversationLoadState = ConversationLoadState.Loading,
+    onRetry: () -> Unit = {},
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -3785,10 +3847,37 @@ internal fun ConversationDetectingPlaceholder() {
             .testTag(TMUX_CONVERSATION_DETECTING_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        LoadingIndicator.Spinner(
-            size = SpinnerSize.Medium,
-            label = "Waiting for agent…",
-        )
+        when (loadState) {
+            ConversationLoadState.Failed -> Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .padding(horizontal = 24.dp)
+                    .testTag(TMUX_CONVERSATION_LOAD_FAILED_TAG),
+            ) {
+                Text(
+                    text = "Couldn't load this conversation.",
+                    color = PocketShellColors.Text,
+                    fontSize = 16.sp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                TextButton(
+                    onClick = onRetry,
+                    modifier = Modifier.testTag(TMUX_CONVERSATION_LOAD_RETRY_TAG),
+                ) {
+                    Text("Retry")
+                }
+            }
+            ConversationLoadState.Empty -> Text(
+                text = "No conversation events yet.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 14.sp,
+                modifier = Modifier.testTag(TMUX_CONVERSATION_LOAD_EMPTY_TAG),
+            )
+            else -> LoadingIndicator.Spinner(
+                size = SpinnerSize.Medium,
+                label = "Loading conversation…",
+            )
+        }
     }
 }
 
@@ -3933,6 +4022,14 @@ internal fun TmuxConversationPane(
     onQueryChange: (String) -> Unit = NoOpStringChange,
     paneId: String? = null,
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
+    // Issue #793: tail-first paging. [hasMoreOlderEvents] is true when older
+    // messages exist before the loaded window; the pane fires
+    // [onLoadOlderEvents] when the user scrolls near the top to page them in,
+    // and shows a top-of-list progress row while [isPagingOlder] is true.
+    // Defaults keep direct/screenshot callers (no paging) rendering as before.
+    hasMoreOlderEvents: Boolean = false,
+    isPagingOlder: Boolean = false,
+    onLoadOlderEvents: () -> Unit = {},
     onRetryAgentStream: () -> Unit = {},
     // Issue #494: retry a failed optimistic user send (passes its optimistic
     // id). Default no-op for screenshot/legacy callers.
@@ -4007,6 +4104,23 @@ internal fun TmuxConversationPane(
         }
     }
 
+    // Issue #793: tail-first upward paging. When the user scrolls near the TOP
+    // of the loaded window and older messages exist, fire [onLoadOlderEvents] so
+    // the VM widens the window and prepends older turns. Gated on an unfiltered
+    // view (paging a filtered list is confusing) and on not already paging. The
+    // VM merge preserves the already-loaded tail, so the user's scroll position
+    // holds — the newly-prepended older rows simply extend the list upward.
+    if (hasMoreOlderEvents && effectiveQuery.isBlank()) {
+        val nearTop by remember {
+            derivedStateOf { listState.firstVisibleItemIndex <= 2 }
+        }
+        LaunchedEffect(nearTop, hasMoreOlderEvents, isPagingOlder) {
+            if (nearTop && hasMoreOlderEvents && !isPagingOlder) {
+                onLoadOlderEvents()
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .background(color = PocketShellColors.Background)
@@ -4041,6 +4155,24 @@ internal fun TmuxConversationPane(
                 contentPadding = PaddingValues(start = 0.dp, end = 0.dp, top = 8.dp, bottom = 72.dp),
                 verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
+                // Issue #793: top-of-list progress row while older messages are
+                // being paged in on upward scroll.
+                if (isPagingOlder && effectiveQuery.isBlank()) {
+                    item(key = "ps-paging-older") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp)
+                                .testTag(TMUX_CONVERSATION_PAGING_OLDER_TAG),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            LoadingIndicator.Spinner(
+                                size = SpinnerSize.Small,
+                                label = "Loading earlier messages…",
+                            )
+                        }
+                    }
+                }
                 if (filteredEvents.isEmpty()) {
                     item {
                         Text(

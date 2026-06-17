@@ -33,6 +33,11 @@ import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.ConversationEventsWindow
+import com.pocketshell.app.session.ConversationLoadState
+import com.pocketshell.app.session.DEFAULT_RETRY_MESSAGE_BUDGET
+import com.pocketshell.app.session.FIRST_PAINT_MESSAGE_BUDGET
+import com.pocketshell.app.session.OLDER_PAGE_GROWTH_FACTOR
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.canRetryAgentStream
@@ -226,6 +231,23 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setReconcileDispatcherForTest(dispatcher: CoroutineDispatcher) {
         reconcileDispatcher = dispatcher
+    }
+
+    /**
+     * Issue #793: how long the Conversation tab stays in the
+     * [ConversationLoadState.Loading] ("Loading conversation…") state before
+     * the load watchdog flips it to [ConversationLoadState.Failed]. Bounds the
+     * spinner so a never-completing first-paint read (e.g. the epic #792
+     * transport flap) surfaces a clear terminal state instead of hanging
+     * forever. NOT a constructor parameter so the Hilt `@Inject` graph stays
+     * free of a bare `Long`; a unit test shrinks it via
+     * [setConversationLoadTimeoutForTest] to assert the watchdog deterministically.
+     */
+    private var conversationLoadTimeoutMs: Long = CONVERSATION_LOAD_TIMEOUT_MS
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setConversationLoadTimeoutForTest(timeoutMs: Long) {
+        conversationLoadTimeoutMs = timeoutMs
     }
 
     /**
@@ -1059,6 +1081,9 @@ public class TmuxSessionViewModel @Inject constructor(
     // [AGENT_EXIT_CONFIRMATIONS] consecutive nulls do we treat the agent as
     // genuinely exited and reconcile it away.
     private val paneAgentNullDetections: MutableMap<String, Int> = ConcurrentHashMap()
+    // Issue #793: per-pane conversation-load watchdog. Flips a never-completing
+    // "Loading conversation…" state to Failed so the tab can't spin forever.
+    private val conversationLoadWatchdogJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneInputQueues: MutableMap<String, TmuxPaneInputQueue> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
@@ -3343,6 +3368,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneSurfaceRecoveryTimestamps.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
+        conversationLoadWatchdogJobs.values.forEach { it.cancel() }
+        conversationLoadWatchdogJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
@@ -3438,6 +3465,11 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputJobs.putAll(runtime.paneInputJobs)
         paneSurfaceRecoveryTimestamps.clear()
         paneAgentJobs.clear()
+        // Issue #793: drop any pending load watchdogs from the prior runtime so
+        // a restored, already-populated conversation row is not flipped to
+        // Failed by a stale timer.
+        conversationLoadWatchdogJobs.values.forEach { it.cancel() }
+        conversationLoadWatchdogJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
@@ -6929,6 +6961,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // Issue #448: stop the new-port detector for a removed pane.
             panePortDetectorJobs.remove(paneId)?.cancel()
             paneAgentJobs.remove(paneId)?.cancel()
+            conversationLoadWatchdogJobs.remove(paneId)?.cancel()
             paneAgentTailGenerations.remove(paneId)
             paneAgentInputs.remove(paneId)
             paneAgentNullDetections.remove(paneId)
@@ -8177,9 +8210,21 @@ public class TmuxSessionViewModel @Inject constructor(
         // phantom Conversation tab. Forget BEFORE dropping the row so the
         // window lookup still resolves.
         forgetAgentStatusForPane(paneId)
+        var rowDropped = false
         updateAgentConversation(paneId) { current ->
-            if (current.detection == null) current else null
+            if (current.detection == null) {
+                current
+            } else {
+                rowDropped = true
+                null
+            }
         }
+        // Issue #793: a removed row has no surface to load into — stop its
+        // watchdog. A KEPT detection-less placeholder row (a presumed-agent
+        // pane the user is on whose detection never landed) intentionally
+        // retains its watchdog so the "Loading conversation…" state still
+        // resolves to a clear Failed terminal state.
+        if (rowDropped) cancelConversationLoadWatchdog(paneId)
     }
 
     private suspend fun startAgentConversationForPane(
@@ -8187,7 +8232,18 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         detection: AgentDetection,
         refreshGuard: RuntimeRefreshGuard? = null,
+        // Issue #793: tail window size. The first-OPEN path uses the small
+        // first-paint budget for a fast tail; the stream-RETRY path
+        // ([retryAgentConversationForPane]) passes the user's currently-loaded
+        // window size so a re-fetch does not silently shrink an already-paged
+        // transcript back to the first-paint tail.
+        maxMessages: Int = FIRST_PAINT_MESSAGE_BUDGET,
     ) {
+        // Issue #793: a real detection landed for this pane; the transcript is
+        // now actively loading. Move the row into the Loading state so the
+        // Conversation tab shows "Loading conversation…" (not the old
+        // "Waiting for agent…") and the detection-pending watchdog stops.
+        markConversationLoading(paneId)
         val lineCount = recoverAgentConversationStartupRead(
             paneId = paneId,
             detection = detection,
@@ -8196,16 +8252,45 @@ public class TmuxSessionViewModel @Inject constructor(
         ) {
             agentRepository.lineCount(session, detection)
         }
-        val initialEvents = recoverAgentConversationStartupRead(
-            paneId = paneId,
-            detection = detection,
-            operation = "initial_read",
-            fallback = emptyList(),
-        ) {
-            agentRepository.readInitialEvents(session, detection)
+        // Issue #793: tail-first windowed read. Fetch only the most recent
+        // [maxMessages] messages so the tail paints quickly instead of blocking
+        // on the whole history. Older messages page in lazily on upward scroll
+        // (loadOlderAgentConversationEvents). A read failure is surfaced as a
+        // terminal Failed state — never an infinite spinner — via the explicit
+        // catch below.
+        var loadFailed = false
+        val window = try {
+            agentRepository.readEventsWindow(
+                session = session,
+                detection = detection,
+                maxMessages = maxMessages,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Exception) {
+            recordAgentConversationTailStatus(
+                paneId = paneId,
+                detection = detection,
+                status = AgentConversationSyncStatus.LogUnavailable,
+                cause = t,
+                reason = "initial_window_read",
+            )
+            loadFailed = true
+            ConversationEventsWindow(emptyList(), hasMoreOlder = false)
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
+        val initialEvents = window.events
         markAgentTailLive(paneId, detection, initialEvents)
+        // Issue #793: record the terminal load outcome for the pane so the
+        // screen renders the right state — Ready (feed), Empty (clear "no
+        // events" terminal state), or Failed (clear error + retry).
+        markConversationLoadOutcome(
+            paneId = paneId,
+            detection = detection,
+            loadedEvents = initialEvents,
+            hasMoreOlder = window.hasMoreOlder,
+            failed = loadFailed,
+        )
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
         // identically to Claude and Codex. No more polling branch — the
         // tmux pane gets the same real-time refresh as the raw-SSH route.
@@ -8272,16 +8357,30 @@ public class TmuxSessionViewModel @Inject constructor(
         ) {
             agentRepository.lineCount(session, detection)
         }
+        // Issue #793: tail-first windowed read on reconnect-restore too. On a
+        // read failure we keep the previously-restored events (the reconnect
+        // fallback) rather than blanking the pane.
+        var restoreHasMoreOlder = restored.hasMoreOlderEvents
         val initialEvents = recoverAgentConversationStartupRead(
             paneId = paneId,
             detection = detection,
             operation = "restore_initial_read",
             fallback = restored.events,
         ) {
-            agentRepository.readInitialEvents(session, detection)
+            agentRepository.readEventsWindow(
+                session = session,
+                detection = detection,
+                maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+            ).also { restoreHasMoreOlder = it.hasMoreOlder }.events
         }
         if (!isCurrentRuntime(refreshGuard)) return
         markRestoredAgentTailLive(paneId, detection, initialEvents)
+        updateAgentConversation(paneId) { current ->
+            current.copy(
+                loadState = ConversationLoadState.Ready,
+                hasMoreOlderEvents = restoreHasMoreOlder,
+            )
+        }
         // Issue #576: batched/debounced tail (see startAgentConversationForPane).
         val followJob = agentRepository.tailEventsBatchedFromLine(session, detection, lineCount) { batch ->
             appendAgentEvents(paneId, batch)
@@ -8727,8 +8826,14 @@ public class TmuxSessionViewModel @Inject constructor(
                     events = emptyList(),
                     selectedTab = SessionTab.Conversation,
                     syncStatus = AgentConversationSyncStatus.Live,
+                    // Issue #793: the user opened the Conversation tab; the
+                    // transcript is loading (or detection is still warming).
+                    // Show "Loading conversation…" + arm the watchdog so a
+                    // never-arriving detection/read can't spin forever.
+                    loadState = ConversationLoadState.Loading,
                 ),
             )
+            armConversationLoadWatchdog(paneId)
             DiagnosticEvents.record(
                 "action",
                 "session_tab_select",
@@ -8755,6 +8860,24 @@ public class TmuxSessionViewModel @Inject constructor(
             updateAgentConversation(paneId) { current ->
                 current.copy(selectedTab = tab)
             }
+        }
+        // Issue #793: arm the load watchdog when the user opens the
+        // Conversation tab on a row whose transcript has not loaded yet
+        // (detection still warming, or a previously-Failed load the user is
+        // re-opening). Leaving the tab stops the spinner bookkeeping.
+        if (tab == SessionTab.Conversation) {
+            if (before.loadState == ConversationLoadState.Loading ||
+                (before.loadState == ConversationLoadState.Failed && before.events.isEmpty())
+            ) {
+                if (before.loadState != ConversationLoadState.Loading) {
+                    updateAgentConversation(paneId) { current ->
+                        current.copy(loadState = ConversationLoadState.Loading)
+                    }
+                }
+                armConversationLoadWatchdog(paneId)
+            }
+        } else {
+            cancelConversationLoadWatchdog(paneId)
         }
         if (changed) {
             DiagnosticEvents.record(
@@ -8828,6 +8951,35 @@ public class TmuxSessionViewModel @Inject constructor(
         return true
     }
 
+    /**
+     * Issue #793: retry the INITIAL transcript load after it ended in the
+     * Failed terminal state (the "Loading conversation…" watchdog tripped, or
+     * the first-paint read threw). Unlike [retryAgentConversationStreamForPane]
+     * — which retries a Stale/LogUnavailable *stream* on an already-detected
+     * pane — this re-arms the Loading state and re-runs detection + the
+     * tail-first windowed read, so it also recovers a presumed-agent
+     * placeholder whose detection never landed. No-op when there is no live
+     * session/pane to load from.
+     */
+    public fun retryAgentConversationLoad(paneId: String): Boolean {
+        val session = sessionRef?.takeIf { it.isConnected } ?: return false
+        val pane = paneRows[paneId] ?: return false
+        // Re-enter the Loading state (and re-arm the watchdog) before kicking a
+        // fresh detection so the UI flips back to "Loading conversation…".
+        markConversationLoading(paneId)
+        DiagnosticEvents.record(
+            "action",
+            "tmux_agent_conversation_load_retry",
+            "paneId" to paneId,
+        )
+        // Clear the detection de-dup key so startAgentDetectionForPane does not
+        // short-circuit the re-detection as already-seen, then re-run the full
+        // detect → window-read → tail path.
+        paneAgentInputs.remove(paneId)
+        startAgentDetectionForPane(pane)
+        return true
+    }
+
     private suspend fun retryAgentConversationForPane(
         session: SshSession,
         pane: TmuxPaneState,
@@ -8851,7 +9003,14 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return
         }
-        startAgentConversationForPane(session, pane.paneId, detection, refreshGuard)
+        // Issue #793: a stream RETRY re-fetches the transcript the user was
+        // already viewing — keep at least the legacy default window so a
+        // re-fetch never shrinks an already-loaded/paged conversation back to
+        // the small first-paint tail. (The first-OPEN path keeps the small
+        // tail-first budget.)
+        val retryBudget = (_agentConversations.value[pane.paneId]?.events?.size ?: 0)
+            .coerceAtLeast(DEFAULT_RETRY_MESSAGE_BUDGET)
+        startAgentConversationForPane(session, pane.paneId, detection, refreshGuard, retryBudget)
     }
 
     private fun appendAgentEvents(paneId: String, events: List<ConversationEvent>) {
@@ -9016,6 +9175,151 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         rememberAgentStatusForPane(paneId)
         scanAgentConversationEventsForPortOffers(paneId, initialEvents)
+    }
+
+    // ===================================================================
+    // Issue #793: tail-first conversation load state machine.
+    //
+    // Two distinct full-screen states the Conversation tab can be in BEFORE a
+    // transcript is rendered:
+    //   - Loading  -> "Loading conversation…" (an existing transcript is being
+    //     fetched; NOT "Waiting for agent…").
+    //   - Failed / Empty -> a clear terminal state, never an infinite spinner.
+    //
+    // The load is driven through `loadState` on the per-pane
+    // AgentConversationUiState row; a watchdog flips a never-arriving load to
+    // Failed so a transport flap (epic #792, out of scope to fix here) can no
+    // longer hang the tab forever.
+    // ===================================================================
+
+    /**
+     * Move [paneId]'s EXISTING conversation row into the Loading state and
+     * (re)arm the load watchdog so the Conversation tab shows
+     * "Loading conversation…" while the first-paint read runs. No-op when no
+     * row exists — the detection-pending placeholder row is seeded by
+     * [selectSessionTab] (the presumed-agent path), and the active-load path
+     * here must not conjure a phantom row that an immediate cancellation
+     * (intentional switch/teardown) would then strand.
+     */
+    private fun markConversationLoading(paneId: String) {
+        var rowExists = false
+        updateAgentConversation(paneId) { current ->
+            rowExists = true
+            current.copy(loadState = ConversationLoadState.Loading)
+        }
+        if (rowExists) armConversationLoadWatchdog(paneId)
+    }
+
+    private fun armConversationLoadWatchdog(paneId: String) {
+        conversationLoadWatchdogJobs.remove(paneId)?.cancel()
+        conversationLoadWatchdogJobs[paneId] = bridgeScope.launch {
+            delay(conversationLoadTimeoutMs)
+            updateAgentConversation(paneId) { current ->
+                if (current.loadState == ConversationLoadState.Loading) {
+                    DiagnosticEvents.record(
+                        "recoverable",
+                        "tmux_agent_conversation_load_timeout",
+                        "pane" to paneId,
+                        "timeoutMs" to conversationLoadTimeoutMs,
+                    )
+                    current.copy(loadState = ConversationLoadState.Failed)
+                } else {
+                    current
+                }
+            }
+        }
+    }
+
+    private fun cancelConversationLoadWatchdog(paneId: String) {
+        conversationLoadWatchdogJobs.remove(paneId)?.cancel()
+    }
+
+    /**
+     * Record the terminal outcome of the first-paint tail read for [paneId].
+     * Disarms the load watchdog and sets `loadState` to Ready (feed has
+     * content / will be live-tailed), Empty (read succeeded but the transcript
+     * has no events), or Failed (the read could not complete). Also records
+     * whether older messages remain to page in on upward scroll.
+     */
+    private fun markConversationLoadOutcome(
+        paneId: String,
+        detection: AgentDetection,
+        loadedEvents: List<ConversationEvent>,
+        hasMoreOlder: Boolean,
+        failed: Boolean,
+    ) {
+        cancelConversationLoadWatchdog(paneId)
+        updateAgentConversation(paneId) { current ->
+            // Only own the load state for the row that still matches this
+            // detection (a fast switch could have replaced it).
+            if (current.detection != null && !sameAgentSource(current.detection, detection)) {
+                return@updateAgentConversation current
+            }
+            val nextLoadState = when {
+                failed -> ConversationLoadState.Failed
+                current.events.isEmpty() && loadedEvents.isEmpty() -> ConversationLoadState.Empty
+                else -> ConversationLoadState.Ready
+            }
+            current.copy(
+                loadState = nextLoadState,
+                hasMoreOlderEvents = hasMoreOlder && !failed,
+                isPagingOlder = false,
+            )
+        }
+    }
+
+    /**
+     * Issue #793: page OLDER messages into [paneId]'s window on upward scroll.
+     * Re-reads a wider tail window (the current loaded message count grown by
+     * [OLDER_PAGE_GROWTH_FACTOR], capped at [MaxAgentEvents]) and prepends the
+     * older events the wider read surfaces — preserving the events already in
+     * view so the pane can hold scroll position. No-op when there is nothing
+     * older to load or a page is already in flight.
+     */
+    public fun loadOlderAgentConversationEvents(paneId: String) {
+        val current = _agentConversations.value[paneId] ?: return
+        if (!current.hasMoreOlderEvents || current.isPagingOlder) return
+        val detection = current.detection ?: return
+        val session = sessionRef ?: return
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = activeTarget ?: return,
+            client = clientRef ?: return,
+        )
+        updateAgentConversation(paneId) { it.copy(isPagingOlder = true) }
+        val widerBudget = (current.events.size * OLDER_PAGE_GROWTH_FACTOR)
+            .coerceAtLeast(current.events.size + FIRST_PAINT_MESSAGE_BUDGET)
+            .coerceAtMost(MaxAgentEvents)
+        bridgeScope.launch {
+            val window = try {
+                agentRepository.readEventsWindow(
+                    session = session,
+                    detection = detection,
+                    maxMessages = widerBudget,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                updateAgentConversation(paneId) { it.copy(isPagingOlder = false) }
+                return@launch
+            }
+            if (!isCurrentRuntime(guard)) {
+                updateAgentConversation(paneId) { it.copy(isPagingOlder = false) }
+                return@launch
+            }
+            updateAgentConversation(paneId) { row ->
+                // Merge the wider window with whatever is already loaded (live
+                // tail may have appended newer turns meanwhile). reconcile
+                // de-dups by id and preserves document order, so older events
+                // from the wider read slot in ahead of the existing tail.
+                val merged = boundedDistinctEvents(window.events + row.events)
+                row.copy(
+                    events = merged,
+                    hasMoreOlderEvents = window.hasMoreOlder,
+                    isPagingOlder = false,
+                )
+            }
+        }
     }
 
     private fun scanAgentConversationEventsForPortOffers(
@@ -11986,6 +12290,15 @@ internal const val AGENT_EXIT_CONFIRMATIONS: Int = 2
 
 /** Delay before the issue #554 agent-exit confirmation re-detection. */
 internal const val AGENT_EXIT_RECHECK_DELAY_MS: Long = 1_200L
+
+/**
+ * Issue #793: how long the Conversation tab spins on "Loading conversation…"
+ * before the load watchdog flips it to a clear Failed terminal state. Sized to
+ * comfortably cover a normal first-paint tail read over SSH while still
+ * bounding a never-completing read (transport flap / unavailable log) so the
+ * tab can never hang indefinitely.
+ */
+internal const val CONVERSATION_LOAD_TIMEOUT_MS: Long = 12_000L
 
 public enum class TmuxConnectTrigger(public val logValue: String) {
     UserTap("user-tap"),

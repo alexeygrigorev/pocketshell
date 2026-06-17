@@ -1152,6 +1152,74 @@ class AgentConversationRepositoryTest {
         assertOpenCodeSqliteQueryIsShellSingleQuoted("/tmp/pocketshell-\"quoted\"")
     }
 
+    // ===================================================================
+    // Issue #793: tail-first windowed read (readEventsWindow).
+    // ===================================================================
+
+    @Test
+    fun readEventsWindowClaudeReadsTailAndReportsMoreOlderWhenFileExceedsBudget() = runTest {
+        // The file has 5000 lines total but the first-paint window only reads
+        // FIRST_PAINT_MESSAGE_BUDGET * JSONL_RAW_LINES_PER_EVENT (= 240) raw
+        // lines. Since 5000 > 240, hasMoreOlder must be true so the UI offers
+        // upward paging — WITHOUT having fetched the whole 5000-line history.
+        val tailJsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"latest question"}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"latest answer"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(wcOutput = "5000\n", jsonlTailOutput = tailJsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = detection,
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        assertTrue("older messages must remain to page in", window.hasMoreOlder)
+        assertEquals(
+            listOf("latest question", "latest answer"),
+            window.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+        // Tail-first: ONE combined round-trip, capped at the first-paint raw
+        // budget — NOT a read of the whole 5000-line history.
+        val windowCommand = session.execCommands.single { it.contains("@@PS_WINDOW@@") }
+        val rawBudget = FIRST_PAINT_MESSAGE_BUDGET * JSONL_RAW_LINES_PER_EVENT
+        assertTrue(
+            "expected tail capped at the first-paint budget; got $windowCommand",
+            windowCommand.contains("tail -n $rawBudget "),
+        )
+    }
+
+    @Test
+    fun readEventsWindowClaudeReportsNoMoreOlderWhenWholeFileFitsInWindow() = runTest {
+        val tailJsonl =
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"only question"}}"""
+        val session = FakeSshSession(wcOutput = "3\n", jsonlTailOutput = tailJsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = detection,
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        assertFalse("the whole file is in the window", window.hasMoreOlder)
+        assertEquals(
+            listOf("only question"),
+            window.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+    }
+
     private fun assertOpenCodeSqliteQueryIsShellSingleQuoted(cwd: String) {
         val sqliteLine = openCodeSqliteLine(AgentConversationRepository().detectionCommand(cwd))
         val normalizedCwd = cwd.trim().trimEnd('/').ifBlank { "/" }
@@ -1220,6 +1288,11 @@ class AgentConversationRepositoryTest {
                 command.contains("ps -eo pid,tty,comm,args") -> hostWideProcessOutput
                 command.contains("ps -t ") -> paneProcessOutput
                 command.contains("stat -c '%Y' ") -> statOutputs.removeFirstOrNull() ?: statOutputs.lastOrNull() ?: "0\n"
+                // Issue #793: the windowed read combines wc -l + a sentinel + the
+                // tail into ONE round-trip. Emit them in that shape so the
+                // repository can split total-lines from the tail window.
+                command.contains("@@PS_WINDOW@@") ->
+                    "${wcOutput.trim()}\n@@PS_WINDOW@@\n$jsonlTailOutput"
                 command.contains("wc -l < ") -> wcOutput
                 command.contains("pocketshell agent-log") -> agentLogOutput
                 command.trimStart().startsWith("tail -n") -> jsonlTailOutput

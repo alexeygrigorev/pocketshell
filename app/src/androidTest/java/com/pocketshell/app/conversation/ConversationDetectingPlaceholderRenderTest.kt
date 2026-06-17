@@ -20,9 +20,12 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.ConversationLoadState
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.tmux.ConversationDetectingPlaceholder
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_DETECTING_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_LOAD_FAILED_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_LOAD_RETRY_TAG
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.tmuxSessionTabState
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -122,11 +125,14 @@ class ConversationDetectingPlaceholderRenderTest {
         compose.onNodeWithTag(conversationTabTag).performClick()
         compose.waitForIdle()
 
-        // (a) The real "Waiting for agent…" placeholder is now displayed —
-        // the tap was honoured and the view switched to the Conversation
-        // surface even though detection is still null.
+        // (a) The real loading placeholder is now displayed — the tap was
+        // honoured and the view switched to the Conversation surface even
+        // though detection is still null. Issue #793: the copy is now
+        // "Loading conversation…" (loading an existing transcript), NOT the
+        // old, misleading "Waiting for agent…".
         compose.onNodeWithTag(TMUX_CONVERSATION_DETECTING_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Waiting for agent…").assertIsDisplayed()
+        compose.onNodeWithText("Loading conversation…").assertIsDisplayed()
+        compose.onNodeWithText("Waiting for agent…").assertIsNotDisplayed()
 
         // (b) The terminal content genuinely swapped OUT — not just the tab
         // index moved; the content area no longer shows the terminal.
@@ -188,6 +194,34 @@ class ConversationDetectingPlaceholderRenderTest {
         compose.onNodeWithTag(terminalTag).assertIsDisplayed()
         compose.onNodeWithTag(TMUX_CONVERSATION_DETECTING_TAG).assertIsNotDisplayed()
         assertTrue("base no-op leaves row on Terminal", true)
+    }
+
+    /**
+     * Issue #793: a FAILED load surfaces a clear terminal state — error copy +
+     * a tappable Retry — instead of an infinite spinner. Renders the REAL
+     * production [ConversationDetectingPlaceholder] in the Failed state and
+     * proves Retry is shown and invokes the callback.
+     */
+    @Test
+    fun failedLoadShowsClearRetryNotInfiniteSpinner() {
+        var retried = false
+        compose.setContent {
+            PocketShellTheme {
+                ConversationDetectingPlaceholder(
+                    loadState = ConversationLoadState.Failed,
+                    onRetry = { retried = true },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_LOAD_FAILED_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Couldn't load this conversation.").assertIsDisplayed()
+        // It is NOT the loading spinner copy — a clear terminal state.
+        compose.onNodeWithText("Loading conversation…").assertIsNotDisplayed()
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_LOAD_RETRY_TAG).performClick()
+        compose.waitForIdle()
+        assertTrue("Retry must invoke the retry callback", retried)
     }
 
     /**

@@ -3805,7 +3805,22 @@ class TmuxSessionViewModelTest {
 
                 val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                     while (sender.isActive) {
-                        shadowOf(Looper.getMainLooper()).idle()
+                        // Issue #803/#804: the off-main live `%output` drain is now
+                        // frame-paced — the MainThreadDrainScheduler `postDelayed`s its
+                        // continuation one frame (16ms) out between bounded parse turns
+                        // so the looper is guaranteed a servicing gap (the ANR fix).
+                        // Under the Robolectric PAUSED looper a plain `idle()` only runs
+                        // tasks already DUE, so it never fires those delayed
+                        // continuations and the 64KB process queue stays full, blocking
+                        // the real off-main producer forever. Advance the virtual main
+                        // looper one frame per pump (as SshTerminalBridgeTest.
+                        // drainMainLooperUntil does) so the budgeted continuations fire
+                        // and the burst drains. This models a real device looper that
+                        // advances time; it does NOT weaken the assertion — if the burst
+                        // genuinely stalled behind the slow side-channel the loop still
+                        // times out and `completed` stays false.
+                        shadowOf(Looper.getMainLooper())
+                            .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
                         runCurrent()
                         delay(10)
                     }
@@ -3830,7 +3845,11 @@ class TmuxSessionViewModelTest {
                 val markerDeadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
                 do {
                     advanceUntilIdle()
-                    shadowOf(Looper.getMainLooper()).idle()
+                    // Issue #803/#804: advance the virtual looper a frame so the
+                    // budgeted `postDelayed` drain-continuations fire (a bare `idle()`
+                    // never runs them), draining the queue tail and rendering the marker.
+                    shadowOf(Looper.getMainLooper())
+                        .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
                     transcript = renderedTranscriptFrom(state)
                     if (transcript.contains("ISSUE576-CODEX-LIKE-DONE")) break
                     Thread.sleep(20)

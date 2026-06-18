@@ -10,14 +10,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -386,31 +387,19 @@ internal const val ASSISTANT_CHOOSING_TAG: String = "assistant:choosing"
 internal fun assistantChoiceTag(path: String): String = "assistant:choice:$path"
 
 /**
- * Scrollable strip of secondary command chips. Only the chips here are
- * inside `horizontalScroll`; the primary right-cluster (`show keyboard`,
- * `+ snippet`) is rendered by [PrimaryChipCluster] outside this scroll
- * region so it stays visible without horizontal-scrolling.
+ * The static secondary command chips (`git status`, `tmux ls`, …), the optional
+ * `dirs` project-navigation chip, and the optional previous-session toggle chip —
+ * rendered inline WITHOUT their own scroll container.
  *
- * Left-to-right:
- * 1. Static command chips passed via [chips] (e.g. `git status`,
- *    `tmux ls`, `k logs`, `clear`) — quick-runs, low tap frequency.
- * 2. `dirs` project-navigation chip — secondary navigation, raw-SSH
- *    route only (rendered when [onProjectNavigationTap] is non-null).
- *
- * Per the #208 right-thumb ergonomics audit and design-system §9, the
- * high-frequency `show keyboard` (#131) and `+ snippet` chips are rendered
- * adjacent to the composer launcher in a non-scrolling sticky cluster (see
- * [PrimaryChipCluster] and [BottomChipControls]) so they sit inside the
- * right-thumb arc on a Pixel-class viewport even when there are enough
- * leading static chips to overflow the scrolling region. Round-1 of #221
- * left the primary chips inside this scrolling row and the connected
- * test caught that `show keyboard` / `+ snippet` were pushed off-screen by
- * the four wide static chips that lead the row — round-2 splits them
- * into the sticky cluster to keep AC2 actually true at the rendered
- * layout layer.
+ * Issue #813: this content is now hosted inside the single shared
+ * horizontally-scrollable flexible region in [BottomChipControls] (alongside the
+ * [PrimaryChipCluster]), so the static chips and the primary cluster scroll
+ * TOGETHER when space is tight rather than each owning a separate scroll. The
+ * launcher is pinned outside that scroll region (unweighted) so it reserves its
+ * width first and is never clipped.
  */
 @Composable
-private fun ScrollableChipStrip(
+private fun StaticChipStripContent(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onProjectNavigationTap: (() -> Unit)? = null,
@@ -419,40 +408,29 @@ private fun ScrollableChipStrip(
     // the first thing the user sees in the chip row.
     previousSessionName: String? = null,
     onTogglePreviousSession: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
 ) {
-    val scrollState = rememberScrollState()
-    Row(
-        modifier = modifier
-            .horizontalScroll(scrollState)
-            .padding(PocketShellSpacing.sm),
-        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // Issue #628: toggle chip at the start of the strip. The "›"
-        // prefix signals directionality ("go back to"). Uses the accent
-        // style (icon chip) to visually distinguish from command chips.
-        if (previousSessionName != null && onTogglePreviousSession != null) {
-            CommandChip(
-                label = "$SESSION_TOGGLE_CHIP_PREFIX$previousSessionName",
-                onClick = onTogglePreviousSession,
-                modifier = Modifier.testTag(SESSION_TOGGLE_CHIP_TAG),
-            )
-        }
-        chips.forEach { chip ->
-            CommandChip(
-                label = chip,
-                onClick = { onChipTap(chip) },
-            )
-        }
-        if (onProjectNavigationTap != null) {
-            CommandChip(
-                label = "dirs",
-                onClick = onProjectNavigationTap,
-                icon = DictateDotIcon,
-            )
-        }
-        Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
+    // Issue #628: toggle chip at the start of the strip. The "›"
+    // prefix signals directionality ("go back to"). Uses the accent
+    // style (icon chip) to visually distinguish from command chips.
+    if (previousSessionName != null && onTogglePreviousSession != null) {
+        CommandChip(
+            label = "$SESSION_TOGGLE_CHIP_PREFIX$previousSessionName",
+            onClick = onTogglePreviousSession,
+            modifier = Modifier.testTag(SESSION_TOGGLE_CHIP_TAG),
+        )
+    }
+    chips.forEach { chip ->
+        CommandChip(
+            label = chip,
+            onClick = { onChipTap(chip) },
+        )
+    }
+    if (onProjectNavigationTap != null) {
+        CommandChip(
+            label = "dirs",
+            onClick = onProjectNavigationTap,
+            icon = DictateDotIcon,
+        )
     }
 }
 
@@ -499,15 +477,18 @@ private fun PrimaryChipCluster(
         onShowHotkeysTap == null
     ) return
     Row(
-        // Issue #641 (reopened): the primary cluster is rendered at its NATURAL
-        // width with no horizontal scroll and no width cap. [BottomChipControls]
-        // guarantees it (and the pinned launcher) reserve their full width before
-        // the flexible static-chip strip, so the cluster never has to compress or
-        // clip a chip — every primary affordance (`Enter` / `show keyboard` /
-        // `snippets`) is fully visible and tappable. The round-1 internal scroll
-        // caused the half-clipped `snippets` chip behind the launcher; removing
-        // it (and the cap) is the fix. Issue #787: the `/ commands` chip was
-        // hard-cut from this cluster — slash entry now lives only in the composer.
+        // Issue #813: the primary cluster (`Enter` / `show keyboard` / `hotkeys` /
+        // `snippets`) renders at its NATURAL width. It NO LONGER reserves that
+        // width ahead of the launcher — [BottomChipControls] now hosts the cluster
+        // inside a single horizontally-scrollable, weighted flexible region while
+        // the launcher is pinned UNWEIGHTED (so the launcher reserves its width
+        // FIRST and is never the element that overflows). When the row is wide
+        // enough (Pixel-class width, default font) every cluster chip is fully
+        // visible without scrolling; when it is tight (narrow / large system
+        // font — the #813 07:53 clip) the cluster yields by scrolling within the
+        // flexible region instead of pushing the launcher off the right edge.
+        // Issue #787: the `/ commands` chip was hard-cut from this cluster —
+        // slash entry now lives only in the composer.
         modifier = modifier
             .padding(
                 top = PocketShellSpacing.sm,
@@ -560,24 +541,38 @@ private fun PrimaryChipCluster(
  * [TmuxSessionScreen][com.pocketshell.app.tmux.TmuxSessionScreen] mounts
  * this as the bottom band of the per-session input controls.
  *
- * Layout (left → right):
+ * Layout (left → right), hosted in a [BoxWithConstraints] that reserves the
+ * launcher's fixed width before laying out the chip area:
  *
- * 1. [ScrollableChipStrip] (`weight(1f)`) — scrollable, holds the
- *    low-frequency static command chips plus optional `dirs`.
- * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `Enter`, `show keyboard`,
- *    and the picker chip pinned to the right side of the chip area so they sit
- *    inside the right-thumb arc on a Pixel-class viewport regardless of
- *    how many static chips precede them.
- * 3. Optional composer launcher (sticky, non-scrolling) — raw SSH still keeps
- *    the prompt composer affordance; tmux terminal chrome omits it per #283.
+ * 1. The chip area — width-capped at `rowWidth − launcherSlot` so the launcher's
+ *    slot is always reserved. Inside it, [StaticChipStripContent] (low-frequency
+ *    static command chips plus the optional previous-session toggle and `dirs`)
+ *    is the flexible `weight(1f, fill = false)` scrolling strip that YIELDS
+ *    first, followed by the [PrimaryChipCluster] (`Enter`, `show keyboard`,
+ *    `hotkeys`, picker) at its natural width, pinned to the right of the chip
+ *    area in the right-thumb arc (design-system §9 / #208). The whole chip area
+ *    also scrolls, so in the extreme narrow / huge-font case the cluster yields
+ *    by scrolling rather than clipping.
+ * 2. The composer launcher — its fixed-width slot is reserved up front, so it
+ *    RESERVES its width FIRST and is never the element pushed off the right edge
+ *    (issue #813). Raw SSH keeps the prompt composer affordance; tmux terminal
+ *    chrome omits it per #283.
  *
  * The redundant `dictate` chip that used to lead the row was removed
  * per design-system §9 and the right-thumb ergonomics audit
  * (#208 → #221): with the launcher already anchored to the right-thumb arc,
- * the chip row need not duplicate it. Splitting the primary cluster out
- * of the scrolling region fixes the round-1 regression where the four
- * wide leading static chips pushed `show keyboard` / picker off-screen
- * (AC2 of #221).
+ * the chip row need not duplicate it.
+ *
+ * Issue #813 (clean rework, not a patch — D22): the prior #641 round-2 layout
+ * had the primary cluster AND the launcher both unweighted, with the cluster
+ * declared first. A Row measures unweighted children in declaration order, each
+ * taking the remaining width, so on a narrow / large-system-font device the
+ * cluster took its full (font-inflated) natural width and the LAUNCHER (declared
+ * last) was squeezed to zero and clipped off the right edge — the maintainer's
+ * 07:53 clip (`snippets`-wraps-to-two-lines tell). The fix reserves the
+ * launcher's fixed width up front via the constraints math, so the launcher is
+ * never the element that overflows; the chip area absorbs the squeeze by
+ * scrolling and every chip stays reachable (scroll, never silently dropped).
  *
  * `onProjectNavigationTap` is optional because the tmux route does not
  * surface project navigation yet (the raw-SSH `SessionViewModel` owns the
@@ -671,77 +666,131 @@ internal fun BottomChipControls(
                 )
             }
         }
-        Row(
+        // Issue #813 (clean rework — D22): the composer launcher RESERVES its
+        // width FIRST and is NEVER the element that overflows. We compute the
+        // available row width with [BoxWithConstraints] and hand the chip area
+        // exactly `rowWidth − launcherWidth`. Priority of yielding, highest →
+        // lowest: launcher (always full width) > primary cluster (`Enter` /
+        // `show keyboard` / `hotkeys` / `snippets`, stays visible at normal
+        // widths in the right-thumb arc) > static command chips (`git status`,
+        // `tmux ls`, … — yield + scroll first).
+        //
+        // Why this is the least-blast-radius fix for the 07:53 clip: the #641
+        // round-2 layout had BOTH the cluster and the launcher unweighted, with
+        // the cluster declared first. A Compose Row measures unweighted children
+        // in declaration order, each getting the remaining width — so the cluster
+        // took its full (font-inflated) natural width and the launcher (declared
+        // last) was squeezed to zero and clipped off the right edge. Reserving the
+        // launcher's fixed width up front (via the constraints math here) keeps the
+        // launcher fully on-screen; the chip area absorbs the squeeze by scrolling.
+        // On a Pixel-class width with the default font the static chips + cluster
+        // fit in the capped area with room to spare (nothing scrolls, every chip
+        // is fully visible — the existing #641 assertions stay green). When tight
+        // (narrow / large system font), the static strip scrolls first and, only
+        // if even an empty static strip can't fit the cluster, the whole chip area
+        // scrolls — the cluster yields by scrolling, never silently dropping a chip
+        // and never pushing the launcher off-screen.
+        val launcherSlotWidth = if (onDictateTap != null) {
+            // Launcher tap target + its end padding (matches the Box padding below).
+            PocketShellDensity.tapTargetMin + PocketShellSpacing.sm
+        } else {
+            0.dp
+        }
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = SessionBottomControlsMinHeight)
                 .background(color = PocketShellColors.Surface)
                 .border(width = 1.dp, color = PocketShellColors.Border),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Issue #641 (reopened): priority of the bottom-control band, from
-            // most to least important — the LAUNCHER and the PRIMARY CLUSTER
-            // (`Enter` / `show keyboard` / `snippets`) must be FULLY visible and
-            // tappable; the low-frequency static command chips (`git status`,
-            // `tmux ls`, …) are the ones that yield + scroll.
-            //
-            // Round 1 capped the primary cluster at `rowWidth − launcher` and let
-            // it scroll within that cap. That stopped the launcher being clipped,
-            // but introduced the *reopened* symptom: in the multi-chip dogfood
-            // state the rightmost cluster chip (`snippets`) was left
-            // HALF-CLIPPED at the cap boundary — sitting partly behind/under the
-            // launcher, so the maintainer saw an unidentifiable control "hidden
-            // behind the compose button".
-            //
-            // The fix inverts which side yields. The launcher (pinned last,
-            // unweighted) and the primary cluster (unweighted, natural width, NO
-            // internal scroll, NO cap) both reserve their full width FIRST; the
-            // static-chip strip is the only flexible child and absorbs all the
-            // squeeze by scrolling. On a Pixel-class width the 4-chip cluster +
-            // launcher fit with room to spare, so nothing in the cluster is ever
-            // partially clipped. `fill = false` on the strip's weight lets it
-            // shrink below its weighted share when its own content is narrow, so
-            // it never forces the cluster to give up width.
-            ScrollableChipStrip(
-                chips = chips,
-                onChipTap = if (inputEnabled) onChipTap else { _ -> },
-                onProjectNavigationTap = onProjectNavigationTap,
-                // Issue #628: pass the toggle chip through so it renders at the
-                // START of the row, before the command chips.
-                previousSessionName = previousSessionName,
-                onTogglePreviousSession = onTogglePreviousSession,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            PrimaryChipCluster(
-                onEnterTap = onEnterTap?.let { callback ->
-                    if (inputEnabled) callback else ({})
-                },
-                onShowKeyboardTap = onShowKeyboardTap,
-                onAddSnippetTap = onAddSnippetTap,
-                // Issue #789: the hotkeys launcher must stay tappable even while
-                // disconnected/reconnecting so the panel can still be opened
-                // (the panel itself gates control-byte writes on the live pane),
-                // matching how `show keyboard` / `snippets` are not gated here.
-                onShowHotkeysTap = onShowHotkeysTap,
-                hotkeysLauncherTag = hotkeysLauncherTag,
-                enterLabel = enterLabel,
-                addSnippetLabel = addSnippetLabel,
-                addSnippetIcon = addSnippetIcon,
-            )
-            if (onDictateTap != null) {
-                Box(
-                    modifier = Modifier
-                        .padding(
-                            top = PocketShellSpacing.sm,
-                            bottom = PocketShellSpacing.sm,
-                            end = PocketShellSpacing.sm,
-                        ),
-                    contentAlignment = Alignment.CenterEnd,
+            val chipAreaMaxWidth = (maxWidth - launcherSlotWidth).coerceAtLeast(0.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val staticScrollState = rememberScrollState()
+                val clusterScrollState = rememberScrollState()
+                Row(
+                    // The chip area is width-capped at `rowWidth − launcher`, so the
+                    // launcher's slot is reserved no matter how wide the chips grow.
+                    // No own scroll here — bounded so `weight` inside it works (a
+                    // `weight` child needs a bounded width, which a scroll parent
+                    // would NOT provide).
+                    modifier = Modifier.width(chipAreaMaxWidth),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    ComposerLauncherButton(
-                        enabled = inputEnabled,
-                        onClick = onDictateTap,
-                    )
+                    // Static command chips: the low-priority, low-frequency chips.
+                    // They yield + scroll FIRST (`weight(1f, fill = false)` lets the
+                    // strip shrink below its share and scroll, so the primary cluster
+                    // keeps its natural width and stays visible at normal widths).
+                    Row(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .horizontalScroll(staticScrollState)
+                            .padding(PocketShellSpacing.sm),
+                        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StaticChipStripContent(
+                            chips = chips,
+                            onChipTap = if (inputEnabled) onChipTap else { _ -> },
+                            onProjectNavigationTap = onProjectNavigationTap,
+                            // Issue #628: pass the toggle chip through so it renders
+                            // at the START of the row, before the command chips.
+                            previousSessionName = previousSessionName,
+                            onTogglePreviousSession = onTogglePreviousSession,
+                        )
+                    }
+                    // Primary cluster: high-frequency, pinned to the right of the
+                    // chip area (right-thumb arc, design-system §9 / #208). Natural
+                    // width, but wrapped in its OWN scroll bounded to the chip area
+                    // (`widthIn(max = chipAreaMaxWidth)`): measured before the
+                    // weighted static strip, so it keeps its full width and the
+                    // static strip yields to it; in the extreme narrow / huge-font
+                    // case where the cluster alone exceeds the chip area it yields by
+                    // scrolling WITHIN the cap instead of overflowing into (and
+                    // clipping) the launcher's reserved slot. Every chip stays
+                    // reachable (#813 AC) and the launcher is never clipped.
+                    Row(
+                        modifier = Modifier
+                            .widthIn(max = chipAreaMaxWidth)
+                            .horizontalScroll(clusterScrollState),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PrimaryChipCluster(
+                            onEnterTap = onEnterTap?.let { callback ->
+                                if (inputEnabled) callback else ({})
+                            },
+                            onShowKeyboardTap = onShowKeyboardTap,
+                            onAddSnippetTap = onAddSnippetTap,
+                            // Issue #789: the hotkeys launcher must stay tappable even
+                            // while disconnected/reconnecting so the panel can still be
+                            // opened (the panel itself gates control-byte writes on the
+                            // live pane), matching how `show keyboard` / `snippets` are
+                            // not gated here.
+                            onShowHotkeysTap = onShowHotkeysTap,
+                            hotkeysLauncherTag = hotkeysLauncherTag,
+                            enterLabel = enterLabel,
+                            addSnippetLabel = addSnippetLabel,
+                            addSnippetIcon = addSnippetIcon,
+                        )
+                    }
+                }
+                if (onDictateTap != null) {
+                    Box(
+                        modifier = Modifier
+                            .padding(
+                                top = PocketShellSpacing.sm,
+                                bottom = PocketShellSpacing.sm,
+                                end = PocketShellSpacing.sm,
+                            ),
+                        contentAlignment = Alignment.CenterEnd,
+                    ) {
+                        ComposerLauncherButton(
+                            enabled = inputEnabled,
+                            onClick = onDictateTap,
+                        )
+                    }
                 }
             }
         }

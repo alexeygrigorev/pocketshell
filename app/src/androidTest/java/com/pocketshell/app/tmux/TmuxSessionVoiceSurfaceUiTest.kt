@@ -223,11 +223,12 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("Terminal hotkeys").assertDoesNotExist()
 
         // The compact chip sits inline alongside the other primary chips, fully
-        // within the root and tappable.
-        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertIsDisplayed()
+        // within the root and tappable. Issue #813: containment (not a bare
+        // `assertIsDisplayed()`) is the load-bearing check — a chip pushed off the
+        // right edge by an overflowing cluster still reports "displayed".
+        compose.assertNodeFullyWithinRoot(SESSION_ENTER_CHIP_TAG)
+        compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .assertTextContains(HOTKEYS_CHIP_LABEL)
         compose.assertNodeFullyWithinRoot(TERMINAL_HOTKEYS_LAUNCHER_TAG)
@@ -335,24 +336,28 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithText("^C").assertDoesNotExist()
 
-        // The shell pane keeps Enter / show-keyboard / snippets …
+        // The shell pane keeps Enter / show-keyboard / snippets … Issue #813:
+        // containment (not a bare `assertIsDisplayed()`) is the load-bearing check
+        // — a chip pushed off-edge by an overflowing cluster still reports
+        // "displayed".
+        compose.assertNodeFullyWithinRoot(SESSION_ENTER_CHIP_TAG)
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
+        compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
+        compose.assertNodeFullyWithinRoot(SESSION_ADD_SNIPPET_CHIP_TAG)
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
 
-        // … AND the Prompt Composer launcher (the #641 fix): visible + tappable
-        // in shell mode just like an agent pane.
+        // … AND the Prompt Composer launcher (the #641 fix): fully within the
+        // viewport + tappable in shell mode just like an agent pane (issue #813
+        // containment — the launcher must never be the element clipped off-edge).
+        compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
 
@@ -474,15 +479,17 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("^D").assertDoesNotExist()
         compose.onNodeWithText("Tab").assertDoesNotExist()
 
+        // Issue #813: containment (not a bare `assertIsDisplayed()`) — a chip
+        // pushed off-edge by an overflowing cluster still reports "displayed".
+        compose.assertNodeFullyWithinRoot(SESSION_ENTER_CHIP_TAG)
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
+        compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
-        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
 
         assertEquals(emptyList<String>(), keyTaps)
         assertEquals(1, enterTaps)
@@ -638,28 +645,34 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("shell-snippets-bottom-strip.png")
 
-        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed().performClick()
+        // Issue #813: containment (not a bare `assertIsDisplayed()`) is the
+        // load-bearing check — the launcher must never be the element clipped
+        // off-edge by the cluster.
+        compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).performClick()
         compose.onNodeWithContentDescription(SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION)
             .assertIsDisplayed()
         compose.onNodeWithContentDescription("Dictate").assertDoesNotExist()
         assertEquals(1, dictateTaps)
         compose.onNodeWithText("dictate").assertDoesNotExist()
 
-        // Issue #131 / #221 (round 2): the show-keyboard and picker
-        // chips live in a sticky right cluster *outside* the scrolling
-        // chip strip, so they are visible without any horizontal scroll.
-        // `assertIsDisplayed()` here is a real
-        // visibility check; the round-1 implementation kept the primary
-        // chips inside the horizontalScroll Row and this assertion
-        // caught them being pushed off-screen by the four wide leading
-        // static chips. Both chips are located by their stable test tag
-        // so the assertion survives a future caption rename.
-        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertIsDisplayed().performClick()
+        // Issue #131 / #221 / #813: the show-keyboard and picker chips are the
+        // high-frequency primary cluster, pinned to the right of the chip area in
+        // the right-thumb arc. At a Pixel-class width with the default font the
+        // four leading static chips + the cluster fit without scrolling, so the
+        // cluster is fully on-screen. Containment (`assertNodeFullyWithinRoot`),
+        // NOT a bare `assertIsDisplayed()` — a chip pushed off the right edge by an
+        // overflowing cluster still reports "displayed" (#657 F1). The chips are
+        // located by their stable test tag so the assertion survives a caption
+        // rename.
+        compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).performClick()
         assertEquals(1, keyboardTaps)
         compose.onNodeWithText("show keyboard").assertIsDisplayed()
         compose.onNodeWithText("keyboard").assertDoesNotExist()
 
-        compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertIsDisplayed().performClick()
+        compose.assertNodeFullyWithinRoot(SESSION_ADD_SNIPPET_CHIP_TAG)
+        compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).performClick()
         assertEquals(1, snippetTaps)
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertIsDisplayed()
         compose.onNodeWithText("+ snippet").assertDoesNotExist()
@@ -798,11 +811,13 @@ class TmuxSessionVoiceSurfaceUiTest {
             (launcherBounds.right - launcherBounds.left).value <= 48.5f &&
                 (launcherBounds.bottom - launcherBounds.top).value <= 48.5f,
         )
+        // Issue #813: containment (not a bare `assertIsDisplayed()`) — a chip
+        // pushed off-edge by an overflowing cluster still reports "displayed".
+        compose.assertNodeFullyWithinRoot(SESSION_ENTER_CHIP_TAG)
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
-            .assertIsDisplayed()
             .assertHasClickAction()
             .performClick()
-        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
         compose.onNodeWithText("show keyboard").assertIsDisplayed()
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithText("^C").assertDoesNotExist()

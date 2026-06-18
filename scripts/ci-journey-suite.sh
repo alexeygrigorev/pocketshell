@@ -416,6 +416,20 @@ JOURNEY_CLASSES=(
   # local-only flaky-reconnect evidence). Target the single @Test method by
   # FQCN#method so the CI-gated reconnect cases are NOT selected here.
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#freshlyDetectedAgentDefaultsToConversationAndShellStaysTerminal"
+  # ADDED (#813): the composer-launcher NARROW / LARGE-FONT clip proof. The
+  # maintainer dogfooded (2026-06-18 07:53) the launcher being CLIPPED off the
+  # right edge of the bottom bar by the 4-chip primary cluster on a narrow /
+  # large-system-font device (the snippets-wraps-to-two-lines tell). This proof
+  # renders the PRODUCTION TmuxTerminalBottomControls pinned to a narrow logical
+  # width (360dp) AND a large font scale (1.5x, injected synthetically via a
+  # LocalDensity override so the clip state is produced deterministically on any
+  # AVD) and HARD-asserts the launcher lies fully within the bottom-bar band
+  # (containment, not a bare assertIsDisplayed) plus all four primary chips stay
+  # reachable. RED on base (launcher=Rect(0,0,0,0) — clipped off-edge); GREEN
+  # after the bottom-bar rework reserves the launcher width first. It does NOT
+  # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
+  # load-bearing assertion). It lives under com.pocketshell.app.tmux.
+  "com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest"
 )
 
 echo "=========================================================="

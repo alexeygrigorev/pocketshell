@@ -151,6 +151,7 @@ import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
+import com.pocketshell.app.voice.ConversationComposerLauncherRow
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
 import com.pocketshell.app.voice.HotkeysChipIcon
@@ -1682,14 +1683,6 @@ public fun TmuxSessionScreen(
                             .fillMaxSize()
                             .testTag(TMUX_CONVERSATION_PANE_TAG),
                         showSystemNotes = appSettings.showSystemNotes,
-                        // Issue #154 (acceptance criterion #5): hoist
-                        // the search query into the ViewModel state so
-                        // toggling to the Terminal tab and back does
-                        // not clear the user's filter.
-                        query = visibleConversation.searchQuery,
-                        onQueryChange = { next ->
-                            viewModel.setAgentSearchQuery(paneIdForSend, next)
-                        },
                         paneId = paneIdForSend,
                         syncStatus = visibleConversation.syncStatus,
                         // Issue #793: tail-first paging. The pane fires this when
@@ -3431,18 +3424,15 @@ internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:to
 /** Issue #176: stable test tag prefix for a `SystemNote` row in the tmux conversation pane. */
 internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversation:system-note:"
 /**
- * Issue #154: stable test tags for the conversation navigation polish:
- * - [TMUX_CONVERSATION_SEARCH_TAG] is on the search field inside
- *   [TmuxConversationPane]. The connected `TmuxConversationPaneNavigationUiTest`
- *   uses it to type a query, then asserts the value survives a tab
- *   round-trip.
+ * Issue #154/#786: stable test tags for the conversation navigation polish.
+ * Issue #786 (hard-cut, D22): the "Search in conversation" field was DELETED —
+ * the maintainer wants the whole screen given to the transcript — so its
+ * `TMUX_CONVERSATION_SEARCH_TAG` is gone with it.
  * - [TMUX_CONVERSATION_JUMP_TO_LATEST_TAG] is on the "↓ Latest"
  *   affordance pinned to the bottom-end of the conversation list when
  *   the user has scrolled away from the tail. The button hides itself
  *   when the user is already at the bottom.
  */
-internal const val TMUX_CONVERSATION_SEARCH_TAG =
-    "tmux:conversation:search"
 internal const val TMUX_CONVERSATION_JUMP_TO_LATEST_TAG =
     "tmux:conversation:jump-to-latest"
 /**
@@ -4263,16 +4253,6 @@ internal fun TmuxConversationPane(
     // behaviour (notes visible but muted) so direct callers that did
     // not opt into the setting wire-up still see system notes.
     showSystemNotes: Boolean = true,
-    // Issue #154 (acceptance criterion #5): hoist the search query so
-    // it survives Terminal ↔ Conversation tab switches. The screen
-    // wires these to the per-pane `AgentConversationUiState.searchQuery`
-    // / `TmuxSessionViewModel.setAgentSearchQuery`. The defaults keep
-    // direct callers (unit tests, the connected E2E test) running with
-    // the previous "local remember" behaviour: when [onQueryChange] is
-    // the no-op default we fall back to an internal `remember` so the
-    // search field still types. See [rememberHoistedQuery] below.
-    query: String = "",
-    onQueryChange: (String) -> Unit = NoOpStringChange,
     paneId: String? = null,
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
     // Issue #793: tail-first paging. [hasMoreOlderEvents] is true when older
@@ -4294,21 +4274,25 @@ internal fun TmuxConversationPane(
 ) {
     ConversationInteractionCleanupEffect()
 
-    // Issue #459: this pane is now read-only chrome — search + the
-    // conversation feed. Sending is owned by the shared unified composer
-    // ([PromptComposerSheet]) mounted at the screen level, identical to the
-    // Terminal tab's bottom. The bespoke in-pane "Message …" field, its
-    // draft/unsent-prompt state, and the `onSendToAgent` callback are gone.
-    val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
+    // Issue #459: this pane is read-only chrome — just the conversation feed.
+    // Sending is owned by the shared unified composer ([PromptComposerSheet])
+    // mounted at the screen level, identical to the Terminal tab's bottom. The
+    // bespoke in-pane "Message …" field, its draft/unsent-prompt state, and the
+    // `onSendToAgent` callback are gone.
+    // Issue #786 (hard-cut, D22): the "Search in conversation" field is GONE —
+    // the maintainer wants the whole screen given to the transcript. The
+    // [filterConversationRows] call STAYS (it also does tool-result pairing +
+    // the searched-tool-call expansion merge) but is fed an empty query, so it
+    // never filters out rows — every event is shown.
     val visibleEvents = remember(events, showSystemNotes) {
         val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
         if (showSystemNotes) timelineEvents else timelineEvents.filterNot { it is ConversationEvent.SystemNote }
     }
     val toolResultPairing = remember(visibleEvents) { visibleEvents.toolResultPairing() }
-    val filteredConversation = remember(visibleEvents, effectiveQuery, toolResultPairing) {
+    val filteredConversation = remember(visibleEvents, toolResultPairing) {
         filterConversationRows(
             events = visibleEvents,
-            query = effectiveQuery,
+            query = "",
             pairing = toolResultPairing,
         )
     }
@@ -4355,7 +4339,7 @@ internal fun TmuxConversationPane(
             }
         }
     }
-    LaunchedEffect(filteredEvents.lastOrNull()?.id, effectiveQuery) {
+    LaunchedEffect(filteredEvents.lastOrNull()?.id) {
         if (filteredEvents.isEmpty()) return@LaunchedEffect
         if (!userScrolledAwayFromTail) {
             listState.scrollToItem(filteredEvents.size - 1)
@@ -4368,7 +4352,7 @@ internal fun TmuxConversationPane(
     // view (paging a filtered list is confusing) and on not already paging. The
     // VM merge preserves the already-loaded tail, so the user's scroll position
     // holds — the newly-prepended older rows simply extend the list upward.
-    if (hasMoreOlderEvents && effectiveQuery.isBlank()) {
+    if (hasMoreOlderEvents) {
         val nearTop by remember {
             derivedStateOf { listState.firstVisibleItemIndex <= 2 }
         }
@@ -4384,15 +4368,11 @@ internal fun TmuxConversationPane(
             .background(color = PocketShellColors.Background)
             .padding(horizontal = ChatPaneHPadding, vertical = ChatPaneVPadding),
     ) {
-        OutlinedTextField(
-            value = effectiveQuery,
-            onValueChange = onEffectiveQueryChange,
-            placeholder = { Text("Search in conversation") },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag(TMUX_CONVERSATION_SEARCH_TAG),
-        )
+        // Issue #786: the "Search in conversation" field used to live here as the
+        // first child of the Column. It is GONE (hard-cut, D22) — the transcript
+        // Box below holds `weight(1f)`, so removing the field hands its vertical
+        // space straight to the transcript for the full-height conversation the
+        // maintainer asked for.
         ConversationSyncStatusRow(
             syncStatus = syncStatus,
             onRetry = onRetryAgentStream,
@@ -4415,7 +4395,7 @@ internal fun TmuxConversationPane(
             ) {
                 // Issue #793: top-of-list progress row while older messages are
                 // being paged in on upward scroll.
-                if (isPagingOlder && effectiveQuery.isBlank()) {
+                if (isPagingOlder) {
                     item(key = "ps-paging-older") {
                         Box(
                             modifier = Modifier
@@ -4508,31 +4488,6 @@ internal fun TmuxConversationPane(
         // the shared unified composer band at the screen level owns sending.
     }
 }
-
-/**
- * Issue #154 (acceptance criterion #5): when callers wire the conversation
- * pane to a real hoisted `(query, onQueryChange)` pair the pane uses those
- * values directly. When callers leave the defaults in place — which is the
- * case for the connected `ConversationInteractE2eTest` and the
- * `TmuxConversationSendTargetUiTest` that exist before this change — we
- * keep the previous local-`remember` behaviour so the search field still
- * types into something. The sentinel [NoOpStringChange] is identity-checked
- * (not value-checked) so a caller that wires a real lambda is always
- * treated as hoisted, even if their lambda happens to be empty for a frame.
- */
-@Composable
-private fun rememberHoistedQuery(
-    hoistedQuery: String,
-    onHoistedChange: (String) -> Unit,
-): Pair<String, (String) -> Unit> {
-    if (onHoistedChange !== NoOpStringChange) {
-        return hoistedQuery to onHoistedChange
-    }
-    var local by remember { mutableStateOf("") }
-    return local to { next: String -> local = next }
-}
-
-private val NoOpStringChange: (String) -> Unit = {}
 
 /**
  * Issue #154: jump-to-latest affordance. A small accent-tinted pill that
@@ -5993,38 +5948,58 @@ internal fun TmuxTerminalBottomControls(
             }
         }
         TmuxTerminalKeyboardChromeMode.HiddenImeControls -> {
-            // Issue #789 (hard-cut, D22): the full-width
-            // `TerminalHotkeysLauncherBar` (#784) is GONE. The launcher is now a
-            // COMPACT chip inline in the [BottomChipControls] primary cluster, so
-            // the dedicated bar row's vertical space is reclaimed. The chip opens
-            // the same dedicated [TerminalHotkeysSheet]. Terminal tab only — the
-            // panel writes control bytes to the raw pane, so the launcher is null
-            // in conversation mode.
-            BottomChipControls(
-                chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
-                onChipTap = onChipTap,
-                onDictateTap = onDictateTap,
-                onEnterTap = if (!showConversation) onEnterTap else null,
-                onShowKeyboardTap = if (!showConversation) onShowKeyboardTap else null,
-                onAddSnippetTap = onAddSnippetTap,
-                // Issue #789: the compact hotkeys launcher chip (terminal tab
-                // only). Reclaims the deleted full-width bar's row.
-                onShowHotkeysTap = if (!showConversation) onShowHotkeysTap else null,
-                addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                addSnippetIcon = SnippetsChipIcon,
-                // Project navigation on tmux panes is a separate
-                // follow-up — see #123 notes on per-pane cwd /
-                // project-root wiring.
-                onProjectNavigationTap = null,
-                // Issue #628: toggle chip for switching back to
-                // the previous tmux session. Only shown when
-                // previousSessionName differs from the current
-                // session and a callback is provided.
-                previousSessionName = previousSessionName,
-                onTogglePreviousSession = onTogglePreviousSession,
-                inputEnabled = sessionLive,
-                modifier = modifier,
-            )
+            if (showConversation) {
+                // Issue #786 (hard-cut, D22): the Conversation tab's bottom band
+                // is JUST the composer launcher — no static command chips, no
+                // #628 previous-session toggle chip (the `› <project>` pill the
+                // maintainer circled and didn't recognise), no snippets `{}` chip,
+                // no primary cluster. Everything the bar offered stays reachable:
+                // fast session-switch on the top breadcrumb, snippets in the
+                // composer's `{}`, slash commands via the composer (`/`
+                // autocomplete). The launcher keeps its #810 unconditional
+                // presence. The Terminal tab (the `else` below) is untouched and
+                // keeps its full chip band / key chips.
+                if (onDictateTap != null) {
+                    ConversationComposerLauncherRow(
+                        onDictateTap = onDictateTap,
+                        inputEnabled = sessionLive,
+                        modifier = modifier,
+                    )
+                }
+            } else {
+                // Issue #789 (hard-cut, D22): the full-width
+                // `TerminalHotkeysLauncherBar` (#784) is GONE. The launcher is now
+                // a COMPACT chip inline in the [BottomChipControls] primary
+                // cluster, so the dedicated bar row's vertical space is reclaimed.
+                // The chip opens the same dedicated [TerminalHotkeysSheet].
+                // Terminal tab only — the panel writes control bytes to the raw
+                // pane.
+                BottomChipControls(
+                    chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
+                    onChipTap = onChipTap,
+                    onDictateTap = onDictateTap,
+                    onEnterTap = onEnterTap,
+                    onShowKeyboardTap = onShowKeyboardTap,
+                    onAddSnippetTap = onAddSnippetTap,
+                    // Issue #789: the compact hotkeys launcher chip (terminal tab
+                    // only). Reclaims the deleted full-width bar's row.
+                    onShowHotkeysTap = onShowHotkeysTap,
+                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
+                    addSnippetIcon = SnippetsChipIcon,
+                    // Project navigation on tmux panes is a separate
+                    // follow-up — see #123 notes on per-pane cwd /
+                    // project-root wiring.
+                    onProjectNavigationTap = null,
+                    // Issue #628: toggle chip for switching back to
+                    // the previous tmux session. Only shown when
+                    // previousSessionName differs from the current
+                    // session and a callback is provided.
+                    previousSessionName = previousSessionName,
+                    onTogglePreviousSession = onTogglePreviousSession,
+                    inputEnabled = sessionLive,
+                    modifier = modifier,
+                )
+            }
         }
     }
 }

@@ -1835,6 +1835,85 @@ class DesignRenders {
             }
         }
 
+    /**
+     * Issue #786: the Conversation view's bottom band collapses to JUST the `>_`
+     * composer launcher — the maintainer circled the full command bar (the #628
+     * previous-session toggle `› <project>` pill + the snippets `{}` chip) and
+     * asked to remove it. This static mirror shows the AFTER state: a full-height
+     * transcript, a thin status row, and only the right-anchored launcher at the
+     * bottom — no bordered chip bar, no toggle chip, no command chips.
+     *
+     * Caveat (#555): the real `TmuxConversationPane` /
+     * `ConversationComposerLauncherRow` live in `:app`, which this ui-kit harness
+     * cannot import, so this is a STATIC visual mirror using ui-kit primitives.
+     * The full-device emulator screenshot of the real Conversation screen is the
+     * acceptance.
+     */
+    @Test
+    fun conversationLauncherOnlyBottom() =
+        render("conversation-launcher-only-bottom") {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // The transcript claims all the vertical space the deleted search
+                // bar + command bar used to eat.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = "Let me check the build status.",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                            .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    ) {
+                        Text(
+                            text = "▸ Bash  ./gradlew assembleDebug",
+                            color = PocketShellColors.Text,
+                            fontSize = 13.sp,
+                        )
+                    }
+                    Text(
+                        text = "Build succeeded in 41s.",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                    )
+                }
+                // The ONLY bottom chrome on the Conversation tab: the launcher,
+                // right-anchored, no bordered chip-bar row around it.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    contentAlignment = Alignment.CenterEnd,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+                            .border(1.dp, PocketShellColors.AccentDim, RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = ">_",
+                            color = PocketShellColors.Accent,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+        }
+
     @Test
     fun composerKeyboardUpNoKeyBar() = render("composer-keyboard-up-no-key-bar") {
         Spacer(Modifier.height(260.dp))

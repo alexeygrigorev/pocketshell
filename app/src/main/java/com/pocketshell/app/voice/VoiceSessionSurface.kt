@@ -799,6 +799,46 @@ internal fun BottomChipControls(
 
 internal val SessionBottomControlsMinHeight = PocketShellDensity.tapTargetMin + 8.dp
 
+/**
+ * Issue #786 (Conversation view = transcript + composer only): the Conversation
+ * tab's bottom band collapses to JUST the `>_` composer launcher. The maintainer
+ * circled the full command bar (the #628 previous-session toggle chip + the
+ * snippets `{}` chip) and asked to remove it — "I don't understand where it comes
+ * from, what it is, how to use it." Everything the bar offered is reachable
+ * elsewhere: the toggle chip's fast session-switch lives on the top breadcrumb,
+ * snippets live in the composer's `{}` affordance, slash commands live in the
+ * composer (`/` autocomplete, #767/#787). So on the Conversation tab only the
+ * launcher remains — right-anchored, no bordered chip row, no static chip strip,
+ * no primary cluster. The Terminal tab keeps the full [BottomChipControls].
+ *
+ * The launcher is identical to the one [BottomChipControls] renders and keeps the
+ * same [SESSION_COMPOSER_LAUNCHER_TAG], so the #810 unconditional-launcher proof
+ * tests still find it.
+ */
+@Composable
+internal fun ConversationComposerLauncherRow(
+    onDictateTap: () -> Unit,
+    inputEnabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = SessionBottomControlsMinHeight)
+            .padding(
+                top = PocketShellSpacing.sm,
+                bottom = PocketShellSpacing.sm,
+                end = PocketShellSpacing.sm,
+            ),
+        contentAlignment = Alignment.CenterEnd,
+    ) {
+        ComposerLauncherButton(
+            enabled = inputEnabled,
+            onClick = onDictateTap,
+        )
+    }
+}
+
 @Composable
 private fun ComposerLauncherButton(
     enabled: Boolean,

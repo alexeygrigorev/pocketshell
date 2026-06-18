@@ -8917,31 +8917,6 @@ public class TmuxSessionViewModel @Inject constructor(
         rememberAgentStatusForPane(paneId)
     }
 
-    /**
-     * Issue #154 (acceptance criterion #5): hoist the per-pane
-     * conversation search query into the ViewModel so it survives
-     * Terminal ↔ Conversation tab switches (the previous local
-     * `remember` lost the query on every tab flip). Bound to the
-     * search field's `onValueChange` inside [TmuxConversationPane].
-     */
-    public fun setAgentSearchQuery(paneId: String, query: String) {
-        val before = _agentConversations.value[paneId]?.searchQuery ?: return
-        if (before == query) return
-        updateAgentConversation(paneId) { current ->
-            current.copy(searchQuery = query)
-        }
-        if (before.isEmpty() != query.isEmpty()) {
-            DiagnosticEvents.record(
-                "action",
-                "conversation_search_query_changed",
-                "mode" to "tmux",
-                "paneId" to paneId,
-                "empty" to query.isEmpty(),
-                "queryBytes" to query.toByteArray(Charsets.UTF_8).size,
-            )
-        }
-    }
-
     public fun retryAgentConversationStreamForPane(paneId: String): Boolean {
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         if (inlineConnectionStatus !is ConnectionStatus.Connected) return false

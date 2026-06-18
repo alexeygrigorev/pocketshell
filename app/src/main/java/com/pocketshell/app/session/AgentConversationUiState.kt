@@ -67,19 +67,12 @@ public enum class ConversationLoadState {
  * @property events the rendered conversation transcript.
  * @property selectedTab the active in-session tab (Terminal vs Conversation).
  * @property syncStatus transcript freshness for the live-dot / banner.
- * @property searchQuery issue #154: persisted search query for the
- *   conversation pane. The value lives on the ViewModel state (not as a local
- *   `remember` in the pane composable) so the query survives Terminal ↔
- *   Conversation tab switches. The pane is the only consumer of [searchQuery],
- *   and the ViewModel exposes a setter (`setAgentSearchQuery` on
- *   `TmuxSessionViewModel`) that the composer wires `onValueChange` into.
  */
 public data class AgentConversationUiState(
     val detection: AgentDetection? = null,
     val events: List<ConversationEvent> = emptyList(),
     val selectedTab: SessionTab = SessionTab.Terminal,
     val syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
-    val searchQuery: String = "",
     /**
      * Issue #793: lifecycle of the initial tail load. The screen consults
      * this to show "Loading conversation…", a clear empty/failed terminal

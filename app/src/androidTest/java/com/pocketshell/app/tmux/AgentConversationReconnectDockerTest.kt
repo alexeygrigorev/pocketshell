@@ -488,30 +488,32 @@ class AgentConversationReconnectDockerTest {
     }
 
     /**
-     * Issue #807 ("black screen") — a freshly-attached, freshly-detected AGENT
-     * session must open on the Conversation (parsed) view by default, WITHOUT
-     * the user tapping anything; and a plain SHELL session must NOT be forced
-     * onto Conversation.
+     * Issue #815 — detecting an agentic session must NOT change the tab the user
+     * is on. A freshly-attached, freshly-detected AGENT session must STAY on the
+     * raw Terminal view (the tab the user is already on) by default, WITHOUT the
+     * app yanking them to Conversation; and a plain SHELL session never gets a
+     * conversation row at all.
      *
-     * Why: an idle agent (e.g. Claude Code) bottom-anchors its TUI and leaves
-     * the rest of the grid empty, so its raw Terminal view is mostly black /
-     * unusable (proven faithful render — the void is the agent's own TUI, not a
-     * render bug). The shippable fix is to land a detected agent on the readable
-     * parsed Conversation view by default instead of that black raw Terminal.
+     * Why: the maintainer found the auto-navigation to Conversation on detection
+     * jarring (introduced by af32522b for #807, now reverted). The empty-grid
+     * "black screen" that motivated that auto-switch is addressed at product
+     * level by epic #809 / the always-visible composer (#810), not by forcing a
+     * tab change. So detection must leave the view alone — the user can still
+     * switch to Conversation manually.
      *
      * This drives the production [TmuxSessionViewModel] against the deterministic
      * Docker `agents` fixture (host port 2222) through the FRESH-attach path —
      * NO reconnect — so it is far more deterministic than the reconnect case
      * above and the load-bearing assertion is NOT CI-gated. Two panes:
      *  - an AGENT pane (`claude`-named process in /workspace/pocketshell + a
-     *    refreshed Claude JSONL) → live detection fires → the default tab is
-     *    Conversation, with NO `selectSessionTab` call in this test.
+     *    refreshed Claude JSONL) → live detection fires → a conversation row is
+     *    created but the tab STAYS on Terminal, with NO `selectSessionTab` call
+     *    in this test.
      *  - a SHELL pane (plain shell, no agent) → no detection ever lands → no
-     *    conversation row is ever created → it stays on the raw Terminal. This
-     *    proves the Conversation default can NEVER force a non-agent/shell pane.
+     *    conversation row is ever created → it stays on the raw Terminal.
      */
     @Test
-    fun freshlyDetectedAgentDefaultsToConversationAndShellStaysTerminal(): Unit = runBlocking {
+    fun freshlyDetectedAgentStaysOnTerminalAndShellGetsNoConversationRow(): Unit = runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -610,29 +612,39 @@ class AgentConversationReconnectDockerTest {
                 agentVm.agentForWindow(agentWindowId),
             )
 
-            // CORE ASSERTION (#807): with NO user tab tap, the freshly-detected
-            // agent opens on the parsed Conversation view by default — NOT the
-            // black raw Terminal. Bound the wait: markAgentTailLive seeds the
-            // default tab synchronously once the detection's tail read lands.
-            waitForSelectedTab(agentVm, agentPaneId, SessionTab.Conversation)
+            // Detection landing creates the conversation row; wait for it to
+            // exist (markAgentTailLive seeds it once the detection's tail read
+            // lands). NO `selectSessionTab` is ever called in this test.
+            waitForCondition(
+                label = "issue815 agent conversation row",
+                timeoutMs = 10_000,
+                describe = { "conversations=${agentVm.agentConversations.value.keys}" },
+                predicate = { agentVm.agentConversations.value[agentPaneId] != null },
+            )
             val agentRow = agentVm.agentConversations.value[agentPaneId]
             assertNotNull(
                 "a detected agent must have a conversation row (pane=$agentPaneId); " +
                     "conversations=${agentVm.agentConversations.value.keys}",
                 agentRow,
             )
+
+            // CORE ASSERTION (#815): with NO user tab tap, detecting the agent
+            // must NOT yank the user to Conversation — the row defaults to the
+            // raw Terminal view, the tab the user is already on. Give the auto-
+            // switch (if it had survived) a real chance to fire before asserting.
+            delay(SHELL_NO_DETECTION_SETTLE_MS)
             assertEquals(
-                "a freshly-detected agent must DEFAULT to Conversation (no black raw Terminal), " +
-                    "with no user tab tap",
-                SessionTab.Conversation,
-                agentRow!!.selectedTab,
+                "detecting an agent must NOT change the tab — the row stays on raw Terminal, " +
+                    "with no user tab tap (pane=$agentPaneId)",
+                SessionTab.Terminal,
+                agentVm.agentConversations.value[agentPaneId]!!.selectedTab,
             )
             assertEquals(
-                "the default-Conversation row must carry the real Claude detection",
+                "the Terminal-default row must carry the real Claude detection",
                 AgentKind.ClaudeCode,
-                agentRow.detection?.agent,
+                agentVm.agentConversations.value[agentPaneId]!!.detection?.agent,
             )
-            stamp("issue807_agent_default_tab=${agentRow.selectedTab}")
+            stamp("issue815_agent_default_tab=${agentVm.agentConversations.value[agentPaneId]!!.selectedTab}")
         } finally {
             agentVm.clearForTest()
         }
@@ -661,8 +673,8 @@ class AgentConversationReconnectDockerTest {
             stamp("issue807_shell_attached window=$shellWindowId pane=$shellPaneId")
 
             // Give live detection a real chance to (not) fire on the plain shell,
-            // then assert the shell never gets a conversation row and so never
-            // gets forced onto Conversation — it stays on the raw Terminal.
+            // then assert the shell never gets a conversation row at all — it
+            // stays on the raw Terminal.
             delay(SHELL_NO_DETECTION_SETTLE_MS)
             assertEquals(
                 "a plain shell pane must have NO live agent detection",
@@ -670,21 +682,20 @@ class AgentConversationReconnectDockerTest {
                 shellVm.agentForWindow(shellWindowId),
             )
             assertEquals(
-                "a non-agent shell must NOT be forced onto Conversation — no conversation row " +
-                    "is ever created for it, so it stays on the raw Terminal (pane=$shellPaneId); " +
-                    "conversations=${shellVm.agentConversations.value.keys}",
+                "a non-agent shell never gets a conversation row, so it stays on the raw " +
+                    "Terminal (pane=$shellPaneId); conversations=${shellVm.agentConversations.value.keys}",
                 null,
                 shellVm.agentConversations.value[shellPaneId],
             )
-            stamp("issue807_shell_stays_terminal conversations=${shellVm.agentConversations.value.keys}")
+            stamp("issue815_shell_stays_terminal conversations=${shellVm.agentConversations.value.keys}")
 
             writeText(
-                "issue807-default-tab-summary.txt",
+                "issue815-default-tab-summary.txt",
                 buildString {
-                    appendLine("scenario=agent-defaults-to-conversation-shell-stays-terminal (#807)")
+                    appendLine("scenario=detection-does-not-change-tab-agent-and-shell-stay-terminal (#815)")
                     appendLine("agent_session=$agentSessionName")
                     appendLine("shell_session=$shellSessionName")
-                    appendLine("agent_default_tab=Conversation")
+                    appendLine("agent_default_tab=Terminal")
                     appendLine("shell_has_conversation_row=false")
                     appendLine("shell_agent_for_window=null")
                     appendLine("stamps:")

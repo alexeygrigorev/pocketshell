@@ -6016,16 +6016,16 @@ class TmuxSessionViewModelTest {
         )
     }
 
-    // ─── Issue #807: detected agents default to the Conversation view ───
+    // ─── Issue #815: detecting an agent must NOT change the user's tab ───
 
     @Test
-    fun freshlyDetectedAgentDefaultsToConversationTab() = runTest(scheduler) {
-        // Issue #807 ("black screen"): an idle agent bottom-anchors its TUI and
-        // leaves the rest of the grid empty, so its raw Terminal view is mostly
-        // black/unusable. When a POSITIVE agent detection first lands on a pane
-        // with NO existing conversation row (no remembered tab, no explicit user
-        // choice), the live-detection landing path must default the agent's view
-        // to the Conversation (parsed) tab — not the raw Terminal.
+    fun freshlyDetectedAgentStaysOnTerminalTab() = runTest(scheduler) {
+        // Issue #815: detecting an agentic session must NOT yank the user onto
+        // the Conversation view. When a POSITIVE agent detection first lands on a
+        // pane with NO existing conversation row (no remembered tab, no explicit
+        // user choice), the live-detection landing path defaults the new row to
+        // the raw Terminal view — the tab the user is already on. The user can
+        // still switch to Conversation manually.
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
@@ -6037,16 +6037,16 @@ class TmuxSessionViewModelTest {
 
         val state = vm.agentConversations.value["%0"]!!
         assertEquals(
-            "a freshly-detected agent opens on the parsed Conversation view, not the black raw Terminal",
-            SessionTab.Conversation,
+            "detecting an agent must NOT change the tab: a fresh detection defaults to Terminal",
+            SessionTab.Terminal,
             state.selectedTab,
         )
         assertEquals(AgentKind.ClaudeCode, state.detection?.agent)
     }
 
     @Test
-    fun freshlyDetectedAgentViaFullSshPathDefaultsToConversationTab() = runTest(scheduler) {
-        // Issue #807: the same Conversation default through the REAL end-to-end
+    fun freshlyDetectedAgentViaFullSshPathStaysOnTerminalTab() = runTest(scheduler) {
+        // Issue #815: the same Terminal default through the REAL end-to-end
         // production conversation-start path (startAgentConversationForPane →
         // markAgentTailLive), not only the markAgentTailLive seam.
         val vm = newVm()
@@ -6062,19 +6062,48 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         assertEquals(
-            "the end-to-end detect+load path opens the agent on Conversation",
-            SessionTab.Conversation,
+            "the end-to-end detect+load path must NOT bounce the user off Terminal",
+            SessionTab.Terminal,
             vm.agentConversations.value["%0"]!!.selectedTab,
         )
     }
 
     @Test
-    fun nonAgentShellNeverGetsForcedOntoConversation() = runTest(scheduler) {
-        // Issue #807 guard: only a POSITIVE agent detection opts a pane into the
-        // Conversation default. A plain shell pane (no agent detected) never gets
-        // a conversation row at all — markAgentTailLive is only ever called once
-        // an agent is detected — so it stays on the raw Terminal. This proves the
-        // Conversation default can NEVER force a non-agent/shell pane.
+    fun differentAgentTakeoverStaysOnTerminalTab() = runTest(scheduler) {
+        // Issue #815: a DIFFERENT agent taking over a pane's window (no
+        // same-source continuity) must also NOT force the user onto Conversation.
+        // The new identity's row defaults to Terminal, just like a fresh row.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        // First agent lands and creates the row (defaults to Terminal).
+        vm.markAgentTailLiveForTest("%0", newClaudeDetection())
+        runCurrent()
+        assertEquals(
+            "precondition: the first detection defaults to Terminal",
+            SessionTab.Terminal,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+
+        // A different agent (Codex) takes over the same pane — no same-source
+        // continuity, so the takeover branch (current.detection != detection)
+        // rebuilds the row. It must still default to Terminal, not Conversation.
+        vm.markAgentTailLiveForTest("%0", newCodexDetection())
+        runCurrent()
+        val takenOver = vm.agentConversations.value["%0"]!!
+        assertEquals(
+            "a different-agent takeover must NOT force the user onto Conversation",
+            SessionTab.Terminal,
+            takenOver.selectedTab,
+        )
+        assertEquals(AgentKind.Codex, takenOver.detection?.agent)
+    }
+
+    @Test
+    fun nonAgentShellNeverGetsAConversationRow() = runTest(scheduler) {
+        // Issue #815 guard: a plain shell pane (no agent detected) never gets a
+        // conversation row at all — markAgentTailLive is only ever called once an
+        // agent is detected — so it stays on the raw Terminal. This proves
+        // detection-driven row creation can NEVER touch a non-agent/shell pane.
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         // The pane is a plain "shell" (see connectWithPaneForTest's ParsedPane).
@@ -6093,18 +6122,18 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun rememberedTerminalChoiceIsHonoredOverConversationDefaultOnReattach() = runTest(scheduler) {
-        // Issue #807: the Conversation default only applies when there is NO
-        // remembered/explicit user choice. A user who deliberately stayed on
-        // Terminal must be put back on Terminal on reattach, NOT bounced to the
-        // new Conversation default. (Seed-from-memory honours wasOnConversation
-        // BEFORE markAgentTailLive runs, so the remembered Terminal row already
-        // exists and live re-detection refines it without resetting the tab.)
+    fun rememberedConversationChoiceIsHonoredOnReattach() = runTest(scheduler) {
+        // Issue #815: detection never changes the tab, but a remembered/explicit
+        // user choice must still WIN. A user who deliberately moved to
+        // Conversation must be put back on Conversation on reattach, NOT reset to
+        // the Terminal default. (Seed-from-memory honours wasOnConversation
+        // BEFORE markAgentTailLive runs, so the remembered Conversation row
+        // already exists and live re-detection refines it without resetting it.)
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
-        // The user saw the agent but deliberately stayed on Terminal.
-        vm.selectSessionTab("%0", SessionTab.Terminal)
+        // The user deliberately moved to Conversation.
+        vm.selectSessionTab("%0", SessionTab.Conversation)
         runCurrent()
 
         // Reattach: a new pane id under the same window; memory restores the row.
@@ -6113,21 +6142,21 @@ class TmuxSessionViewModelTest {
         )
         runCurrent()
         assertEquals(
-            "remembered Terminal choice is restored, NOT overridden by the agent Conversation default",
-            SessionTab.Terminal,
+            "remembered Conversation choice is restored on reattach, not reset to the Terminal default",
+            SessionTab.Conversation,
             vm.agentConversations.value["%7"]!!.selectedTab,
         )
 
         // Live re-detection lands for the SAME agent + same log: it must still
-        // honour the remembered Terminal tab (same-source refinement preserves it).
+        // honour the remembered Conversation tab (same-source refinement preserves it).
         vm.markAgentTailLiveForTest(
             "%7",
             newClaudeDetection().copy(confidence = AgentDetection.Confidence.RecentFile),
         )
         runCurrent()
         assertEquals(
-            "same-agent refinement keeps the user's remembered Terminal tab",
-            SessionTab.Terminal,
+            "same-agent refinement keeps the user's remembered Conversation tab",
+            SessionTab.Conversation,
             vm.agentConversations.value["%7"]!!.selectedTab,
         )
     }

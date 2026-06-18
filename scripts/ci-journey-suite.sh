@@ -385,6 +385,22 @@ JOURNEY_CLASSES=(
   # fully-qualified name directly. The heavier live-burst on-device acceptance
   # (Issue796ComposerOpenDuringCodexBurstProofTest) stays out of this fast subset.
   "com.pocketshell.app.tmux.Issue796ComposerOpenTerminalScopeProofTest"
+  # ADDED (#810): the composer-launcher ALWAYS-PRESENT switch journey. The
+  # maintainer dogfooded the composer launcher DROPPING OUT after a session
+  # switch (A->B->C->A): the launcher chip rendered on the first session but
+  # vanished on subsequent switches, so there was no way to open the composer
+  # without backing all the way out. This proof switches across THREE live
+  # sessions (A->B->C->A) and, after EACH switch, asserts the composer launcher
+  # is present AND fully within the viewport (assertNodeFullyWithinRoot, the
+  # #657/F1 containment helper — not a bare assertIsDisplayed). RED on base (the
+  # launcher drops on the 2nd+ switch); GREEN after the fix. It is a
+  # load-bearing session-switch journey, so per the #638 "switch journeys run in
+  # regular per-PR CI" mandate it joins this per-push subset. It uses ONLY the
+  # deterministic agents:2222 fixture (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222)
+  # that tests.yml already brings up — no toxiproxy, no new Docker service/port —
+  # and does NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the
+  # load-bearing assertion). It lives under the com.pocketshell.app.proof prefix.
+  "$FQCN_PREFIX.ComposerAlwaysPresentSwitchJourneyE2eTest"
 )
 
 echo "=========================================================="

@@ -1771,17 +1771,33 @@ public fun TmuxSessionScreen(
                 onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
-            // Issue #797: the bottom controls + composer launcher wrap the
-            // SURFACE pane, not the active-only `currentPane`. This is the fix
-            // for the maintainer's "composer button gone" symptom: on a settled
-            // cached pane `currentPane == null` skipped this whole block, so the
-            // composer launcher was simply not in the tree. The chip / key / send
-            // callbacks below route to `pane.paneId` — which is the pane the user
-            // is parked on; the promotion-on-settle path makes that pane active
-            // (rebinding `clientRef`/`_panes.value`) so the bytes actually reach
-            // it, never a stale leaving session (surfacePane is null while a
-            // switch hides the terminal — the #661 bleed guard).
-            surfacePane?.let { pane ->
+            // Issue #810 (hard-cut, D22) — the prompt composer affordance is
+            // ALWAYS present on every live session, structurally independent of
+            // agent-detection state, pane-cache state (`surfacePane == null` /
+            // the #797 visible-pane swap), the selected tab, and session-switch
+            // transitions. The bottom controls (which HOST the composer launcher)
+            // are therefore rendered UNCONDITIONALLY — never wrapped in a
+            // `surfacePane?.let { ... }` that drops them from the tree whenever
+            // the surface pane is momentarily null.
+            //
+            // This DELETES the multi-release regression source: every prior
+            // composer-disappearance fix (#797 visible-pane following, #744
+            // detection uncertainty, #801 squish, #805 detecting-state chrome)
+            // gated the composer on some piece of state, and a different state
+            // path kept removing it. The cure is to stop gating PRESENCE at all.
+            //
+            // The composer launcher itself only flips `showMicSheet`; it needs no
+            // pane. The CONTENT/behaviour (voice, snippets, send) is unchanged —
+            // only PRESENCE becomes unconditional. The pane-dependent chip / key
+            // callbacks below are null/no-op when there is no routable surface
+            // pane (a switch is hiding the terminal — the #661/#634/#636
+            // stale-bleed guard), and `controlsInputEnabled` disables them, so a
+            // tap never routes bytes to a stale leaving session. They reappear the
+            // instant the target pane is revealed. The `onSend` path already
+            // returns false when `surfacePane == null`, so opening the composer
+            // over a null surface is safe.
+            run {
+                val pane = surfacePane
                 // Issue #716: agent-aware chips/affordances follow presumed-agent,
                 // not just live detection, so they don't flip to shell chips
                 // during the slow-detection window.
@@ -1794,6 +1810,11 @@ public fun TmuxSessionScreen(
                 } else {
                     Modifier.navigationBarsPadding()
                 }
+                // Issue #810: input routing is live only when there is a routable
+                // surface pane AND the SSH/tmux link is up. With no surface pane
+                // (a switch is hiding the terminal) the chips are inert; the
+                // composer launcher stays present and tappable regardless.
+                val controlsInputEnabled = sessionLive && pane != null
                 // Issue #673: staged composer attachments are NOT shown in the
                 // session/terminal bottom area. They live only inside the
                 // Prompt Composer sheet (state persists in the composer
@@ -1813,7 +1834,7 @@ public fun TmuxSessionScreen(
                     // composer launcher off-screen. Restores the #744 invariant:
                     // the composer stays reachable while detection is uncertain.
                     showConversation = onConversationTab,
-                    sessionLive = sessionLive,
+                    sessionLive = controlsInputEnabled,
                     isAgentPane = isAgentPane,
                     onChipTap = { chip ->
                         // Agent slash commands are opened through the primary
@@ -1822,29 +1843,37 @@ public fun TmuxSessionScreen(
                         // quick-run commands ([DefaultSessionChips]). Each
                         // runs literally in the focused pane, appending a CR
                         // that the tmux input bridge translates into Enter.
-                        viewModel.writeInputToPane(
-                            pane.paneId,
-                            (chip + "\r").toByteArray(Charsets.UTF_8),
-                        )
+                        // Issue #810: no-op when there is no routable surface pane.
+                        pane?.let {
+                            viewModel.writeInputToPane(
+                                it.paneId,
+                                (chip + "\r").toByteArray(Charsets.UTF_8),
+                            )
+                        }
                     },
+                    // Issue #810: the composer launcher is UNCONDITIONAL — it only
+                    // opens the Prompt Composer sheet (no pane needed), so it is
+                    // never gated on `surfacePane`.
                     onDictateTap = { showMicSheet = true },
-                    onEnterTap = { viewModel.onKeyBarKey(pane.paneId, "Enter") },
+                    onEnterTap = pane?.let { p -> { viewModel.onKeyBarKey(p.paneId, "Enter") } },
                     // Issue #131: surface the show-keyboard chip on the tmux
                     // route too. The helper looks up the TerminalView of the
                     // currently visible pane.
-                    onShowKeyboardTap = {
-                        DiagnosticEvents.record(
-                            "action",
-                            "keyboard_panel_show",
-                            "mode" to "tmux",
-                            "paneId" to pane.paneId,
-                        )
-                        showTerminalSoftKeyboard(
-                            composeRootView,
-                            onLocalTerminalError = { cause ->
-                                viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
-                            },
-                        )
+                    onShowKeyboardTap = pane?.let { p ->
+                        {
+                            DiagnosticEvents.record(
+                                "action",
+                                "keyboard_panel_show",
+                                "mode" to "tmux",
+                                "paneId" to p.paneId,
+                            )
+                            showTerminalSoftKeyboard(
+                                composeRootView,
+                                onLocalTerminalError = { cause ->
+                                    viewModel.reportTerminalSurfaceFailure(p.paneId, cause)
+                                },
+                            )
+                        }
                     },
                     // Issue #453: no snippet chip on agent panes — the
                     // composer's `{}` affordance already inserts saved prompts.
@@ -1857,7 +1886,10 @@ public fun TmuxSessionScreen(
                     // has never hosted an agent — that suppression is the #761
                     // bug (the chip was never in the semantics tree on a tmux
                     // shell). See [tmuxSessionShowsSnippetChip].
+                    // Issue #810: also null when there is no surface pane to route
+                    // a picked snippet to.
                     onAddSnippetTap = if (
+                        pane != null &&
                         tmuxSessionShowsSnippetChip(
                             hasHost = hostId != 0L,
                             hasLiveDetection = currentAgentConversation?.detection != null,
@@ -1874,14 +1906,16 @@ public fun TmuxSessionScreen(
                     },
                     // Issue #784: open the dedicated terminal-hotkeys panel.
                     // Terminal tab only (a raw pane to receive control bytes).
-                    onShowHotkeysTap = {
-                        DiagnosticEvents.record(
-                            "action",
-                            "hotkey_panel_show",
-                            "mode" to "tmux",
-                            "paneId" to pane.paneId,
-                        )
-                        showHotkeysPanel = true
+                    onShowHotkeysTap = pane?.let { p ->
+                        {
+                            DiagnosticEvents.record(
+                                "action",
+                                "hotkey_panel_show",
+                                "mode" to "tmux",
+                                "paneId" to p.paneId,
+                            )
+                            showHotkeysPanel = true
+                        }
                     },
                     modifier = bottomControlsModifier,
                 )

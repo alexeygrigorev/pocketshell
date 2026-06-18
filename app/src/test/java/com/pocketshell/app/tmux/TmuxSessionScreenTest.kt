@@ -816,10 +816,17 @@ class TmuxSessionScreenTest {
     /**
      * The user-visible outcome of the composer / Conversation / input gate for a
      * given pager/switch state, derived through the SAME production helpers and
-     * in the SAME order as [TmuxSessionScreen] (#797). Modelling the gate here —
-     * rather than calling [tmuxSessionPresumedAgent] alone — reproduces the
-     * call-site short-circuit that was the actual bug (`presumedAgent =
-     * surfacePane != null && …` and the `surfacePane?.let { }` composer wrapper).
+     * in the SAME order as [TmuxSessionScreen] (#797 / #810). Modelling the gate
+     * here — rather than calling [tmuxSessionPresumedAgent] alone — reproduces the
+     * call-site short-circuit that was the actual bug.
+     *
+     * Issue #810 (hard-cut, D22): the composer launcher is now STRUCTURALLY
+     * UNCONDITIONAL — the old `surfacePane?.let { }` wrapper that dropped the
+     * bottom controls (and the launcher) whenever the surface pane was null is
+     * DELETED. So [composerShown] is always `true`. The send/chip ROUTE remains
+     * surface-pane-gated ([sendRouteTargetPaneId] is null with no surface pane) so
+     * a tap can never reach a stale leaving session even though the launcher is
+     * present. The two properties are now independent.
      */
     private data class SessionSurfaceOutcome(
         val composerShown: Boolean,
@@ -853,11 +860,17 @@ class TmuxSessionScreenTest {
             )
         // 4. Conversation tab state.
         val tabState = tmuxSessionTabState(currentAgentConversation, presumedAgent)
-        // 5. Composer launcher: the `surfacePane?.let { }` wrapper at the bottom
-        //    controls — present iff there is a surface pane.
-        val composerShown = surfacePane != null
+        // 5. Composer launcher (issue #810, hard-cut D22): the bottom controls
+        //    that host the launcher render UNCONDITIONALLY — the old
+        //    `surfacePane?.let { }` wrapper is DELETED, so presence no longer keys
+        //    off the surface pane (or detection, or the selected tab). The
+        //    launcher is ALWAYS present; only its pane-routed callbacks go inert
+        //    when there is no surface pane.
+        val composerShown = true
         // 6. Send route target paneId: the surface pane's id (the visible/intended
-        //    session). Null when no surface pane (switch in flight).
+        //    session). Null when no surface pane (switch in flight) — so a send /
+        //    chip tap can never route to a stale leaving session even though the
+        //    launcher itself stays present.
         return SessionSurfaceOutcome(
             composerShown = composerShown,
             conversationTabShown = tabState.showsConversationTab,
@@ -1008,14 +1021,19 @@ class TmuxSessionScreenTest {
     }
 
     @Test
-    fun switchInFlightSuppressesSurfaceSoNoStaleSessionBleed() {
-        // #797 no-content-bleed proof (#661/#634/#636): while a cross-session
-        // switch is hiding the terminal, the VISIBLE pane is the LEAVING session.
-        // The surface MUST be suppressed so neither the composer nor a send can
-        // route to / leak from the stale leaving session. Composer hidden +
-        // tab hidden + NO send-route target during the switch-in-flight window;
-        // it reappears the instant the target is revealed (the active-pane test
-        // above).
+    fun switchInFlightKeepsComposerPresentButSuppressesRouteSoNoStaleSessionBleed() {
+        // #797 no-content-bleed proof (#661/#634/#636) + #810 always-present
+        // composer: while a cross-session switch is hiding the terminal, the
+        // VISIBLE pane is the LEAVING session.
+        //
+        // #810 (hard-cut, D22): the composer LAUNCHER stays PRESENT throughout the
+        // switch — it is the session's only input affordance and must never vanish
+        // (the maintainer's multi-release regression). What MUST stay suppressed is
+        // anything that could route to / leak from the stale leaving session: the
+        // Conversation tab content AND the send/chip ROUTE target. So during the
+        // switch-in-flight window: composer present, tab hidden, NO route target.
+        // The route + tab reappear the instant the target is revealed (the
+        // active-pane test above).
         val leavingSessionPane = fakePane("%leaving")
         val outcome = sessionSurfaceOutcome(
             visibleUnifiedPane = leavingSessionPane,
@@ -1032,9 +1050,9 @@ class TmuxSessionScreenTest {
         )
 
         assertTrue(
-            "composer must be suppressed while a switch hides the terminal " +
-                "(no stale-session surface)",
-            !outcome.composerShown,
+            "composer launcher must STAY PRESENT while a switch hides the terminal " +
+                "(issue #810 — never gate the composer on a transient null surface)",
+            outcome.composerShown,
         )
         assertTrue(
             "Conversation tab must be suppressed while a switch hides the terminal",
@@ -1043,6 +1061,138 @@ class TmuxSessionScreenTest {
         assertNull(
             "no send may route to the leaving session while a switch is in flight",
             outcome.sendRouteTargetPaneId,
+        )
+    }
+
+    // ─── Issue #810 (epic #809): the composer launcher is ALWAYS present ──────
+    // on every live session — independent of agent detection, pane-cache state,
+    // selected tab, and switch transitions. The multi-release regression came
+    // back each time because a fix gated the composer on some piece of state;
+    // these proofs lock in that PRESENCE has no gate at all (hard-cut, D22).
+
+    @Test
+    fun composerLauncherIsPresentIndependentOfDetectionCacheTabAndSwitchState() {
+        // Cross-product of the four state dimensions the issue calls out:
+        //   - detection: live-detected / sticky-only / undetected,
+        //   - pane-cache: active pane vs settled cached pane (currentPane null),
+        //   - selected tab: Terminal vs Conversation,
+        //   - switch transition: at rest vs switch-hides-terminal (surface null).
+        // In EVERY combination the composer launcher must be present. The send
+        // route may legitimately be null (switch in flight) — presence and route
+        // are independent post-#810 — but presence is never false.
+        val tabs = listOf(SessionTab.Terminal, SessionTab.Conversation)
+        val detections = listOf<AgentConversationUiState?>(
+            // live-detected
+            AgentConversationUiState(detection = claudeDetection(), selectedTab = SessionTab.Terminal),
+            // undetected (no row)
+            null,
+        )
+        val stickies = listOf(emptyMap<String, AgentKind>(), mapOf("%p" to AgentKind.Codex))
+        for (switchHides in listOf(false, true)) {
+            for (tab in tabs) {
+                for (det in detections) {
+                    for (sticky in stickies) {
+                        val pane = fakePane("%p")
+                        val convo = det?.copy(selectedTab = tab)
+                        val outcome = sessionSurfaceOutcome(
+                            visibleUnifiedPane = pane,
+                            switchHidesTerminal = switchHides,
+                            agentConversations = convo?.let { mapOf("%p" to it) } ?: emptyMap(),
+                            stickyAgentByPaneId = sticky,
+                        )
+                        assertTrue(
+                            "issue #810: composer launcher must be present for " +
+                                "switchHides=$switchHides tab=$tab detected=${det != null} " +
+                                "sticky=${sticky.isNotEmpty()} — presence has NO gate",
+                            outcome.composerShown,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun composerLauncherIsPresentEvenWithNoVisiblePaneAtAll() {
+        // Defensive: even when the pager has no pane to show yet (null visible
+        // pane, e.g. the brief waiting-for-panes window), the composer launcher
+        // is still present (the bottom controls render unconditionally). Only the
+        // pane-routed callbacks are inert.
+        val outcome = sessionSurfaceOutcome(
+            visibleUnifiedPane = null,
+            switchHidesTerminal = false,
+            agentConversations = emptyMap(),
+            stickyAgentByPaneId = emptyMap(),
+        )
+        assertTrue(
+            "issue #810: composer launcher present even with no visible pane",
+            outcome.composerShown,
+        )
+        assertNull(
+            "no send route when there is no pane to route to",
+            outcome.sendRouteTargetPaneId,
+        )
+    }
+
+    /**
+     * The PRE-#810 (origin/main `03ef2fe7`) composer-presence gate: the bottom
+     * controls were wrapped in `surfacePane?.let { … }`, so the composer launcher
+     * was present IFF there was a surface pane. During a cross-session switch
+     * (`switchHidesTerminal == true`) the surface pane is null, so the launcher
+     * VANISHED — the maintainer's multi-release "composer disappears on
+     * switch-back" regression. This baseline reproduces that gate so the #810
+     * fix's RED→GREEN is visible in one file.
+     */
+    private fun pre810ComposerShown(switchHidesTerminal: Boolean): Boolean {
+        // origin/main: `surfacePane = if (switchHidesTerminal) null else visiblePane`,
+        // and the composer launcher was `surfacePane?.let { … }` → present iff
+        // surfacePane != null.
+        val surfacePane = tmuxSessionSurfacePane(
+            visibleUnifiedPane = fakePane("%p"),
+            switchHidesTerminal = switchHidesTerminal,
+        )
+        return surfacePane != null
+    }
+
+    @Test
+    fun pre810BaselineHidesComposerWhileSwitchHidesTerminal() {
+        // RED baseline: the pre-#810 `surfacePane?.let { }` gate dropped the
+        // composer launcher from the tree whenever a switch was hiding the
+        // terminal (surface pane null) — the disappearance the maintainer hit.
+        assertTrue(
+            "baseline: pre-#810 the composer was present while NOT switching",
+            pre810ComposerShown(switchHidesTerminal = false),
+        )
+        assertTrue(
+            "baseline: pre-#810 the composer VANISHED while a switch hid the " +
+                "terminal (surface pane null) — the #810 regression",
+            !pre810ComposerShown(switchHidesTerminal = true),
+        )
+    }
+
+    @Test
+    fun post810ComposerSurvivesTheSwitchInFlightWindowThePre810GateHid() {
+        // GREEN: the #810 fix renders the bottom controls (and the launcher)
+        // unconditionally, so the composer survives EXACTLY the switch-in-flight
+        // window the pre-#810 gate hid it in — with the SAME input. Contrasted
+        // directly against [pre810BaselineHidesComposerWhileSwitchHidesTerminal]
+        // so the RED→GREEN is unambiguous.
+        val outcome = sessionSurfaceOutcome(
+            visibleUnifiedPane = fakePane("%p"),
+            switchHidesTerminal = true,
+            agentConversations = emptyMap(),
+            stickyAgentByPaneId = emptyMap(),
+        )
+        // The pre-#810 gate hid it here…
+        assertTrue(
+            "precondition: the pre-#810 gate hid the composer in this exact state",
+            !pre810ComposerShown(switchHidesTerminal = true),
+        )
+        // …the #810 fix keeps it present.
+        assertTrue(
+            "issue #810: the composer launcher survives the switch-in-flight window " +
+                "the pre-#810 surfacePane gate hid it in",
+            outcome.composerShown,
         )
     }
 

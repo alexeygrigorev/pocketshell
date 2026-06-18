@@ -50,15 +50,51 @@ Look for the actual failure signal, not the framework chrome. Common patterns:
 
 ### 3. Classify the failure
 
+#### 3.0 Diff-aware guard — run this BEFORE the table (mandatory, #806)
+
+A repeatedly-failing journey on the swiftshader CI AVD is the #788-class
+interop/timing flake, NOT necessarily a code regression — and "failed both the
+in-suite attempt AND the cold-boot retry" is NOT sufficient on its own to call
+it a genuine regression. Before you classify ANY emulator/journey (`androidTest`)
+failure as a commit defect, inspect what the offending commit actually changed:
+
+```bash
+gh run view <RUN_ID> --json headSha -q .headSha          # the offending commit
+git show --stat <sha>                                    # changed paths
+```
+
+If the diff is **version-only** (only `app/build.gradle*` / `build.gradle*`
+`versionName`/`versionCode`, `tools/pocketshell/pyproject.toml`, changelog) OR
+**test-only / harness-only** (`src/androidTest/**`, `src/test/**`, `scripts/**`
+test harness) AND does **not** touch the production module the failing journey
+exercises, then the commit **cannot have regressed that production journey**.
+Classify it as the **#788 swiftshader flake class** → comment on the #788 /
+flake tracker with the run URL, **do NOT reopen the closed issue, and do NOT
+fire a "real regression" alert.** Confirm with a `gh run rerun` and/or a local
+run before escalating any journey failure on such a commit.
+
+Worked false-positive precedent: commit `2c6b0924` (the v0.4.7 version bump,
+version-string + test-only) — `PreExistingMultiWindowSeedE2eTest` failed both
+cold-boot attempts on the first run; the "failed both ⇒ genuine" heuristic would
+have spammed a real-regression alert, but identical production code passed the
+same journey on `e57716ac`/`89729e72` minutes earlier and locally on a real
+emulator. A whole-workflow rerun then went green. That is the flake, not a
+regression.
+
+The guard only SUPPRESSES false positives — when the diff **does** touch the
+production code the journey exercises, classify normally and fire the
+genuine-regression path (no weakening of true-positive detection).
+
 | Pattern | Class | Action |
 |---------|-------|--------|
 | Same failure across N consecutive pushes touching unrelated files | infra | File or comment on existing infra issue (e.g. #182 for AVD contention) |
+| Journey/`androidTest` failure on a **version-only or test-only** commit that doesn't touch the journey's production module | infra / #788 flake | Comment on #788 / flake tracker with run URL; do NOT reopen, do NOT alert "real regression" (see §3.0) |
 | Build/compile failure introduced by named commit | commit defect — small | Fix yourself, push as `Fix CI failure (refs #N)` |
-| Test failure introduced by named commit | commit defect | Reopen issue #N, comment with failure, dispatch implementer round-2 via the orchestrator (your final report tells the orchestrator to dispatch) |
+| Test failure introduced by named commit **whose diff touches the relevant production code** | commit defect | Reopen issue #N, comment with failure, dispatch implementer round-2 via the orchestrator (your final report tells the orchestrator to dispatch) |
 | Test failure on a test the commit didn't touch, unclear cause | new issue | File a new issue and link the failing run |
 | Pass on rerun | flake | File or comment on flake-tracker issue with the run URL |
 
-When in doubt about whether infra or commit defect, **rerun the failed run** (`gh run rerun <RUN_ID>`). Reruns are cheap signal — passing rerun = flake; same failure twice = real.
+When in doubt about whether infra or commit defect, **rerun the failed run** (`gh run rerun <RUN_ID>`). Reruns are cheap signal — passing rerun = flake; same failure twice = real — but a version-only/test-only commit (§3.0) is a flake even when it fails twice.
 
 ### 4. If commit-related: identify the issue from the commit
 

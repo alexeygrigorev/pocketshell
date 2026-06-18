@@ -527,6 +527,53 @@ def _jobs_status_handler(params: Mapping[str, Any]) -> dict[str, Any]:
     return _jobs.daemon_handler_status(dict(params))
 
 
+# ---------------------------------------------------------------------------
+# Method: agents.kind_for_panes
+# ---------------------------------------------------------------------------
+
+
+def _agents_kind_for_panes_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify the agent kind running in each pane's cgroup scope.
+
+    Replaces the client's fragile ``ps -eo … | grep`` agent scan (#809/#811)
+    with a server-side cgroup-v2 + ``/proc`` read: each pane's ``pane_pid``
+    resolves to its ``tmuxctl-<session>.scope`` via ``/proc/<pid>/cgroup``, the
+    scope's ``cgroup.procs`` are read, and each proc's ``comm``/``cmdline`` is
+    matched against the claude/codex/opencode token rules (mirrored from
+    ``AgentDetector.namesAgent``). No ``systemctl`` shell-out — raw cgroupfs.
+
+    Request params::
+
+        {"panes": [{"pane_id": "%1", "pane_pid": 2647034}, ...]}
+
+    Result::
+
+        {"results": [
+            {"pane_id": "%1", "agent_kind": "claude",
+             "scope": "tmuxctl-git-pocketshell.scope", "evidence_pid": 2647069},
+            ...
+        ]}
+
+    ``agent_kind`` is one of ``claude`` / ``codex`` / ``opencode`` / ``none``
+    (readable scope, no agent) / ``unknown`` (pane pid/cgroup unreadable). One
+    bad pane never sinks the batch.
+    """
+    from pocketshell import cgroup_agents as _cgroup_agents
+
+    raw_panes = params.get("panes")
+    if raw_panes is None:
+        panes: list[Mapping[str, Any]] = []
+    elif isinstance(raw_panes, list):
+        panes = [p for p in raw_panes if isinstance(p, Mapping)]
+    else:
+        raise _RpcError(
+            JSONRPC_INVALID_PARAMS,
+            "agents.kind_for_panes: `panes` must be a list of objects",
+        )
+
+    return {"results": _cgroup_agents.kind_for_panes(panes)}
+
+
 # Single shared registry; tests can register additional methods via
 # :meth:`Daemon.register_method` on a fresh instance without touching
 # this dict.
@@ -544,6 +591,7 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "jobs.edit": _jobs_edit_handler,
     "jobs.remove": _jobs_remove_handler,
     "jobs.status": _jobs_status_handler,
+    "agents.kind_for_panes": _agents_kind_for_panes_handler,
 }
 
 

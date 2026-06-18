@@ -836,6 +836,63 @@ def test_daemon_registry_includes_sessions_and_jobs_methods() -> None:
     assert daemon_mod.METHOD_CACHE_INVALIDATIONS["jobs.trigger"] == ("jobs.list",)
 
 
+def test_daemon_registry_includes_agents_kind_for_panes() -> None:
+    assert "agents.kind_for_panes" in daemon_mod.DEFAULT_METHODS
+    # No TTL: agent processes change live, so the method must never be cached
+    # (the spike explicitly forbids a TTL cache here — procs change live).
+    assert "agents.kind_for_panes" not in daemon_mod.METHOD_TTLS
+
+
+def test_agents_kind_for_panes_round_trip(
+    running_daemon: subprocess.Popen,
+    sandbox_socket: Path,
+) -> None:
+    """The RPC returns a well-formed batch envelope over the real transport.
+
+    A pane_pid that does not exist resolves to ``unknown`` (never an error),
+    and the pane_id is passed through verbatim so the client can correlate.
+    This exercises the full JSON-RPC framing + handler dispatch, not just the
+    in-process classifier.
+    """
+    result = daemon_mod.call(
+        "agents.kind_for_panes",
+        {"panes": [{"pane_id": "%1", "pane_pid": 999999999}]},
+        socket_path=sandbox_socket,
+    )
+    assert isinstance(result, dict)
+    assert isinstance(result["results"], list)
+    assert len(result["results"]) == 1
+    entry = result["results"][0]
+    assert entry["pane_id"] == "%1"
+    # A non-existent pid resolves to `unknown` (no /proc entry), never errors.
+    assert entry["agent_kind"] == "unknown"
+    assert entry["scope"] is None
+
+
+def test_agents_kind_for_panes_rejects_non_list_panes(
+    running_daemon: subprocess.Popen,
+    sandbox_socket: Path,
+) -> None:
+    """A `panes` param that is not a list is an invalid-params error."""
+    with pytest.raises(RuntimeError, match="must be a list"):
+        daemon_mod.call(
+            "agents.kind_for_panes",
+            {"panes": "not-a-list"},
+            socket_path=sandbox_socket,
+        )
+
+
+def test_agents_kind_for_panes_empty_when_no_panes(
+    running_daemon: subprocess.Popen,
+    sandbox_socket: Path,
+) -> None:
+    """Omitting `panes` yields an empty results list, not an error."""
+    result = daemon_mod.call(
+        "agents.kind_for_panes", {}, socket_path=sandbox_socket
+    )
+    assert result == {"results": []}
+
+
 def test_failed_usage_fetch_is_not_cached(
     sandbox_socket: Path,
     tmp_path: Path,

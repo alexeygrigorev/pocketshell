@@ -1071,6 +1071,31 @@ public class TmuxSessionViewModel @Inject constructor(
     // (cwd, command) would treat that as already-seen and skip the
     // round-trip, leaving the cached "no agent" verdict in place.
     private val paneAgentInputs: MutableMap<String, Triple<String, String, String>> = ConcurrentHashMap()
+    // Issue #817 (Rank-1 measurement): per-pane t0 for the FULL conversation-open
+    // span — the elapsed-realtime stamped when agent detection BEGINS for the
+    // pane (first SSH exec on the open path). The span ends at the
+    // markAgentTailLive push in startAgentConversationForPane. Threading the t0
+    // through this map (rather than a parameter) keeps the recorded-vs-foreign
+    // detection branch and the existing call sites untouched, and the entry is
+    // consumed-and-removed on emit so a retry/re-detect re-stamps a fresh start.
+    private val paneConversationOpenStartedAtMs: MutableMap<String, Long> = ConcurrentHashMap()
+    // Issue #828 (perf): per-tmux-session cache of the RECORDED `@ps_agent_kind`
+    // (the #825 identity PocketShell stamps on sessions it launches). Keyed by
+    // the tmux session id / target token (`pane.sessionId`). The open path runs
+    // detection per-pane on EVERY reconcile, and `readRecordedAgentKind` is a
+    // standalone SSH round-trip; without a cache that round-trip is paid on every
+    // single open. The recorded kind is FIXED for the life of the session (the
+    // launch wrapper writes it once and never rewrites it), so reading it more
+    // than once per session is pure waste. We resolve it at most once per session
+    // and reuse it for all panes + all later reconciles, so the steady-state
+    // recorded-open path issues ZERO `readRecordedAgentKind` execs (AC: detection
+    // chain ~0). [RecordedKindCacheEntry] distinguishes "not yet read" (absent)
+    // from "read = foreign/null" (present-but-null) so a foreign session is not
+    // re-probed on every reconcile either. Cleared with the other per-runtime
+    // detection maps on park/restore/clear so a different session never inherits
+    // a stale recorded kind.
+    private val sessionRecordedKindCache: MutableMap<String, RecordedKindCacheEntry> =
+        ConcurrentHashMap()
     // Issue #554: count consecutive null detections for a pane whose window
     // has a remembered agent status (the #495 optimistic seed). On reconnect,
     // live detection can transiently read "no agent" before the agent's JSONL
@@ -3373,6 +3398,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneConversationOpenStartedAtMs.clear()
+        sessionRecordedKindCache.clear()
         clearAgentConversations()
         // Issue #448: drop any pending forward overlay when this runtime
         // is parked to the cache — it belongs to the view we're leaving.
@@ -3473,6 +3500,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneConversationOpenStartedAtMs.clear()
+        sessionRecordedKindCache.clear()
         paneAgentInputs.putAll(runtime.paneAgentInputs)
         replaceAgentConversations(runtime.agentConversations)
         remoteColumns = runtime.remoteColumns
@@ -8058,6 +8087,17 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
+    /**
+     * Issue #828 (perf): box for the per-session recorded-kind cache so an
+     * ABSENT map entry means "not yet read" and a PRESENT entry whose [kind] is
+     * null means "read = foreign session (no `@ps_agent_kind`)". Without the box
+     * a `null` map value would be indistinguishable from "no entry", so a
+     * foreign session would be re-probed (a wasted `readRecordedAgentKind`
+     * round-trip) on every reconcile — defeating the cache for exactly the
+     * sessions that have no recorded kind to find.
+     */
+    private class RecordedKindCacheEntry(val kind: AgentKind?)
+
     private fun startAgentDetectionForPane(
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard? = null,
@@ -8084,6 +8124,14 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         val sessionTarget = pane.sessionId
         paneAgentJobs[paneId] = bridgeScope.launch {
+            // Issue #817 (Rank-1 measurement): stamp the FULL conversation-open
+            // t0 the instant detection begins (before the first SSH exec on the
+            // open path), so the span captures the serial detection round-trips
+            // — the real network-bound cost the localhost fixture hides. The
+            // window-read-only span (conversation_open) is still recorded inside
+            // startAgentConversationForPane; `full - window` is the detection
+            // chain cost. Consumed-and-removed on emit (or on null detection).
+            paneConversationOpenStartedAtMs[paneId] = SystemClock.elapsedRealtime()
             // Epic #821 slice #3 (#825): if PocketShell RECORDED this session's
             // agent kind at launch (`@ps_agent_kind`), bind the Conversation
             // source to that recorded identity — kind from the record, source
@@ -8106,35 +8154,116 @@ public class TmuxSessionViewModel @Inject constructor(
             // bootstrap and the first list-panes round-trip), the
             // repository returns null — preserving the old behaviour
             // that "no signal = no detection" for this pane.
-            val recordedKind = runCatching {
-                agentRepository.readRecordedAgentKind(session, sessionTarget)
-            }.getOrNull()
+            //
+            // Issue #828 (perf): two levers collapse the recorded-open chain.
+            //  (1) Per-session cache: the recorded kind is fixed for the life of
+            //      the session, so we resolve `@ps_agent_kind` at most ONCE per
+            //      session id and reuse it for every later pane + reconcile — the
+            //      steady-state open issues ZERO standalone `readRecordedAgentKind`
+            //      execs (AC: detection chain ~0).
+            //  (2) Single-round-trip first resolve: on a cache MISS we fold the
+            //      `@ps_agent_kind` read INTO the candidate-enumeration exec
+            //      ([resolveRecordedSessionOpen]) so even the FIRST open of a
+            //      session pays one chain round-trip (kind+candidates) before the
+            //      window read instead of two serial ones — the ~512 ms→~256 ms
+            //      pre-window cut that lets the cold open clear the <0.3s gate.
+            // Codex still needs its second `/proc/<pid>/fd` owned-rollout pass
+            // (no session-id-in-path), so it falls through to the existing
+            // recorded resolve. A FOREIGN session (no recorded kind) keeps the
+            // unchanged foreign detection path.
+            //  (3) Window fold: for a recorded CLAUDE cache-miss open, the
+            //      single-round-trip resolve ALSO prefetches the first transcript
+            //      window in that same exec, so the cold open is ONE SSH
+            //      round-trip total (kind + source + window) — cold ≈ warm. The
+            //      prefetched window is handed to [startAgentConversationForPane]
+            //      so it skips its own window-read exec.
+            val cachedKind = sessionRecordedKindCache[sessionTarget.trim()]
+            var prefetchedWindow: ConversationEventsWindow? = null
             val detection = runCatching {
-                if (recordedKind != null) {
-                    agentRepository.detectRecordedSessionForPane(
-                        session = session,
-                        cwd = cwd,
-                        paneTty = tty,
-                        paneCommand = command,
-                        recordedKind = recordedKind,
-                    )
+                if (cachedKind != null) {
+                    // Cache HIT — kind already known, no `@ps_agent_kind` exec.
+                    val recordedKind = cachedKind.kind
+                    if (recordedKind != null) {
+                        agentRepository.detectRecordedSessionForPane(
+                            session = session,
+                            cwd = cwd,
+                            paneTty = tty,
+                            paneCommand = command,
+                            recordedKind = recordedKind,
+                        )
+                    } else {
+                        agentRepository.detectForPane(
+                            session = session,
+                            cwd = cwd,
+                            paneTty = tty,
+                            paneCommand = command,
+                        )
+                    }
                 } else {
-                    agentRepository.detectForPane(
+                    // Cache MISS — read the kind folded into the candidate
+                    // enumeration (+ the Claude window), then cache the verdict.
+                    val open = agentRepository.resolveRecordedSessionOpen(
                         session = session,
+                        sessionTarget = sessionTarget,
                         cwd = cwd,
                         paneTty = tty,
                         paneCommand = command,
                     )
+                    sessionRecordedKindCache.putIfAbsent(
+                        sessionTarget.trim(),
+                        RecordedKindCacheEntry(open.recordedKind),
+                    )
+                    when {
+                        open.recordedKind == null ->
+                            // Foreign session — fall back to foreign detection.
+                            agentRepository.detectForPane(
+                                session = session,
+                                cwd = cwd,
+                                paneTty = tty,
+                                paneCommand = command,
+                            )
+                        open.needsCodexResolution ->
+                            // Recorded Codex needs the second owned-rollout pass.
+                            agentRepository.detectRecordedSessionForPane(
+                                session = session,
+                                cwd = cwd,
+                                paneTty = tty,
+                                paneCommand = command,
+                                recordedKind = open.recordedKind,
+                            )
+                        // Recorded Claude/OpenCode: resolved in the one round-trip.
+                        // Claude also carries the prefetched first window.
+                        else -> {
+                            prefetchedWindow = open.prefetchedWindow
+                            open.detection
+                        }
+                    }
                 }
             }.getOrNull()
-            if (!isCurrentRuntime(guard)) return@launch
+            if (!isCurrentRuntime(guard)) {
+                // Issue #817: a stale runtime never reaches markAgentTailLive, so
+                // drop the open t0 to avoid attributing the next pane's open to it.
+                paneConversationOpenStartedAtMs.remove(paneId)
+                return@launch
+            }
             if (detection == null) {
+                // Issue #817: no detection → no conversation open; clear the t0.
+                paneConversationOpenStartedAtMs.remove(paneId)
                 handleNullAgentDetection(pane, guard)
                 return@launch
             }
             // A real detection cancels any in-flight exit-confirmation count.
             paneAgentNullDetections.remove(paneId)
-            startAgentConversationForPane(session, paneId, detection, guard)
+            // Issue #828: hand the recorded-Claude prefetched window straight to
+            // the conversation open so it skips its own window-read round-trip —
+            // the cold open is then ONE SSH round-trip total.
+            startAgentConversationForPane(
+                session = session,
+                paneId = paneId,
+                detection = detection,
+                refreshGuard = guard,
+                prefetchedWindow = prefetchedWindow,
+            )
         }
     }
 
@@ -8261,6 +8390,12 @@ public class TmuxSessionViewModel @Inject constructor(
         // window size so a re-fetch does not silently shrink an already-paged
         // transcript back to the first-paint tail.
         maxMessages: Int = FIRST_PAINT_MESSAGE_BUDGET,
+        // Issue #828 (perf): a window ALREADY fetched in the recorded-Claude
+        // single-round-trip resolve. When present the window-read SSH exec is
+        // skipped entirely — the cold open is ONE round-trip total (kind + source
+        // + window), making it ≈ the warm switch. Null on every other path (the
+        // standard window read runs).
+        prefetchedWindow: ConversationEventsWindow? = null,
     ) {
         // Issue #793: a real detection landed for this pane; the transcript is
         // now actively loading. Move the row into the Loading state so the
@@ -8287,7 +8422,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // before the read — one fewer serial exec on every fresh open.
         var loadFailed = false
         val window = try {
-            agentRepository.readEventsWindow(
+            // Issue #828: a recorded-Claude open already fetched the first window
+            // in the resolve exec — use it and skip the read round-trip.
+            prefetchedWindow ?: agentRepository.readEventsWindow(
                 session = session,
                 detection = detection,
                 maxMessages = maxMessages,
@@ -8308,16 +8445,35 @@ public class TmuxSessionViewModel @Inject constructor(
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
         val initialEvents = window.events
         val tailStartLine = window.tailStartLine
+        val markLiveAtMs = SystemClock.elapsedRealtime()
         markAgentTailLive(paneId, detection, initialEvents)
         TmuxSessionLatencyTelemetry.record(
             name = CONVERSATION_OPEN_LATENCY_OPERATION,
-            durationMs = SystemClock.elapsedRealtime() - openStartedAtMs,
+            durationMs = markLiveAtMs - openStartedAtMs,
             sessionName = activeTarget?.sessionName,
             paneId = paneId,
             trigger = activeAttachMilestone?.trigger,
             detail = "agent=${detection.agent.name} events=${initialEvents.size} " +
                 "failed=$loadFailed tail_start_line=$tailStartLine",
         )
+        // Issue #817 (Rank-1 measurement): emit the FULL open span — detection
+        // start → first events live — so the serial detection round-trips are
+        // visible alongside the window-read-only span. `full - window` is the
+        // detection-chain cost. The t0 is the stamp set in
+        // startAgentDetectionForPane; absence means this open was driven by a
+        // path that did not stamp one (e.g. a restore/refresh re-tail), in which
+        // case we skip the full span rather than report a bogus number.
+        paneConversationOpenStartedAtMs.remove(paneId)?.let { detectionStartedAtMs ->
+            TmuxSessionLatencyTelemetry.record(
+                name = CONVERSATION_OPEN_FULL_LATENCY_OPERATION,
+                durationMs = markLiveAtMs - detectionStartedAtMs,
+                sessionName = activeTarget?.sessionName,
+                paneId = paneId,
+                trigger = activeAttachMilestone?.trigger,
+                detail = "agent=${detection.agent.name} events=${initialEvents.size} " +
+                    "failed=$loadFailed window_read_ms=${markLiveAtMs - openStartedAtMs}",
+            )
+        }
         // Issue #793: record the terminal load outcome for the pane so the
         // screen renders the right state — Ready (feed), Empty (clear "no
         // events" terminal state), or Failed (clear error + retry).
@@ -8852,6 +9008,12 @@ public class TmuxSessionViewModel @Inject constructor(
         // on a missing row is still a no-op (there is no agent surface to leave).
         // We only seed for a LIVE pane (one present in `paneRows`): a tap that
         // names a genuinely unknown pane id stays a no-op.
+        // Issue #817 (Rank-1 measurement): time the warm tab-switch. t0 at the
+        // method entry, recorded below only for a switch to Conversation that
+        // lands on an already-loaded transcript (the warm-switch case the spike
+        // predicted is already <0.3s). A tap on a missing/loading row is the
+        // OPEN path and is covered by conversation_open_full instead.
+        val switchStartedAtMs = SystemClock.elapsedRealtime()
         val existing = _agentConversations.value[paneId]
         if (existing == null) {
             if (tab != SessionTab.Conversation) return
@@ -8933,6 +9095,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 hasConversation = before.detection != null,
                 eventCount = before.events.size,
                 syncStatus = before.syncStatus.name,
+            )
+        }
+        // Issue #817 (Rank-1 measurement): record the warm-switch span for a
+        // switch TO Conversation that lands on an already-loaded transcript
+        // (events present, not the loading/placeholder open path). This is the
+        // pure-state-read switch the spike predicted is already <0.3s; the span
+        // turns that prediction into an authoritative number.
+        if (changed && tab == SessionTab.Conversation && before.events.isNotEmpty()) {
+            TmuxSessionLatencyTelemetry.record(
+                name = CONVERSATION_SWITCH_LATENCY_OPERATION,
+                durationMs = SystemClock.elapsedRealtime() - switchStartedAtMs,
+                sessionName = activeTarget?.sessionName,
+                paneId = paneId,
+                trigger = activeAttachMilestone?.trigger,
+                detail = "from=${before.selectedTab.name} events=${before.events.size} " +
+                    "agent=${before.detection?.agent?.name ?: "none"}",
             )
         }
         // Issue #495: remember the tab choice keyed by window so a reconnect
@@ -10672,6 +10850,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneConversationOpenStartedAtMs.clear()
+        sessionRecordedKindCache.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -10784,6 +10964,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneConversationOpenStartedAtMs.clear()
+        sessionRecordedKindCache.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -10921,6 +11103,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneConversationOpenStartedAtMs.clear()
+        sessionRecordedKindCache.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()

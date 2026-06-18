@@ -722,6 +722,76 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun recordedClaudeSessionResolvesWithoutTheHostWideProcessScan() = runTest {
+        // Issue #828 (perf): the recorded-Claude path selects on the cwd-encoded
+        // session-id-in-path with requireProcessMatch = false, so the host-wide
+        // `ps` round-trip is never consulted for selection. It must therefore NOT
+        // be issued — the open path is candidate-enum + window-read only. This is
+        // the dropped serial SSH round-trip that helps the cold open clear the
+        // <0.3s gate at realistic RTT.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/c.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "1001 1 pts/7 claude claude",
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+            recordedKind = AgentKind.ClaudeCode,
+        )
+
+        assertEquals(AgentKind.ClaudeCode, detection?.agent)
+        assertEquals("c", detection?.sessionId)
+        assertEquals(1, session.execCommands.size)
+        assertFalse(
+            "the recorded-Claude open path must NOT issue the host-wide ps scan " +
+                "(selection ignores it for requireProcessMatch=false); got ${session.execCommands}",
+            session.execCommands.any { it.contains("ps -eo pid,ppid,tty,comm,args") },
+        )
+        assertTrue(
+            "the recorded-Claude open path is exactly the candidate enumeration; " +
+                "got ${session.execCommands}",
+            session.execCommands.single().contains("claude_dir="),
+        )
+    }
+
+    @Test
+    fun recordedOpenCodeSessionResolvesWithoutTheHostWideProcessScan() = runTest {
+        // Issue #828 (perf): same as the recorded-Claude case — OpenCode carries
+        // the session id in its `opencode.db#<id>` candidate path and selects on
+        // requireProcessMatch = false, so the host-wide ps scan is skipped.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                opencode|$now|/workspace/proj|/home/testuser/.local/share/opencode/opencode.db#oc-7
+            """.trimIndent(),
+            hostWideProcessOutput = "2002 1 pts/3 node opencode",
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/3",
+            paneCommand = "node",
+            recordedKind = AgentKind.OpenCode,
+        )
+
+        assertEquals(AgentKind.OpenCode, detection?.agent)
+        assertEquals("oc-7", detection?.sessionId)
+        assertEquals(1, session.execCommands.size)
+        assertFalse(
+            "the recorded-OpenCode open path must NOT issue the host-wide ps scan; " +
+                "got ${session.execCommands}",
+            session.execCommands.any { it.contains("ps -eo pid,ppid,tty,comm,args") },
+        )
+    }
+
+    @Test
     fun recordedOpenCodeSessionBindsToOpenCodeOverANewerClaudeSibling() = runTest {
         val now = System.currentTimeMillis() / 1000
         val session = FakeSshSession(
@@ -790,6 +860,178 @@ class AgentConversationRepositoryTest {
         assertTrue(
             "the recorded-Codex path must resolve the process-owned rollout via /proc fd",
             session.execCommands.any { it.contains("/proc/") && it.contains(".codex/sessions/") },
+        )
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenReadsKindResolvesClaudeAndPrefetchesWindowInOneRoundTrip() = runTest {
+        // Issue #828 (perf): the cold-open lever — the `@ps_agent_kind` read, the
+        // candidate enumeration, AND the first transcript window are folded into
+        // ONE SSH exec for a recorded Claude session. The #825 split path paid
+        // THREE serial round-trips (readRecordedAgentKind, enumerate, window read);
+        // this is one, so the cold open ≈ the warm switch at realistic RTT.
+        val now = System.currentTimeMillis() / 1000
+        val sourcePath = "/home/testuser/.claude/projects/-workspace-proj/sess-abc.jsonl"
+        val session = FakeSshSession(
+            recordedKindOutput = "claude\n",
+            detectionOutput = "claude|$now|/workspace/proj|$sourcePath",
+            hostWideProcessOutput = "1001 1 pts/7 claude claude",
+            // The folded window section: PATH must equal the resolved source so
+            // the prefetch binds; wc -l = total lines; tail = the raw JSONL.
+            foldedClaudePath = sourcePath,
+            foldedClaudeWcOutput = "2",
+            foldedClaudeTail = listOf(
+                """{"type":"user","uuid":"u1","message":{"role":"user","content":"hello agent"}}""",
+                """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"hi back"}]}}""",
+            ).joinToString("\n"),
+        )
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$3",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+        )
+
+        assertEquals(AgentKind.ClaudeCode, open.recordedKind)
+        assertFalse("Claude resolves fully in one round-trip; no Codex pass", open.needsCodexResolution)
+        assertEquals(AgentKind.ClaudeCode, open.detection?.agent)
+        assertEquals("sess-abc", open.detection?.sessionId)
+        assertEquals(sourcePath, open.detection?.sourcePath)
+        assertEquals(
+            "recorded Claude open must be a SINGLE SSH round-trip: kind + candidates " +
+                "+ window folded into one exec, no separate readRecordedAgentKind, no ps scan, " +
+                "no window-read; got ${session.execCommands}",
+            1,
+            session.execCommands.size,
+        )
+        assertTrue(
+            "the one exec must carry the @ps_agent_kind read, the candidate enumeration, " +
+                "and the Claude window fold; got ${session.execCommands}",
+            session.execCommands.single().contains("@ps_agent_kind") &&
+                session.execCommands.single().contains("claude_dir=") &&
+                session.execCommands.single().contains("@@PS_CLAUDE_WINDOW@@"),
+        )
+        // The first window is prefetched in the SAME exec — the caller skips its
+        // window-read round-trip.
+        val window = open.prefetchedWindow
+        assertNotNull("recorded Claude open must prefetch the first window", window)
+        assertEquals(2L, window!!.tailStartLine)
+        assertEquals(
+            listOf("hello agent", "hi back"),
+            window.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenDropsPrefetchWhenFoldedPathDisagreesWithSelection() = runTest {
+        // Issue #828: correctness over the saved round-trip — if the shell's
+        // most-recent jsonl differs from the JVM-selected source (a race, or a
+        // different file), the prefetch is dropped (null) and the caller does the
+        // normal window read against the SELECTED source. Detection still resolves.
+        val now = System.currentTimeMillis() / 1000
+        val sourcePath = "/home/testuser/.claude/projects/-workspace-proj/sess-abc.jsonl"
+        val session = FakeSshSession(
+            recordedKindOutput = "claude\n",
+            detectionOutput = "claude|$now|/workspace/proj|$sourcePath",
+            // The folded section names a DIFFERENT file than the selected source.
+            foldedClaudePath = "/home/testuser/.claude/projects/-workspace-proj/some-other.jsonl",
+            foldedClaudeWcOutput = "9",
+            foldedClaudeTail = """{"type":"user","uuid":"x","message":{"role":"user","content":"stale"}}""",
+        )
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$3",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+        )
+
+        assertEquals(AgentKind.ClaudeCode, open.detection?.agent)
+        assertEquals(sourcePath, open.detection?.sourcePath)
+        assertEquals(
+            "a folded window from a path that disagrees with the selected source " +
+                "must be dropped — no wrong-file transcript",
+            null,
+            open.prefetchedWindow,
+        )
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenReturnsForeignWhenNoRecordedKind() = runTest {
+        // A FOREIGN session (no `@ps_agent_kind`) resolves to recordedKind = null
+        // in the one exec; the caller then falls back to foreign detection. The
+        // candidate rows in the same exec are ignored — the recorded path is only
+        // for sessions PocketShell launched.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            recordedKindOutput = "",
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/c.jsonl
+            """.trimIndent(),
+        )
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$9",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/2",
+            paneCommand = "bash",
+        )
+
+        assertEquals(null, open.recordedKind)
+        assertEquals(null, open.detection)
+        assertFalse(open.needsCodexResolution)
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenDefersCodexToTheOwnedRolloutPass() = runTest {
+        // Codex has no session-id-in-path, so the one-round-trip resolve cannot
+        // bind its source without the `/proc/<pid>/fd` owned-rollout pass. It
+        // returns recordedKind = Codex + needsCodexResolution = true (no detection
+        // yet) so the caller completes it via detectRecordedSessionForPane — the
+        // #819 owned-rollout binding stays in exactly one place.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            recordedKindOutput = "codex\n",
+            detectionOutput = """
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-x.jsonl
+            """.trimIndent(),
+        )
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$5",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "codex",
+        )
+
+        assertEquals(AgentKind.Codex, open.recordedKind)
+        assertTrue("Codex needs the second owned-rollout pass", open.needsCodexResolution)
+        assertEquals(null, open.detection)
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenShortCircuitsBlankCwdWithoutIo() = runTest {
+        // A blank cwd / tty is unattributable — no recorded kind to act on and no
+        // round-trip, exactly like the per-pane detection contract.
+        val session = FakeSshSession(recordedKindOutput = "claude\n")
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$1",
+            cwd = "",
+            paneTty = "/dev/pts/1",
+            paneCommand = "node",
+        )
+
+        assertEquals(null, open.recordedKind)
+        assertTrue(
+            "an unattributable pane must not trigger any SSH round-trip; got ${session.execCommands}",
+            session.execCommands.isEmpty(),
         )
     }
 
@@ -1813,6 +2055,14 @@ class AgentConversationRepositoryTest {
         private val jsonlTailOutput: String = "",
         private val recordedKindOutput: String = "",
         private val procFdOutput: String = "",
+        // Issue #828: when set, the single-round-trip recorded-open exec emits a
+        // folded Claude window section (PATH=<path>, wc -l, sentinel, tail) after
+        // the candidate enumeration — the shape the repository's window parse
+        // expects. `foldedClaudePath` must equal the resolved source for the
+        // prefetch to bind.
+        private val foldedClaudePath: String = "",
+        private val foldedClaudeWcOutput: String = "0",
+        private val foldedClaudeTail: String = "",
     ) : SshSession {
         val execCommands = mutableListOf<String>()
         val tailFromLineCalls = mutableListOf<Pair<String, Long>>()
@@ -1823,6 +2073,23 @@ class AgentConversationRepositoryTest {
         override suspend fun exec(command: String): ExecResult {
             execCommands += command
             val stdout = when {
+                // Issue #828: the single-round-trip recorded-open exec folds the
+                // `@ps_agent_kind` read + a sentinel + the candidate enumeration
+                // (+ for Claude, a window section) into ONE command. Emit them in
+                // that shape so the repository can split the kind, the candidate
+                // rows, and the prefetched window.
+                command.contains("@@PS_RECORDED_KIND@@") -> buildString {
+                    append(recordedKindOutput.trim())
+                    append("\n@@PS_RECORDED_KIND@@\n")
+                    append(detectionOutput)
+                    append("\n@@PS_CLAUDE_WINDOW@@\n")
+                    if (foldedClaudePath.isNotBlank()) {
+                        append("PATH=").append(foldedClaudePath).append("\n")
+                        append(foldedClaudeWcOutput.trim()).append("\n")
+                        append("@@PS_CLAUDE_WINDOW@@\n")
+                        append(foldedClaudeTail)
+                    }
+                }
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") -> recordedKindOutput
                 command.contains("/proc/") && command.contains(".codex/sessions/") -> procFdOutput
                 command.contains("claude_dir=") -> detectionOutput

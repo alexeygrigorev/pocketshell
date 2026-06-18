@@ -5862,6 +5862,67 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun warmSwitchToLoadedConversationRecordsConversationSwitchSpan() = runTest(scheduler) {
+        // Issue #817 (Rank-1 measurement): switching Terminal -> Conversation on a
+        // row whose transcript is ALREADY loaded (events present) records a
+        // conversation_switch latency span. This is the warm-switch case the spike
+        // predicted is already <0.3s (a pure StateFlow read, no SSH); the span
+        // makes that an authoritative number.
+        TmuxSessionLatencyTelemetry.resetForTest()
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val event = ConversationEvent.Message(
+            id = "message-1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.Assistant,
+            text = "already loaded answer",
+        )
+        // Seed a row with events, default tab Terminal (the #815 default).
+        vm.startAgentConversationForTest("%0", newClaudeDetection(), listOf(event))
+        assertEquals(SessionTab.Terminal, vm.agentConversations.value["%0"]!!.selectedTab)
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+
+        val switchEvents = TmuxSessionLatencyTelemetry.snapshot()
+            .filter { it.name == CONVERSATION_SWITCH_LATENCY_OPERATION }
+        assertEquals(
+            "exactly one conversation_switch span; spans=" +
+                TmuxSessionLatencyTelemetry.snapshot().map { it.name },
+            1,
+            switchEvents.size,
+        )
+        assertEquals("%0", switchEvents.single().paneId)
+        assertTrue(
+            "span must carry a grep-able artifact line; got ${switchEvents.single().toArtifactLine()}",
+            switchEvents.single().toArtifactLine().contains("tmux_latency_conversation_switch_ms="),
+        )
+        TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
+    fun switchingToConversationOnAStillLoadingRowDoesNotRecordSwitchSpan() = runTest(scheduler) {
+        // Issue #817: a tap that lands on a still-loading/placeholder row (no
+        // events yet) is the OPEN path, NOT the warm switch — it must NOT emit a
+        // conversation_switch span (the open is covered by conversation_open_full).
+        TmuxSessionLatencyTelemetry.resetForTest()
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        // selectSessionTab seeds a detection-less, event-less Loading placeholder.
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+
+        val switchEvents = TmuxSessionLatencyTelemetry.snapshot()
+            .filter { it.name == CONVERSATION_SWITCH_LATENCY_OPERATION }
+        assertTrue(
+            "a switch onto an empty/loading row must not record a warm-switch span; " +
+                "spans=${TmuxSessionLatencyTelemetry.snapshot().map { it.name }}",
+            switchEvents.isEmpty(),
+        )
+        TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
     fun selectingConversationTabOnPresumedAgentWithoutDetectionSeedsPlaceholderRow() = runTest(scheduler) {
         // Issue #778: tapping Conversation on a live presumed-agent pane that has
         // no conversation row yet (no live detection, no remembered status) must

@@ -679,13 +679,38 @@ class AgentConversationReconnectDockerTest {
             )
             timing("issue817_conversation_open_ms", openSpan.durationMs)
             stamp("issue817_conversation_open ${openSpan.toArtifactLine()}")
+            // Issue #817 (Rank-1 measurement): also capture the FULL open span
+            // (detection start → first events live). On this localhost zero-RTT
+            // fixture the full number is the non-network floor; the
+            // ConversationOpenLatencyRttDockerTest surfaces the network-realistic
+            // figure. The detection-chain cost is `full - window`.
+            val fullOpenSpan = TmuxSessionLatencyTelemetry.snapshot()
+                .lastOrNull { it.name == CONVERSATION_OPEN_FULL_LATENCY_OPERATION }
+            assertNotNull(
+                "conversation_open_full span must be recorded for the cold open; " +
+                    "spans=${TmuxSessionLatencyTelemetry.snapshot().map { it.name }}",
+                fullOpenSpan,
+            )
+            timing("issue817_conversation_open_full_ms", fullOpenSpan!!.durationMs)
+            timing(
+                "issue817_conversation_open_detection_chain_ms",
+                fullOpenSpan.durationMs - openSpan.durationMs,
+            )
+            stamp("issue817_conversation_open_full ${fullOpenSpan.toArtifactLine()}")
             writeText(
                 "issue817-conversation-open-timing.txt",
                 buildString {
-                    appendLine("scenario=conversation_open-cold-open-into-freshly-detected-agent (#817 slice 1)")
+                    appendLine("scenario=conversation_open-cold-open-into-freshly-detected-agent (#817 slice 1 + Rank-1)")
                     appendLine("agent=${openSpan.detail}")
                     appendLine(openSpan.toArtifactLine())
                     appendLine("conversation_open_ms=${openSpan.durationMs}")
+                    appendLine(fullOpenSpan.toArtifactLine())
+                    appendLine("conversation_open_full_ms=${fullOpenSpan.durationMs}")
+                    appendLine(
+                        "conversation_open_detection_chain_ms=" +
+                            (fullOpenSpan.durationMs - openSpan.durationMs),
+                    )
+                    appendLine("rtt=localhost-zero-rtt-floor")
                     appendLine(
                         "loaded_events=" +
                             seededEvents.filterIsInstance<ConversationEvent.Message>().map { it.text },

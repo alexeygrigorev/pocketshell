@@ -46,6 +46,32 @@ class ToxiproxyControl(
     }
 
     /**
+     * Issue #817 (Rank-1 measurement): add a symmetric, deterministic latency
+     * toxic on BOTH directions so a single SSH round-trip costs ~2 × [oneWayMs]
+     * (one-way client→server + one-way server→client). No jitter — the goal is a
+     * stable, citable RTT figure, not a fuzz model. With [oneWayMs] = 75 the
+     * round-trip is ~150 ms, modelling a phone on a typical mobile/wifi link to a
+     * remote host; ~40 ms one-way models a closer/better link (~80 ms RTT).
+     *
+     * Folded into the standard `latency_upstream` / `latency_downstream` toxic
+     * names so [clearToxics] / [reset] remove them like the canned model.
+     */
+    fun addSymmetricLatency(oneWayMs: Int) {
+        addToxic(
+            name = "latency_upstream",
+            type = "latency",
+            stream = "upstream",
+            attributesJson = """{"latency":$oneWayMs,"jitter":0}""",
+        )
+        addToxic(
+            name = "latency_downstream",
+            type = "latency",
+            stream = "downstream",
+            attributesJson = """{"latency":$oneWayMs,"jitter":0}""",
+        )
+    }
+
+    /**
      * Cap the downstream (server -> client) throughput with the stock toxiproxy
      * `bandwidth` toxic. [rateKbps] is the sustained rate in kilobytes/second
      * (toxiproxy's `rate` attribute). Used by the #576 Codex-redraw overflow

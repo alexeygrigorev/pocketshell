@@ -576,7 +576,6 @@ public class AgentConversationRepository internal constructor(
     ): AgentDetection? {
         val normalizedCwd = cwd.trim().ifBlank { return null }
         val normalizedTty = paneTty.trim().ifBlank { return null }
-        val nowMillis = System.currentTimeMillis()
         // Same cwd-scoped candidate enumeration as detectForPane, but we keep
         // ONLY the candidates of the recorded kind — the detector never gets to
         // pick the kind from a cross-kind path-hint / mtime race.
@@ -586,14 +585,60 @@ public class AgentConversationRepository internal constructor(
             .mapNotNull(::parseCandidate)
             .filter { it.agent == recordedKind }
             .toList()
+        return selectRecordedCandidate(
+            session = session,
+            normalizedCwd = normalizedCwd,
+            normalizedTty = normalizedTty,
+            paneCommand = paneCommand,
+            recordedKind = recordedKind,
+            candidates = candidates,
+        )
+    }
+
+    /**
+     * Epic #821 slice #3 (#825) / Issue #828: shared selection step for a
+     * recorded session, given the already-enumerated [candidates] of the
+     * recorded kind. Split out so BOTH the standalone
+     * [detectRecordedSessionForPane] (kind already known/cached) AND the
+     * single-round-trip [resolveRecordedSessionOpen] (kind + candidates read in
+     * ONE exec) reuse the EXACT same #819/#554 selection discipline — the
+     * recorded-Codex `/proc/<pid>/fd` owned-rollout binding, the Claude/OpenCode
+     * no-process-match selection, and the host-wide `ps` scan that is issued
+     * ONLY for Codex.
+     */
+    private suspend fun selectRecordedCandidate(
+        session: SshSession,
+        normalizedCwd: String,
+        normalizedTty: String,
+        paneCommand: String,
+        recordedKind: AgentKind,
+        candidates: List<AgentLogCandidate>,
+    ): AgentDetection? {
         if (candidates.isEmpty()) return null
-        val ttyArg = normalizedTty.removePrefix("/dev/")
-        val processSnapshot = session.exec(PROCESS_TREE_SCAN_COMMAND)
-            .stdout
-            .lines()
-            .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
-        val paneProcesses = processLinesForPane(processSnapshot, ttyArg)
-        val processLines = if (paneCommand.isBlank()) {
+        val nowMillis = System.currentTimeMillis()
+        // Issue #828 (perf): the process scan is ONLY load-bearing for the
+        // recorded-Codex path — it feeds the `/proc/<pid>/fd` owned-rollout
+        // resolution that disambiguates same-cwd Codex siblings (#819) and the
+        // `requireProcessMatch` gate below. Claude / OpenCode carry the session
+        // id IN their candidate path and select on `requireProcessMatch = false`,
+        // so [AgentDetector.detect] never consults `processLines` for them — the
+        // host-wide `ps` round-trip was pure waste on the recorded-Claude /
+        // -OpenCode open path the #818 default exercises. Skip it for those
+        // kinds so the cold open drops from candidate-enum + ps + window-read to
+        // candidate-enum + window-read (one fewer serial SSH round-trip at
+        // realistic RTT). The recorded-Codex path keeps the scan unchanged.
+        val needsProcessScan = recordedKind == AgentKind.Codex
+        val paneProcesses = if (needsProcessScan) {
+            val ttyArg = normalizedTty.removePrefix("/dev/")
+            val processSnapshot = session.exec(PROCESS_TREE_SCAN_COMMAND)
+                .stdout
+                .lines()
+                .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
+            processLinesForPane(processSnapshot, ttyArg)
+        } else {
+            emptyList()
+        }
+        val processLines = if (!needsProcessScan || paneCommand.isBlank()) {
             paneProcesses
         } else {
             paneProcesses + paneCommand
@@ -629,6 +674,244 @@ public class AgentConversationRepository internal constructor(
             processLines = processLines,
             requireProcessMatch = requireProcessMatch,
             processOwnedSourcePaths = processOwnedSourcePaths,
+        )
+    }
+
+    /**
+     * Issue #828 (perf): the outcome of the single-round-trip recorded-open
+     * resolution. [recordedKind] is the `@ps_agent_kind` read in the SAME exec
+     * as the candidate enumeration (`null` = a FOREIGN session with no recorded
+     * kind — the caller then falls back to foreign detection). [detection] is
+     * the resolved source for a recorded Claude/OpenCode session (or `null` when
+     * no candidate of the recorded kind exists yet).
+     *
+     * [prefetchedWindow] is the FIRST transcript window, fetched in the SAME exec
+     * for a recorded CLAUDE session (the #818 default): the Claude source is
+     * the most-recent `*.jsonl` under `~/.claude/projects/<encoded-cwd>/`, so the
+     * combined exec also `wc -l`s + tails it. When present the caller skips the
+     * separate `readEventsWindow` round-trip entirely — the cold open is then ONE
+     * SSH round-trip total (kind + source + first window), making it ≈ the warm
+     * switch. `null` for OpenCode/Codex (their sources can't be tailed as a flat
+     * JSONL in the same shell) — those keep the separate window read.
+     *
+     * For a recorded CODEX session [detection]/[prefetchedWindow] are `null` and
+     * [needsCodexResolution] is `true`: Codex has no session-id-in-path, so its
+     * source needs the `/proc/<pid>/fd` owned-rollout pass (a second exec) — the
+     * caller completes it via [detectRecordedSessionForPane].
+     */
+    data class RecordedSessionOpen(
+        val recordedKind: AgentKind?,
+        val detection: AgentDetection?,
+        val needsCodexResolution: Boolean,
+        val prefetchedWindow: ConversationEventsWindow? = null,
+    )
+
+    /**
+     * Issue #828 (perf): resolve a recorded session's kind, its Claude/OpenCode
+     * source, AND (for Claude) prefetch its first transcript window — all in a
+     * SINGLE SSH round-trip. This is THE cold-open lever.
+     *
+     * The #825 split path paid THREE serial SSH round-trips before content was
+     * live: `readRecordedAgentKind`, then the candidate enumeration, then the
+     * window read. Each `session.exec` opens a fresh SSH channel (a round-trip in
+     * itself), so at realistic RTT three execs were ~690 ms (#817 measurement).
+     * This folds them into ONE exec:
+     *   1. `tmux show-options @ps_agent_kind` — the recorded kind.
+     *   2. the SAME [detectionCommand] candidate enumeration (kind parse +
+     *      candidate parse are byte-identical to the split path).
+     *   3. for a recorded CLAUDE kind, the most-recent `*.jsonl` under the
+     *      cwd-encoded project dir is the source, so the exec also emits its
+     *      `wc -l` + a sentinel + the tail window — the SAME shape
+     *      [readEventsWindow] reads, so parsing/`hasMoreOlder`/`tailStartLine`
+     *      are identical. The most-recent-within-the-recency-window selection is
+     *      exactly what [selectRecordedCandidate] picks for a single-cwd recorded
+     *      Claude (the recorded kind is authoritative; no cross-kind race), so
+     *      doing it shell-side does not change the chosen source.
+     *
+     * OpenCode (SQLite, not a flat JSONL) and Codex (`/proc/<pid>/fd` owned
+     * rollout) cannot have their window folded into this shell, so they fall back
+     * to the standard window read / second resolve pass; the kind read is still
+     * saved for them.
+     *
+     * [sessionTarget] is the tmux `-t` target (session id `$N` or name) the kind
+     * is recorded against; a blank [cwd]/[paneTty] short-circuits to a foreign
+     * (`recordedKind = null`) result with no I/O, exactly like the per-pane
+     * detection contract. [maxMessages] bounds the prefetched window's tail.
+     */
+    suspend fun resolveRecordedSessionOpen(
+        session: SshSession,
+        sessionTarget: String,
+        cwd: String,
+        paneTty: String,
+        paneCommand: String,
+        maxMessages: Int = FIRST_PAINT_MESSAGE_BUDGET,
+    ): RecordedSessionOpen {
+        val normalizedCwd = cwd.trim()
+        val normalizedTty = paneTty.trim()
+        if (normalizedCwd.isBlank() || normalizedTty.isBlank()) {
+            return RecordedSessionOpen(recordedKind = null, detection = null, needsCodexResolution = false)
+        }
+        val kindSentinel = "@@PS_RECORDED_KIND@@"
+        // The Claude window-fold tail budget mirrors [readEventsWindow]: raw
+        // lines = messages * JSONL_RAW_LINES_PER_EVENT, floored at the message
+        // count and at 1.
+        val claudeRawLineBudget = (maxMessages * JSONL_RAW_LINES_PER_EVENT)
+            .coerceAtLeast(maxMessages)
+            .coerceAtLeast(1)
+        val claudeWindowSentinel = "@@PS_CLAUDE_WINDOW@@"
+        val encodedClaudeCwd = detector.encodeClaudeCwd(normalizedCwd)
+        val combined = buildString {
+            // 1. The recorded-kind read first, then a sentinel. `|| true` keeps
+            //    the exec exit code 0 on a foreign session (no option set).
+            append(
+                "tmux show-options -v -t ${shellQuote(sessionTarget.trim())} @ps_agent_kind 2>/dev/null || true",
+            )
+            append("\n")
+            append("printf '%s\\n' $kindSentinel")
+            append("\n")
+            // 2. The SAME candidate enumeration the split path runs.
+            append(detectionCommand(normalizedCwd))
+            append("\n")
+            // 3. The Claude window fold: pick the most-recent *.jsonl in the
+            //    cwd-encoded Claude project dir (the recorded-Claude source) and
+            //    emit its wc -l + a sentinel + the tail window — the SAME shape
+            //    [readEventsWindow] reads. Best-effort: if the dir/file is
+            //    missing (not yet a Claude session, or a recorded OpenCode/Codex
+            //    kind) nothing useful is printed and the caller skips the prefetch.
+            //    Uses the SAME `find -print` + `stat -c '%Y'` mechanics as
+            //    [detectionCommand] (BusyBox-compatible — no `find -printf`), so
+            //    the most-recent-within-the-2h-window pick equals the JVM
+            //    selection for a single-cwd recorded Claude.
+            append("printf '%s\\n' $claudeWindowSentinel")
+            append("\n")
+            append(
+                "claude_proj=\"\$HOME/.claude/projects/$encodedClaudeCwd\"; " +
+                    "newest=\$(" +
+                    "find \"\$claude_proj\" -maxdepth 1 -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | " +
+                    "while IFS= read -r f; do " +
+                    "m=\$(stat -c '%Y' \"\$f\" 2>/dev/null) || continue; " +
+                    "printf '%s %s\\n' \"\$m\" \"\$f\"; " +
+                    "done | sort -rn | head -n 1 | cut -d' ' -f2-" +
+                    "); " +
+                    "if [ -n \"\$newest\" ]; then " +
+                    "printf 'PATH=%s\\n' \"\$newest\"; " +
+                    "wc -l < \"\$newest\" 2>/dev/null || printf 0; " +
+                    "printf '\\n%s\\n' $claudeWindowSentinel; " +
+                    "tail -n $claudeRawLineBudget \"\$newest\" 2>/dev/null || true; " +
+                    "fi",
+            )
+        }
+        val out = session.exec(combined).stdout
+        val lines = out.split("\n")
+        val kindSentinelIndex = lines.indexOf(kindSentinel)
+        val rawKind = if (kindSentinelIndex >= 0) {
+            lines.take(kindSentinelIndex).joinToString("\n").trim().ifBlank { null }
+        } else {
+            null
+        }
+        val recordedKind = recordedAgentKindFromOption(rawKind)
+            ?: return RecordedSessionOpen(
+                recordedKind = null,
+                detection = null,
+                needsCodexResolution = false,
+            )
+        // Candidate rows live between the kind sentinel and the FIRST Claude
+        // window sentinel (the section-2 enumeration). Everything from the
+        // SECOND Claude window sentinel onward is the prefetched window.
+        val afterKind = if (kindSentinelIndex >= 0) lines.drop(kindSentinelIndex + 1) else lines
+        val firstClaudeSentinel = afterKind.indexOf(claudeWindowSentinel)
+        val candidateLines = if (firstClaudeSentinel >= 0) {
+            afterKind.take(firstClaudeSentinel)
+        } else {
+            afterKind
+        }
+        val candidates = candidateLines
+            .asSequence()
+            .mapNotNull(::parseCandidate)
+            .filter { it.agent == recordedKind }
+            .toList()
+        // Codex needs the second `/proc/<pid>/fd` pass; defer to the caller so
+        // the owned-rollout binding (#819) stays in exactly one place.
+        if (recordedKind == AgentKind.Codex) {
+            return RecordedSessionOpen(
+                recordedKind = recordedKind,
+                detection = null,
+                needsCodexResolution = true,
+            )
+        }
+        val detection = selectRecordedCandidate(
+            session = session,
+            normalizedCwd = normalizedCwd,
+            normalizedTty = normalizedTty,
+            paneCommand = paneCommand,
+            recordedKind = recordedKind,
+            candidates = candidates,
+        ) ?: return RecordedSessionOpen(
+            recordedKind = recordedKind,
+            detection = null,
+            needsCodexResolution = false,
+        )
+        // Parse the folded Claude window (only Claude prefetches in-exec). The
+        // selected source MUST match the shell's most-recent pick for the fold to
+        // be valid; if the shell printed a different/blank path, drop the prefetch
+        // and let the caller do the normal window read (correctness over the
+        // saved round-trip).
+        val prefetchedWindow = if (recordedKind == AgentKind.ClaudeCode) {
+            parseFoldedClaudeWindow(
+                lines = if (firstClaudeSentinel >= 0) {
+                    afterKind.drop(firstClaudeSentinel + 1)
+                } else {
+                    emptyList()
+                },
+                expectedSourcePath = detection.sourcePath,
+                sentinel = claudeWindowSentinel,
+                rawLineBudget = claudeRawLineBudget,
+            )
+        } else {
+            null
+        }
+        return RecordedSessionOpen(
+            recordedKind = recordedKind,
+            detection = detection,
+            needsCodexResolution = false,
+            prefetchedWindow = prefetchedWindow,
+        )
+    }
+
+    /**
+     * Issue #828 (perf): parse the Claude transcript window folded into the
+     * single-round-trip [resolveRecordedSessionOpen] exec. [lines] is the
+     * remainder after the section-2 enumeration; its shape is
+     * `PATH=<path>` then `<wc-l>` then the window sentinel then the raw tail.
+     * Returns `null` (caller does the normal window read) when the shell printed
+     * no path, or a path that does not match [expectedSourcePath] — so the
+     * prefetch can never bind a window from the wrong file. Parsing/`hasMoreOlder`/
+     * `tailStartLine` mirror [readEventsWindow]'s Claude branch exactly.
+     */
+    private fun parseFoldedClaudeWindow(
+        lines: List<String>,
+        expectedSourcePath: String,
+        sentinel: String,
+        rawLineBudget: Int,
+    ): ConversationEventsWindow? {
+        val pathLine = lines.firstOrNull { it.startsWith("PATH=") } ?: return null
+        val foldedPath = pathLine.removePrefix("PATH=").trim()
+        if (foldedPath.isBlank() || foldedPath != expectedSourcePath) return null
+        val sentinelIndex = lines.indexOf(sentinel)
+        if (sentinelIndex < 0) return null
+        // The wc -l output sits between PATH= and the sentinel.
+        val totalLines = lines
+            .subList(lines.indexOf(pathLine) + 1, sentinelIndex)
+            .joinToString("")
+            .trim()
+            .toLongOrNull() ?: 0L
+        val tailRawLines = lines.drop(sentinelIndex + 1)
+        val parser = ClaudeCodeParser()
+        val events = tailRawLines.asSequence().flatMap { parser.parseLine(it) }.toList()
+        return ConversationEventsWindow(
+            events = events,
+            hasMoreOlder = totalLines > rawLineBudget,
+            tailStartLine = totalLines,
         )
     }
 

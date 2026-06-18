@@ -94,3 +94,36 @@ public const val TMUX_WARM_SWITCH_CI_ADVISORY_P95_MS: Long = 5_000L
  * grep-able log tag (`tmux_latency_conversation_open_ms=`).
  */
 public const val CONVERSATION_OPEN_LATENCY_OPERATION: String = "conversation_open"
+
+/**
+ * Issue #817 (Rank-1 measurement): operation name for the FULL conversation-open
+ * latency span — the user-visible "tap into a session → readable Conversation
+ * content on screen" path, measured end-to-end.
+ *
+ * Unlike [CONVERSATION_OPEN_LATENCY_OPERATION] (which times only the final
+ * window-read leg, `agent detected → first events live`), this span starts when
+ * agent detection BEGINS for the pane (the first SSH exec on the open path —
+ * `readRecordedAgentKind` / `detectForPane` / `detectRecordedSessionForPane`)
+ * and ends at the same `markAgentTailLive` push. It therefore includes the
+ * serial SSH round-trips the #817 spike identified as the real bottleneck —
+ * which is exactly what is invisible on a localhost zero-RTT fixture and only
+ * surfaces under network-realistic RTT (the #552 toxiproxy latency harness).
+ *
+ * `full = detection_chain + window_read`, so the detection-chain cost is
+ * `conversation_open_full_ms - conversation_open_ms`.
+ */
+public const val CONVERSATION_OPEN_FULL_LATENCY_OPERATION: String = "conversation_open_full"
+
+/**
+ * Issue #817 (Rank-1 measurement): operation name for the warm tab-SWITCH
+ * latency span — Terminal → Conversation when the transcript is already loaded.
+ *
+ * `selectSessionTab(Conversation)` is a pure `StateFlow` mutation with no SSH
+ * read and no re-parse, so the span measures only the state mutation + the
+ * recomposition trigger. The spike predicted this is already well under 0.3s;
+ * the span makes that an authoritative number instead of an assumption. Only
+ * recorded for a switch to a row whose transcript is already live (events
+ * present) — a tap that lands on a still-loading/placeholder row is the OPEN
+ * path and is covered by [CONVERSATION_OPEN_FULL_LATENCY_OPERATION].
+ */
+public const val CONVERSATION_SWITCH_LATENCY_OPERATION: String = "conversation_switch"

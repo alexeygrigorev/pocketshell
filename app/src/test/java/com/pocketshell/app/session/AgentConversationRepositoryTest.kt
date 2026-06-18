@@ -2,6 +2,7 @@ package com.pocketshell.app.session
 
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.MessageSendState
@@ -252,6 +253,98 @@ class AgentConversationRepositoryTest {
         assertEquals(2, userMessages.size)
         assertTrue(userMessages.any { it.text == "run the tests" && it.sendState == MessageSendState.Pending })
         assertTrue(userMessages.any { it.text == "now ship it" })
+    }
+
+    @Test
+    fun reconcileCollapsesCodexAssistantTurnEmittedAsBothAgentMessageAndResponseItem() {
+        // Issue #819 (duplicate ASSISTANT turn): a real Codex rollout writes
+        // the SAME assistant text twice within one session — once as a
+        // streaming `event_msg`/`agent_message` (NO id → CodexParser falls
+        // back to line.hashCode()) and once as the authoritative
+        // `response_item`/`message` (WITH a real id like "m1"). The two
+        // events therefore carry DIFFERENT ids for identical prose, so the
+        // id-keyed reconcile cannot collapse them and the turn renders twice
+        // (the screenshot's repeated "Still green at 83%... I'll continue
+        // polling.").
+        //
+        // Parse them through the REAL CodexParser (not hand-built events) so
+        // this test exercises the actual id-collision path, then reconcile.
+        // Exactly ONE assistant turn must survive.
+        val parser = CodexParser()
+        val text = "Still green at 83%. The run is long but healthy; I'll continue polling."
+        val streamingEcho = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"agent_message","message":${
+                JSONObject.quote(text)
+            }},"timestamp":"2026-06-18T16:38:00Z"}""",
+        )
+        val authoritative = parser.parseLine(
+            """{"type":"response_item","item":{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":${
+                JSONObject.quote(text)
+            }}]}}""",
+        )
+
+        // Sanity: the parser really does mint two different ids for the same
+        // text (the precondition that makes the duplicate visible).
+        val echoMsg = streamingEcho.single() as ConversationEvent.Message
+        val authMsg = authoritative.single() as ConversationEvent.Message
+        assertEquals(text, echoMsg.text)
+        assertEquals(text, authMsg.text)
+        assertEquals("m1", authMsg.id)
+        assertFalse(
+            "precondition: the agent_message echo must carry a different id " +
+                "than the response_item record",
+            echoMsg.id == authMsg.id,
+        )
+
+        val reconciled = reconcileAgentEvents(streamingEcho + authoritative)
+
+        val assistantTurns = reconciled.filterIsInstance<ConversationEvent.Message>()
+            .filter { it.role == ConversationRole.Assistant && it.text == text }
+        assertEquals(
+            "the same Codex assistant turn arriving as both an agent_message " +
+                "echo and a response_item record must render ONCE (#819)",
+            1,
+            assistantTurns.size,
+        )
+    }
+
+    @Test
+    fun reconcileKeepsLegitimatelyRepeatedAssistantTurnsSeparatedByOtherTurns() {
+        // Counter-pin to the #819 dedup: identical assistant text that is a
+        // GENUINELY separate turn (e.g. the agent says the same status line
+        // at two different points, with a user turn in between) must NOT be
+        // collapsed. The dedup is adjacency-scoped (consecutive duplicate of
+        // the SAME logical turn — the echo+record pair), not a global
+        // "drop every repeat of this text".
+        val first = ConversationEvent.Message(
+            id = "codex-a-1",
+            agent = AgentKind.Codex,
+            role = ConversationRole.Assistant,
+            text = "Working...",
+        )
+        val userBetween = ConversationEvent.Message(
+            id = "codex-u-1",
+            agent = AgentKind.Codex,
+            role = ConversationRole.User,
+            text = "any update?",
+        )
+        val second = ConversationEvent.Message(
+            id = "codex-a-2",
+            agent = AgentKind.Codex,
+            role = ConversationRole.Assistant,
+            text = "Working...",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(first, userBetween, second))
+
+        val working = reconciled.filterIsInstance<ConversationEvent.Message>()
+            .filter { it.role == ConversationRole.Assistant && it.text == "Working..." }
+        assertEquals(
+            "two legitimately-separate assistant turns with the same text " +
+                "(separated by another turn) must both survive",
+            2,
+            working.size,
+        )
     }
 
     // ----------------------------------------------------------------

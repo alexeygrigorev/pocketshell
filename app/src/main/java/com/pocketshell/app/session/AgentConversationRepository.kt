@@ -116,7 +116,34 @@ internal fun reconcileAgentEvents(
     // all tool activity still keeps the user/assistant prose that
     // preceded it within view.
     val window = events.takeLastPreservingMessages(maxEvents * 2)
+    // Issue #819 (duplicate ASSISTANT turn): track the most recently
+    // inserted NON-optimistic Message so a consecutive duplicate of the same
+    // logical turn collapses. A real Codex rollout writes the same assistant
+    // text twice in a row — once as a streaming `event_msg`/`agent_message`
+    // (no id → CodexParser falls back to line.hashCode()) and once as the
+    // authoritative `response_item`/`message` (with a real id) — so the
+    // id-keyed dedup below cannot collapse them. The check is adjacency-scoped
+    // (the immediately-preceding Message, ignoring intervening tool/reasoning/
+    // system events) so legitimately-repeated turns separated by another turn
+    // are preserved.
+    var lastNonOptimisticMessage: ConversationEvent.Message? = null
     for (event in window) {
+        if (event is ConversationEvent.Message &&
+            !event.isOptimistic()
+        ) {
+            val previous = lastNonOptimisticMessage
+            if (previous != null &&
+                previous.role == event.role &&
+                previous.text == event.text &&
+                previous.agent == event.agent
+            ) {
+                // Consecutive duplicate of the same turn (the Codex echo +
+                // record pair). Keep the one already inserted; skip this one.
+                // The previous entry stays "last" so a third identical write
+                // (rare) also collapses.
+                continue
+            }
+        }
         if (event is ConversationEvent.Message &&
             event.role == ConversationRole.User &&
             !event.isOptimistic()
@@ -150,6 +177,13 @@ internal fun reconcileAgentEvents(
             event.isOptimistic()
         ) {
             optimisticIdsByText.getOrPut(event.text) { ArrayDeque() }.addLast(event.id)
+        }
+        // Issue #819: advance the adjacency cursor only for non-optimistic
+        // Message turns. Tool/reasoning/system events between an echo and its
+        // record must not break the adjacency check; an optimistic user echo
+        // is collapsed by the id/text path above, not here.
+        if (event is ConversationEvent.Message && !event.isOptimistic()) {
+            lastNonOptimisticMessage = event
         }
     }
     return byId.values.toList().takeLastPreservingMessages(maxEvents)
@@ -440,13 +474,74 @@ public class AgentConversationRepository internal constructor(
         } else {
             paneProcesses + paneCommand
         }
+        // Issue #819: bind the Codex source to the pane's OWN session by
+        // resolving the rollout JSONL files actually held open by this pane's
+        // process subtree (`/proc/<pid>/fd`). Without this, two same-cwd
+        // Codex rollouts (the pane's own + an orchestrator/sibling) both pass
+        // detection and the mtime tiebreak picks the busier sibling. The owner
+        // signal is only needed when there is MORE THAN ONE Codex candidate to
+        // disambiguate; with a single candidate the existing selection is
+        // already correct, so the extra `/proc/<pid>/fd` round-trip is skipped.
+        val processOwnedSourcePaths = if (candidates.count { it.agent == AgentKind.Codex } >= 2) {
+            resolveProcessOwnedCodexRollouts(session, pidsFromProcessRows(paneProcesses))
+        } else {
+            emptySet()
+        }
         return detector.detect(
             cwd = normalizedCwd,
             nowMillis = nowMillis,
             candidates = candidates,
             processLines = processLines,
             requireProcessMatch = true,
+            processOwnedSourcePaths = processOwnedSourcePaths,
         )
+    }
+
+    /**
+     * Issue #819: extract the PIDs of a pane's process subtree from the
+     * `ps -eo pid,ppid,tty,comm,args` rows [processLinesForPane] returns. The
+     * first whitespace-delimited token of each row is the PID.
+     */
+    private fun pidsFromProcessRows(rows: List<String>): List<Long> =
+        rows.mapNotNull { row ->
+            row.trim().substringBefore(' ').toLongOrNull()
+        }.distinct()
+
+    /**
+     * Issue #819: resolve which `~/.codex/sessions/**/*.jsonl` rollout files
+     * are held OPEN by the given pane-owned PIDs, via `/proc/<pid>/fd`. The
+     * Codex CLI keeps its active rollout file descriptor open for the life of
+     * the session, so the open fd uniquely identifies the rollout belonging
+     * to THIS pane's Codex process — even when a sibling Codex shares the
+     * same cwd and flushes more recently.
+     *
+     * Best-effort: on a non-Linux remote (no `/proc`), a Codex build that
+     * doesn't hold the fd open, or any read failure, this returns an empty
+     * set and the detector degrades to its previous mtime selection.
+     */
+    private suspend fun resolveProcessOwnedCodexRollouts(
+        session: SshSession,
+        pids: List<Long>,
+    ): Set<String> {
+        if (pids.isEmpty()) return emptySet()
+        val pidList = pids.joinToString(" ")
+        // `readlink` each open fd; keep only paths under .codex/sessions/
+        // ending in .jsonl. `2>/dev/null` and `|| true` keep the command
+        // silent on permission errors / missing /proc.
+        val command =
+            "for p in $pidList; do " +
+                "for fd in /proc/\$p/fd/*; do " +
+                "t=\$(readlink \"\$fd\" 2>/dev/null) || continue; " +
+                "case \"\$t\" in */.codex/sessions/*.jsonl) printf '%s\\n' \"\$t\";; esac; " +
+                "done; " +
+                "done 2>/dev/null || true"
+        return runCatching {
+            session.exec(command).stdout
+                .lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && it.contains("/.codex/sessions/") && it.endsWith(".jsonl") }
+                .toSet()
+        }.getOrDefault(emptySet())
     }
 
     /**
@@ -562,12 +657,26 @@ public class AgentConversationRepository internal constructor(
                 ttyFiltered + pane.paneCommand
             }
 
+            // Issue #819: only pay the extra `/proc/<pid>/fd` round-trip when
+            // this pane has MORE THAN ONE same-cwd Codex candidate to
+            // disambiguate — the canonical orchestrator/sibling-shares-cwd
+            // case. With a single Codex candidate the existing selection is
+            // already correct, so the session-list latency contract (#252:
+            // constant 2 round-trips) is preserved for the common case.
+            val processOwnedSourcePaths =
+                if (paneCandidates.count { it.agent == AgentKind.Codex } >= 2) {
+                    resolveProcessOwnedCodexRollouts(session, pidsFromProcessRows(ttyFiltered))
+                } else {
+                    emptySet()
+                }
+
             val detection = detector.detect(
                 cwd = pane.cwd,
                 nowMillis = nowMillis,
                 candidates = paneCandidates,
                 processLines = merged,
                 requireProcessMatch = true,
+                processOwnedSourcePaths = processOwnedSourcePaths,
             )
             if (detection != null) {
                 result[pane.key] = detection

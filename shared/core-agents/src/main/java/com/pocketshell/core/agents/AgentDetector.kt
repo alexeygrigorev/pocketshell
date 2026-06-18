@@ -62,6 +62,20 @@ public class AgentDetector(
      * up the Conversation tab on a window where no agent is actually
      * running. Session-scoped callers pass `false` (default) and accept
      * the looser `RecentFile` confidence when the process scan misses.
+     *
+     * Issue #819: [processOwnedSourcePaths] is the set of transcript source
+     * paths actually held open by THIS pane's own agent process (resolved
+     * from `/proc/<pid>/fd` for the pane's process subtree). When more than
+     * one same-cwd candidate is process-confirmed — the canonical Codex
+     * failure where an orchestrator/sibling Codex shares the pane's cwd and
+     * out-flushes the pane's own rollout — the mtime tiebreak picks the
+     * WRONG (busier sibling) session. Binding to the rollout the pane's own
+     * process holds open makes the pane's session win regardless of which
+     * sibling flushed most recently. When the owner signal is empty (no
+     * `/proc/<pid>/fd` match — a foreign/exited session, a Codex build that
+     * doesn't keep the fd open, or a non-Linux remote), selection degrades
+     * to the previous mtime-among-confirmed behaviour so detection still
+     * lights up. Empty by default; only the per-pane callers populate it.
      */
     public fun detect(
         cwd: String,
@@ -69,6 +83,7 @@ public class AgentDetector(
         candidates: List<AgentLogCandidate>,
         processLines: List<String>,
         requireProcessMatch: Boolean = false,
+        processOwnedSourcePaths: Set<String> = emptySet(),
     ): AgentDetection? {
         val normalizedCwd = normalizeCwd(cwd)
         val expected = expectedPathHints(normalizedCwd)
@@ -81,8 +96,17 @@ public class AgentDetector(
             candidate to processLines.any { line -> line.namesAgent(candidate.agent) }
         }
         val selected = if (requireProcessMatch) {
-            ranked
-                .filter { (_, confirmed) -> confirmed }
+            val confirmedCandidates = ranked.filter { (_, isConfirmed) -> isConfirmed }
+            // Issue #819: among the process-confirmed candidates, prefer one
+            // whose source path is held open by the pane's OWN agent process.
+            // This binds the transcript to the pane's actual session identity
+            // rather than letting a busier same-cwd sibling win the mtime
+            // race. If no confirmed candidate is process-owned (signal
+            // absent/unsupported), fall back to the most-recent confirmed.
+            val ownedCandidates = confirmedCandidates.filter { (candidate, _) ->
+                candidate.path in processOwnedSourcePaths
+            }
+            (ownedCandidates.ifEmpty { confirmedCandidates })
                 .maxByOrNull { (candidate, _) -> candidate.modifiedAtMillis }
                 ?: return null
         } else {

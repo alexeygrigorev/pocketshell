@@ -601,6 +601,93 @@ class AgentDetectorTest {
     }
 
     @Test
+    fun codexSelectsProcessOwnedRolloutOverNewerSameCwdSibling() {
+        // Issue #819: two Codex rollouts share the pane's cwd — the pane's
+        // OWN session (older mtime) and a busier orchestrator/sibling Codex
+        // (newer mtime, e.g. a poll loop flushing on every turn). Both pass
+        // the same-cwd candidate enumeration and both are "process
+        // confirmed" because *a* codex runs on the pane TTY. The pre-#819
+        // selection collapsed to maxBy(mtime) and picked the WRONG (newer
+        // sibling) rollout, so the Conversation tab rendered another
+        // session's transcript under the correct header.
+        //
+        // With an identity signal — the rollout actually held open by the
+        // pane's own Codex process (resolved from /proc/<pid>/fd) — the
+        // pane's session must win even though it is OLDER.
+        val paneRollout =
+            "/home/alexey/.codex/sessions/2026/06/18/rollout-pane-own.jsonl"
+        val siblingRollout =
+            "/home/alexey/.codex/sessions/2026/06/18/rollout-orchestrator.jsonl"
+
+        val detection = detector.detect(
+            cwd = "/home/alexey/git/ai-shipping-labs",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = siblingRollout,
+                    modifiedAtMillis = 9_900, // newer — would win the mtime race
+                    sessionId = "codex-orchestrator",
+                    cwd = "/home/alexey/git/ai-shipping-labs",
+                ),
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = paneRollout,
+                    modifiedAtMillis = 9_000, // older — but it's THIS pane's
+                    sessionId = "codex-pane-own",
+                    cwd = "/home/alexey/git/ai-shipping-labs",
+                ),
+            ),
+            processLines = listOf("4242 pts/3 00:00:01 codex"),
+            requireProcessMatch = true,
+            processOwnedSourcePaths = setOf(paneRollout),
+        )
+
+        assertEquals(
+            "the rollout held open by the pane's own Codex process must win, " +
+                "not the most-recently-flushed same-cwd sibling (#819)",
+            "codex-pane-own",
+            detection?.sessionId,
+        )
+        assertEquals(paneRollout, detection?.sourcePath)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
+    fun codexFallsBackToMtimeWhenNoProcessOwnedRollout() {
+        // When the identity signal is unavailable (no /proc/<pid>/fd match —
+        // e.g. a foreign/exited session, or a Codex build that doesn't keep
+        // the rollout fd open), the selection degrades to the previous
+        // mtime-among-same-cwd behaviour so detection still lights up. The
+        // newer same-cwd rollout wins in the absence of an owner signal.
+        val detection = detector.detect(
+            cwd = "/home/alexey/git/ai-shipping-labs",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/alexey/.codex/sessions/2026/06/18/rollout-a.jsonl",
+                    modifiedAtMillis = 9_900,
+                    sessionId = "codex-newer",
+                    cwd = "/home/alexey/git/ai-shipping-labs",
+                ),
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/alexey/.codex/sessions/2026/06/18/rollout-b.jsonl",
+                    modifiedAtMillis = 9_000,
+                    sessionId = "codex-older",
+                    cwd = "/home/alexey/git/ai-shipping-labs",
+                ),
+            ),
+            processLines = listOf("4242 pts/3 00:00:01 codex"),
+            requireProcessMatch = true,
+            processOwnedSourcePaths = emptySet(),
+        )
+
+        assertEquals("codex-newer", detection?.sessionId)
+    }
+
+    @Test
     fun picksMostRecentAcrossMultipleEnginesWhenAllPathsMatch() {
         // When more than one engine has a recent matching candidate
         // (e.g. user briefly switched agents in the same pane), the

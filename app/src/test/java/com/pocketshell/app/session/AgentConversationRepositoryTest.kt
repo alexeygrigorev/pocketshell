@@ -581,6 +581,247 @@ class AgentConversationRepositoryTest {
         assertEquals(perEvent.map { it.id }, batchedReconciled.map { it.id })
     }
 
+    // ===================================================================
+    // Epic #821 slice #3 (#825): bind the Conversation source to the
+    // RECORDED session identity (@ps_agent_kind), not detection. For a
+    // session PocketShell launched, the source is computed from
+    // (recordedKind, sessionId, cwd) with NO cross-kind path-hint / mtime
+    // race — killing the #807/#819/#820 mis-detected-source cluster.
+    // ===================================================================
+
+    @Test
+    fun readRecordedAgentKindReadsSessionScopedTmuxOption() = runTest {
+        val session = FakeSshSession(recordedKindOutput = "claude\n")
+
+        val kind = AgentConversationRepository().readRecordedAgentKind(session, "\$3")
+
+        assertEquals(AgentKind.ClaudeCode, kind)
+        val command = session.execCommands.single()
+        assertTrue("must read the session-scoped option value; got $command", command.contains("show-options -v"))
+        assertTrue(command.contains("@ps_agent_kind"))
+        assertTrue("must target the pane's session; got $command", command.contains("'\$3'"))
+    }
+
+    @Test
+    fun readRecordedAgentKindIsNullForForeignSessionWithNoOption() = runTest {
+        // A foreign session (one we did not launch) has no @ps_agent_kind, so
+        // `show-options -v` prints nothing → null → caller keeps detection.
+        val session = FakeSshSession(recordedKindOutput = "")
+
+        assertEquals(null, AgentConversationRepository().readRecordedAgentKind(session, "\$9"))
+    }
+
+    @Test
+    fun recordedClaudeSessionBindsToRecordedKindEvenWhenABusierCodexSiblingExists() = runTest {
+        // The maintainer's #807/#819/#820 cluster: a session PocketShell
+        // launched as CLAUDE, but a busier Codex rollout in the SAME cwd flushed
+        // more recently. Cross-kind detection (detectForPane) would have a Codex
+        // candidate (newer mtime) competing with the Claude candidate; with a
+        // live `codex` process on the pane TTY the detector would bind the
+        // Conversation view to CODEX — the wrong kind.
+        //
+        // detectRecordedSessionForPane must ignore the Codex candidate entirely
+        // (recordedKind = Claude) and bind to the Claude transcript computed from
+        // (recordedKind, sessionId, cwd). This FAILS on base (detection picks the
+        // busier Codex sibling) and passes after the recorded-kind rewire.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 600}|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/claude-sess.jsonl
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-busier.jsonl
+            """.trimIndent(),
+            // Both a claude and a codex process are live on the pane TTY, so
+            // cross-kind detection would happily confirm + pick the newer Codex.
+            hostWideProcessOutput = """
+                1001 1000 pts/7 codex /usr/local/bin/codex --busy
+                1002 1000 pts/7 claude /usr/local/bin/claude
+            """.trimIndent(),
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+            recordedKind = AgentKind.ClaudeCode,
+        )
+
+        assertEquals(
+            "a recorded Claude session must bind to Claude, never the busier " +
+                "same-cwd Codex sibling detection would have picked (#807/#819/#820)",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("claude-sess", detection?.sessionId)
+        assertEquals(
+            "/home/testuser/.claude/projects/-workspace-proj/claude-sess.jsonl",
+            detection?.sourcePath,
+        )
+    }
+
+    @Test
+    fun foreignDetectionMisbindsTheSameFixtureToTheBusierCodexSibling() = runTest {
+        // Red-baseline pin for the recorded-Claude test above: the OLD
+        // (foreign / no-recorded-kind) detectForPane path, given the EXACT same
+        // host state, binds the Conversation view to the busier same-cwd CODEX
+        // sibling — the wrong kind. This is the bug recorded-kind binding fixes;
+        // foreign sessions intentionally KEEP this behaviour (out of scope for
+        // #825 — workstream B handles foreign guess/confirm later).
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 600}|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/claude-sess.jsonl
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-busier.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                1001 1000 pts/7 codex /usr/local/bin/codex --busy
+                1002 1000 pts/7 claude /usr/local/bin/claude
+            """.trimIndent(),
+        )
+
+        val foreign = AgentConversationRepository().detectForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+        )
+
+        assertEquals(
+            "the foreign detection path mis-binds this fixture to the busier " +
+                "Codex sibling — exactly the bug recorded-kind binding fixes",
+            AgentKind.Codex,
+            foreign?.agent,
+        )
+    }
+
+    @Test
+    fun recordedClaudeSessionResolvesEvenWhenNoAgentProcessIsObservable() = runTest {
+        // The recorded kind is authoritative: an idle recorded Claude session
+        // (no live `claude` process visible on the TTY right now) must STILL
+        // resolve its source, instead of flapping to null the way foreign
+        // per-pane detection (requireProcessMatch) would.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/idle.jsonl
+            """.trimIndent(),
+            // No agent process at all on the pane TTY.
+            hostWideProcessOutput = "5005 1 pts/7 bash -bash",
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "bash",
+            recordedKind = AgentKind.ClaudeCode,
+        )
+
+        assertEquals(AgentKind.ClaudeCode, detection?.agent)
+        assertEquals("idle", detection?.sessionId)
+    }
+
+    @Test
+    fun recordedOpenCodeSessionBindsToOpenCodeOverANewerClaudeSibling() = runTest {
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/newer.jsonl
+                opencode|${now - 300}|/workspace/proj|/home/testuser/.local/share/opencode/opencode.db#oc-42
+            """.trimIndent(),
+            hostWideProcessOutput = "2002 1 pts/3 node opencode",
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/3",
+            paneCommand = "node",
+            recordedKind = AgentKind.OpenCode,
+        )
+
+        assertEquals(AgentKind.OpenCode, detection?.agent)
+        assertEquals("oc-42", detection?.sessionId)
+        assertEquals(
+            "/home/testuser/.local/share/opencode/opencode.db#oc-42",
+            detection?.sourcePath,
+        )
+    }
+
+    @Test
+    fun recordedCodexSessionPicksProcessOwnedRolloutNotTheBusierSibling() = runTest {
+        // Codex has no session-id-in-path, so even within the recorded Codex
+        // kind a busier same-cwd sibling rollout would win an mtime race. The
+        // recorded-Codex path must bind to the rollout THIS pane's own process
+        // holds open (`/proc/<pid>/fd`, the #819 mechanism), not the sibling
+        // that flushed most recently. FAILS without the process-owned scoping
+        // (mtime would pick rollout-busier).
+        val now = System.currentTimeMillis() / 1000
+        val ownPath = "/home/testuser/.codex/sessions/2026/06/18/rollout-mine.jsonl"
+        val busierPath = "/home/testuser/.codex/sessions/2026/06/18/rollout-busier.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                codex|${now - 120}|/workspace/proj|$ownPath
+                codex|$now|/workspace/proj|$busierPath
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                4242 1 pts/5 codex /usr/local/bin/codex --here
+            """.trimIndent(),
+            // The pane's own codex process (pid 4242) holds rollout-mine open.
+            procFdOutput = ownPath,
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "codex",
+            recordedKind = AgentKind.Codex,
+        )
+
+        assertEquals(AgentKind.Codex, detection?.agent)
+        assertEquals(
+            "a recorded Codex session must bind to the rollout its OWN process " +
+                "holds open, not the busier same-cwd sibling (#819)",
+            ownPath,
+            detection?.sourcePath,
+        )
+        assertEquals("rollout-mine", detection?.sessionId)
+        assertTrue(
+            "the recorded-Codex path must resolve the process-owned rollout via /proc fd",
+            session.execCommands.any { it.contains("/proc/") && it.contains(".codex/sessions/") },
+        )
+    }
+
+    @Test
+    fun recordedSessionWithNoCandidateOfRecordedKindResolvesNull() = runTest {
+        // The recorded kind is Codex but only a Claude candidate exists for this
+        // cwd (e.g. the Codex rollout has not been written yet). We must NOT
+        // fall back to the Claude candidate — the recorded kind is fixed.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/c.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "1001 1 pts/2 claude claude",
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/2",
+            paneCommand = "claude",
+            recordedKind = AgentKind.Codex,
+        )
+
+        assertEquals(
+            "a recorded Codex session must not bind to a Claude candidate just " +
+                "because no Codex log exists yet",
+            null,
+            detection,
+        )
+    }
+
     private fun buildMixedConversationBurst(turns: Int): List<ConversationEvent> = buildList {
         repeat(turns) { turn ->
             val prompt = "do task $turn"
@@ -1570,6 +1811,8 @@ class AgentConversationRepositoryTest {
         private val tailFailure: Throwable? = null,
         private val agentLogOutput: String = "",
         private val jsonlTailOutput: String = "",
+        private val recordedKindOutput: String = "",
+        private val procFdOutput: String = "",
     ) : SshSession {
         val execCommands = mutableListOf<String>()
         val tailFromLineCalls = mutableListOf<Pair<String, Long>>()
@@ -1580,6 +1823,8 @@ class AgentConversationRepositoryTest {
         override suspend fun exec(command: String): ExecResult {
             execCommands += command
             val stdout = when {
+                command.contains("show-options -v") && command.contains("@ps_agent_kind") -> recordedKindOutput
+                command.contains("/proc/") && command.contains(".codex/sessions/") -> procFdOutput
                 command.contains("claude_dir=") -> detectionOutput
                 command.contains("ps -eo pid,ppid,tty,comm,args") -> hostWideProcessOutput
                 command.contains("ps -eo pid,tty,comm,args") -> hostWideProcessOutput

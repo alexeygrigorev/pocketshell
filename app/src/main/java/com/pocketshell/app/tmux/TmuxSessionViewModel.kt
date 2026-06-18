@@ -8082,27 +8082,50 @@ public class TmuxSessionViewModel @Inject constructor(
             target = activeTarget ?: return,
             client = clientRef ?: return,
         )
+        val sessionTarget = pane.sessionId
         paneAgentJobs[paneId] = bridgeScope.launch {
-            // Issue #186: run the per-pane detection path so a sibling
-            // window's JSONL log cannot light up the Conversation tab
-            // on a non-agent window that just shares a cwd. The legacy
-            // session-scoped [detect] is intentionally NOT called here
-            // — its host-wide process scan was the root cause of the
-            // "Claude detected" misattribution reported in the v0.2.8
-            // feedback.
+            // Epic #821 slice #3 (#825): if PocketShell RECORDED this session's
+            // agent kind at launch (`@ps_agent_kind`), bind the Conversation
+            // source to that recorded identity — kind from the record, source
+            // computed from `(recordedKind, sessionId, cwd)` — instead of
+            // re-guessing the kind by output/mtime detection. This is what kills
+            // the #807 / #819 / #820 mis-detected-source cluster for OUR
+            // sessions (detection mis-guessing the kind or picking a busier
+            // sibling rollout). A FOREIGN session (option absent) keeps the
+            // detection path below unchanged.
+            //
+            // Issue #186: the per-pane detection path (foreign sessions) scopes
+            // a sibling window's JSONL log so it cannot light up the
+            // Conversation tab on a non-agent window that just shares a cwd. The
+            // legacy session-scoped [detect] is intentionally NOT called here —
+            // its host-wide process scan was the root cause of the "Claude
+            // detected" misattribution reported in the v0.2.8 feedback.
             //
             // When `tty` is blank (older tmux that does not emit
             // `#{pane_tty}`, or a freshly-discovered pane between
             // bootstrap and the first list-panes round-trip), the
             // repository returns null — preserving the old behaviour
             // that "no signal = no detection" for this pane.
+            val recordedKind = runCatching {
+                agentRepository.readRecordedAgentKind(session, sessionTarget)
+            }.getOrNull()
             val detection = runCatching {
-                agentRepository.detectForPane(
-                    session = session,
-                    cwd = cwd,
-                    paneTty = tty,
-                    paneCommand = command,
-                )
+                if (recordedKind != null) {
+                    agentRepository.detectRecordedSessionForPane(
+                        session = session,
+                        cwd = cwd,
+                        paneTty = tty,
+                        paneCommand = command,
+                        recordedKind = recordedKind,
+                    )
+                } else {
+                    agentRepository.detectForPane(
+                        session = session,
+                        cwd = cwd,
+                        paneTty = tty,
+                        paneCommand = command,
+                    )
+                }
             }.getOrNull()
             if (!isCurrentRuntime(guard)) return@launch
             if (detection == null) {

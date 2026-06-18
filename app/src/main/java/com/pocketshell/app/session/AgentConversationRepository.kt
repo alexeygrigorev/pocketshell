@@ -498,6 +498,141 @@ public class AgentConversationRepository internal constructor(
     }
 
     /**
+     * Epic #821 slice #3 (#825): read the agent kind PocketShell recorded for
+     * the tmux session [sessionTarget] at launch, from the host-side
+     * `@ps_agent_kind` user option. Returns the [AgentKind] when the option is
+     * set to a known engine, or `null` when the option is absent (a session we
+     * did not launch — a FOREIGN session) or names an unknown value.
+     *
+     * [sessionTarget] is a `-t` target: the tmux session id (`$N`) or name. We
+     * read the SESSION-scoped option exactly as the launch wrapper wrote it
+     * (`tmux set-option @ps_agent_kind <kind>` with no `-g`), so the recorded
+     * kind survives reconnect / app restart for the life of the session — the
+     * same durable, authoritative signal [com.pocketshell.app.projects.FolderListGateway]
+     * reads back via `list-sessions`. Best-effort: any failure / empty output
+     * resolves to `null` so the caller degrades to foreign-session detection.
+     */
+    suspend fun readRecordedAgentKind(
+        session: SshSession,
+        sessionTarget: String,
+    ): AgentKind? {
+        val target = sessionTarget.trim().ifBlank { return null }
+        val raw = runCatching {
+            session.exec(
+                "tmux show-options -v -t ${shellQuote(target)} @ps_agent_kind 2>/dev/null || true",
+            ).stdout
+        }.getOrNull() ?: return null
+        return recordedAgentKindFromOption(raw)
+    }
+
+    /**
+     * Epic #821 slice #3 (#825): map a raw `@ps_agent_kind` option value to an
+     * [AgentKind]. The launch wrapper writes the lowercase engine token
+     * (`claude` / `codex` / `opencode`); anything else (blank, a foreign
+     * session with no option, an unknown value) maps to `null`. Kept in lockstep
+     * with `FolderListGateway.recordedKindFromOption`.
+     */
+    internal fun recordedAgentKindFromOption(raw: String?): AgentKind? =
+        when (raw?.trim()?.lowercase()) {
+            "claude" -> AgentKind.ClaudeCode
+            "codex" -> AgentKind.Codex
+            "opencode" -> AgentKind.OpenCode
+            else -> null
+        }
+
+    /**
+     * Epic #821 slice #3 (#825): resolve the Conversation source for a session
+     * whose agent kind PocketShell RECORDED at launch (`@ps_agent_kind` →
+     * [recordedKind]). Unlike [detectForPane], the kind is NOT re-guessed by
+     * the detector — it is fixed by [recordedKind], and only candidates of that
+     * exact kind are handed to the selection step. This kills the #807 / #819 /
+     * #820 mis-detected-source cluster where detection's cross-kind path-hint /
+     * mtime race binds the Conversation view to the WRONG kind or a busier
+     * sibling rollout of a different engine.
+     *
+     * Engine-specific resolution, scoped to the recorded kind:
+     *  - **Claude**: pick the most-recent candidate under
+     *    `~/.claude/projects/<encodeClaudeCwd(cwd)>/` — the source path is
+     *    `~/.claude/projects/<encodeClaudeCwd(cwd)>/<sessionId>.jsonl`, computed
+     *    from `(recordedKind, sessionId, cwd)` with no kind detection.
+     *  - **OpenCode**: pick the most-recent `opencode.db#<sessionId>` session
+     *    scoped to this cwd — `~/.local/share/opencode/opencode.db#<sessionId>`,
+     *    computed from `(recordedKind, sessionId)`.
+     *  - **Codex**: the rollout file has no session-id-in-path, so it is still
+     *    selected by the process-owned `/proc/<pid>/fd` resolution
+     *    ([resolveProcessOwnedCodexRollouts]) — but scoped as Codex by the
+     *    recorded kind, NOT by an mtime race against a sibling of any kind.
+     *
+     * Returns `null` only when no candidate of the recorded kind exists for
+     * this pane (the agent's log has not appeared yet / the agent exited) —
+     * the caller treats that exactly like a null detection.
+     */
+    suspend fun detectRecordedSessionForPane(
+        session: SshSession,
+        cwd: String,
+        paneTty: String,
+        paneCommand: String,
+        recordedKind: AgentKind,
+    ): AgentDetection? {
+        val normalizedCwd = cwd.trim().ifBlank { return null }
+        val normalizedTty = paneTty.trim().ifBlank { return null }
+        val nowMillis = System.currentTimeMillis()
+        // Same cwd-scoped candidate enumeration as detectForPane, but we keep
+        // ONLY the candidates of the recorded kind — the detector never gets to
+        // pick the kind from a cross-kind path-hint / mtime race.
+        val candidates = session.exec(detectionCommand(normalizedCwd))
+            .stdout
+            .lineSequence()
+            .mapNotNull(::parseCandidate)
+            .filter { it.agent == recordedKind }
+            .toList()
+        if (candidates.isEmpty()) return null
+        val ttyArg = normalizedTty.removePrefix("/dev/")
+        val processSnapshot = session.exec(PROCESS_TREE_SCAN_COMMAND)
+            .stdout
+            .lines()
+            .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
+        val paneProcesses = processLinesForPane(processSnapshot, ttyArg)
+        val processLines = if (paneCommand.isBlank()) {
+            paneProcesses
+        } else {
+            paneProcesses + paneCommand
+        }
+        // Codex has no session-id-in-path, so a same-cwd sibling Codex rollout
+        // would still win an mtime race even within the recorded kind. Bind to
+        // the rollout the pane's OWN process holds open (the #819 mechanism),
+        // scoped here to Codex by the recorded kind rather than detected kind.
+        val processOwnedSourcePaths =
+            if (recordedKind == AgentKind.Codex && candidates.size >= 2) {
+                resolveProcessOwnedCodexRollouts(session, pidsFromProcessRows(paneProcesses))
+            } else {
+                emptySet()
+            }
+        // Claude / OpenCode carry the session id IN their candidate path, so
+        // the most-recent candidate of the recorded kind, scoped to this cwd, is
+        // the right source — and we do NOT gate on a live process match: the
+        // kind is recorded (authoritative), so requiring a process match would
+        // re-introduce the null-detection flapping #554 fought for a kind we
+        // already KNOW (idle agent between turns, slow ps).
+        //
+        // Codex has no session-id-in-path, so we DO use the process-confirmed
+        // owned-rollout selection ([processOwnedSourcePaths] is consulted only
+        // on the requireProcessMatch path) to bind to THIS pane's rollout rather
+        // than a busier same-cwd sibling. With a single Codex candidate the
+        // owned set is empty and the detector falls back to the most-recent
+        // confirmed candidate, so a live-but-single Codex still resolves.
+        val requireProcessMatch = recordedKind == AgentKind.Codex
+        return detector.detect(
+            cwd = normalizedCwd,
+            nowMillis = nowMillis,
+            candidates = candidates,
+            processLines = processLines,
+            requireProcessMatch = requireProcessMatch,
+            processOwnedSourcePaths = processOwnedSourcePaths,
+        )
+    }
+
+    /**
      * Issue #819: extract the PIDs of a pane's process subtree from the
      * `ps -eo pid,ppid,tty,comm,args` rows [processLinesForPane] returns. The
      * first whitespace-delimited token of each row is the PID.

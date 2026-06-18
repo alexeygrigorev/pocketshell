@@ -38,6 +38,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
@@ -420,6 +421,20 @@ data class SessionTypeChoice(
             codexProfileName, codexProfiles,
         )
     }
+
+    /**
+     * Epic #821 Workstream A: the [SessionAgentKind] this choice will launch,
+     * known synchronously at create time (no detection). Passed into
+     * [FolderListViewModel.createSession] so the optimistically-inserted tree
+     * node shows the real kind from the moment of creation. `null` for a shell
+     * session (no agent kind to record) — the node then falls through to the
+     * reconcile's `Shell` verdict as before.
+     */
+    val sessionAgentKind: SessionAgentKind?
+        get() = when (type) {
+            SessionType.Shell -> null
+            SessionType.Agent -> agent?.toSessionAgentKind()
+        }
 }
 
 enum class SessionType { Shell, Agent }
@@ -429,6 +444,19 @@ enum class AgentCli(val command: String) {
     Codex("codex"),
     OpenCode("opencode"),
     ;
+
+    /**
+     * Epic #821 Workstream A: map the picked CLI to the [SessionAgentKind] the
+     * tree renders, so the chosen kind can be recorded on the new session node
+     * at create time. This is the SAME kind the `pocketshell agent <command>`
+     * wrapper records host-side as `@ps_agent_kind` ([command]), so the
+     * optimistic node and the host read-back agree.
+     */
+    fun toSessionAgentKind(): SessionAgentKind = when (this) {
+        Claude -> SessionAgentKind.Claude
+        Codex -> SessionAgentKind.Codex
+        OpenCode -> SessionAgentKind.OpenCode
+    }
 
     /**
      * Build the SHORT `pocketshell agent <kind> --dir <dir> …` line typed

@@ -11,19 +11,25 @@ import org.junit.Test
  * Unit tests for the tab-delimited `tmux list-sessions` /
  * `list-panes -a` parsers in [SshFolderListGateway] — issue #171.
  *
- * The parsers are intentionally narrow (they only need to read four /
- * five trusted fields emitted with a literal `\t` separator), so the
- * test focus is correctness on representative wire shapes plus a
- * couple of edge cases (blank cwd, malformed row, multiple panes per
- * session with only the active one winning).
+ * The parsers are intentionally narrow (they only need to read trusted
+ * fields emitted with a literal `\t` separator), so the test focus is
+ * correctness on representative wire shapes plus a couple of edge cases
+ * (blank cwd, malformed row, multiple panes per session with only the
+ * active one winning).
+ *
+ * Epic #821 Workstream A: `list-sessions` now carries a 6th field,
+ * `@ps_agent_kind`, BETWEEN `session_attached` and `session_path` — the
+ * agent kind PocketShell recorded at launch. Field order:
+ * `name::created::activity::attached::@ps_agent_kind::path`.
  */
 class FolderListGatewayParserTest {
 
     @Test
-    fun parseListSessionsRowsExtractsAllFiveFields() {
+    fun parseListSessionsRowsExtractsAllFields() {
+        // Foreign sessions (no `@ps_agent_kind`) leave the 5th field blank.
         val stdout =
-            "claude-main::1700000000::1700001000::1::/home/alexey/git/pocketshell\n" +
-                "build-shell::1700000100::1700000500::0::/home/alexey/git/pocketshell\n"
+            "claude-main::1700000000::1700001000::1::::/home/alexey/git/pocketshell\n" +
+                "build-shell::1700000100::1700000500::0::::/home/alexey/git/pocketshell\n"
         val rows = SshFolderListGateway.parseListSessionsRows(stdout)
         assertEquals(2, rows.size)
         assertEquals("claude-main", rows[0].sessionName)
@@ -35,10 +41,69 @@ class FolderListGatewayParserTest {
     }
 
     @Test
+    fun parseListSessionsRowsReadsRecordedAgentKind() {
+        // Epic #821: a session we launched carries its `@ps_agent_kind` in
+        // the 5th field; parseRow surfaces it as the authoritative kind.
+        val stdout =
+            "git-pocketshell::1700000000::1700001000::1::codex::/home/alexey/git/pocketshell\n" +
+                "git-app::1700000100::1700000500::0::claude::/home/alexey/git/app\n" +
+                "git-web::1700000200::1700000600::0::opencode::/home/alexey/git/web\n"
+        val rows = SshFolderListGateway.parseListSessionsRows(stdout)
+        assertEquals(3, rows.size)
+        assertEquals(SessionAgentKind.Codex, rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Codex, rows[0].agentKind)
+        assertEquals("/home/alexey/git/pocketshell", rows[0].cwd)
+        assertEquals(SessionAgentKind.Claude, rows[1].recordedKind)
+        assertEquals(SessionAgentKind.Claude, rows[1].agentKind)
+        assertEquals(SessionAgentKind.OpenCode, rows[2].recordedKind)
+        assertEquals(SessionAgentKind.OpenCode, rows[2].agentKind)
+    }
+
+    @Test
+    fun parseListSessionsRowsBlankKindIsForeignNotRecorded() {
+        // A blank `@ps_agent_kind` means we did not launch this session
+        // (foreign). recordedKind is null and the row keeps the Shell
+        // default so the detection probe (still running in A1) can fill it
+        // without being clobbered.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "foreign::100::200::1::::/srv/app\n",
+        )
+        assertEquals(1, rows.size)
+        assertNull(rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Shell, rows[0].agentKind)
+        assertEquals("/srv/app", rows[0].cwd)
+    }
+
+    @Test
+    fun parseListSessionsRowsUnknownKindFallsBackToShell() {
+        // An unrecognised option value must NOT mislabel the session — it
+        // falls back to Shell with no recorded kind.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "weird::100::200::1::gemini::/srv/app\n",
+        )
+        assertEquals(1, rows.size)
+        assertNull(rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Shell, rows[0].agentKind)
+    }
+
+    @Test
+    fun parseListSessionsRowsKeepsPathWithEmbeddedSeparator() {
+        // session_path is the absorbing last column; a path containing the
+        // rare `::` literal still parses, and the recorded kind ahead of it
+        // is read correctly.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "odd::100::200::1::claude::/srv/weird::dir\n",
+        )
+        assertEquals(1, rows.size)
+        assertEquals(SessionAgentKind.Claude, rows[0].recordedKind)
+        assertEquals("/srv/weird::dir", rows[0].cwd)
+    }
+
+    @Test
     fun parseListSessionsRowsPreservesHetznerCableWorldRawNames() {
         val stdout =
-            "git-cable-world::1700000000::1700001000::0::/home/alexey/git/cable-world\n" +
-                "git-cable-world-map::1700000100::1700002000::0::/home/alexey/git/cable-world\n"
+            "git-cable-world::1700000000::1700001000::0::::/home/alexey/git/cable-world\n" +
+                "git-cable-world-map::1700000100::1700002000::0::::/home/alexey/git/cable-world\n"
 
         val rows = SshFolderListGateway.parseListSessionsRows(stdout)
 
@@ -50,9 +115,10 @@ class FolderListGatewayParserTest {
     fun parseListSessionsRowsHandlesBlankCwdAsNull() {
         // Some tmux setups leave session_path empty for sessions
         // created without `-c`; row must still parse.
-        val rows = SshFolderListGateway.parseListSessionsRows("plain::100::200::0::\n")
+        val rows = SshFolderListGateway.parseListSessionsRows("plain::100::200::0::::\n")
         assertEquals(1, rows.size)
         assertNull(rows[0].cwd)
+        assertNull(rows[0].recordedKind)
     }
 
     @Test
@@ -63,6 +129,7 @@ class FolderListGatewayParserTest {
         assertEquals(1, rows.size)
         assertEquals("plain", rows[0].sessionName)
         assertNull(rows[0].cwd)
+        assertNull(rows[0].recordedKind)
     }
 
     @Test

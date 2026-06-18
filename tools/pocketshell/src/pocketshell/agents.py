@@ -74,6 +74,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -354,6 +355,56 @@ def _resolve_dir(ctx: click.Context, directory: str) -> Path:
     return path
 
 
+def record_agent_kind(
+    kind: str,
+    env: Optional[dict[str, str]] = None,
+    runner=None,
+) -> bool:
+    """Record the launched agent ``kind`` as a per-session tmux user option.
+
+    Workstream A / epic #821: the durable "what is this session running"
+    state lives **host-side** as the tmux user option ``@ps_agent_kind`` on
+    the session this wrapper runs in. Writing it here (in the same process
+    that becomes the agent) means the recorded kind cannot drift from what
+    actually launched, and it covers every launch caller — the folder
+    picker, the assistant, the repo browser — with zero Kotlin launch-exec
+    change. The client reads it back through its session enumeration
+    (``tmux list-sessions -F '…#{@ps_agent_kind}'``).
+
+    The option is session-scoped (not global): ``tmux set-option`` without
+    ``-g`` sets it on the current session, which is the session the agent
+    was launched into. tmux session options persist for the life of the
+    session, so the recorded kind survives reconnect / app restart /
+    app-kill / reinstall — exactly the durability the epic requires.
+
+    No-op (returns ``False``) when not running inside tmux (``$TMUX``
+    unset) — e.g. a bare SSH ``pocketshell agent`` invocation — or when the
+    kind is unknown. A failure of the ``tmux`` call is swallowed: recording
+    the kind must never prevent the agent from launching.
+
+    ``runner`` is injected so tests can assert the exact ``tmux`` argv
+    without spawning a real process; production passes ``None`` and it
+    resolves to :func:`subprocess.run`.
+    """
+    if not kind:
+        return False
+    source_env = os.environ if env is None else env
+    if not source_env.get("TMUX"):
+        # Not inside a tmux server — nothing to record onto.
+        return False
+    if runner is None:
+        runner = subprocess.run
+    try:
+        runner(
+            ["tmux", "set-option", "@ps_agent_kind", kind],
+            check=False,
+        )
+    except Exception:
+        # Recording the kind is best-effort; never block the launch on it.
+        return False
+    return True
+
+
 def launch_agent(
     ctx: click.Context,
     kind: str,
@@ -363,6 +414,7 @@ def launch_agent(
     config_dir: Optional[str],
     extra_env: Optional[dict[str, str]] = None,
     execvpe=None,
+    record_kind=None,
 ) -> None:
     """Resolve the dir, build env+argv, suppress prompts, exec the agent.
 
@@ -376,9 +428,17 @@ def launch_agent(
     ``os`` so a monkeypatch on ``agents.os.execvpe`` is honoured (a default
     argument would bind the original at def-time and bypass the patch).
     :func:`os.execvpe` never returns on success.
+
+    Before the exec, when running inside tmux, the launched ``kind`` is
+    recorded as the per-session ``@ps_agent_kind`` user option
+    (:func:`record_agent_kind`) so the client can read the agent type back
+    from the host without output-parsing detection (epic #821 Workstream A).
+    ``record_kind`` is injected the same way as ``execvpe`` for tests.
     """
     if execvpe is None:
         execvpe = os.execvpe
+    if record_kind is None:
+        record_kind = record_agent_kind
 
     path = _resolve_dir(ctx, directory)
     resolved_dir = str(path)
@@ -408,6 +468,12 @@ def launch_agent(
 
     if kind == "claude":
         seed_claude_trust(claude_config_path(env), resolved_dir)
+
+    # Record the launched kind on the tmux session BEFORE the exec replaces
+    # this process (epic #821 Workstream A). Use this wrapper's own
+    # environment (os.environ) for the TMUX detection — `env` is the
+    # provider-stripped launch env that does not necessarily carry $TMUX.
+    record_kind(kind, dict(os.environ))
 
     # Replace this process with the agent so it owns the pty cleanly.
     execvpe(argv[0], argv, env)

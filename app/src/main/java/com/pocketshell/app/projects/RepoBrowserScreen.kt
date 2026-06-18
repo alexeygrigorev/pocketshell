@@ -164,6 +164,9 @@ fun RepoBrowserScreen(
                     sessionName = newName,
                     cwd = choice.startDirectory,
                     startCommand = choice.startCommand(),
+                    // Epic #821 Workstream A: record the picked kind onto the
+                    // new tree node immediately (no detection round-trip).
+                    chosenKind = choice.sessionAgentKind,
                     onResolved = { resolved ->
                         onSessionCreated(resolved, choice.startDirectory)
                     },

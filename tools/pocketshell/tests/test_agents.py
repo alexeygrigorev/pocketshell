@@ -454,6 +454,122 @@ def test_launch_agent_missing_dir_exits_two():
 
 
 # ---------------------------------------------------------------------------
+# Record agent kind as the host-side @ps_agent_kind tmux user option
+# (epic #821 Workstream A). The wrapper writes the launched kind onto the
+# tmux session it runs in, so the client reads the type back from the host
+# without output-parsing detection.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex", "opencode"])
+def test_record_agent_kind_sets_session_option_inside_tmux(kind):
+    calls = []
+    ok = agents.record_agent_kind(
+        kind,
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        runner=lambda argv, **kw: calls.append((argv, kw)),
+    )
+    assert ok is True
+    assert len(calls) == 1
+    argv, _kw = calls[0]
+    # Session-scoped (no -g): tmux applies it to the current session, which
+    # is the one the agent was launched into.
+    assert argv == ["tmux", "set-option", "@ps_agent_kind", kind]
+
+
+def test_record_agent_kind_noop_when_not_in_tmux():
+    calls = []
+    ok = agents.record_agent_kind(
+        "claude",
+        env={},  # $TMUX unset -> bare SSH invocation
+        runner=lambda argv, **kw: calls.append(argv),
+    )
+    assert ok is False
+    assert calls == []
+
+
+def test_record_agent_kind_noop_for_blank_kind():
+    calls = []
+    ok = agents.record_agent_kind(
+        "",
+        env={"TMUX": "x"},
+        runner=lambda argv, **kw: calls.append(argv),
+    )
+    assert ok is False
+    assert calls == []
+
+
+def test_record_agent_kind_swallows_runner_failure():
+    def boom(argv, **kw):
+        raise RuntimeError("tmux not found")
+
+    # A failure to record must never propagate (the agent must still launch).
+    ok = agents.record_agent_kind(
+        "codex",
+        env={"TMUX": "x"},
+        runner=boom,
+    )
+    assert ok is False
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex", "opencode"])
+def test_launch_agent_records_kind_before_exec(tmp_path, monkeypatch, kind):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    order = []
+
+    def fake_record(k, env=None, runner=None):
+        order.append(("record", k, env.get("TMUX") if env else None))
+        return True
+
+    def fake_execvpe(file, argv, env):
+        order.append(("exec", file))
+
+    agents.launch_agent(
+        _FakeCtx(),
+        kind,
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        execvpe=fake_execvpe,
+        record_kind=fake_record,
+    )
+    # The kind is recorded with the wrapper's own $TMUX, and recorded BEFORE
+    # the exec replaces the process.
+    assert order == [
+        ("record", kind, "/tmp/tmux-1000/default,1234,0"),
+        ("exec", kind),
+    ]
+
+
+def test_launch_agent_execs_even_when_record_is_noop(tmp_path, monkeypatch):
+    # When recording is a no-op (e.g. not inside tmux -> record returns
+    # False), the agent must still exec normally. Production
+    # record_agent_kind swallows its own errors and returns False rather
+    # than raising (covered by test_record_agent_kind_swallows_runner_failure),
+    # so the launch is never blocked by a recording problem.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    captured = {}
+
+    def quiet_record(k, env=None, runner=None):
+        return False
+
+    def fake_execvpe(file, argv, env):
+        captured["file"] = file
+
+    agents.launch_agent(
+        _FakeCtx(),
+        "codex",
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        execvpe=fake_execvpe,
+        record_kind=quiet_record,
+    )
+    assert captured["file"] == "codex"
+
+
+# ---------------------------------------------------------------------------
 # Missing agent binary -> friendly 127 (issue #774 §3)
 #
 # Before the fix, a missing `claude`/`codex`/`opencode` let os.execvpe raise

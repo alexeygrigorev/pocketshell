@@ -79,6 +79,16 @@ data class FolderSessionRow(
     val cwd: String?,
     val agentKind: SessionAgentKind = SessionAgentKind.Shell,
     val windows: List<FolderSessionWindowRow> = emptyList(),
+    /**
+     * Epic #821 Workstream A: the agent kind PocketShell recorded for this
+     * session at launch, read back from the host-side `@ps_agent_kind` tmux
+     * user option via the `list-sessions` enumeration. `null` when the
+     * option is absent (a session we did not launch, i.e. a foreign
+     * session). When non-null this is the AUTHORITATIVE kind — it wins over
+     * output-parsing detection, which can no longer disagree with what the
+     * session was actually launched as.
+     */
+    val recordedKind: SessionAgentKind? = null,
 )
 
 /**
@@ -175,7 +185,10 @@ class FolderListExecTimeoutException(
  * Wire shape (per host poll):
  *
  *  - `tmux list-sessions -F '#{session_name}\t#{session_created}\t
- *    #{session_activity}\t#{session_attached}\t#{session_path}'`
+ *    #{session_activity}\t#{session_attached}\t#{@ps_agent_kind}\t
+ *    #{session_path}'` — the `@ps_agent_kind` user option (epic #821) is
+ *    the agent kind PocketShell recorded at launch; when present it is the
+ *    authoritative kind, overriding the detection probe below.
  *  - `tmux list-panes -a -F '#{session_name}\t#{window_index}\t
  *    #{window_name}\t#{window_active}\t#{pane_active}\t
  *    #{pane_current_path}\t#{pane_tty}\t#{pane_current_command}'` so
@@ -1327,14 +1340,23 @@ class SshFolderListGateway internal constructor(
             detectAgentKinds(session = session, rows = rows)
         }.getOrDefault(FolderAgentDetection())
         return rows.map { row ->
+            // Epic #821 Workstream A: a recorded `@ps_agent_kind` is the
+            // authoritative kind for a session WE launched — it wins over
+            // output-parsing detection so the chip can never disagree with
+            // what the session was actually started as. Detection still runs
+            // (additive) and supplies the kind for foreign / pre-#821
+            // sessions that carry no recorded option.
+            val recorded = row.recordedKind
             val windows = row.windows.map { window ->
                 val key = WindowProbeKey(row.sessionName, window.index)
                 window.copy(
-                    agentKind = agentKinds.windowKinds[key]
+                    agentKind = recorded
+                        ?: agentKinds.windowKinds[key]
                         ?: resolveUndetectedKind(window.command),
                 )
             }
-            val sessionKind = agentKinds.sessionKinds[row.sessionName]
+            val sessionKind = recorded
+                ?: agentKinds.sessionKinds[row.sessionName]
                 ?: resolveUndetectedKind(
                     (windows.firstOrNull { it.active } ?: windows.firstOrNull())?.command,
                 )
@@ -1491,6 +1513,12 @@ class SshFolderListGateway internal constructor(
 
                     baseRows.map { row ->
                         val pane = paneRows[row.sessionName]
+                        // Epic #821: a recorded `@ps_agent_kind` (read back in
+                        // parseRow from CONTROL_LIST_SESSIONS_COMMAND) is the
+                        // authoritative kind for a session WE launched. This
+                        // live path runs no detector, so the recorded kind is
+                        // the only positive agent signal here for our sessions.
+                        val recorded = row.recordedKind
                         val windows = windowsBySession[row.sessionName].orEmpty().map { window ->
                             // Issue #716: the live-client path runs NO detector
                             // (the control channel can't host the ps/candidate
@@ -1501,12 +1529,14 @@ class SshFolderListGateway internal constructor(
                             // when watched roots are empty this path returns
                             // WITHOUT annotation and feeds the maintained tree
                             // directly, where a false `Shell` would downgrade a
-                            // sticky agent (#716).
-                            window.copy(agentKind = resolveUndetectedKind(window.command))
+                            // sticky agent (#716). A recorded kind (#821) wins.
+                            window.copy(
+                                agentKind = recorded ?: resolveUndetectedKind(window.command),
+                            )
                         }
                         row.copy(
                             cwd = pane?.cwd ?: row.cwd,
-                            agentKind = resolveUndetectedKind(
+                            agentKind = recorded ?: resolveUndetectedKind(
                                 (windows.firstOrNull { it.active } ?: windows.firstOrNull())?.command,
                             ),
                             windows = windows,
@@ -1733,7 +1763,8 @@ class SshFolderListGateway internal constructor(
         const val LIST_SESSIONS_COMMAND: String =
             "tmux list-sessions -F " +
                 "'#{session_name}$FIELD_SEP#{session_created}$FIELD_SEP" +
-                "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP#{session_path}'"
+                "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP" +
+                "#{@ps_agent_kind}$FIELD_SEP#{session_path}'"
 
         const val LIST_PANES_COMMAND: String =
             "tmux list-panes -a -F " +
@@ -1819,7 +1850,8 @@ class SshFolderListGateway internal constructor(
         const val CONTROL_LIST_SESSIONS_COMMAND: String =
             "list-sessions -F " +
                 "'#{session_name}$FIELD_SEP#{session_created}$FIELD_SEP" +
-                "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP#{session_path}'"
+                "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP" +
+                "#{@ps_agent_kind}$FIELD_SEP#{session_path}'"
 
         const val CONTROL_LIST_PANES_COMMAND: String =
             "list-panes -a -F " +
@@ -1830,11 +1862,19 @@ class SshFolderListGateway internal constructor(
 
         /**
          * Parse the tab-delimited `list-sessions` output into
-         * [FolderSessionRow]s. Each line carries five fields:
+         * [FolderSessionRow]s. Each line carries six fields:
          * `session_name`, `session_created`, `session_activity`,
-         * `session_attached`, `session_path`. Blank cwd surfaces as
-         * `null` so the view model can route the row to the "Untracked"
-         * group.
+         * `session_attached`, `@ps_agent_kind`, `session_path`. Blank cwd
+         * surfaces as `null` so the view model can route the row to the
+         * "Untracked" group. The `@ps_agent_kind` user option (epic #821
+         * Workstream A) is the kind PocketShell recorded at launch; when
+         * present it is the authoritative agent kind for the session,
+         * read back here with no output-parsing detection. A blank value
+         * means the session was not launched by us (a foreign session):
+         * [FolderSessionRow.recordedKind] stays `null` and the row keeps the
+         * Shell default so the existing detection probe (still running in
+         * Slice A1) fills it as before. (Slice B will repurpose the blank
+         * case for the foreign-session one-shot guess.)
          */
         internal fun parseListSessionsRows(stdout: String): List<FolderSessionRow> =
             stdout.lineSequence()
@@ -1880,24 +1920,48 @@ class SshFolderListGateway internal constructor(
 
         private fun parseRow(line: String): FolderSessionRow? {
             if (line.isBlank()) return null
-            // limit=5 so a path containing the rare `::` literal still
-            // parses (the rightmost column absorbs any trailing
-            // separators).
-            val parts = line.split(FIELD_SEP, limit = 5)
+            // Field order (epic #821): name, created, activity, attached,
+            // @ps_agent_kind, session_path. limit=6 so a path containing the
+            // rare `::` literal still parses — the rightmost column
+            // (session_path) absorbs any trailing separators. `@ps_agent_kind`
+            // is a controlled value (claude/codex/opencode) that never
+            // contains `::`, so it sits safely at the fixed 5th field.
+            val parts = line.split(FIELD_SEP, limit = 6)
             if (parts.size < 4) return null
             val name = parts[0].trim()
             if (name.isEmpty()) return null
-            val sessionPath = if (parts.size >= 5) parts[4].trim().ifBlank { null } else null
+            val recordedKind = parts.getOrNull(4)?.let(::recordedKindFromOption)
+            val sessionPath = parts.getOrNull(5)?.trim()?.ifBlank { null }
             return FolderSessionRow(
                 sessionName = name,
                 lastActivity = parts[2].trim().toLongOrNull(),
                 attached = (parts[3].trim().toLongOrNull() ?: 0L) > 0L,
                 cwd = sessionPath,
-                // Default to Shell; the gateway will override this for
-                // sessions where the agent detection probe finds a match.
-                agentKind = SessionAgentKind.Shell,
+                // The recorded `@ps_agent_kind` (epic #821) is authoritative
+                // when present. When absent, default to Shell; the gateway
+                // overrides that for sessions where the detection probe finds
+                // a match (additive — detection still runs for foreign /
+                // pre-#821 sessions).
+                agentKind = recordedKind ?: SessionAgentKind.Shell,
+                recordedKind = recordedKind,
             )
         }
+
+        /**
+         * Map a host-side `@ps_agent_kind` user-option value (written by the
+         * `pocketshell agent` wrapper at launch, epic #821) to a
+         * [SessionAgentKind]. Returns `null` for a blank/absent option (a
+         * session we did not launch) or an unrecognised value, so the caller
+         * falls back to detection / the Shell default rather than mislabeling
+         * the session.
+         */
+        internal fun recordedKindFromOption(raw: String?): SessionAgentKind? =
+            when (raw?.trim()?.lowercase()) {
+                "claude" -> SessionAgentKind.Claude
+                "codex" -> SessionAgentKind.Codex
+                "opencode" -> SessionAgentKind.OpenCode
+                else -> null
+            }
 
         /**
          * Parse `list-panes -a` output into compact per-window rows. The

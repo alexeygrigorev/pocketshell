@@ -935,6 +935,7 @@ class FolderListViewModel internal constructor(
         sessionName: String,
         cwd: String,
         startCommand: String?,
+        chosenKind: SessionAgentKind? = null,
         onResolved: (sessionName: String) -> Unit,
     ) {
         val params = bound ?: return
@@ -960,15 +961,25 @@ class FolderListViewModel internal constructor(
                     // slow-to-appear"). The node carries an optimistic grace so
                     // the reconcile that follows does not prune it before the
                     // probe has observed it; that same reconcile then confirms it
-                    // and clears the grace. The agent kind is left as Probing so
-                    // the gateway's detection (or a plain-Shell verdict) drives
-                    // the final kind via mergeAgentKind on the next reconcile.
+                    // and clears the grace.
+                    //
+                    // EPIC #821 Workstream A: the app already KNOWS the kind it
+                    // just launched (the picker chose it, and the wrapper has
+                    // recorded it host-side as `@ps_agent_kind`). Stamp that
+                    // chosen kind onto the optimistic node instead of `Probing`
+                    // so the tree shows the real kind from the moment of
+                    // creation — no detection round-trip, no flicker through
+                    // Probing. The sticky `mergeAgentKind` guard keeps this
+                    // recorded kind across the reconcile that follows (which
+                    // also re-reads it from the host option). A shell session
+                    // (`chosenKind == null`) keeps the optimistic `Probing`
+                    // placeholder until the reconcile confirms it as `Shell`.
                     tree.insertSession(
                         entry = FolderSessionEntry(
                             sessionName = resolvedName,
                             lastActivity = System.currentTimeMillis(),
                             attached = false,
-                            agentKind = SessionAgentKind.Probing,
+                            agentKind = chosenKind ?: SessionAgentKind.Probing,
                         ),
                         folderPath = cwd,
                     )

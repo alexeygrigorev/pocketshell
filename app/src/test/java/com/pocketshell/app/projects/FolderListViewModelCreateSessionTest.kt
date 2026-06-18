@@ -152,6 +152,74 @@ class FolderListViewModelCreateSessionTest {
     }
 
     @Test
+    fun createSessionStampsChosenAgentKindNotProbing() = runTest {
+        // Epic #821 Workstream A: the picker knows the kind it just launched,
+        // so the optimistically-inserted node must carry THAT kind — not the
+        // old `Probing` placeholder that waited for detection. The gateway
+        // probe here still reports only the pre-existing session (it has not
+        // observed the new one yet), proving the kind comes from the chosen
+        // value, not a probe round-trip.
+        val gateway = StubGateway(rows = listOf(sessionRow("alpha")))
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+
+            vm.createSession(
+                sessionName = "git-beta",
+                cwd = "/home/alexey/git/beta",
+                startCommand = "pocketshell agent codex --dir '/home/alexey/git/beta'",
+                chosenKind = SessionAgentKind.Codex,
+                onResolved = {},
+            )
+            runCurrent()
+
+            val state = vm.state.value as FolderListUiState.Ready
+            val beta = state.flatSessions.first { it.sessionName == "git-beta" }
+            assertEquals(
+                "the just-created session shows the chosen kind, not Probing",
+                SessionAgentKind.Codex,
+                beta.agentKind,
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun createShellSessionWithoutChosenKindStaysProbingUntilProbe() = runTest {
+        // A shell session (no agent kind) keeps the optimistic Probing
+        // placeholder — there is no kind to record — until the reconcile
+        // confirms it (Shell). This guards that A1 did not regress the
+        // shell-session create path.
+        val gateway = StubGateway(rows = listOf(sessionRow("alpha")))
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+
+            vm.createSession(
+                sessionName = "build-shell",
+                cwd = "/home/alexey/git/beta",
+                startCommand = null,
+                chosenKind = null,
+                onResolved = {},
+            )
+            runCurrent()
+
+            val state = vm.state.value as FolderListUiState.Ready
+            val shell = state.flatSessions.first { it.sessionName == "build-shell" }
+            assertEquals(
+                "a shell create stays Probing optimistically (no kind to record)",
+                SessionAgentKind.Probing,
+                shell.agentKind,
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
     fun failedCreateDoesNotInsertARow() = runTest {
         val gateway = StubGateway(rows = listOf(sessionRow("alpha")), createSucceeds = false)
         val vm = newViewModel(gateway)

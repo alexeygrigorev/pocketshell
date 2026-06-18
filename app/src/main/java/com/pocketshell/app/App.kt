@@ -14,6 +14,7 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
+import com.pocketshell.app.portfwd.ForwardingResumeScheduler
 import com.pocketshell.app.release.UpdateCheckScheduler
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
@@ -108,6 +109,19 @@ class App : Application() {
      */
     @Inject
     lateinit var updateCheckScheduler: UpdateCheckScheduler
+
+    /**
+     * Issue #752 (REOPENED): re-establishes port forwarding for every host
+     * the user previously enabled the moment the app foregrounds, so the
+     * persisted `host.enabled` intent actually drives
+     * [com.pocketshell.app.portfwd.ForwardingController.activeHostCount] and
+     * all three port-forward indicators (⇄ notification, host-list pill,
+     * in-session chip) appear without the user re-toggling the panel switch.
+     * Foreground-only (D21): hooked to [ProcessLifecycleOwner]'s ON_START
+     * like [usageScheduler] / [updateCheckScheduler]; no background work.
+     */
+    @Inject
+    lateinit var forwardingResumeScheduler: ForwardingResumeScheduler
 
     /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
@@ -263,6 +277,18 @@ class App : Application() {
         // WorkManager / AlarmManager / repeating timer.
         updateCheckScheduler.observeProcessLifecycle()
         StartupTiming.mark("update-check-lifecycle-observed")
+
+        // Issue #752 (REOPENED): re-establish port forwarding for every
+        // host the user previously enabled (persisted `host.enabled = 1`)
+        // on every foreground resume, so the persisted intent populates the
+        // [ForwardingController] and the always-on port-forward indicators
+        // (⇄ notification, host-list pill, in-session chip) appear without
+        // the user re-toggling the panel switch. Foreground-only (D21): the
+        // observer fires on ON_START only; nothing runs while backgrounded,
+        // no WorkManager / AlarmManager / boot receiver. Idempotent — a host
+        // already actively forwarding in this process is never re-started.
+        forwardingResumeScheduler.observeProcessLifecycle()
+        StartupTiming.mark("forwarding-resume-lifecycle-observed")
 
         // Issue #235 + #450: auto-detach tmux `-CC` clients on lifecycle
         // background + reattach on foreground, but only after the bounded

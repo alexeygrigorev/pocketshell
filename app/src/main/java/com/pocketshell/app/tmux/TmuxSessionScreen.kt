@@ -1578,6 +1578,50 @@ public fun TmuxSessionScreen(
                 modifier = Modifier
                     .weight(1f),
             ) {
+                // Issue #810 (regression of #807): the terminal-render pager is
+                // kept MOUNTED underneath the Conversation content for a live,
+                // panes-present session — it is no longer REPLACED by the
+                // conversation. After #807 made a detected agent default to the
+                // Conversation view, the agent session never mounted a
+                // TerminalView again on a switch-back (the conversation pane took
+                // the whole Box), so the embedded Termux `TerminalView` was absent
+                // from the view tree. That broke the load-bearing #810 multi-
+                // session switch journey: its switch-landing confirmation reads the
+                // attached terminal's transcript, and with no TerminalView it hung
+                // (and the user lost the warm terminal surface behind the agent
+                // view entirely). Keeping the pager mounted and drawing the
+                // Conversation content ON TOP of it preserves the #807 black-screen
+                // fix (the user still SEES the parsed conversation, the raw terminal
+                // is covered) while the terminal surface stays warm + attached. This
+                // also makes the #605 Conversation→Terminal swap race structurally
+                // impossible (the terminal never unmounts/re-attaches across the
+                // tab swap), and #796's skippable-pager guarantee is unchanged (the
+                // pager's inputs are still all stable, so an overlay-visibility
+                // toggle still skips it).
+                //
+                // `effectiveHidesTerminal` still takes precedence and paints ONLY
+                // the switch placeholder: during a cross-session switch not a single
+                // frame of the leaving session's terminal (or conversation) may leak
+                // (#661 / EPIC #687 P1).
+                val keepTerminalMounted = !effectiveHidesTerminal &&
+                    !deferTerminalAttachForSwap &&
+                    unifiedPanes.isNotEmpty()
+                if (keepTerminalMounted) {
+                    TmuxTerminalPager(
+                        unifiedPanes = unifiedPanes,
+                        pagerState = pagerState,
+                        sessionName = sessionName,
+                        terminalKeyboardMode = appSettings.terminalKeyboardMode,
+                        engineCommands = engineCommandSet,
+                        sessionNameForUnifiedPane = stableSessionNameForUnifiedPane,
+                        onTerminalSizeChanged = stableResizeRemotePty,
+                        onSurfaceError = stableReportTerminalSurfaceFailure,
+                        onRecreateSurface = stableRecreateTerminalSurface,
+                        onUrlTap = handleUrlTap,
+                        onFilePathTap = stableFilePathTap,
+                        onEngineCommandTap = stableEngineCommandTap,
+                    )
+                }
                 if (effectiveHidesTerminal) {
                     // Issue #661 / EPIC #687 P1: a cross-session switch is in flight —
                     // never paint the leaving session's terminal (or its agent
@@ -1721,42 +1765,14 @@ public fun TmuxSessionScreen(
                     )
                 } else if (unifiedPanes.isEmpty()) {
                     EmptyPanesPlaceholder()
-                } else {
-                    // Issue #796 (H3): the terminal-render pager is hoisted into a
-                    // dedicated, SKIPPABLE composable. The trigger the maintainer
-                    // pinpointed is "opening the Prompt Composer over a bursting Codex
-                    // pane freezes": tapping the composer launcher flips `showMicSheet`
-                    // (and the other overlay-visibility booleans), all read in the
-                    // `TmuxSessionScreen` body root group — so the whole body
-                    // re-executes, and because the OLD inline pager allocated FRESH
-                    // `TerminalSurface` callbacks on every body recomposition,
-                    // `TerminalSurface` (its `AndroidView` update + the viewport URL /
-                    // file-path / engine-command scanners, all main-thread) recomposed
-                    // too. Stacked on a Codex `%output` burst that is the ANR.
-                    // `aff7ac45` (H4) only decoupled the IME-INSET frame burst from the
-                    // body; it did NOT stop the composer-open body recomposition from
-                    // dragging the terminal subtree. [TmuxTerminalPager] finishes that
-                    // decoupling: all its inputs are STABLE (the data classes + the
-                    // remembered lambdas built once below), so when only the
-                    // overlay-visibility state toggles the pager is SKIPPED entirely —
-                    // opening the composer over a bursting pane does ZERO main-thread
-                    // terminal recomposition work (D22 hard-cut: the inline
-                    // fresh-lambda block is deleted, not kept as a fallback).
-                    TmuxTerminalPager(
-                        unifiedPanes = unifiedPanes,
-                        pagerState = pagerState,
-                        sessionName = sessionName,
-                        terminalKeyboardMode = appSettings.terminalKeyboardMode,
-                        engineCommands = engineCommandSet,
-                        sessionNameForUnifiedPane = stableSessionNameForUnifiedPane,
-                        onTerminalSizeChanged = stableResizeRemotePty,
-                        onSurfaceError = stableReportTerminalSurfaceFailure,
-                        onRecreateSurface = stableRecreateTerminalSurface,
-                        onUrlTap = handleUrlTap,
-                        onFilePathTap = stableFilePathTap,
-                        onEngineCommandTap = stableEngineCommandTap,
-                    )
                 }
+                // Issue #810: the plain-Terminal case (no conversation overlay) is
+                // now served by the always-mounted [TmuxTerminalPager] above —
+                // there is no trailing `else` branch that mounts a SECOND pager.
+                // The pager above keeps #796's skippable guarantee (its inputs are
+                // all stable, so an overlay-visibility toggle skips it) and supplies
+                // the warm, attached terminal surface for BOTH the raw-Terminal tab
+                // and (covered, underneath) the Conversation tab.
             }
 
             // Assistant review sits above the input band.

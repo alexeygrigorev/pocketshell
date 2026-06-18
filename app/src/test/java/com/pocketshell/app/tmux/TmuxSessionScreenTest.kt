@@ -573,6 +573,54 @@ class TmuxSessionScreenTest {
         assertTrue(!tmuxSessionIsAgentPane(hasLiveDetection = false, presumedAgent = false))
     }
 
+    // ─── Issue #805 (regression of #744/#716): the bottom-bar chrome follows ──
+    // the Conversation TAB (detecting OR loaded), not the detection-gated ──────
+    // transcript — so the composer launcher is never pushed off-screen by the ──
+    // Terminal chips during agent-engine detection. ───────────────────────────
+
+    @Test
+    fun bottomControlsShowConversationWhileDetectingAgentEngine() {
+        // The #805 regression state: the user is on the Conversation tab, the
+        // agent engine is still being detected (`detection == null`), so the
+        // "Loading conversation…" placeholder is shown and the live transcript
+        // is NOT yet mounted. The bottom bar MUST still wear conversation chrome
+        // here — otherwise it renders the Terminal chips (`Enter` /
+        // `show keyboard` / `hotkeys`) that overflow the row and push the
+        // composer launcher off-screen (the #744 invariant break on v0.4.7).
+        assertTrue(
+            tmuxSessionBottomControlsShowsConversation(
+                showConversationTranscript = false,
+                showConversationDetectingPlaceholder = true,
+            ),
+        )
+    }
+
+    @Test
+    fun bottomControlsShowConversationOnceTranscriptLoaded() {
+        // Once detection lands and the live transcript mounts, the bar stays in
+        // conversation chrome (this path already worked pre-#805; covered so the
+        // loaded state is not regressed by the detecting-state fix).
+        assertTrue(
+            tmuxSessionBottomControlsShowsConversation(
+                showConversationTranscript = true,
+                showConversationDetectingPlaceholder = false,
+            ),
+        )
+    }
+
+    @Test
+    fun bottomControlsStayTerminalChromeOffTheConversationTab() {
+        // On the Terminal tab (no transcript, no conversation placeholder) the
+        // bar keeps its Terminal chrome — the fix must not steal Terminal chips
+        // from a genuine terminal/shell surface.
+        assertTrue(
+            !tmuxSessionBottomControlsShowsConversation(
+                showConversationTranscript = false,
+                showConversationDetectingPlaceholder = false,
+            ),
+        )
+    }
+
     // ─── Issue #761 / #454: the snippet chip is a shell-pane affordance ─────
     // gated on the ACTUAL agent signal, NOT the optimistic presumed-agent. ───
 

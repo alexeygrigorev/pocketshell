@@ -1489,6 +1489,26 @@ public fun TmuxSessionScreen(
                 presumedAgent &&
                 visibleConversation?.detection == null &&
                 visibleConversation?.selectedTab == SessionTab.Conversation
+            // Issue #805 (regression of #744/#716): whether the user is parked on
+            // the Conversation TAB at all — true for BOTH the loaded transcript
+            // ([showConversation]) AND the detection-uncertainty "Loading
+            // conversation…" placeholder ([showConversationPlaceholder]). The
+            // bottom controls must use THIS, not the detection-gated
+            // [showConversation], to decide their chrome. On v0.4.7 the bottom bar
+            // keyed its Conversation chrome off `showConversation` alone, so during
+            // agent-engine detection (`detection == null`, placeholder shown) it
+            // wrongly rendered the THREE Terminal-tab chips (`Enter` /
+            // `show keyboard` / `hotkeys`) into the bottom row. That overflowed the
+            // primary cluster and pushed the composer launcher off the right edge —
+            // the "composer absent while the agent is being detected" symptom. The
+            // composer must stay reachable throughout the detection window (#744
+            // invariant), so the conversation chrome (which drops those Terminal
+            // chips so the launcher fits) is active for the whole Conversation tab,
+            // detected or not.
+            val onConversationTab = tmuxSessionBottomControlsShowsConversation(
+                showConversationTranscript = showConversation,
+                showConversationDetectingPlaceholder = showConversationPlaceholder,
+            )
             // Issue #605: hold the heavyweight terminal AndroidView re-attach
             // for exactly one frame on the Conversation → Terminal edge so the
             // leaving conversation pane's selection-toolbar/focus teardown
@@ -1785,7 +1805,14 @@ public fun TmuxSessionScreen(
                 // surface's hotkeys launcher (`onShowHotkeysTap`).
                 TmuxTerminalBottomControls(
                     isImeVisible = isImeVisible,
-                    showConversation = showConversation,
+                    // Issue #805: the bottom-bar chrome follows the Conversation
+                    // TAB, not the detection-gated transcript. During agent-engine
+                    // detection (`showConversation == false`, placeholder shown)
+                    // this keeps the Conversation chrome — dropping the Terminal
+                    // chips that would otherwise overflow the row and push the
+                    // composer launcher off-screen. Restores the #744 invariant:
+                    // the composer stays reachable while detection is uncertain.
+                    showConversation = onConversationTab,
                     sessionLive = sessionLive,
                     isAgentPane = isAgentPane,
                     onChipTap = { chip ->
@@ -2869,6 +2896,34 @@ internal fun tmuxSessionIsAgentPane(
     hasLiveDetection: Boolean,
     presumedAgent: Boolean,
 ): Boolean = hasLiveDetection || presumedAgent
+
+/**
+ * Issue #805 (regression of #744/#716): whether the bottom-bar chrome wears its
+ * CONVERSATION layout — i.e. drops the Terminal-tab chips (`Enter` /
+ * `show keyboard` / `hotkeys`) so the composer launcher fits.
+ *
+ * This must follow the Conversation TAB, not the detection-gated transcript.
+ * The screen has two distinct "conversation is showing" signals:
+ *
+ *  - [showConversationTranscript] — the heavyweight live transcript is mounted
+ *    (detection has landed). The OLD bottom-bar predicate.
+ *  - [showConversationDetectingPlaceholder] — the user is on the Conversation
+ *    tab but the agent engine is still being detected (`detection == null`), so
+ *    the "Loading conversation…" placeholder is shown instead.
+ *
+ * On v0.4.7 the bottom bar keyed its Conversation chrome off the transcript
+ * signal ALONE. During detection (placeholder shown, transcript not yet mounted)
+ * the bar fell back to the THREE Terminal chips, which overflowed the primary
+ * cluster and pushed the composer launcher off the right edge — the maintainer's
+ * "composer absent while the agent is being detected" symptom (#805). The #744
+ * invariant is that the composer stays reachable throughout the detection
+ * window; this helper restores it by treating the WHOLE Conversation tab
+ * (detecting OR loaded) as conversation chrome.
+ */
+internal fun tmuxSessionBottomControlsShowsConversation(
+    showConversationTranscript: Boolean,
+    showConversationDetectingPlaceholder: Boolean,
+): Boolean = showConversationTranscript || showConversationDetectingPlaceholder
 
 /**
  * Issue #761 / #454: whether the bottom controls surface the saved-snippet

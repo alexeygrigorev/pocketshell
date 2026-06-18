@@ -8244,20 +8244,24 @@ public class TmuxSessionViewModel @Inject constructor(
         // Conversation tab shows "Loading conversation…" (not the old
         // "Waiting for agent…") and the detection-pending watchdog stops.
         markConversationLoading(paneId)
-        val lineCount = recoverAgentConversationStartupRead(
-            paneId = paneId,
-            detection = detection,
-            operation = "line_count",
-            fallback = 0L,
-        ) {
-            agentRepository.lineCount(session, detection)
-        }
+        // Issue #817 (slice 1): time the cold-open path from "agent detected,
+        // first transcript read begins" to "first parsed events are live in the
+        // UI state" (the markAgentTailLive below). This is the authoritative
+        // conversation_open latency span; a connected test / logcat snapshots
+        // it for the <0.3s gate.
+        val openStartedAtMs = SystemClock.elapsedRealtime()
         // Issue #793: tail-first windowed read. Fetch only the most recent
         // [maxMessages] messages so the tail paints quickly instead of blocking
         // on the whole history. Older messages page in lazily on upward scroll
         // (loadOlderAgentConversationEvents). A read failure is surfaced as a
         // terminal Failed state — never an infinite spinner — via the explicit
         // catch below.
+        //
+        // Issue #817: the window read already yields the file's line count at
+        // read time (ConversationEventsWindow.tailStartLine), which is exactly
+        // the `fromLineExclusive` cursor the follow-tail needs. The cold-open
+        // path therefore no longer pays a separate `lineCount` SSH round-trip
+        // before the read — one fewer serial exec on every fresh open.
         var loadFailed = false
         val window = try {
             agentRepository.readEventsWindow(
@@ -8280,7 +8284,17 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
         val initialEvents = window.events
+        val tailStartLine = window.tailStartLine
         markAgentTailLive(paneId, detection, initialEvents)
+        TmuxSessionLatencyTelemetry.record(
+            name = CONVERSATION_OPEN_LATENCY_OPERATION,
+            durationMs = SystemClock.elapsedRealtime() - openStartedAtMs,
+            sessionName = activeTarget?.sessionName,
+            paneId = paneId,
+            trigger = activeAttachMilestone?.trigger,
+            detail = "agent=${detection.agent.name} events=${initialEvents.size} " +
+                "failed=$loadFailed tail_start_line=$tailStartLine",
+        )
         // Issue #793: record the terminal load outcome for the pane so the
         // screen renders the right state — Ready (feed), Empty (clear "no
         // events" terminal state), or Failed (clear error + retry).
@@ -8297,7 +8311,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #576: use the batched/debounced tail so a Codex `/new`
         // (or any large JSONL replay) collapses into a handful of
         // reconcile + StateFlow-emit cycles instead of one per line.
-        val followJob = agentRepository.tailEventsBatchedFromLine(session, detection, lineCount) { batch ->
+        val followJob = agentRepository.tailEventsBatchedFromLine(session, detection, tailStartLine) { batch ->
             appendAgentEvents(paneId, batch)
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {

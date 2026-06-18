@@ -5598,6 +5598,75 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun coldOpenDropsRedundantLineCountExecAndTailsFromWindowPosition() = runTest(scheduler) {
+        // REGRESSION PROOF (#817 slice 1): the cold-open path must NOT issue a
+        // separate `wc -l` (lineCount) round-trip before the windowed read. The
+        // window read already yields the file's line count, and the follow-tail
+        // starts from THAT position (no dropped/duplicated events).
+        TmuxSessionLatencyTelemetry.resetForTest()
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        val tailJsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"latest question"}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"latest answer"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(
+            wcOutput = "1234\n",
+            initialEventsOutput = tailJsonl,
+        )
+
+        vm.startAgentConversationForPaneForTest(
+            paneId = "%0",
+            session = session,
+            detection = detection,
+        )
+        advanceUntilIdle()
+
+        // Events loaded correctly from the window read.
+        val state = vm.agentConversations.value["%0"]!!
+        assertEquals(
+            listOf("latest question", "latest answer"),
+            state.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+
+        // (a) The redundant standalone `wc -l` (lineCount) exec is gone. The
+        // ONLY count of the source file happens inside the windowed read's own
+        // single exec (the @@PS_WINDOW@@ sentinel command), never as a separate
+        // `wc -l < ...` round-trip.
+        val standaloneWcExecs = session.execCommands.filter {
+            it.contains("wc -l < ") && !it.contains("@@PS_WINDOW@@")
+        }
+        assertTrue(
+            "cold open must not fire a separate lineCount `wc -l` exec; commands=${session.execCommands}",
+            standaloneWcExecs.isEmpty(),
+        )
+
+        // (b) The follow-tail starts from the window read's line count (1234),
+        // so it only emits lines appended AFTER the window — no gaps/dupes.
+        assertEquals(
+            listOf("/home/u/.claude/sessions/abc.jsonl" to 1234L),
+            session.tailFromLineCalls,
+        )
+
+        // The conversation_open latency span was emitted with the open duration
+        // so a connected test / logcat can snapshot the authoritative number.
+        val openEvents = TmuxSessionLatencyTelemetry.snapshot()
+            .filter { it.name == CONVERSATION_OPEN_LATENCY_OPERATION }
+        assertEquals(
+            "exactly one conversation_open span; spans=${TmuxSessionLatencyTelemetry.snapshot().map { it.name }}",
+            1,
+            openEvents.size,
+        )
+        assertEquals("%0", openEvents.single().paneId)
+        assertTrue(
+            "span must carry a grep-able artifact line; got ${openEvents.single().toArtifactLine()}",
+            openEvents.single().toArtifactLine().contains("tmux_latency_conversation_open_ms="),
+        )
+        TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
     fun openingExistingConversationStartsInLoadingThenReady() = runTest(scheduler) {
         // Problem 1/2 (#793): the Conversation tab shows a "Loading
         // conversation…" state (loadState == Loading) while the tail read is in
@@ -11935,6 +12004,12 @@ class TmuxSessionViewModelTest {
                 // tail window.
                 command.contains("@@PS_WINDOW@@") ->
                     "${wcOutput.trim()}\n@@PS_WINDOW@@\n$initialEventsOutput"
+                // Issue #817: the Codex windowed read folds wc -l + a sentinel +
+                // the agent-log window into ONE round-trip (no separate
+                // lineCount exec). Answer in that shape so the repository can
+                // split the raw-file line count (follow cursor) from the window.
+                command.contains("@@PS_CODEX_WINDOW@@") ->
+                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n${agentLogEnvelope(command) ?: initialEventsOutput}"
                 command.contains("wc -l < ") -> wcOutput
                 command.contains("pocketshell agent-log") -> agentLogEnvelope(command) ?: initialEventsOutput
                 command.startsWith("tail -n ") -> initialEventsOutput

@@ -12,6 +12,7 @@ import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -582,6 +583,10 @@ class AgentConversationReconnectDockerTest {
         )
 
         // ---- AGENT session: default tab must be Conversation (no user tap) ----
+        // Issue #817 (slice 1): capture the authoritative conversation_open
+        // latency span for the cold-open-into-freshly-detected-agent path. Reset
+        // the in-memory sink so the only span we read is THIS run's open.
+        TmuxSessionLatencyTelemetry.resetForTest()
         val agentVm = TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = ActiveTmuxClients(),
@@ -645,6 +650,48 @@ class AgentConversationReconnectDockerTest {
                 agentVm.agentConversations.value[agentPaneId]!!.detection?.agent,
             )
             stamp("issue815_agent_default_tab=${agentVm.agentConversations.value[agentPaneId]!!.selectedTab}")
+
+            // Issue #817 (slice 1): the cold open seeded the conversation row,
+            // so the conversation_open span must have been recorded. Wait for it
+            // (it is emitted right after markAgentTailLive), assert the seeded
+            // events are present, and write the authoritative timing artifact.
+            waitForCondition(
+                label = "issue817 conversation_open span",
+                timeoutMs = 10_000,
+                describe = {
+                    "spans=${TmuxSessionLatencyTelemetry.snapshot().map { it.name }}"
+                },
+                predicate = {
+                    TmuxSessionLatencyTelemetry.snapshot()
+                        .any { it.name == CONVERSATION_OPEN_LATENCY_OPERATION }
+                },
+            )
+            val openSpan = TmuxSessionLatencyTelemetry.snapshot()
+                .last { it.name == CONVERSATION_OPEN_LATENCY_OPERATION }
+            // The seeded transcript (2 turns) must be loaded — the open is not
+            // an empty/failed window read.
+            val seededEvents = agentVm.agentConversations.value[agentPaneId]!!.events
+            assertEquals(
+                "cold open must load the 2 seeded turns; events=" +
+                    seededEvents.map { it::class.simpleName },
+                listOf("hello agent", "hi back"),
+                seededEvents.filterIsInstance<ConversationEvent.Message>().map { it.text },
+            )
+            timing("issue817_conversation_open_ms", openSpan.durationMs)
+            stamp("issue817_conversation_open ${openSpan.toArtifactLine()}")
+            writeText(
+                "issue817-conversation-open-timing.txt",
+                buildString {
+                    appendLine("scenario=conversation_open-cold-open-into-freshly-detected-agent (#817 slice 1)")
+                    appendLine("agent=${openSpan.detail}")
+                    appendLine(openSpan.toArtifactLine())
+                    appendLine("conversation_open_ms=${openSpan.durationMs}")
+                    appendLine(
+                        "loaded_events=" +
+                            seededEvents.filterIsInstance<ConversationEvent.Message>().map { it.text },
+                    )
+                },
+            )
         } finally {
             agentVm.clearForTest()
         }

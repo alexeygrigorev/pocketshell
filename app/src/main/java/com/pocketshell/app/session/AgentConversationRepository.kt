@@ -286,6 +286,17 @@ internal const val OLDER_PAGE_GROWTH_FACTOR: Int = 3
 public data class ConversationEventsWindow(
     val events: List<ConversationEvent>,
     val hasMoreOlder: Boolean,
+    /**
+     * Issue #817 (slice 1): the line offset the live tail-follow must start
+     * from so it emits only lines appended AFTER this window — i.e. the file's
+     * line count at read time. The window read already learns this for free
+     * (Claude: the sentinel `wc -l`; Codex: a folded `wc -l` of the raw source
+     * file), so the cold-open path threads it through instead of paying a
+     * separate `lineCount` SSH round-trip before the read. For OpenCode the
+     * batched tail polls SQLite snapshots and ignores the line offset, so this
+     * is `0` there (and is never used as a line cursor).
+     */
+    val tailStartLine: Long = 0L,
 )
 
 private const val PROCESS_TREE_SCAN_COMMAND: String =
@@ -704,10 +715,16 @@ public class AgentConversationRepository internal constructor(
         }
         if (detection.agent == AgentKind.Codex) {
             val rawBudget = (budget * JSONL_RAW_LINES_PER_EVENT).coerceAtLeast(budget)
-            val (events, rawLineCount) = readCodexWindow(session, detection, budget)
+            val codex = readCodexWindow(session, detection, budget)
             return ConversationEventsWindow(
-                events = events,
-                hasMoreOlder = rawLineCount >= rawBudget,
+                events = codex.events,
+                hasMoreOlder = codex.rawLineCount >= rawBudget,
+                // Issue #817: the live tail follows the raw `sourcePath` from a
+                // line offset, so it needs the file's `wc -l` (NOT the
+                // agent-log envelope line count). The Codex window read folds
+                // that count into its own exec via a sentinel, so the cold-open
+                // path no longer needs the separate `lineCount` round-trip.
+                tailStartLine = codex.sourceLineCount,
             )
         }
         val parser = parserFor(detection.agent)
@@ -738,27 +755,65 @@ public class AgentConversationRepository internal constructor(
         return ConversationEventsWindow(
             events = events,
             hasMoreOlder = totalLines > rawLineBudget,
+            // Issue #817: the file's line count at read time is exactly the
+            // `fromLineExclusive` cursor the follow-tail needs — it is the same
+            // value the separate `lineCount` exec used to fetch. Thread it
+            // through so the cold-open path no longer pays that round-trip.
+            tailStartLine = totalLines,
         )
     }
+
+    /**
+     * Issue #817: the Codex window read now also reports [sourceLineCount] —
+     * the `wc -l` of the raw transcript file the live tail follows — so the
+     * cold-open path derives the follow cursor from this single exec instead of
+     * a separate `lineCount` round-trip. [rawLineCount] stays the agent-log
+     * envelope line count used for the `hasMoreOlder` derivation.
+     */
+    private data class CodexWindow(
+        val events: List<ConversationEvent>,
+        val rawLineCount: Int,
+        val sourceLineCount: Long,
+    )
 
     private suspend fun readCodexWindow(
         session: SshSession,
         detection: AgentDetection,
         maxMessages: Int,
-    ): Pair<List<ConversationEvent>, Int> {
+    ): CodexWindow {
         val sessionId = detection.sessionId?.takeIf { it.isNotBlank() }
             ?: detection.sourcePath.substringAfterLast('/').substringBeforeLast('.')
-        if (sessionId.isBlank()) return emptyList<ConversationEvent>() to 0
+        if (sessionId.isBlank()) return CodexWindow(emptyList(), 0, 0L)
         val boundedMaxLines = (maxMessages * JSONL_RAW_LINES_PER_EVENT)
             .coerceAtLeast(maxMessages)
             .coerceAtLeast(1)
+        // ONE round-trip: emit the raw-file `wc -l` (the follow-tail cursor),
+        // a sentinel, then the agent-log window. Folding the count into the
+        // same exec is what lets the cold-open path drop the standalone
+        // `lineCount` round-trip without losing the tail-start position.
+        val sentinel = "@@PS_CODEX_WINDOW@@"
         val output = session.exec(
-            "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
+            "wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0; " +
+                "printf '%s\\n' $sentinel; " +
+                "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
                 "--json --tail $boundedMaxLines 2>/dev/null || true",
         ).stdout
-        val lines = parseAgentLogEnvelopeLines(output)
+        val splitLines = output.split("\n")
+        val sentinelIndex = splitLines.indexOf(sentinel)
+        val sourceLineCount = if (sentinelIndex >= 0) {
+            splitLines.take(sentinelIndex).joinToString("").trim().toLongOrNull() ?: 0L
+        } else {
+            0L
+        }
+        val envelopeOutput = if (sentinelIndex >= 0) {
+            splitLines.drop(sentinelIndex + 1).joinToString("\n")
+        } else {
+            output
+        }
+        val lines = parseAgentLogEnvelopeLines(envelopeOutput)
         val parser = CodexParser()
-        return lines.asSequence().flatMap { parser.parseLine(it) }.toList() to lines.size
+        val events = lines.asSequence().flatMap { parser.parseLine(it) }.toList()
+        return CodexWindow(events = events, rawLineCount = lines.size, sourceLineCount = sourceLineCount)
     }
 
     fun tailEvents(

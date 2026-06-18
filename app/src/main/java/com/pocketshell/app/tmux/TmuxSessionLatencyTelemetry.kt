@@ -81,3 +81,16 @@ public object TmuxSessionLatencyTelemetry {
 
 public const val TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS: Long = 100L
 public const val TMUX_WARM_SWITCH_CI_ADVISORY_P95_MS: Long = 5_000L
+
+/**
+ * Issue #817 (slice 1): operation name for the conversation-open latency span.
+ *
+ * The span measures the cold-open path of an agent conversation — from "agent
+ * detected, first transcript read begins" to "first parsed events are live in
+ * the UI state" (the `markAgentTailLive` push). It is the authoritative
+ * before/after number for the <0.3s gate; a connected test snapshots it via
+ * [TmuxSessionLatencyTelemetry.snapshot] and writes a durable timing artifact,
+ * and the emitted [TmuxSessionLatencyTelemetry.Event.toArtifactLine] is the
+ * grep-able log tag (`tmux_latency_conversation_open_ms=`).
+ */
+public const val CONVERSATION_OPEN_LATENCY_OPERATION: String = "conversation_open"

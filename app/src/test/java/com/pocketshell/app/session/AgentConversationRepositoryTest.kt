@@ -1220,6 +1220,89 @@ class AgentConversationRepositoryTest {
         )
     }
 
+    // ===================================================================
+    // Issue #817 (slice 1): the windowed read now also reports the
+    // follow-tail cursor (tailStartLine) so the cold-open path no longer
+    // needs a separate lineCount round-trip before the read.
+    // ===================================================================
+
+    @Test
+    fun readEventsWindowClaudeReportsFileLineCountAsTailStartLineInOneExec() = runTest {
+        val tailJsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"q"}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"a"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(wcOutput = "4200\n", jsonlTailOutput = tailJsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = detection,
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        // The window carries the file's wc -l as the follow cursor — exactly
+        // what a separate lineCount exec used to return.
+        assertEquals(4200L, window.tailStartLine)
+        // And it was derived from the SAME single windowed exec: no standalone
+        // `wc -l < ...` round-trip (that would be the redundant lineCount call
+        // the cold-open path dropped). The only exec is the sentinel window.
+        assertEquals(listOf(true), session.execCommands.map { it.contains("@@PS_WINDOW@@") })
+    }
+
+    @Test
+    fun readEventsWindowCodexReportsRawFileLineCountAsTailStartLineInOneExec() = runTest {
+        val codexLines = listOf(
+            """{"type":"session_meta","payload":{"id":"pocketshell-codex","cwd":"/workspace/pocketshell"}}""",
+            """{"type":"event_msg","payload":{"type":"user_message","message":"hello"}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}""",
+        )
+        val session = FakeSshSession(
+            wcOutput = "777\n",
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+        )
+        val detection = AgentDetection(
+            agent = AgentKind.Codex,
+            sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+            sessionId = "pocketshell-codex",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = detection,
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        // The follow tail follows the raw sourcePath, so tailStartLine must be
+        // the raw FILE's wc -l (777), NOT the agent-log envelope line count.
+        assertEquals(777L, window.tailStartLine)
+        assertEquals(
+            listOf("hello", "hi"),
+            window.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+        // One combined round-trip carried both the raw line count and the
+        // agent-log window — no separate lineCount exec.
+        assertEquals(1, session.execCommands.size)
+        val command = session.execCommands.single()
+        assertTrue("expected folded wc -l in the codex window exec", command.contains("wc -l < "))
+        assertTrue("expected codex sentinel", command.contains("@@PS_CODEX_WINDOW@@"))
+        assertTrue("expected the agent-log window in the same exec", command.contains("pocketshell agent-log --engine codex"))
+    }
+
     private fun assertOpenCodeSqliteQueryIsShellSingleQuoted(cwd: String) {
         val sqliteLine = openCodeSqliteLine(AgentConversationRepository().detectionCommand(cwd))
         val normalizedCwd = cwd.trim().trimEnd('/').ifBlank { "/" }
@@ -1293,6 +1376,12 @@ class AgentConversationRepositoryTest {
                 // repository can split total-lines from the tail window.
                 command.contains("@@PS_WINDOW@@") ->
                     "${wcOutput.trim()}\n@@PS_WINDOW@@\n$jsonlTailOutput"
+                // Issue #817: the Codex windowed read folds wc -l + a sentinel +
+                // the agent-log window into ONE round-trip so it carries the
+                // raw-file line count (the follow cursor) without a separate
+                // lineCount exec.
+                command.contains("@@PS_CODEX_WINDOW@@") ->
+                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n$agentLogOutput"
                 command.contains("wc -l < ") -> wcOutput
                 command.contains("pocketshell agent-log") -> agentLogOutput
                 command.trimStart().startsWith("tail -n") -> jsonlTailOutput

@@ -22,6 +22,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -58,6 +59,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -1576,10 +1579,35 @@ public fun TmuxSessionScreen(
                     }
                 }
             }
-            Box(
-                modifier = Modifier
-                    .weight(1f),
-            ) {
+            // Issue #823 (Slice 1): a pull-down on the session/terminal surface
+            // is a discoverable manual-reconnect affordance that mirrors the
+            // session-tree's pull-to-refresh (FolderListScreen's
+            // [PullToRefreshBox]). It calls the EXISTING reconnect entrypoint
+            // ([TmuxSessionViewModel.reconnect]) — it adds NO new connection
+            // logic and is NOT a second writer on the reconnect path (D28).
+            //
+            // The gesture is scoped to non-Connected states only (`!sessionLive`
+            // + `canReconnect`). On a live (`Connected`) session the terminal
+            // surface is a gesture-hungry Termux `TerminalView` in a
+            // `HorizontalPager` (scrollback, selection, horizontal paging);
+            // wrapping the live surface in a pull-to-refresh would fight those
+            // gestures. While not live the surface shows only a static
+            // placeholder (Attaching… / waiting / empty), so there is no live
+            // terminal to compete with — and "pull to recover a dropped session"
+            // matches the maintainer's mental model. When live, the surface
+            // content renders directly with no pull wrapper.
+            //
+            // NOTE (Slice 2 / #822): wiring the gesture to today's `reconnect()`
+            // improves discoverability + recovers the common transient-drop
+            // case, but it does NOT by itself break the #822 wedge — a wedged
+            // in-flight `connectJob` makes `reconnect()` no-op at the dedup
+            // guard. Breaking the wedge is connection-core logic owned by epic
+            // #792 (Slice 2); this slice deliberately does not touch it.
+            val pullToReconnectActive = !sessionLive && canReconnect
+            // The surface content (terminal pager / conversation / placeholders)
+            // is captured once so it can render either inside the pull-to-reconnect
+            // wrapper (not live) or bare (live) without duplicating the tree.
+            val surfaceContent: @Composable () -> Unit = {
                 // Issue #810 (regression of #807): the terminal-render pager is
                 // kept MOUNTED underneath the Conversation content for a live,
                 // panes-present session — it is no longer REPLACED by the
@@ -1767,6 +1795,25 @@ public fun TmuxSessionScreen(
                 // all stable, so an overlay-visibility toggle skips it) and supplies
                 // the warm, attached terminal surface for BOTH the raw-Terminal tab
                 // and (covered, underneath) the Conversation tab.
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f),
+            ) {
+                SessionSurfaceReconnectWrapper(
+                    pullToReconnectActive = pullToReconnectActive,
+                    // The spinner reflects an in-flight reconnect: a
+                    // Reconnecting/Connecting/Switching status means the reconnect
+                    // the pull triggered (or the auto-ladder) is working; it clears
+                    // the instant we reach Connected (the wrapper falls back to the
+                    // bare surface when `pullToReconnectActive` flips false) or
+                    // settle on a Failed band.
+                    isReconnecting = status is ConnectionStatus.Reconnecting ||
+                        status is ConnectionStatus.Connecting ||
+                        status is ConnectionStatus.Switching,
+                    onReconnect = { viewModel.reconnect() },
+                    content = surfaceContent,
+                )
             }
 
             // Assistant review sits above the input band.
@@ -3537,6 +3584,86 @@ internal const val TMUX_CONNECTION_STATUS_PILL_TAG = "tmux:chrome:connection-pil
  */
 internal const val TMUX_SESSION_ERROR_TAG = "tmux:session:error"
 internal const val TMUX_SESSION_RECONNECT_TAG = "tmux:session:reconnect"
+
+/**
+ * Issue #823 (Slice 1): test tag for the pull-to-reconnect [PullToRefreshBox]
+ * that wraps the session surface while the session is NOT
+ * [ConnectionStatus.Connected]. A pull-down fires the existing
+ * [TmuxSessionViewModel.reconnect] entrypoint (no new connection logic).
+ */
+internal const val TMUX_PULL_TO_RECONNECT_TAG = "tmux:session:pull-to-reconnect"
+
+/**
+ * Issue #823 (Slice 1): wraps the session surface (terminal pager /
+ * conversation / placeholders) with a discoverable pull-to-reconnect gesture,
+ * mirroring the session-tree's pull-to-refresh affordance
+ * ([com.pocketshell.app.projects.FolderListScreen]'s [PullToRefreshBox]).
+ *
+ * The wrapper is a pure UI affordance over the EXISTING reconnect entrypoint —
+ * [onReconnect] is wired by the caller to [TmuxSessionViewModel.reconnect]. It
+ * adds NO new connection logic and is NOT a second writer on the reconnect path
+ * (D28).
+ *
+ * The pull gesture is mounted ONLY while [pullToReconnectActive] is true (the
+ * session is NOT [ConnectionStatus.Connected] AND there is a reconnect target).
+ * On a live session the surface is a gesture-hungry Termux `TerminalView` inside
+ * a `HorizontalPager`; wrapping it in a pull-to-refresh would fight scrollback /
+ * selection / horizontal-paging gestures, so when not active the content renders
+ * bare with no pull wrapper at all.
+ *
+ * [isReconnecting] drives the [PullToRefreshBox] spinner so an in-flight
+ * reconnect (or the auto-reconnect ladder) is visible after the pull.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+internal fun SessionSurfaceReconnectWrapper(
+    pullToReconnectActive: Boolean,
+    isReconnecting: Boolean,
+    onReconnect: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    if (pullToReconnectActive) {
+        val state = rememberPullToRefreshState()
+        PullToRefreshBox(
+            isRefreshing = isReconnecting,
+            onRefresh = onReconnect,
+            state = state,
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag(TMUX_PULL_TO_RECONNECT_TAG),
+        ) {
+            // [PullToRefreshBox] drives its pull gesture through the nested-scroll
+            // connection of its content. While `pullToReconnectActive` the surface
+            // shows only a STATIC placeholder (Attaching… / waiting / empty — never
+            // a live terminal), which is not itself scrollable, so we host it in a
+            // `verticalScroll` container. That gives the pull-to-refresh a
+            // nested-scroll source to consume the drag-down (mirroring the tree's
+            // scrollable LazyColumn content) without changing what the user sees.
+            // [BoxWithConstraints] pins the scrollable child to at least the
+            // viewport height so the centered placeholder still fills the surface
+            // (a bare `fillMaxSize` collapses to 0 under a scroll's unbounded
+            // height constraint) and there is nothing to actually scroll.
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val viewportHeight = maxHeight
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = viewportHeight),
+                    ) {
+                        content()
+                    }
+                }
+            }
+        }
+    } else {
+        content()
+    }
+}
 
 /**
  * Issue #235: stable test tag for the kebab menu's Detach item. The

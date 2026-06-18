@@ -173,6 +173,92 @@ class TmuxConnectingStatesScreenshotTest {
         captureFullDevice(File(artifactDir(), "tmux-reattach-attaching-single-indicator.png"))
     }
 
+    @Test
+    fun capturePullToReconnectDisconnectedSurface() {
+        // Issue #823 (Slice 1): screenshot evidence that the disconnected /
+        // "Reconnecting" session surface carries BOTH the existing visible
+        // reconnect controls (the amber [ReconnectingProgressRow] "Retry now"
+        // band and the calm [FailedConnectionRow] "Tap to reconnect" band) AND
+        // the new pull-to-reconnect gesture wrapper ([SessionSurfaceReconnectWrapper]
+        // with `pullToReconnectActive = true`) around the dropped-session
+        // placeholder. This reproduces the maintainer's "dropped session, give me
+        // a way to reconnect" state with every reconnect affordance present.
+        val reconnecting = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
+            host = "hetzner.example",
+            port = 22,
+            user = "alex",
+            attempt = 2,
+            maxAttempts = 3,
+            retryDelayMs = 4_000L,
+            reason = "Reconnecting…",
+        )
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "claude-main",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    // The existing visible reconnect controls (#685 / #720) that
+                    // remain available in a non-Connected state — the amber band's
+                    // "Retry now" and the calm "Tap to reconnect" band.
+                    ReconnectingProgressRow(
+                        status = reconnecting,
+                        sessionLabel = "tmux claude-main",
+                        onRetryNow = {},
+                        onCancel = {},
+                    )
+                    FailedConnectionRow(
+                        message = "Connection lost — tap to reconnect",
+                        onReconnect = {},
+                        canReconnect = true,
+                    )
+                    // The #823 pull-to-reconnect surface wrapper around the
+                    // dropped-session placeholder. Pulling down here fires the same
+                    // reconnect() entrypoint the bands above call.
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    ) {
+                        SessionSurfaceReconnectWrapper(
+                            pullToReconnectActive = true,
+                            isReconnecting = true,
+                            onReconnect = {},
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(color = PocketShellColors.Surface),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LoadingIndicator.Spinner(
+                                    size = SpinnerSize.Medium,
+                                    label = "Pull down to reconnect…",
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("Retry now").assertExists()
+        compose.onNodeWithText("Tap to reconnect").assertExists()
+        compose
+            .onAllNodesWithTag(TMUX_PULL_TO_RECONNECT_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose.waitForIdle()
+        SystemClock.sleep(300)
+        captureFullDevice(File(artifactDir(), "tmux-pull-to-reconnect-disconnected.png"))
+    }
+
     private fun artifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)

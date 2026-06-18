@@ -85,6 +85,22 @@ Encoded-cwd format for Claude Code: `/home/alexey/git/pocketshell` → `-home-al
 ```
 
 Behaviours:
+- **Default tab on open: Conversation (#818).** An agent session OPENS on the
+  parsed Conversation view by default — the readable surface and the permanent
+  cure for the recurring "black screen" reports (a raw agent TUI uses the
+  alternate-screen buffer and renders mostly black when idle, whereas the parsed
+  Conversation is always legible). This is safe only because the Conversation
+  view now opens fast (#828: 264–280ms @ 80ms RTT) on the correct source (#825).
+  - **Open-time only — never a mid-session yank.** The default selects the
+    INITIAL tab when an agent session opens. A user already viewing a live
+    session's Terminal is NOT switched to Conversation on a later
+    detection/refresh; doing so was the #815 regression (reverted in 207d33e5)
+    and stays forbidden.
+  - **Configurable.** Settings → Terminal → "Open agent sessions in" lets the
+    user choose Conversation (default) or Terminal.
+  - **Per-session choice wins.** A remembered/explicit per-session tab choice
+    (seed-from-memory precedence) overrides the global default.
+  - Shell (non-agent) sessions have no Conversation tab and are unaffected.
 - Markdown rendering — no ANSI noise
 - Tool calls collapsible (default collapsed); tap to expand command + output + diff
 - Auto-tails the file/db as the agent writes new messages

@@ -212,6 +212,8 @@ fun SettingsScreen(
                     onAgentSubmitEnterDelayChange = viewModel::setAgentSubmitEnterDelayMs,
                     backgroundGraceMillis = settings.backgroundGraceMillis,
                     onBackgroundGraceChange = viewModel::setBackgroundGraceMillis,
+                    defaultAgentSessionView = settings.defaultAgentSessionView,
+                    onDefaultAgentSessionViewChange = viewModel::setDefaultAgentSessionView,
                     hosts = hosts,
                     selectedHostId = settings.defaultHostId,
                     onSelectDefaultHost = viewModel::setDefaultHostId,
@@ -556,6 +558,8 @@ private fun TerminalSection(
     onAgentSubmitEnterDelayChange: (Int) -> Unit,
     backgroundGraceMillis: Long,
     onBackgroundGraceChange: (Long) -> Unit,
+    defaultAgentSessionView: DefaultAgentSessionView,
+    onDefaultAgentSessionViewChange: (DefaultAgentSessionView) -> Unit,
     hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
     selectedHostId: Long?,
     onSelectDefaultHost: (Long?) -> Unit,
@@ -794,6 +798,42 @@ private fun TerminalSection(
                     modifier = Modifier.testTag(AGENT_SUBMIT_DELAY_VALUE_TAG),
                 )
             }
+
+            // Issue #818: which tab an agent session opens on. Conversation
+            // (default) is the cure for the recurring black-screen reports —
+            // raw agent TUIs render mostly black on the alt-screen buffer; the
+            // parsed Conversation view is always legible and now opens fast
+            // (#828) on the correct source (#825). Open-time only: this never
+            // yanks a user already on Terminal mid-session (#815).
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
+            Text(
+                text = "Open agent sessions in",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Which view an agent session lands on when it opens. " +
+                    "You can still switch tabs per session.",
+                color = PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+            DefaultHostOptionRow(
+                title = "Conversation",
+                subtitle = "Default — the readable parsed agent view",
+                selected = defaultAgentSessionView == DefaultAgentSessionView.Conversation,
+                onClick = { onDefaultAgentSessionViewChange(DefaultAgentSessionView.Conversation) },
+                testTag = defaultAgentSessionViewOptionTag(DefaultAgentSessionView.Conversation),
+            )
+            DefaultHostOptionRow(
+                title = "Terminal",
+                subtitle = "Watch the raw agent terminal",
+                selected = defaultAgentSessionView == DefaultAgentSessionView.Terminal,
+                onClick = { onDefaultAgentSessionViewChange(DefaultAgentSessionView.Terminal) },
+                testTag = defaultAgentSessionViewOptionTag(DefaultAgentSessionView.Terminal),
+            )
 
             // -- Startup: open-on-launch destination (folded in from the
             //    former standalone "Startup" section, issue #486) --------
@@ -2079,6 +2119,13 @@ fun defaultHostOptionTag(hostId: Long): String =
 
 fun backgroundGraceOptionTag(millis: Long): String =
     "$BACKGROUND_GRACE_OPTION_PREFIX:$millis"
+
+/**
+ * Issue #818: stable test tag for the "Open agent sessions in" radio
+ * option ([DefaultAgentSessionView.Conversation] / [DefaultAgentSessionView.Terminal]).
+ */
+fun defaultAgentSessionViewOptionTag(view: DefaultAgentSessionView): String =
+    "settings:terminal:default-agent-view:" + view.name.lowercase()
 
 internal fun voiceLanguageOptionTestTag(code: String): String =
     "settings:voice:language:" + code.lowercase()

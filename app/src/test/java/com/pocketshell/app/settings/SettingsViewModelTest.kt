@@ -198,6 +198,22 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `setDefaultAgentSessionView flows through to repository`() {
+        // Issue #818: the VM is a thin pass-through; changing the open-time
+        // default view reaches the repository snapshot.
+        val vm = newVm()
+        assertEquals(
+            "default is Conversation (the black-screen cure)",
+            DefaultAgentSessionView.Conversation,
+            repo.settings.value.defaultAgentSessionView,
+        )
+        vm.setDefaultAgentSessionView(DefaultAgentSessionView.Terminal)
+        assertEquals(DefaultAgentSessionView.Terminal, repo.settings.value.defaultAgentSessionView)
+        vm.setDefaultAgentSessionView(DefaultAgentSessionView.Conversation)
+        assertEquals(DefaultAgentSessionView.Conversation, repo.settings.value.defaultAgentSessionView)
+    }
+
+    @Test
     fun `startFreshDiagnosticsCapture enables recording clears old events and marks capture start`() = runTest {
         val recorder = DiagnosticRecorder(context, repo)
         val vm = newVm(diagnosticRecorder = recorder)

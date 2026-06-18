@@ -401,22 +401,25 @@ JOURNEY_CLASSES=(
   # and does NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.ComposerAlwaysPresentSwitchJourneyE2eTest"
-  # ADDED (#815): detecting an agent must NOT change the tab the user is on —
-  # the auto-switch-to-Conversation behaviour (af32522b, #807) was reverted as
-  # jarring; the empty-grid "black screen" is now a product-level concern
-  # (#809/#810), not a tab switch. This connected case
-  # (AgentConversationReconnectDockerTest#freshlyDetectedAgentStaysOnTerminalAndShellGetsNoConversationRow)
+  # ADDED (#818/#815): an agent pane must OPEN on the user's configured default
+  # view (Conversation by default; opt-out to Terminal honoured), and detection
+  # must NOT YANK the tab mid-session — the auto-switch-to-Conversation behaviour
+  # (af32522b, #807) was reverted as jarring; only the open-time initial
+  # selection is governed by the setting. This connected case
+  # (AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow)
   # drives the production TmuxSessionViewModel against the deterministic
   # agents:2222 fixture through the FRESH-attach path (no reconnect): an AGENT
   # pane (claude-named process + fresh JSONL) gets a conversation row on
-  # detection but STAYS on raw Terminal with NO user tap, and a plain SHELL pane
-  # never gets a conversation row at all. It uses ONLY agents:2222
-  # (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that tests.yml already brings
-  # up, and its load-bearing assertion does NOT self-skip on CI (only the
-  # SIBLING reconnect cases in the same class are assumeFalse-gated as local-only
-  # flaky-reconnect evidence). Target the single @Test method by FQCN#method so
-  # the CI-gated reconnect cases are NOT selected here.
-  "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#freshlyDetectedAgentStaysOnTerminalAndShellGetsNoConversationRow"
+  # detection and the open-time default selection follows the setting, then the
+  # no-yank invariant (#815) is exercised explicitly — a later detection on the
+  # SAME live session does NOT re-apply the default once the user has moved to
+  # Terminal; a plain SHELL pane never gets a conversation row at all. It uses
+  # ONLY agents:2222 (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that tests.yml
+  # already brings up, and its load-bearing assertions do NOT self-skip on CI
+  # (only the SIBLING reconnect cases in the same class are assumeFalse-gated as
+  # local-only flaky-reconnect evidence). Target the single @Test method by
+  # FQCN#method so the CI-gated reconnect cases are NOT selected here.
+  "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow"
   # ADDED (#813): the composer-launcher NARROW / LARGE-FONT clip proof. The
   # maintainer dogfooded (2026-06-18 07:53) the launcher being CLIPPED off the
   # right edge of the bottom bar by the 4-chip primary cluster on a narrow /

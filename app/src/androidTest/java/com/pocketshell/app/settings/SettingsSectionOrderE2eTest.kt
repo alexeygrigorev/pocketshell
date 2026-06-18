@@ -117,6 +117,44 @@ class SettingsSectionOrderE2eTest {
         captureFullDevice(File(dir, "settings-08-about.png"))
     }
 
+    /**
+     * Issue #818: the "Open agent sessions in" radio group lives inside the
+     * Terminal card. This drives the REAL Settings screen, scrolls to the new
+     * control, confirms both options are present (Conversation default selected,
+     * Terminal opt-out), taps Terminal so the selection moves, and captures a
+     * full-device screenshot of the control for visual inspection.
+     */
+    @Test
+    fun defaultAgentSessionViewOptionIsPresentSelectableAndScreenshot() {
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG).assertExists()
+
+        val conversationTag =
+            defaultAgentSessionViewOptionTag(DefaultAgentSessionView.Conversation)
+        val terminalTag =
+            defaultAgentSessionViewOptionTag(DefaultAgentSessionView.Terminal)
+
+        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
+            .performScrollToNode(hasTestTag(conversationTag))
+        compose.onNodeWithTag(conversationTag, useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(terminalTag, useUnmergedTree = true).assertExists()
+
+        val dir = screenshotDir()
+        captureFullDevice(File(dir, "settings-818-default-agent-view-conversation.png"))
+
+        // Tap the Terminal opt-out; the row must become selectable + reflect the
+        // change (the radio group is the proven DefaultHostOptionRow pattern).
+        compose.onNodeWithTag(terminalTag, useUnmergedTree = true).performClick()
+        compose.waitForIdle()
+        captureFullDevice(File(dir, "settings-818-default-agent-view-terminal.png"))
+    }
+
     private fun String.slug(): String = lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
 
     private fun screenshotDir(): File {

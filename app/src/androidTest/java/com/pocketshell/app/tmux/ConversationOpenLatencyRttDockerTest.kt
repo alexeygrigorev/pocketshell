@@ -80,7 +80,7 @@ import java.io.File
  * `pocketshellNetworkFaultProofs=true` instrumentation arg, exactly like the
  * other [com.pocketshell.app.proof.NetworkFaultProofBase] proofs. It is local
  * measurement evidence; CI coverage of the open-path correctness stays in the
- * unit + the deterministic `freshlyDetectedAgentStaysOnTerminalAndShellGetsNoConversationRow`
+ * unit + the deterministic `agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow`
  * connected test.
  */
 @RunWith(AndroidJUnit4::class)
@@ -212,6 +212,16 @@ class ConversationOpenLatencyRttDockerTest {
             activeTmuxClients = ActiveTmuxClients(),
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
         )
+        // Issue #818: this is a warm-SWITCH latency test (Terminal -> Conversation
+        // on an already-loaded row). The production open-time default is now
+        // Conversation (#818), which would open this session straight onto
+        // Conversation and make the "tap to switch" a no-op. Pin the open-time
+        // default to Terminal so the row lands on Terminal and the warm switch is
+        // the scenario under measurement. (The open-on-Conversation default itself
+        // is covered by the unit + the deterministic connected default tests.)
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
         try {
             vm.connect(
                 hostId = 817L,
@@ -308,12 +318,12 @@ class ConversationOpenLatencyRttDockerTest {
             }
 
             // ---- Warm switch: Terminal -> Conversation on an already-loaded row.
-            // The detected agent row defaults to Terminal (#815), so the
-            // transcript is already loaded and the switch is the pure-state-read
-            // warm case. Tap Conversation and snapshot the conversation_switch
-            // span.
+            // The open-time default is pinned to Terminal for this latency test
+            // (see setDefaultAgentSessionViewForTest above), so the transcript is
+            // already loaded and the switch is the pure-state-read warm case. Tap
+            // Conversation and snapshot the conversation_switch span.
             assertEquals(
-                "the detected row defaults to Terminal (no auto-switch, #815)",
+                "the row opened on the pinned Terminal default (warm-switch scenario)",
                 SessionTab.Terminal,
                 vm.agentConversations.value[paneId]!!.selectedTab,
             )

@@ -289,6 +289,48 @@ public class TmuxSessionViewModel @Inject constructor(
         agentSubmitEnterDelayMsOverrideForTest = delayMs
     }
 
+    /**
+     * Issue #818: test override for the configured open-time default agent
+     * session view. Unit tests build the view model without the
+     * [com.pocketshell.app.settings.SettingsRepository] singleton, so this
+     * seam lets a test pin which tab a freshly-opened agent session lands on
+     * and assert the open-time default (and prove that detection/refresh never
+     * yanks an already-open session — the #815 line). Null means "fall back to
+     * the repository / built-in default".
+     */
+    @Volatile
+    private var defaultAgentSessionViewOverrideForTest:
+        com.pocketshell.app.settings.DefaultAgentSessionView? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setDefaultAgentSessionViewForTest(
+        view: com.pocketshell.app.settings.DefaultAgentSessionView?,
+    ) {
+        defaultAgentSessionViewOverrideForTest = view
+    }
+
+    /**
+     * Issue #818: the tab a freshly-OPENED agent session lands on, resolved
+     * from the user's [com.pocketshell.app.settings.AppSettings.defaultAgentSessionView]
+     * setting (default Conversation — the black-screen cure). This is read ONLY
+     * at open/initial-tab time (the fresh-row branch of [markAgentTailLive] and
+     * the presumed-agent open path). It must NEVER be consulted on a
+     * detection/refresh of an ALREADY-open session, or it would re-introduce
+     * the #815 mid-session yank. A remembered/explicit per-session choice is
+     * applied earlier by [seedAgentConversationFromMemory] and still wins.
+     */
+    private fun openTimeDefaultSessionTab(): SessionTab {
+        val configured = defaultAgentSessionViewOverrideForTest
+            ?: settingsRepository?.settings?.value?.defaultAgentSessionView
+            ?: com.pocketshell.app.settings.AppSettings.DEFAULT_AGENT_SESSION_VIEW
+        return when (configured) {
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation ->
+                SessionTab.Conversation
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal ->
+                SessionTab.Terminal
+        }
+    }
+
     /** SSH executor seam for assistant tools; tests substitute it. */
     private var assistantSshExecutor: AssistantSshExecutor = RealAssistantSshExecutor()
 
@@ -9331,15 +9373,21 @@ public class TmuxSessionViewModel @Inject constructor(
             val current = conversations[paneId]
             val updated = when {
                 // A fresh POSITIVE agent detection landed on a pane with no
-                // existing conversation row. Detecting an agent must NOT change
-                // the tab the user is on (#815): default the new row to the raw
-                // Terminal view. A remembered/explicit user choice still wins —
-                // `seedAgentConversationFromMemory` runs first and would have
-                // created the row already if a remembered choice existed.
+                // existing conversation row. This is the OPEN/initial-tab moment
+                // for the agent session, so the new row lands on the user's
+                // configured open-time default (#818) — Conversation by default
+                // (the black-screen cure), Terminal if the user opted out. This
+                // is NOT a mid-session yank: there is no existing row, so no tab
+                // the user is currently viewing is being changed (the #815 line
+                // is about detection/refresh on an ALREADY-open session, handled
+                // by the `current != null` branches below, which preserve the
+                // user's tab). A remembered/explicit per-session choice still
+                // wins — `seedAgentConversationFromMemory` runs first and would
+                // have created the row already if a remembered choice existed.
                 current == null -> AgentConversationUiState(
                     detection = detection,
                     events = boundedDistinctEvents(initialEvents),
-                    selectedTab = SessionTab.Terminal,
+                    selectedTab = openTimeDefaultSessionTab(),
                     syncStatus = AgentConversationSyncStatus.Live,
                 )
                 current.detection != detection && preserveDifferentDetection -> current
@@ -9357,14 +9405,18 @@ public class TmuxSessionViewModel @Inject constructor(
                         syncStatus = AgentConversationSyncStatus.Live,
                     )
                 // A DIFFERENT agent (no same-source continuity) took over this
-                // pane's window — the prior row's tab is being discarded anyway.
-                // Detecting that takeover must NOT yank the user onto another
-                // view (#815), so default the new identity's row to the raw
-                // Terminal view, matching the fresh-row branch above.
+                // pane's window. This is a detection/refresh on an ALREADY-open
+                // session, NOT an open-time event, so it must NOT yank the user
+                // onto another view in EITHER direction (#815): we PRESERVE the
+                // tab the user is currently viewing rather than apply the
+                // open-time default. (The open-time default only governs the
+                // fresh-row branch above. Applying it here would yank a user on
+                // Terminal onto Conversation on a mid-session takeover — exactly
+                // the #815 regression.)
                 current.detection != detection -> AgentConversationUiState(
                     detection = detection,
                     events = boundedDistinctEvents(initialEvents),
-                    selectedTab = SessionTab.Terminal,
+                    selectedTab = current.selectedTab,
                     syncStatus = AgentConversationSyncStatus.Live,
                 )
                 else -> current.copy(

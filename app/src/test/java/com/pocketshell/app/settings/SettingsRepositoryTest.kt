@@ -67,6 +67,10 @@ class SettingsRepositoryTest {
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
         assertEquals(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS, snap.backgroundGraceMillis)
         assertEquals(AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED, snap.diagnosticsRecordingEnabled)
+        // Issue #818: agent sessions open on Conversation by default — the
+        // black-screen cure. The default MUST be Conversation, not Terminal.
+        assertEquals(AppSettings.DEFAULT_AGENT_SESSION_VIEW, snap.defaultAgentSessionView)
+        assertEquals(DefaultAgentSessionView.Conversation, snap.defaultAgentSessionView)
     }
 
     @Test
@@ -187,6 +191,45 @@ class SettingsRepositoryTest {
         assertEquals(
             AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS,
             repo.settings.value.backgroundGraceMillis,
+        )
+    }
+
+    @Test
+    fun `setDefaultAgentSessionView persists and round-trips`() {
+        // Issue #818: switching the open-time default to Terminal persists and
+        // survives a fresh repository (process restart).
+        val repo = SettingsRepository(context)
+        repo.setDefaultAgentSessionView(DefaultAgentSessionView.Terminal)
+        assertEquals(
+            DefaultAgentSessionView.Terminal,
+            repo.settings.value.defaultAgentSessionView,
+        )
+        assertEquals(
+            DefaultAgentSessionView.Terminal,
+            SettingsRepository(context).settings.value.defaultAgentSessionView,
+        )
+
+        repo.setDefaultAgentSessionView(DefaultAgentSessionView.Conversation)
+        assertEquals(
+            DefaultAgentSessionView.Conversation,
+            repo.settings.value.defaultAgentSessionView,
+        )
+        assertEquals(
+            DefaultAgentSessionView.Conversation,
+            SettingsRepository(context).settings.value.defaultAgentSessionView,
+        )
+    }
+
+    @Test
+    fun `unknown default agent session view blob falls back to Conversation`() {
+        // Issue #818: a hand-edited / corrupt prefs blob must not crash; it
+        // falls back to the Conversation default (the cure).
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit().putString("default_agent_session_view", "Bogus").commit()
+        val repo = SettingsRepository(context)
+        assertEquals(
+            DefaultAgentSessionView.Conversation,
+            repo.settings.value.defaultAgentSessionView,
         )
     }
 

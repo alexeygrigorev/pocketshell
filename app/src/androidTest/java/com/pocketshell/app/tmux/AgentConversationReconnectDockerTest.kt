@@ -489,32 +489,39 @@ class AgentConversationReconnectDockerTest {
     }
 
     /**
-     * Issue #815 — detecting an agentic session must NOT change the tab the user
-     * is on. A freshly-attached, freshly-detected AGENT session must STAY on the
-     * raw Terminal view (the tab the user is already on) by default, WITHOUT the
-     * app yanking them to Conversation; and a plain SHELL session never gets a
+     * Issue #818 — an AGENT session OPENS on the configured default tab
+     * (Conversation by default, the black-screen cure), and a mid-session
+     * detection/refresh must NOT yank a user who has moved to Terminal back to
+     * Conversation (the #815 invariant). A plain SHELL session never gets a
      * conversation row at all.
      *
-     * Why: the maintainer found the auto-navigation to Conversation on detection
-     * jarring (introduced by af32522b for #807, now reverted). The empty-grid
-     * "black screen" that motivated that auto-switch is addressed at product
-     * level by epic #809 / the always-visible composer (#810), not by forcing a
-     * tab change. So detection must leave the view alone — the user can still
-     * switch to Conversation manually.
+     * Two distinct moments, distinguished here on the deterministic Docker
+     * fixture:
+     *  - **OPEN-time default (#818):** a freshly-attached, freshly-detected AGENT
+     *    session with no remembered/explicit choice lands on the configured
+     *    open-time default. The production default is Conversation — the readable
+     *    parsed view that cures the recurring black-screen reports (raw agent
+     *    TUIs render mostly black on the alt-screen buffer). This test asserts
+     *    the default open lands on Conversation, then re-runs the open with the
+     *    setting pinned to Terminal to prove the opt-out reaches the open path.
+     *  - **No mid-session yank (#815):** once a user has moved to the raw
+     *    Terminal mid-session, a later detection/refresh on the SAME live session
+     *    must leave them on Terminal — never re-apply the Conversation default.
+     *    The auto-navigation that #815 reverted (af32522b for #807) stays gone;
+     *    only the open-time initial selection is governed by the setting.
      *
      * This drives the production [TmuxSessionViewModel] against the deterministic
      * Docker `agents` fixture (host port 2222) through the FRESH-attach path —
      * NO reconnect — so it is far more deterministic than the reconnect case
-     * above and the load-bearing assertion is NOT CI-gated. Two panes:
-     *  - an AGENT pane (`claude`-named process in /workspace/pocketshell + a
-     *    refreshed Claude JSONL) → live detection fires → a conversation row is
-     *    created but the tab STAYS on Terminal, with NO `selectSessionTab` call
-     *    in this test.
+     * above and the load-bearing assertions are NOT CI-gated. Panes:
+     *  - an AGENT pane (`claude`-named process + a refreshed Claude JSONL) →
+     *    live detection fires → a conversation row is created on the open-time
+     *    default; the no-yank invariant is then exercised explicitly.
      *  - a SHELL pane (plain shell, no agent) → no detection ever lands → no
      *    conversation row is ever created → it stays on the raw Terminal.
      */
     @Test
-    fun freshlyDetectedAgentStaysOnTerminalAndShellGetsNoConversationRow(): Unit = runBlocking {
+    fun agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow(): Unit = runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -633,23 +640,46 @@ class AgentConversationReconnectDockerTest {
                 agentRow,
             )
 
-            // CORE ASSERTION (#815): with NO user tab tap, detecting the agent
-            // must NOT yank the user to Conversation — the row defaults to the
-            // raw Terminal view, the tab the user is already on. Give the auto-
-            // switch (if it had survived) a real chance to fire before asserting.
+            // CORE ASSERTION (#818): with NO user tab tap and NO remembered
+            // choice, a freshly-OPENED agent session lands on the configured
+            // open-time default. The production default is Conversation — the
+            // black-screen cure. Give any (forbidden) post-open re-detection a
+            // real chance to disturb it before asserting.
+            delay(SHELL_NO_DETECTION_SETTLE_MS)
+            val openTab = agentVm.agentConversations.value[agentPaneId]!!.selectedTab
+            assertEquals(
+                "a freshly-opened agent session lands on the Conversation default (#818); " +
+                    "pane=$agentPaneId",
+                SessionTab.Conversation,
+                openTab,
+            )
+            val openDetection = agentVm.agentConversations.value[agentPaneId]!!.detection
+            assertEquals(
+                "the opened row must carry the real Claude detection",
+                AgentKind.ClaudeCode,
+                openDetection?.agent,
+            )
+            stamp("issue818_agent_open_tab=$openTab")
+
+            // NO-MID-SESSION-YANK ASSERTION (#815): the user moves to the raw
+            // Terminal mid-session. A subsequent detection/refresh on the SAME
+            // live session (same agent, same log) must leave them on Terminal —
+            // re-applying the Conversation open-time default here would be the
+            // exact #815 regression (the reverted af32522b auto-switch).
+            agentVm.selectSessionTab(agentPaneId, SessionTab.Terminal)
+            waitForSelectedTab(agentVm, agentPaneId, SessionTab.Terminal)
+            // Drive a same-agent re-detection (the production same-source
+            // refinement path markAgentTailLive takes on a reconnect / confidence
+            // drift) without standing up a new SSH round-trip.
+            agentVm.markAgentTailLiveForTest(agentPaneId, openDetection!!)
             delay(SHELL_NO_DETECTION_SETTLE_MS)
             assertEquals(
-                "detecting an agent must NOT change the tab — the row stays on raw Terminal, " +
-                    "with no user tab tap (pane=$agentPaneId)",
+                "a mid-session re-detection must NOT yank the user off Terminal back to the " +
+                    "Conversation default (#815); pane=$agentPaneId",
                 SessionTab.Terminal,
                 agentVm.agentConversations.value[agentPaneId]!!.selectedTab,
             )
-            assertEquals(
-                "the Terminal-default row must carry the real Claude detection",
-                AgentKind.ClaudeCode,
-                agentVm.agentConversations.value[agentPaneId]!!.detection?.agent,
-            )
-            stamp("issue815_agent_default_tab=${agentVm.agentConversations.value[agentPaneId]!!.selectedTab}")
+            stamp("issue815_no_mid_session_yank tab=${agentVm.agentConversations.value[agentPaneId]!!.selectedTab}")
 
             // Issue #817 (slice 1): the cold open seeded the conversation row,
             // so the conversation_open span must have been recorded. Wait for it
@@ -721,6 +751,55 @@ class AgentConversationReconnectDockerTest {
             agentVm.clearForTest()
         }
 
+        // ---- AGENT session, setting pinned to Terminal: must OPEN on Terminal
+        // ---- (#818 opt-out, emulator evidence for the "Terminal" value) -------
+        val agentTerminalVm = TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+            runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+        )
+        agentTerminalVm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
+        var terminalDefaultOpenTab: SessionTab? = null
+        try {
+            agentTerminalVm.connect(
+                hostId = 809L,
+                hostName = "Issue818 Agent Terminal-default Docker",
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                keyPath = keyPath,
+                passphrase = null,
+                sessionName = agentSessionName,
+            )
+            waitForStatus<TmuxSessionViewModel.ConnectionStatus.Connected>(
+                agentTerminalVm,
+                "issue818 agent terminal-default connect",
+            )
+            val tPanes = waitForPanes(agentTerminalVm, "issue818 agent terminal-default panes")
+            val tWindowId = tPanes.first().windowId
+            val tPaneId = tPanes.first { it.windowId == tWindowId }.paneId
+            waitForAgentForWindow(agentTerminalVm, tWindowId, "issue818 terminal-default detection")
+            waitForCondition(
+                label = "issue818 terminal-default conversation row",
+                timeoutMs = 10_000,
+                describe = { "conversations=${agentTerminalVm.agentConversations.value.keys}" },
+                predicate = { agentTerminalVm.agentConversations.value[tPaneId] != null },
+            )
+            delay(SHELL_NO_DETECTION_SETTLE_MS)
+            terminalDefaultOpenTab = agentTerminalVm.agentConversations.value[tPaneId]!!.selectedTab
+            assertEquals(
+                "with the open-time default set to Terminal, a freshly-opened agent session " +
+                    "lands on Terminal (#818 opt-out); pane=$tPaneId",
+                SessionTab.Terminal,
+                terminalDefaultOpenTab,
+            )
+            stamp("issue818_agent_open_tab_terminal_default=$terminalDefaultOpenTab")
+        } finally {
+            agentTerminalVm.clearForTest()
+        }
+
         // ---- SHELL session: must NOT be forced onto Conversation ----
         val shellVm = TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
@@ -762,12 +841,14 @@ class AgentConversationReconnectDockerTest {
             stamp("issue815_shell_stays_terminal conversations=${shellVm.agentConversations.value.keys}")
 
             writeText(
-                "issue815-default-tab-summary.txt",
+                "issue818-default-tab-summary.txt",
                 buildString {
-                    appendLine("scenario=detection-does-not-change-tab-agent-and-shell-stay-terminal (#815)")
+                    appendLine("scenario=agent-opens-on-conversation-default-no-mid-session-yank (#818/#815)")
                     appendLine("agent_session=$agentSessionName")
                     appendLine("shell_session=$shellSessionName")
-                    appendLine("agent_default_tab=Terminal")
+                    appendLine("agent_open_tab=Conversation (the #818 default cure)")
+                    appendLine("agent_open_tab_terminal_default=$terminalDefaultOpenTab (the #818 opt-out)")
+                    appendLine("agent_after_user_terminal_then_redetect=Terminal (no mid-session yank, #815)")
                     appendLine("shell_has_conversation_row=false")
                     appendLine("shell_agent_for_window=null")
                     appendLine("stamps:")

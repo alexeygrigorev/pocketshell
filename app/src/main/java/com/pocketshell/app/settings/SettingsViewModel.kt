@@ -226,6 +226,14 @@ class SettingsViewModel @Inject constructor(
     fun setBackgroundGraceMillis(millis: Long) =
         repository.setBackgroundGraceMillis(millis)
 
+    /**
+     * Issue #818: persist which tab an agent session opens on (Conversation /
+     * Terminal). Read at open/initial-tab time only — never drives a
+     * mid-session switch (#815).
+     */
+    fun setDefaultAgentSessionView(view: DefaultAgentSessionView) =
+        repository.setDefaultAgentSessionView(view)
+
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) =
         repository.setDiagnosticsRecordingEnabled(enabled)
 

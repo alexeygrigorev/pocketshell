@@ -34,6 +34,34 @@ enum class VoiceTranscriptionProvider {
 }
 
 /**
+ * Which tab an AGENT session lands on when it is first opened / first
+ * detected. Issue #818.
+ *
+ * [Conversation] (the default) opens the parsed agent Conversation view —
+ * the readable surface. This is the permanent cure for the recurring
+ * "black screen" reports: a raw agent TUI uses the alternate-screen buffer
+ * and renders mostly black when idle, whereas the parsed Conversation is
+ * always legible. It is only a safe default now that the Conversation view
+ * opens fast (#828: 264–280ms @ 80ms RTT) and binds to the correct source
+ * (#825).
+ *
+ * [Terminal] opens the raw terminal view instead — the pre-#818 behaviour —
+ * for users who prefer to watch the live TUI.
+ *
+ * IMPORTANT — open-time only. This preference selects the INITIAL tab when an
+ * agent session opens. It must NEVER drive a mid-session switch: a user who is
+ * already viewing a live session's Terminal must not be yanked to Conversation
+ * on a later detection/refresh (that is the #815 regression line, reverted in
+ * commit 207d33e5). A remembered/explicit per-session tab choice still wins
+ * over this global default (the existing memory-seeding precedence). Shell
+ * (non-agent) sessions have no Conversation tab and are unaffected.
+ */
+enum class DefaultAgentSessionView {
+    Conversation,
+    Terminal,
+}
+
+/**
  * Snapshot of all PocketShell user-tunable settings exposed by the
  * settings surface introduced in issue #112.
  *
@@ -127,6 +155,13 @@ data class AppSettings(
      * in-app JSONL log that can be shared manually from Settings.
      */
     val diagnosticsRecordingEnabled: Boolean = DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
+    /**
+     * Issue #818: which tab an agent session opens on (Conversation /
+     * Terminal). Defaults to [DefaultAgentSessionView.Conversation] — the
+     * black-screen cure. Read only at open/initial-tab time; never drives a
+     * mid-session switch (#815).
+     */
+    val defaultAgentSessionView: DefaultAgentSessionView = DEFAULT_AGENT_SESSION_VIEW,
 ) {
     companion object {
         const val MIN_TERMINAL_FONT_SP: Float = 10f
@@ -278,6 +313,18 @@ data class AppSettings(
         // no always-on fallback branch anywhere).
         const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = false
         const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
+
+        /**
+         * Issue #818: default tab for a freshly-opened agent session.
+         * Conversation is the cure for the recurring black-screen reports
+         * (raw agent TUIs render mostly black on the alt-screen buffer; the
+         * parsed Conversation is always legible) and is safe now that the
+         * Conversation view opens fast (#828) and binds the right source
+         * (#825). Users who prefer the raw terminal can switch this to
+         * Terminal in Settings.
+         */
+        val DEFAULT_AGENT_SESSION_VIEW: DefaultAgentSessionView =
+            DefaultAgentSessionView.Conversation
 
         const val BACKGROUND_GRACE_30_SECONDS_MS: Long = 30_000L
         const val DEFAULT_BACKGROUND_GRACE_MILLIS: Long = 60_000L

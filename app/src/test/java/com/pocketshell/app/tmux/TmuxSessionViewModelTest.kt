@@ -6146,17 +6146,25 @@ class TmuxSessionViewModelTest {
         )
     }
 
-    // ─── Issue #815: detecting an agent must NOT change the user's tab ───
+    // ─── Issue #818: configurable open-time default tab + the #815 line ───
+    //
+    // #818 makes the tab a freshly-OPENED agent session lands on configurable
+    // (default Conversation — the black-screen cure). The #815 invariant is
+    // preserved but reframed: the open-time default ONLY governs the fresh-row
+    // open; a detection/refresh on an ALREADY-open session must never yank the
+    // user's tab in either direction. A remembered/explicit per-session choice
+    // still wins (seed-from-memory runs first).
 
     @Test
-    fun freshlyDetectedAgentStaysOnTerminalTab() = runTest(scheduler) {
-        // Issue #815: detecting an agentic session must NOT yank the user onto
-        // the Conversation view. When a POSITIVE agent detection first lands on a
-        // pane with NO existing conversation row (no remembered tab, no explicit
-        // user choice), the live-detection landing path defaults the new row to
-        // the raw Terminal view — the tab the user is already on. The user can
-        // still switch to Conversation manually.
+    fun freshlyOpenedAgentLandsOnConfiguredTerminalDefault() = runTest(scheduler) {
+        // Issue #818: with the open-time default set to Terminal (the user
+        // opted out of the Conversation default), a POSITIVE agent detection
+        // that first lands on a pane with NO existing row (no remembered tab,
+        // no explicit choice) opens on the raw Terminal view.
         val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
         assertNull("precondition: no conversation row before detection", vm.agentConversations.value["%0"])
@@ -6167,7 +6175,7 @@ class TmuxSessionViewModelTest {
 
         val state = vm.agentConversations.value["%0"]!!
         assertEquals(
-            "detecting an agent must NOT change the tab: a fresh detection defaults to Terminal",
+            "open-time default Terminal: a freshly-opened agent session lands on Terminal",
             SessionTab.Terminal,
             state.selectedTab,
         )
@@ -6175,11 +6183,37 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun freshlyDetectedAgentViaFullSshPathStaysOnTerminalTab() = runTest(scheduler) {
-        // Issue #815: the same Terminal default through the REAL end-to-end
-        // production conversation-start path (startAgentConversationForPane →
-        // markAgentTailLive), not only the markAgentTailLive seam.
+    fun freshlyOpenedAgentLandsOnConversationByDefault() = runTest(scheduler) {
+        // Issue #818: the DEFAULT open-time view is Conversation — the
+        // black-screen cure. With no override (= production default) a fresh
+        // agent detection opens directly on the readable Conversation view.
         val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        assertNull("precondition: no conversation row before detection", vm.agentConversations.value["%0"])
+
+        vm.markAgentTailLiveForTest("%0", newClaudeDetection())
+        runCurrent()
+
+        val state = vm.agentConversations.value["%0"]!!
+        assertEquals(
+            "the default open-time view is Conversation (#818 black-screen cure)",
+            SessionTab.Conversation,
+            state.selectedTab,
+        )
+        assertEquals(AgentKind.ClaudeCode, state.detection?.agent)
+    }
+
+    @Test
+    fun freshlyOpenedAgentViaFullSshPathHonoursTerminalDefault() = runTest(scheduler) {
+        // Issue #818: the open-time default through the REAL end-to-end
+        // production conversation-start path (startAgentConversationForPane →
+        // markAgentTailLive), not only the markAgentTailLive seam. Pinned to
+        // Terminal to prove the opt-out reaches the open path.
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
         vm.attachClientForTest(FakeTmuxClient())
         val detection = newClaudeDetection()
         val session = FakeSshSession(
@@ -6192,40 +6226,89 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         assertEquals(
-            "the end-to-end detect+load path must NOT bounce the user off Terminal",
+            "the end-to-end detect+load path honours the Terminal open-time default",
             SessionTab.Terminal,
             vm.agentConversations.value["%0"]!!.selectedTab,
         )
     }
 
     @Test
-    fun differentAgentTakeoverStaysOnTerminalTab() = runTest(scheduler) {
-        // Issue #815: a DIFFERENT agent taking over a pane's window (no
-        // same-source continuity) must also NOT force the user onto Conversation.
-        // The new identity's row defaults to Terminal, just like a fresh row.
+    fun midSessionAgentTakeoverDoesNotYankUserOffTerminal() = runTest(scheduler) {
+        // Issue #815/#818 (the no-mid-session-yank line): a DIFFERENT agent
+        // taking over a pane's window (no same-source continuity) is a
+        // detection/refresh on an ALREADY-open session, NOT an open-time event.
+        // It must NEVER force the user onto another view — even when the global
+        // open-time default is Conversation. A user watching the raw Terminal
+        // stays on Terminal through the takeover.
         val vm = newVm()
+        // Global default = Conversation (the #818 default) to prove the takeover
+        // does NOT apply the open-time default mid-session.
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
-        // First agent lands and creates the row (defaults to Terminal).
+        // First agent lands and creates the row (open-time default = Conversation).
         vm.markAgentTailLiveForTest("%0", newClaudeDetection())
         runCurrent()
         assertEquals(
-            "precondition: the first detection defaults to Terminal",
+            "precondition: the first OPEN lands on the Conversation default",
+            SessionTab.Conversation,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+        // The user deliberately moves to the raw Terminal mid-session.
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+        runCurrent()
+        assertEquals(
+            "precondition: the user is now on Terminal",
             SessionTab.Terminal,
             vm.agentConversations.value["%0"]!!.selectedTab,
         )
 
         // A different agent (Codex) takes over the same pane — no same-source
         // continuity, so the takeover branch (current.detection != detection)
-        // rebuilds the row. It must still default to Terminal, not Conversation.
+        // rebuilds the row. It must PRESERVE the user's Terminal tab, NOT yank
+        // them to the Conversation default.
         vm.markAgentTailLiveForTest("%0", newCodexDetection())
         runCurrent()
         val takenOver = vm.agentConversations.value["%0"]!!
         assertEquals(
-            "a different-agent takeover must NOT force the user onto Conversation",
+            "a mid-session takeover must NOT yank the user off Terminal (#815)",
             SessionTab.Terminal,
             takenOver.selectedTab,
         )
         assertEquals(AgentKind.Codex, takenOver.detection?.agent)
+    }
+
+    @Test
+    fun midSessionRefreshDoesNotYankUserOffTerminalWithConversationDefault() = runTest(scheduler) {
+        // Issue #815/#818: the core no-yank invariant for the SAME-agent
+        // refinement path. With the open-time default = Conversation, a user who
+        // opened on Conversation and then moved to Terminal must NOT be bounced
+        // back to Conversation when live detection re-lands (a reconnect /
+        // confidence drift on the same agent + same log).
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.markAgentTailLiveForTest("%0", newClaudeDetection())
+        runCurrent()
+        // The user moves to the raw Terminal.
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+        runCurrent()
+        assertEquals(SessionTab.Terminal, vm.agentConversations.value["%0"]!!.selectedTab)
+
+        // Same-agent re-detection (only confidence drifted) re-lands.
+        vm.markAgentTailLiveForTest(
+            "%0",
+            newClaudeDetection().copy(confidence = AgentDetection.Confidence.RecentFile),
+        )
+        runCurrent()
+        assertEquals(
+            "a same-agent mid-session refresh must NOT yank the user back to the Conversation default",
+            SessionTab.Terminal,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
     }
 
     @Test

@@ -202,6 +202,17 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(backgroundGraceMillis = supported)
     }
 
+    /**
+     * Persist which tab an agent session opens on. Issue #818. Read at
+     * open/initial-tab time by the session-open path; never drives a
+     * mid-session switch (#815).
+     */
+    fun setDefaultAgentSessionView(view: DefaultAgentSessionView) {
+        if (_settings.value.defaultAgentSessionView == view) return
+        prefs.edit().putString(KEY_DEFAULT_AGENT_SESSION_VIEW, view.name).apply()
+        _settings.value = _settings.value.copy(defaultAgentSessionView = view)
+    }
+
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) {
         if (_settings.value.diagnosticsRecordingEnabled == enabled) return
         prefs.edit().putBoolean(KEY_DIAGNOSTICS_RECORDING_ENABLED, enabled).apply()
@@ -278,6 +289,13 @@ class SettingsRepository @Inject constructor(
             KEY_DIAGNOSTICS_RECORDING_ENABLED,
             AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
         )
+        val defaultAgentSessionViewName = prefs.safeString(
+            KEY_DEFAULT_AGENT_SESSION_VIEW,
+            AppSettings.DEFAULT_AGENT_SESSION_VIEW.name,
+        ) ?: AppSettings.DEFAULT_AGENT_SESSION_VIEW.name
+        val defaultAgentSessionView = runCatching {
+            DefaultAgentSessionView.valueOf(defaultAgentSessionViewName)
+        }.getOrDefault(AppSettings.DEFAULT_AGENT_SESSION_VIEW)
         return AppSettings(
             terminalFontSizeSp = font,
             conversationFontSizeSp = conversationFont,
@@ -293,6 +311,7 @@ class SettingsRepository @Inject constructor(
             agentSubmitEnterDelayMs = agentSubmitEnterDelayMs,
             backgroundGraceMillis = backgroundGraceMillis,
             diagnosticsRecordingEnabled = diagnosticsRecordingEnabled,
+            defaultAgentSessionView = defaultAgentSessionView,
         )
     }
 
@@ -395,5 +414,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
         const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
         const val KEY_DIAGNOSTICS_RECORDING_ENABLED = "diagnostics_recording_enabled"
+        const val KEY_DEFAULT_AGENT_SESSION_VIEW = "default_agent_session_view"
     }
 }

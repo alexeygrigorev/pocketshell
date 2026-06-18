@@ -1015,17 +1015,17 @@ internal fun FolderListContent(
     val flatGroups = remember(flatSessions) { FlatSessionGroups.from(flatSessions) }
     // Issue #639: the refresh indicator must NOT displace the list. A routine
     // refresh fires on every session switch, so a top in-list row that pushes
-    // every row down makes the whole list jump under the user's finger. Instead
-    // the indicator is a thin top progress bar overlaid on the content (it
-    // reflows nothing) — see [FolderRefreshProgressBar] pinned to the top of
-    // this Box below.
+    // every row down makes the whole list jump under the user's finger. The
+    // single non-displacing affordance is the [PullToRefreshBox]'s own circular
+    // spinner, which overlays the content and reflows nothing (issue #750 removed
+    // the redundant second top linear bar that used to render alongside it).
     //
     // EPIC #679 requirement #4: the standard swipe-down pull-to-refresh gesture
     // is the explicit manual-reconcile affordance (no extra button). The
     // [PullToRefreshBox] hosts the LazyColumn so a drag-down fires
     // [onPullToRefresh] (→ the maintained-tree reconcile) and surfaces the
-    // refreshing spinner driven by the same [isRefreshing] flag as the #639
-    // top bar.
+    // refreshing spinner driven by the [isRefreshing] flag — the SINGLE loading
+    // indicator for the refresh state (issue #750).
     val pullState = rememberPullToRefreshState()
     PullToRefreshBox(
         isRefreshing = isRefreshing,
@@ -1184,16 +1184,15 @@ internal fun FolderListContent(
             )
         }
     }
-        // Issue #639: non-displacing refresh affordance. A thin indeterminate
-        // progress bar pinned to the top edge of the content overlays the list
-        // (it occupies zero layout slot, so no row shifts when it appears or
-        // disappears). The previous in-list "Refreshing sessions" row pushed
-        // every row down on every session switch.
-        if (isRefreshing) {
-            FolderRefreshProgressBar(
-                modifier = Modifier.align(Alignment.TopCenter),
-            )
-        }
+        // Issue #750: exactly ONE loading indicator. The refresh affordance is the
+        // single circular spinner the [PullToRefreshBox] already surfaces from the
+        // same [isRefreshing] flag. The previous thin top linear progress bar (#639)
+        // rendered AT THE SAME TIME as that circular spinner — two loaders at once
+        // (the maintainer's screenshot: cyan top line under the header + a circular
+        // spinner over the list) — so it is removed (hard-cut, D22). The
+        // pull-to-refresh indicator is itself non-displacing (it overlays the
+        // content and reflows no rows), so the #639 "don't push rows down on every
+        // session switch" requirement still holds with the single indicator.
         // Issue #656: failures surface as a non-displacing snackbar-style
         // overlay pinned to the bottom edge of the content. Like the #639
         // refresh bar it occupies zero layout slot in the list, so a failed
@@ -1210,16 +1209,6 @@ internal fun FolderListContent(
         }
     }
     }
-}
-
-@Composable
-private fun FolderRefreshProgressBar(modifier: Modifier = Modifier) {
-    // The canonical indeterminate "in flight" strip (#756): one accent bar on a
-    // faint track, kept thin/non-displacing (issue #639). Geometry + colours now
-    // come from the shared LoadingIndicator.Bar token, not per-call values.
-    LoadingIndicator.Bar(
-        modifier = modifier.testTag(FOLDER_LIST_REFRESHING_TAG),
-    )
 }
 
 private val HostPortForwardingSummary.shouldShowSummary: Boolean
@@ -2715,7 +2704,6 @@ const val FOLDER_LIST_BACK_TAG: String = "folder-list:back"
 const val FOLDER_LIST_TITLE_TAG: String = "folder-list:title"
 const val FOLDER_LIST_LOADING_TAG: String = "folder-list:loading"
 const val FOLDER_LIST_LOADING_BODY_TAG: String = "folder-list:loading:body"
-const val FOLDER_LIST_REFRESHING_TAG: String = "folder-list:refreshing"
 const val FOLDER_LIST_ERROR_TAG: String = "folder-list:error"
 const val FOLDER_LIST_RETRY_TAG: String = "folder-list:retry"
 const val FOLDER_LIST_EMPTY_TAG: String = "folder-list:empty"

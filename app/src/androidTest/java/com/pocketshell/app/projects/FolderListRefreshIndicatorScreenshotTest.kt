@@ -25,13 +25,22 @@ import java.io.FileOutputStream
  * Issue #639 — the host-detail refresh indicator must NOT displace the list and
  * a routine refresh must NOT reorder rows.
  *
+ * Issue #750 — the refresh state must show EXACTLY ONE loading indicator. The
+ * screen used to render the [PullToRefreshBox]'s circular spinner AND a separate
+ * thin top linear progress bar at the same time (two loaders at once). The top
+ * linear bar (formerly `FOLDER_LIST_REFRESHING_TAG`) is removed; the single
+ * remaining indicator is the pull-to-refresh spinner, which is itself
+ * non-displacing.
+ *
  * This test drives the real [FolderListContent] (flat view) on the emulator:
  *
  *  - It captures the top Y of the first visible session row with the refresh
  *    indicator OFF, flips `isRefreshing` ON (same sessions), and asserts the
  *    first row's top Y is UNCHANGED. The previous in-list "Refreshing sessions"
- *    row pushed every row down; the new thin top progress bar overlays and
+ *    row pushed every row down; the single pull-to-refresh spinner overlays and
  *    reflows nothing.
+ *  - It asserts the removed top linear progress bar is NOT present in the refresh
+ *    state (single-indicator regression guard, #750).
  *  - It asserts the rendered row order is exactly the (stable) order it was
  *    given, in both the OFF and ON states — the screen renders in the order the
  *    ViewModel supplies, which the maintained [HostTreeModel] keeps in stable
@@ -40,6 +49,15 @@ import java.io.FileOutputStream
  * Before/after PNGs are written for the status comment.
  */
 class FolderListRefreshIndicatorScreenshotTest {
+
+    private companion object {
+        // The verbatim test tag of the top linear progress bar that issue #750
+        // removed (was `FOLDER_LIST_REFRESHING_TAG = "folder-list:refreshing"`).
+        // The production constant is deleted (hard-cut, D22); this literal anchors
+        // the negative assertion to the removed bar's identity so re-introducing
+        // a second top indicator under the same tag would fail this test.
+        const val REMOVED_TOP_REFRESH_BAR_TAG = "folder-list:refreshing"
+    }
 
     @get:Rule
     val compose = createComposeRule()
@@ -110,8 +128,10 @@ class FolderListRefreshIndicatorScreenshotTest {
         compose.waitForIdle()
         SystemClock.sleep(200)
 
-        // The thin progress bar exists but must not push the list down.
-        compose.onNodeWithTag(FOLDER_LIST_REFRESHING_TAG).assertIsDisplayed()
+        // Issue #750: exactly ONE loading indicator in the refresh state. The
+        // removed top linear progress bar must NOT exist (it used to render
+        // alongside the pull-to-refresh circular spinner — two loaders at once).
+        compose.onNodeWithTag(REMOVED_TOP_REFRESH_BAR_TAG).assertDoesNotExist()
         val topAfter = compose.onNodeWithTag(firstRowTag)
             .fetchSemanticsNode().boundsInRoot.top
         val orderAfter = visibleRowOrder()

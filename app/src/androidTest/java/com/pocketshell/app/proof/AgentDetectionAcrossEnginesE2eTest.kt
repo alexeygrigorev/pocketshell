@@ -144,6 +144,40 @@ class AgentDetectionAcrossEnginesE2eTest {
         )
     }
 
+    /**
+     * Issue #820 regression test — the Conversation tab hard-failed
+     * ("Couldn't load this conversation.") for a connected, visibly-alive
+     * Claude Code session because the Claude branch of
+     * [com.pocketshell.app.session.AgentConversationRepository.detectionCommand]
+     * pre-filtered candidates with `find ... -mmin -5`. An idle Claude
+     * session between turns — or one whose Z.AI/GLM response had not flushed
+     * its JSONL in the last 5 minutes — had its only transcript excluded by
+     * that gate, so `detectForPane` returned null and the 12 s detection
+     * watchdog flipped the tab to the Failed state. (Not Z.AI-specific:
+     * Z.AI Claude writes its JSONL to the identical
+     * `~/.claude/projects/<cwd>/` directory.)
+     *
+     * The fix widened the Claude window to `-mmin -120` so it agrees with
+     * the in-process
+     * [com.pocketshell.core.agents.AgentDetector.recentWindowMillis]
+     * default. This test backdates the seeded Claude JSONL by 30 minutes —
+     * well beyond the old 5-minute gate, comfortably inside the new
+     * 120-minute one — and asserts detection still fires (so the
+     * Conversation tab loads instead of hard-failing). On current `main`
+     * (`-mmin -5`) this FAILS at `assertNotNull(detection)`.
+     */
+    @Test
+    fun claudeDetectionFiresWhenJsonlMtimeIsThirtyMinutesAgo() = runBlocking {
+        runStaleJsonlDetectionTest(
+            agent = AgentKind.ClaudeCode,
+            processCommand = "claude",
+            sessionLabel = "claude-stale",
+            seededJsonlPath = CLAUDE_PATH,
+            expectedPathSubstring = ".claude/projects/-workspace-pocketshell/",
+            stalenessMinutes = 30,
+        )
+    }
+
     private suspend fun runDetectionTest(
         agent: AgentKind,
         processCommand: String,
@@ -158,11 +192,30 @@ class AgentDetectionAcrossEnginesE2eTest {
         val sshKey = SshKey.Pem(key)
 
         // Touch the seeded JSONL so its mtime sits comfortably inside
-        // the detector's 5-minute recency window. The fixture's COPY
-        // step in the Docker image dates the file to image build time,
-        // which is far in the past on a long-lived test host.
+        // the detector's recency window. The fixture's COPY step in the
+        // Docker image dates the file to image build time, which is far
+        // in the past on a long-lived test host.
         withSshSession(sshKey) { session ->
             val seededFilePath = candidateFilePath(seededJsonlPath)
+            // Issue #820: now that every engine (Claude included) shares
+            // the 120-minute freshness window, a sibling engine's JSONL
+            // that an earlier test in this class `touch`ed to "now" stays
+            // a competing candidate. The session-scoped `detect` path
+            // ranks newest-mtime-wins among candidates in the same cwd, so
+            // a fresh peer JSONL could win this engine's assertion. Stale
+            // every OTHER engine's JSONL well past the 120-minute window
+            // (3 hours) so the engine under test is the only fresh
+            // candidate — the same discipline `runStaleJsonlDetectionTest`
+            // already applies.
+            val competingPaths = listOf(CLAUDE_PATH, CODEX_PATH, OPENCODE_PATH)
+                .map(::candidateFilePath)
+                .filterNot { it == seededFilePath }
+            for (competing in competingPaths) {
+                session.exec(
+                    "ancient=$(( $(date +%s) - 10800 )); " +
+                        "touch -d \"@${'$'}ancient\" ${shellQuote(competing)} 2>/dev/null || true",
+                )
+            }
             val touch = session.exec("touch ${shellQuote(seededFilePath)}")
             assertEquals(
                 "expected to refresh seeded log mtime for $agent at $seededFilePath, stderr='${touch.stderr}'",

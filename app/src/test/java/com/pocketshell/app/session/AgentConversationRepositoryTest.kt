@@ -853,6 +853,127 @@ class AgentConversationRepositoryTest {
     }
 
     // ----------------------------------------------------------------
+    // Issue #820: the Conversation tab hard-failed ("Couldn't load this
+    // conversation.") for a connected, idle Claude session because the
+    // Claude branch of detectionCommand pre-filtered candidates with
+    // `find ... -mmin -5`. An idle session (or one with slow JSONL
+    // flushing) had its only transcript excluded by that 5-minute gate,
+    // so detection returned null and the 12 s watchdog tripped to Failed.
+    // The fix widens the Claude window to `-mmin -120` so it agrees with
+    // AgentDetector.recentWindowMillis. These tests pin the new window in
+    // the generated command and prove an idle Claude pane still resolves.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun detectionCommandUsesA120MinuteFreshnessWindowForClaude() {
+        val command = AgentConversationRepository().detectionCommand("/workspace/pocketshell")
+
+        // The Claude `find` walks the cwd-scoped projects dir. It must use
+        // the 120-minute window, NOT the old 5-minute one that excluded
+        // idle/slow-flush Claude sessions (#820).
+        val claudeFindLine = command.lineSequence()
+            .first { it.contains("\$claude_dir") && it.contains("find") }
+        assertTrue(
+            "Claude find must use -mmin -120 (idle-session freshness, #820); " +
+                "got: $claudeFindLine",
+            claudeFindLine.contains("-mmin -120"),
+        )
+        assertFalse(
+            "Claude find must NOT use the old tight -mmin -5 window that hard-failed " +
+                "idle Claude conversations (#820); got: $claudeFindLine",
+            claudeFindLine.contains("-mmin -5 "),
+        )
+    }
+
+    @Test
+    fun detectForPaneResolvesIdleClaudeTranscriptOlderThanFiveMinutes() = runTest {
+        // The transcript's mtime is 30 minutes old — beyond the old
+        // 5-minute pre-filter but well inside the 120-minute window. The
+        // shell `find -mmin -120` (production) keeps emitting it, so the
+        // candidate reaches the detector and the pane resolves instead of
+        // hard-failing in the Conversation tab. The FakeSshSession returns
+        // exactly what the production `find` would emit.
+        //
+        // NOTE on coverage: the `-mmin -5` -> `-mmin -120` widening is
+        // SHELL-side (inside detectionCommand), so this JVM test (which
+        // injects the candidate the shell would emit) only proves the
+        // detector's own 120-minute recency window accepts a 30-min-old
+        // candidate — it is NOT the red->green proof for the shell-filter
+        // bug itself. Two siblings cover the actual fix:
+        //   * detectionCommandUsesA120MinuteFreshnessWindowForClaude
+        //     asserts the generated shell command no longer uses -mmin -5
+        //     (FAILS on origin/main).
+        //   * The connected E2E
+        //     AgentDetectionAcrossEnginesE2eTest
+        //       .claudeDetectionFiresWhenJsonlMtimeIsThirtyMinutesAgo
+        //     runs the real `find` against a 30-min-stale Claude JSONL on
+        //     the Docker fixture (FAILS on origin/main).
+        val thirtyMinAgoSeconds = (System.currentTimeMillis() - 30 * 60 * 1000L) / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$thirtyMinAgoSeconds|/workspace/pocketshell|/home/testuser/.claude/projects/-workspace-pocketshell/idle.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "1001 pts/1 00:00:01 claude",
+        )
+
+        val detection = AgentConversationRepository().detectForPane(
+            session = session,
+            cwd = "/workspace/pocketshell",
+            paneTty = "/dev/pts/1",
+            paneCommand = "claude",
+        )
+
+        assertNotNull(
+            "an idle Claude transcript (mtime 30 min ago) must still resolve so the " +
+                "Conversation tab loads instead of hard-failing (#820)",
+            detection,
+        )
+        assertEquals(AgentKind.ClaudeCode, detection?.agent)
+        assertEquals("idle", detection?.sessionId)
+    }
+
+    @Test
+    fun detectForPaneResolvesClaudeTranscriptWhenCwdContainsADot() = runTest {
+        // #820 encoding bug: a cwd containing a dot is encoded by Claude as
+        // `-...-with-dots-as-dashes`. The detectionCommand emits the same
+        // dot-encoded claude_dir, and the path-hint filter must agree, or
+        // the candidate is rejected and the pane hard-fails. The session
+        // returns a transcript under the correctly dot-encoded directory.
+        val nowSeconds = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$nowSeconds|/home/alexey/git/.claude|/home/alexey/.claude/projects/-home-alexey-git--claude/dot.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "1001 pts/1 00:00:01 claude",
+        )
+
+        // The production detectionCommand must encode the dot cwd the same
+        // way (double-dash) so the seeded path is actually found on a real
+        // host; assert that too.
+        val command = AgentConversationRepository().detectionCommand("/home/alexey/git/.claude")
+        assertTrue(
+            "detectionCommand must encode a dot cwd as a dash to match Claude's real " +
+                "projects dir (#820); got claude_dir line in: $command",
+            command.contains(".claude/projects/-home-alexey-git--claude"),
+        )
+
+        val detection = AgentConversationRepository().detectForPane(
+            session = session,
+            cwd = "/home/alexey/git/.claude",
+            paneTty = "/dev/pts/1",
+            paneCommand = "claude",
+        )
+
+        assertNotNull(
+            "a Claude transcript whose cwd contains a dot must resolve once the cwd is " +
+                "encoded like Claude's real projects dir (#820)",
+            detection,
+        )
+        assertEquals(AgentKind.ClaudeCode, detection?.agent)
+        assertEquals("dot", detection?.sessionId)
+    }
+
+    // ----------------------------------------------------------------
     // Issue #252 latency follow-up: detectForPanes must classify the
     // whole list from a CONSTANT number of round-trips (one candidate
     // enumeration + one host-wide ps), not 2 per session.

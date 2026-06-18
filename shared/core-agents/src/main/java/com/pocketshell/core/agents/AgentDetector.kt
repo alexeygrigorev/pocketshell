@@ -135,8 +135,24 @@ public class AgentDetector(
         AgentKind.OpenCode to listOf(".local/share/opencode/opencode.db"),
     )
 
+    /**
+     * Encodes a working directory into the directory name Claude Code uses
+     * under `~/.claude/projects/<encoded-cwd>/`.
+     *
+     * Issue #820: Claude replaces BOTH path separators (`/`) **and** dots
+     * (`.`) with `-`. The previous implementation only replaced `/`, so a
+     * cwd containing a dot (a dotdir like `/home/user/.claude`, a versioned
+     * dir like `app-1.2`, or a worktree path with a dot) produced an
+     * encoded name that diverged from Claude's real one — the resolver
+     * looked in a directory that doesn't exist, found no transcript, and
+     * the Conversation tab hard-failed ("Couldn't load this conversation.")
+     * after the 12 s detection watchdog. Empirically on a real box,
+     * `/home/alexey/git/.claude` → `-home-alexey-git--claude` (the dot
+     * becomes a dash, yielding a double dash). Every other character
+     * (letters, digits, underscores, existing hyphens) is preserved.
+     */
     public fun encodeClaudeCwd(cwd: String): String =
-        cwd.trim().replace('/', '-').ifBlank { "-" }
+        cwd.trim().replace('/', '-').replace('.', '-').ifBlank { "-" }
 
     private fun normalizeCwd(cwd: String): String =
         cwd.trim().trimEnd('/').ifBlank { "/" }

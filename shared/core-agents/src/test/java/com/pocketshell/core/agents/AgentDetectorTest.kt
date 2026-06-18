@@ -26,6 +26,88 @@ class AgentDetectorTest {
         )
     }
 
+    /**
+     * Issue #820: Claude Code replaces BOTH `/` and `.` with `-` when it
+     * names the directory under `~/.claude/projects/`. The previous
+     * implementation only replaced `/`, so any cwd containing a dot encoded
+     * to the wrong directory name, the resolver found no transcript, and the
+     * Conversation tab hard-failed. Empirically on a real box,
+     * `/home/alexey/git/.claude` → `-home-alexey-git--claude` (the dot
+     * becomes a dash, producing the double dash). This pins the contract.
+     */
+    @Test
+    fun encodesDotInClaudeCwdAsDashLikeRealClaude() {
+        // A dotdir in the path (the empirically-verified double-dash case).
+        assertEquals(
+            "-home-alexey-git--claude",
+            detector.encodeClaudeCwd("/home/alexey/git/.claude"),
+        )
+        // A versioned dir with a dot in the leaf name.
+        assertEquals(
+            "-workspace-app-1-2-3",
+            detector.encodeClaudeCwd("/workspace/app-1.2.3"),
+        )
+        // A worktree path with a dot in a middle segment.
+        assertEquals(
+            "-home-user-my-project-feature",
+            detector.encodeClaudeCwd("/home/user/my.project/feature"),
+        )
+        // Letters, digits, underscores, and existing hyphens are preserved.
+        assertEquals(
+            "-home-user-Repo_Name-2026",
+            detector.encodeClaudeCwd("/home/user/Repo_Name-2026"),
+        )
+    }
+
+    /**
+     * Issue #820: the path hint that gates Claude candidates is built from
+     * [AgentDetector.encodeClaudeCwd]. With a dot in the cwd, the hint must
+     * match Claude's real `-cwd-with-dots-as-dashes` directory or every
+     * candidate is rejected and detection returns null.
+     */
+    @Test
+    fun expectedPathHintEncodesDotCwdSoClaudeCandidateMatches() {
+        val hints = detector.expectedPathHints("/home/alexey/git/.claude")
+        assertEquals(
+            listOf(".claude/projects/-home-alexey-git--claude"),
+            hints[AgentKind.ClaudeCode],
+        )
+    }
+
+    /**
+     * Issue #820 end-to-end through [detect]: a real Claude transcript that
+     * lives at Claude's dot-encoded directory must be detected when the pane
+     * cwd contains a dot. Before the fix the candidate's path
+     * (`.claude/projects/-home-alexey-git--claude/...`) failed the path-hint
+     * filter (which produced `-home-alexey-git-.claude`), so `detect`
+     * returned null and the Conversation tab hard-failed.
+     */
+    @Test
+    fun detectsClaudeCandidateWhenCwdContainsADot() {
+        val detection = detector.detect(
+            cwd = "/home/alexey/git/.claude",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.ClaudeCode,
+                    path = "/home/alexey/.claude/projects/-home-alexey-git--claude/sess.jsonl",
+                    modifiedAtMillis = 9_500,
+                    sessionId = "claude-dot",
+                ),
+            ),
+            processLines = listOf("1234 pts/0 00:00:01 claude"),
+            requireProcessMatch = true,
+        )
+
+        assertNotNull(
+            "a Claude transcript under the dot-encoded projects dir must be " +
+                "detected when the cwd contains a dot (#820)",
+            detection,
+        )
+        assertEquals(AgentKind.ClaudeCode, detection?.agent)
+        assertEquals("claude-dot", detection?.sessionId)
+    }
+
     @Test
     fun expectedPathHintsCoverAllThreeEngines() {
         val hints = detector.expectedPathHints("/home/alexey/git/pocketshell")

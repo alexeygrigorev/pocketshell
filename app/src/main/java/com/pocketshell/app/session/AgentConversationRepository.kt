@@ -1178,30 +1178,37 @@ public class AgentConversationRepository internal constructor(
         // Each branch is best-effort: missing directories, missing
         // `sqlite3`, or absent OpenCode databases silently emit nothing.
         //
-        // Issue #236: freshness windows differ per engine.
-        //  - Claude (`-mmin -5`): Claude streams JSONL writes
-        //    continuously while the CLI is active, so a tight window
-        //    correctly rejects logs from a session that has already
-        //    exited (no streaming heartbeats anymore).
-        //  - Codex / OpenCode (`-mmin -120`): Codex flushes its rollout
-        //    JSONL only on turn completion. A user attached to an idle
-        //    Codex TUI between turns can easily sit beyond 5 minutes
-        //    without any new write, but the agent is still live. The
-        //    2-hour window matches the detector's recency gate
-        //    ([AgentDetector.recentWindowMillis]) so a stale-yet-active
-        //    Codex/OpenCode rollout survives both filters. The same
-        //    bound also applies to OpenCode's SQLite session rows by
-        //    emitting their `time_updated` as the candidate mtime. The
-        //    candidate path uses `opencode.db#<session-id>` so the
-        //    reader can re-query the selected session instead of trying
-        //    to tail the database file.
+        // Issue #236 / #820: every engine uses a 2-hour freshness window
+        // (`-mmin -120`) that matches the detector's recency gate
+        // ([AgentDetector.recentWindowMillis]) — the shell-side `find`
+        // pre-filter and the JVM-side recency filter agree.
+        //  - Claude originally used a tight `-mmin -5` window on the theory
+        //    that it streams JSONL continuously. In practice (#820) an idle
+        //    Claude session between turns, or one whose GLM/Z.AI response
+        //    hasn't flushed the JSONL in the last 5 minutes, had its only
+        //    transcript excluded by the pre-filter even though the agent
+        //    was visibly alive on screen. Detection then returned null and
+        //    the Conversation tab hard-failed ("Couldn't load this
+        //    conversation.") once the 12 s watchdog tripped. Widening to
+        //    `-mmin -120` lets an idle-but-real Claude session through; the
+        //    per-pane `requireProcessMatch` guard (#186) still prevents a
+        //    stale sibling JSONL in the same cwd from mis-lighting a pane
+        //    where no agent is actually running.
+        //  - Codex flushes its rollout JSONL only on turn completion. A
+        //    user attached to an idle Codex TUI between turns can easily sit
+        //    beyond 5 minutes without any new write, but the agent is still
+        //    live. The same 2-hour bound covers it. The bound also applies
+        //    to OpenCode's SQLite session rows by emitting their
+        //    `time_updated` as the candidate mtime. The candidate path uses
+        //    `opencode.db#<session-id>` so the reader can re-query the
+        //    selected session instead of trying to tail the database file.
         return """
             cwd=$quotedCwd
             claude_dir="${'$'}HOME/.claude/projects/$encodedClaudeCwd"
             codex_dir="${'$'}HOME/.codex/sessions"
             opencode_dir="${'$'}HOME/.local/share/opencode"
             opencode_db="${'$'}opencode_dir/opencode.db"
-            find "${'$'}claude_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
+            find "${'$'}claude_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'claude|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done

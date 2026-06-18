@@ -109,6 +109,119 @@ case "${1:-}" in
         ;;
     esac
     ;;
+  agents)
+    # Epic #821 A2-infra (issue #827): the unified CLI grew `pocketshell
+    # agents kind`, the seam over the `agents.kind_for_panes` daemon RPC. The
+    # client pipes a pane list as `{"panes":[{"pane_id","pane_pid"}, ...]}` JSON
+    # on stdin (and/or `--pane PANE_ID=PANE_PID`) and parses back
+    # `{"results":[{"pane_id","agent_kind","scope","evidence_pid"?}]}`.
+    #
+    # This Docker container has no real cgroup-v2 scope tree, so the fixture
+    # can't run the live classifier. Instead it answers DETERMINISTICALLY,
+    # keyed off the pane_pid the test supplies, so a connected test can assert a
+    # foreign session's guessed kind without seeding a cgroup tree:
+    #   pid 1000-1999 -> claude (scope tmuxctl-claude-main.scope)
+    #   pid 2000-2999 -> codex  (scope tmuxctl-codex.scope)
+    #   pid 3000-3999 -> opencode (scope tmuxctl-opencode-lab.scope)
+    #   pid 4000-4999 -> none   (scope tmuxctl-shell.scope; readable, no agent)
+    #   missing / non-integer / any other pid -> unknown (scope null)
+    # These ranges line up with the seeded fixture sessions claude-main / codex
+    # / opencode-lab (see pocketshell-sessions-list.txt) so the guess matches
+    # the session the test joins.
+    shift
+    if [ "${1:-}" != "kind" ]; then
+      printf 'pocketshell agents fixture supports: kind\n' >&2
+      exit 64
+    fi
+    shift
+
+    # Collect panes from --pane PANE_ID=PANE_PID options.
+    pane_specs=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --pane)
+          pane_specs="${pane_specs}${2:-}
+"
+          shift 2
+          ;;
+        --proc-root|--cgroup-mount)
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+
+    # Read stdin JSON panes when stdin is not a terminal. Extract pane_id /
+    # pane_pid pairs without a JSON parser (busybox has no jq): pull every
+    # "pane_id":... and "pane_pid":... token in document order. pane_pid is
+    # numeric in the RPC shape; a missing pid yields an empty field -> unknown.
+    if [ ! -t 0 ]; then
+      stdin_json="$(cat)"
+    else
+      stdin_json=""
+    fi
+
+    printf '%s' "$stdin_json" | tr ',' '\n' | awk -v specs="$pane_specs" '
+      function classify(pid,   n) {
+        if (pid !~ /^[0-9]+$/) return "unknown\tnull"
+        n = pid + 0
+        if (n >= 1000 && n < 2000) return "claude\ttmuxctl-claude-main.scope"
+        if (n >= 2000 && n < 3000) return "codex\ttmuxctl-codex.scope"
+        if (n >= 3000 && n < 4000) return "opencode\ttmuxctl-opencode-lab.scope"
+        if (n >= 4000 && n < 5000) return "none\ttmuxctl-shell.scope"
+        return "unknown\tnull"
+      }
+      function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+      function emit(pid, pane_id,   c, kind, scope, parts) {
+        c = classify(pid)
+        split(c, parts, "\t")
+        kind = parts[1]; scope = parts[2]
+        if (n++ > 0) printf ","
+        if (scope == "null") sval = "null"; else sval = "\"" esc(scope) "\""
+        printf "{\"pane_id\":\"%s\",\"agent_kind\":\"%s\",\"scope\":%s}", esc(pane_id), kind, sval
+      }
+      BEGIN {
+        printf "{\"results\":["
+        # --pane PANE_ID=PANE_PID specs first.
+        m = split(specs, lines, "\n")
+        for (i = 1; i <= m; i++) {
+          if (lines[i] == "") continue
+          eq = index(lines[i], "=")
+          if (eq == 0) continue
+          pid_id = substr(lines[i], 1, eq - 1)
+          pid_pid = substr(lines[i], eq + 1)
+          emit(pid_pid, pid_id)
+        }
+      }
+      # stdin JSON tokens, one comma-split fragment per line.
+      /"pane_id"/ {
+        if (match($0, /"pane_id"[ \t]*:[ \t]*"[^"]*"/)) {
+          s = substr($0, RSTART, RLENGTH)
+          sub(/^"pane_id"[ \t]*:[ \t]*"/, "", s); sub(/"$/, "", s)
+          pending_id = s; have_id = 1
+        }
+      }
+      /"pane_pid"/ {
+        if (match($0, /"pane_pid"[ \t]*:[ \t]*[0-9]+/)) {
+          s = substr($0, RSTART, RLENGTH)
+          sub(/^"pane_pid"[ \t]*:[ \t]*/, "", s)
+          pending_pid = s; have_pid = 1
+        } else {
+          pending_pid = ""; have_pid = 1
+        }
+      }
+      # A pane object closes either at its `}` or when the next pane_id starts;
+      # flush when we have both fields collected for the current object.
+      (have_id && have_pid) {
+        emit(pending_pid, pending_id)
+        have_id = 0; have_pid = 0; pending_id = ""; pending_pid = ""
+      }
+      END { printf "]}\n" }
+    '
+    exit 0
+    ;;
   profiles)
     # Issue #718 / #732: the Android picker fetches host-defined agent
     # profiles with `pocketshell profiles list [--engine <e>] --json`, so a
@@ -317,5 +430,5 @@ case "${1:-}" in
     ;;
 esac
 
-printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list\n' >&2
+printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, agents kind\n' >&2
 exit 64

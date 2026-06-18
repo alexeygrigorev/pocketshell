@@ -24,6 +24,7 @@ import click
 from pocketshell import __version__
 from pocketshell.agent_log import agent_log_command
 from pocketshell.agents import agent_group
+from pocketshell.agents_kind import agents_group
 from pocketshell.env import env_group
 from pocketshell.github import github_group
 from pocketshell.hooks import hooks_group
@@ -55,6 +56,7 @@ def cli() -> None:
 
 cli.add_command(usage_command, name="usage")
 cli.add_command(agent_group, name="agent")
+cli.add_command(agents_group, name="agents")
 cli.add_command(profiles_group, name="profiles")
 cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")

@@ -106,6 +106,7 @@ import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
 import com.pocketshell.app.conversation.ToolResultPairing
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
+import com.pocketshell.app.conversation.ConversationToolCardExpansion
 import com.pocketshell.app.conversation.filterConversationRows
 import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
 import com.pocketshell.app.conversation.runningToolCallIds
@@ -4312,10 +4313,15 @@ internal fun TmuxConversationPane(
         )
     }
     val filteredEvents = filteredConversation.events
-    // Tool-call expansion state per event-id. Persisted at the pane
-    // level (not inside the row composable) so a row scrolling out and
-    // back in remembers the user's decision until the session detaches.
-    val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
+    // Issue #824: tool-call expansion OVERRIDE per event-id. `true` = the user
+    // expanded it, `false` = the user collapsed it, absent = follow the
+    // auto-expand defaults (running card / search hit). Persisted at the pane
+    // level (not inside the row composable) so a row scrolling out and back in
+    // remembers the user's decision, and so a still-running card the user
+    // collapsed does NOT silently re-expand when the next event arrives. This
+    // replaces the old "explicitly-expanded Set" whose `isRunning && no-result`
+    // term could never be overridden by a tap — the #824 stuck-open bug.
+    val toolCallExpandOverrides = remember { mutableStateOf(mapOf<String, Boolean>()) }
     // Issue #176: SystemNote expand state — same idea as tool-call expand,
     // collapsed by default, the user's choice is sticky for the lifetime
     // of the conversation pane.
@@ -4436,23 +4442,39 @@ internal fun TmuxConversationPane(
                     }
                 }
                 items(filteredEvents, key = { it.id }) { event ->
+                    // Issue #824: resolve the card's expanded state from the
+                    // user's explicit override (if any) on top of the
+                    // auto-expand defaults (running card / search hit). A tap
+                    // records the OPPOSITE of the currently-shown state, so even
+                    // the most-recent running card always toggles closed.
+                    val toolCallExpanded = ConversationToolCardExpansion.isExpanded(
+                        userOverride = toolCallExpandOverrides.value[event.id],
+                        isRunning = event.id in runningToolIds,
+                        hasResult = (event as? ConversationEvent.ToolCall)?.let { call ->
+                            toolResultPairing.resultsByCallId.containsKey(call.id)
+                        } ?: false,
+                        isSearchExpanded = event.id in filteredConversation.searchExpandedToolCallIds,
+                    )
                     ConversationEventRow(
                         event = event,
                         runningToolIds = runningToolIds,
                         toolResultPairing = toolResultPairing,
-                        isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
-                            event.id in filteredConversation.searchExpandedToolCallIds,
+                        isExpanded = toolCallExpanded,
                         onToggleExpand = { id ->
                             ConversationDiagnostics.recordRowToggle(
                                 mode = "tmux",
                                 paneId = paneId,
                                 event = event,
-                                expanded = !expandedToolCalls.value.contains(id),
+                                expanded = !toolCallExpanded,
                                 pairedToolResult = (event as? ConversationEvent.ToolCall)?.let { call ->
                                     toolResultPairing.resultsByCallId[call.id]
                                 },
                             )
-                            expandedToolCalls.value = expandedToolCalls.value.toggle(id)
+                            toolCallExpandOverrides.value = ConversationToolCardExpansion.toggle(
+                                overrides = toolCallExpandOverrides.value,
+                                id = id,
+                                currentlyExpanded = toolCallExpanded,
+                            )
                         },
                         isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
                         onToggleSystemNoteExpand = { id ->
@@ -4674,7 +4696,7 @@ private fun ConversationEventRow(
     event: ConversationEvent,
     runningToolIds: Set<String>,
     toolResultPairing: ToolResultPairing,
-    isExplicitlyExpanded: Boolean,
+    isExpanded: Boolean,
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
@@ -4691,7 +4713,7 @@ private fun ConversationEventRow(
             toolCall = event,
             result = toolResultPairing.resultsByCallId[event.id],
             isRunning = event.id in runningToolIds,
-            isExplicitlyExpanded = isExplicitlyExpanded,
+            expanded = isExpanded,
             onToggle = { onToggleExpand(event.id) },
         )
         is ConversationEvent.ToolResult -> {
@@ -4741,10 +4763,13 @@ private fun ConversationToolCallChatCard(
     toolCall: ConversationEvent.ToolCall,
     result: ConversationEvent.ToolResult?,
     isRunning: Boolean,
-    isExplicitlyExpanded: Boolean,
+    // Issue #824: the fully-resolved expand state (user override applied over
+    // the auto-expand defaults), computed by the pane via
+    // [ConversationToolCardExpansion]. The card no longer re-derives it, so a
+    // running card with no result can be collapsed by tap.
+    expanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val expanded = isExplicitlyExpanded || (isRunning && result == null)
     val summary = remember(toolCall.id, toolCall.input) { ToolCallSummary.forToolCall(toolCall) }
     val statusGlyph = when {
         result?.isError == true -> "!"

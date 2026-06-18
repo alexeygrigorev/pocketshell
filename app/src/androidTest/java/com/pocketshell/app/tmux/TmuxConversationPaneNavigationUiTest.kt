@@ -12,7 +12,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -21,16 +23,20 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.uikit.theme.PocketShellTheme
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -272,6 +278,73 @@ class TmuxConversationPaneNavigationUiTest {
     }
 
     @Test
+    fun runningToolCallCardCanBeCollapsedByTapAndStaysCollapsedAcrossNewEvents() {
+        // #824: a Codex `write_stdin` long-poll tool call has NO paired result
+        // yet (it is still running). Before the fix the card was force-expanded
+        // and could not be collapsed. Reproduce the exact reported card.
+        val runningCall = ConversationEvent.ToolCall(
+            id = "call:write_stdin-1",
+            agent = AgentKind.Codex,
+            name = "write_stdin",
+            input = """{"session_id":"s-1","chars":"","yield_time_ms":30000,"max_output_tokens":40000}""",
+        )
+        val events = mutableStateOf<List<ConversationEvent>>(listOf(runningCall))
+
+        compose.setContent {
+            PocketShellTheme {
+                TmuxConversationPane(
+                    events = events.value,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        // The expanded "input" detail section only renders when the card is
+        // open; its copy button carries a stable, unambiguous test tag (the
+        // one-line collapsed summary does NOT render this tag). Assert on it
+        // rather than the JSON text, which also appears in the collapsed
+        // summary preview.
+        val inputSectionTag =
+            CONVERSATION_TOOL_COPY_TAG_PREFIX + "call:write_stdin-1" + ":input"
+
+        // A running card with no result auto-expands: its input section is shown.
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "call:write_stdin-1")
+            .assertIsDisplayed()
+        compose.onNodeWithTag(inputSectionTag, useUnmergedTree = true).assertExists()
+        saveScreenshot("issue824-running-card-expanded.png")
+
+        // Tap to collapse — the #824 fix. Click the header (the tool name in
+        // the clickable header Row, NOT the row's geometric centre which when
+        // expanded lands on the body section). The input section must vanish.
+        compose.onNodeWithText("write_stdin").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag(inputSectionTag, useUnmergedTree = true).assertDoesNotExist()
+        saveScreenshot("issue824-running-card-collapsed.png")
+
+        // A new transcript event arrives while the call is STILL running (no
+        // result paired). The collapsed card must NOT silently re-expand.
+        events.value = events.value + ConversationEvent.Message(
+            id = "later-message-1",
+            agent = AgentKind.Codex,
+            role = ConversationRole.Assistant,
+            text = "later-assistant-text",
+        )
+        compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("later-assistant-text")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(inputSectionTag, useUnmergedTree = true).assertDoesNotExist()
+
+        // Tapping again re-expands it — the toggle works both ways.
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "call:write_stdin-1")
+            .performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag(inputSectionTag, useUnmergedTree = true).assertExists()
+    }
+
+    @Test
     fun adjacentToolResultDetailsAreMergedIntoExpandedToolCall() {
         val events = listOf(
             ConversationEvent.ToolCall(
@@ -419,6 +492,27 @@ class TmuxConversationPaneNavigationUiTest {
      * row so the search test can assert exactly which rows survive
      * filtering.
      */
+    // #824 visual evidence: capture the live pane to a pullable PNG so the
+    // before/after collapse is attachable to the issue. Tolerant of emulator
+    // images where captureToImage can be flaky — the load-bearing proof is the
+    // assertion, not the bitmap.
+    private fun saveScreenshot(fileName: String) {
+        runCatching {
+            val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
+            val dir = File(mediaRoot, "additional_test_output/issue-824-toolcard-collapse")
+            check(dir.exists() || dir.mkdirs()) { "Could not create #824 screenshot dir: ${dir.absolutePath}" }
+            val file = File(dir, fileName)
+            file.outputStream().use { out ->
+                check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)) {
+                    "Could not write #824 screenshot: ${file.absolutePath}"
+                }
+            }
+            println("ISSUE824_SCREENSHOT ${file.absolutePath}")
+        }
+    }
+
     private fun sampleMessageEvents(count: Int): List<ConversationEvent> {
         val ts = 1_700_000_000_000L
         return (0 until count).map { i ->

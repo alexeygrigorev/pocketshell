@@ -9140,10 +9140,22 @@ public class TmuxSessionViewModel @Inject constructor(
         _agentConversations.update { conversations ->
             val current = conversations[paneId]
             val updated = when {
+                // Issue #807: a fresh POSITIVE agent detection landed on a pane
+                // with no existing conversation row (so no remembered tab and no
+                // explicit user choice to honour — `seedAgentConversationFromMemory`
+                // would have created the row first if a remembered choice existed).
+                // Default the agent's view to the Conversation (parsed) tab instead
+                // of the raw Terminal: an idle agent bottom-anchors its TUI and
+                // leaves the rest of the grid empty (the "black screen"), so the raw
+                // Terminal view is mostly unusable; the parsed Conversation view is
+                // readable and carries the always-visible composer (#810). This is a
+                // POSITIVE-detection-only default — a non-agent / plain shell never
+                // reaches `markAgentTailLive` (it is only called once an agent is
+                // detected), so this can never force a shell onto Conversation.
                 current == null -> AgentConversationUiState(
                     detection = detection,
                     events = boundedDistinctEvents(initialEvents),
-                    selectedTab = SessionTab.Terminal,
+                    selectedTab = SessionTab.Conversation,
                     syncStatus = AgentConversationSyncStatus.Live,
                 )
                 current.detection != detection && preserveDifferentDetection -> current
@@ -9160,10 +9172,16 @@ public class TmuxSessionViewModel @Inject constructor(
                         events = boundedDistinctEvents(current.events + initialEvents),
                         syncStatus = AgentConversationSyncStatus.Live,
                     )
+                // Issue #807: a DIFFERENT agent (no same-source continuity)
+                // took over this pane's window — the prior row's tab is being
+                // discarded entirely anyway. This is still a positive agent
+                // detection with no remembered/explicit choice to honour for the
+                // new identity, so default it to the Conversation (parsed) view
+                // for the same readability reason as the fresh-row branch above.
                 current.detection != detection -> AgentConversationUiState(
                     detection = detection,
                     events = boundedDistinctEvents(initialEvents),
-                    selectedTab = SessionTab.Terminal,
+                    selectedTab = SessionTab.Conversation,
                     syncStatus = AgentConversationSyncStatus.Live,
                 )
                 else -> current.copy(

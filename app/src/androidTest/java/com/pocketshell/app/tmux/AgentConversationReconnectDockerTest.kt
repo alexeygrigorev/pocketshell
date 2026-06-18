@@ -487,6 +487,215 @@ class AgentConversationReconnectDockerTest {
         }
     }
 
+    /**
+     * Issue #807 ("black screen") — a freshly-attached, freshly-detected AGENT
+     * session must open on the Conversation (parsed) view by default, WITHOUT
+     * the user tapping anything; and a plain SHELL session must NOT be forced
+     * onto Conversation.
+     *
+     * Why: an idle agent (e.g. Claude Code) bottom-anchors its TUI and leaves
+     * the rest of the grid empty, so its raw Terminal view is mostly black /
+     * unusable (proven faithful render — the void is the agent's own TUI, not a
+     * render bug). The shippable fix is to land a detected agent on the readable
+     * parsed Conversation view by default instead of that black raw Terminal.
+     *
+     * This drives the production [TmuxSessionViewModel] against the deterministic
+     * Docker `agents` fixture (host port 2222) through the FRESH-attach path —
+     * NO reconnect — so it is far more deterministic than the reconnect case
+     * above and the load-bearing assertion is NOT CI-gated. Two panes:
+     *  - an AGENT pane (`claude`-named process in /workspace/pocketshell + a
+     *    refreshed Claude JSONL) → live detection fires → the default tab is
+     *    Conversation, with NO `selectSessionTab` call in this test.
+     *  - a SHELL pane (plain shell, no agent) → no detection ever lands → no
+     *    conversation row is ever created → it stays on the raw Terminal. This
+     *    proves the Conversation default can NEVER force a non-agent/shell pane.
+     */
+    @Test
+    fun freshlyDetectedAgentDefaultsToConversationAndShellStaysTerminal(): Unit = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val keyPath = writeKeyFile(key)
+        val suffix = System.currentTimeMillis().toString().takeLast(8)
+        val agentSessionName = "issue807-agent-$suffix"
+        val shellSessionName = "issue807-shell-$suffix"
+        val processDir = "/tmp/issue807-claude-${System.nanoTime()}"
+        val wrapperPath = "$processDir/claude"
+        // Self-contained, writable project cwd in the testuser home (NOT
+        // /workspace, which the test user cannot create). The Claude project
+        // dir is the cwd with '/' -> '-' (AgentDetector.encodeClaudeCwd), so the
+        // pane's cwd and the seeded JSONL dir line up and per-pane detection
+        // matches THIS session.
+        val homeDir = "/home/$DEFAULT_USER"
+        val agentCwd = "$homeDir/issue807-pocketshell-$suffix"
+        val encodedClaudeCwd = agentCwd.replace('/', '-')
+        val claudeProjectDir = "$homeDir/.claude/projects/$encodedClaudeCwd"
+        val claudeJsonl = "$claudeProjectDir/issue807-claude.jsonl"
+        val shellCwd = homeDir
+        cleanupCommands += "tmux kill-session -t ${shellQuote(agentSessionName)} 2>/dev/null || true"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(shellSessionName)} 2>/dev/null || true"
+        cleanupCommands += "pkill -f ${shellQuote(wrapperPath)} 2>/dev/null || true"
+        cleanupCommands += "rm -rf ${shellQuote(processDir)} 2>/dev/null || true"
+        cleanupCommands += "rm -rf ${shellQuote(agentCwd)} 2>/dev/null || true"
+        cleanupCommands += "rm -rf ${shellQuote(claudeProjectDir)} 2>/dev/null || true"
+
+        // Seed the AGENT session: a `claude`-named foreground process in the
+        // project cwd + a fresh Claude JSONL (in the cwd-encoded project dir) so
+        // per-pane detection promotes to ProcessConfirmed.
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("mkdir -p ${shellQuote(agentCwd)}")
+                appendLine("mkdir -p ${shellQuote(claudeProjectDir)}")
+                appendLine("cat > ${shellQuote(claudeJsonl)} <<'JSONL_EOF'")
+                appendLine(
+                    """{"uuid":"u807-1","timestamp":"2026-06-18T10:00:00Z",""" +
+                        """"message":{"role":"user","content":"hello agent"}}""",
+                )
+                appendLine(
+                    """{"uuid":"a807-1","timestamp":"2026-06-18T10:00:01Z",""" +
+                        """"message":{"role":"assistant","content":[{"type":"text","text":"hi back"}]}}""",
+                )
+                appendLine("JSONL_EOF")
+                appendLine("mkdir -p ${shellQuote(processDir)}")
+                appendLine("cat > ${shellQuote(wrapperPath)} <<'WRAPPER_EOF'")
+                appendLine("#!/bin/sh")
+                appendLine("while true; do sleep 5; done")
+                appendLine("WRAPPER_EOF")
+                appendLine("chmod +x ${shellQuote(wrapperPath)}")
+                appendLine("tmux kill-session -t ${shellQuote(agentSessionName)} 2>/dev/null || true")
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(agentSessionName)} " +
+                        "-c ${shellQuote(agentCwd)} ${shellQuote(wrapperPath)}",
+                )
+                // Seed the SHELL session: a plain shell pane, no agent.
+                appendLine("tmux kill-session -t ${shellQuote(shellSessionName)} 2>/dev/null || true")
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(shellSessionName)} " +
+                        "-c ${shellQuote(shellCwd)}",
+                )
+                appendLine("sleep 1")
+            },
+        )
+
+        // ---- AGENT session: default tab must be Conversation (no user tap) ----
+        val agentVm = TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+            runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+        )
+        try {
+            agentVm.connect(
+                hostId = 807L,
+                hostName = "Issue807 Agent Docker",
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                keyPath = keyPath,
+                passphrase = null,
+                sessionName = agentSessionName,
+            )
+            waitForStatus<TmuxSessionViewModel.ConnectionStatus.Connected>(agentVm, "issue807 agent connect")
+            val agentPanes = waitForPanes(agentVm, "issue807 agent panes")
+            val agentWindowId = agentPanes.first().windowId
+            val agentPaneId = agentPanes.first { it.windowId == agentWindowId }.paneId
+            stamp("issue807_agent_attached window=$agentWindowId pane=$agentPaneId")
+
+            // Live detection lands → the Conversation tab is available.
+            waitForAgentForWindow(agentVm, agentWindowId, "issue807 agent detection")
+            assertEquals(
+                "live detection should identify Claude on the seeded agent window",
+                AgentKind.ClaudeCode,
+                agentVm.agentForWindow(agentWindowId),
+            )
+
+            // CORE ASSERTION (#807): with NO user tab tap, the freshly-detected
+            // agent opens on the parsed Conversation view by default — NOT the
+            // black raw Terminal. Bound the wait: markAgentTailLive seeds the
+            // default tab synchronously once the detection's tail read lands.
+            waitForSelectedTab(agentVm, agentPaneId, SessionTab.Conversation)
+            val agentRow = agentVm.agentConversations.value[agentPaneId]
+            assertNotNull(
+                "a detected agent must have a conversation row (pane=$agentPaneId); " +
+                    "conversations=${agentVm.agentConversations.value.keys}",
+                agentRow,
+            )
+            assertEquals(
+                "a freshly-detected agent must DEFAULT to Conversation (no black raw Terminal), " +
+                    "with no user tab tap",
+                SessionTab.Conversation,
+                agentRow!!.selectedTab,
+            )
+            assertEquals(
+                "the default-Conversation row must carry the real Claude detection",
+                AgentKind.ClaudeCode,
+                agentRow.detection?.agent,
+            )
+            stamp("issue807_agent_default_tab=${agentRow.selectedTab}")
+        } finally {
+            agentVm.clearForTest()
+        }
+
+        // ---- SHELL session: must NOT be forced onto Conversation ----
+        val shellVm = TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+            runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+        )
+        try {
+            shellVm.connect(
+                hostId = 808L,
+                hostName = "Issue807 Shell Docker",
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                keyPath = keyPath,
+                passphrase = null,
+                sessionName = shellSessionName,
+            )
+            waitForStatus<TmuxSessionViewModel.ConnectionStatus.Connected>(shellVm, "issue807 shell connect")
+            val shellPanes = waitForPanes(shellVm, "issue807 shell panes")
+            val shellWindowId = shellPanes.first().windowId
+            val shellPaneId = shellPanes.first { it.windowId == shellWindowId }.paneId
+            stamp("issue807_shell_attached window=$shellWindowId pane=$shellPaneId")
+
+            // Give live detection a real chance to (not) fire on the plain shell,
+            // then assert the shell never gets a conversation row and so never
+            // gets forced onto Conversation — it stays on the raw Terminal.
+            delay(SHELL_NO_DETECTION_SETTLE_MS)
+            assertEquals(
+                "a plain shell pane must have NO live agent detection",
+                null,
+                shellVm.agentForWindow(shellWindowId),
+            )
+            assertEquals(
+                "a non-agent shell must NOT be forced onto Conversation — no conversation row " +
+                    "is ever created for it, so it stays on the raw Terminal (pane=$shellPaneId); " +
+                    "conversations=${shellVm.agentConversations.value.keys}",
+                null,
+                shellVm.agentConversations.value[shellPaneId],
+            )
+            stamp("issue807_shell_stays_terminal conversations=${shellVm.agentConversations.value.keys}")
+
+            writeText(
+                "issue807-default-tab-summary.txt",
+                buildString {
+                    appendLine("scenario=agent-defaults-to-conversation-shell-stays-terminal (#807)")
+                    appendLine("agent_session=$agentSessionName")
+                    appendLine("shell_session=$shellSessionName")
+                    appendLine("agent_default_tab=Conversation")
+                    appendLine("shell_has_conversation_row=false")
+                    appendLine("shell_agent_for_window=null")
+                    appendLine("stamps:")
+                    stamps.forEach { appendLine("  $it") }
+                },
+            )
+        } finally {
+            shellVm.clearForTest()
+        }
+    }
+
     private suspend inline fun <reified T : TmuxSessionViewModel.ConnectionStatus> waitForStatus(
         vm: TmuxSessionViewModel,
         label: String,
@@ -815,5 +1024,15 @@ class AgentConversationReconnectDockerTest {
          * window, not a detection round-trip.
          */
         const val IMMEDIATE_RESTORE_TIMEOUT_MS: Long = 5_000
+
+        /**
+         * Issue #807: grace for the plain-shell pane's live detection to (not)
+         * fire before asserting it has no conversation row. Detection for a real
+         * agent normally lands within a couple seconds; this generous settle
+         * window makes the "shell got NO detection" assertion meaningful (we
+         * waited long enough that a detection would have arrived if it were
+         * going to) rather than racing the detector.
+         */
+        const val SHELL_NO_DETECTION_SETTLE_MS: Long = 8_000
     }
 }

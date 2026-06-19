@@ -94,6 +94,40 @@ patches-on-patches**:
 
 This is locked decision **D28** in `docs/decisions.md`.
 
+## Durable-fix gate — reopened issues need a class regression test (locked principle D31)
+
+The maintainer's #1 process complaint: we close issues as fixed, the reviewer
+says APPROVED, we ship, and the symptom comes back — over and over. Reopening
+already-"fixed" issues is the single biggest waste in this project. A fix that
+makes the symptom disappear *once* but does not stop it returning is **not
+done**.
+
+Locked rules:
+
+- **The reviewer's default verdict is `CHANGES REQUESTED`.** `APPROVED` must be
+  earned, criterion by criterion, from artifacts the reviewer produced this run.
+  Unproven ≠ passing. Uncertainty ⇒ reject. "Active rework" is never a reason to
+  approve a broken or unproven change — the reviewer turns it back and says so.
+- **A reopened / recurring issue MUST ship with a class-covering, gate-wired
+  regression test** that (a) fails on the bug (red→green proven), (b) covers the
+  whole class — the other sites / sessions / agent kinds / states / the
+  missing-data case — not just the one reported instance, (c) reproduces the
+  maintainer's exact reported scenario (F2/F3), and (d) runs in per-push CI or
+  the pre-tag gate. No durable test ⇒ `CHANGES REQUESTED`. This is not waivable.
+- **Active-rework areas get an adjacency sweep.** For changes to the
+  connection/reconnect/lease core, the session tree, conversation-source /
+  agent detection, or the composer/bottom chrome, the reviewer must confirm the
+  change does not reintroduce a recently-CLOSED sibling symptom in that area,
+  and must run that area's load-bearing journey. A resurrected sibling symptom
+  is blocking even when the issue's own acceptance criteria pass.
+- **The orchestrator must flag reopens in the reviewer brief** (see Briefing
+  Rules) so the gate is applied. An orchestrator that merges a reopened-issue
+  fix lacking a durable regression test is itself in violation.
+
+The mechanics live in `.claude/agents/reviewer.md` ("Default posture",
+"Durable-fix gate", "Active-rework adjacency sweep"). This is locked decision
+**D31** in `docs/decisions.md`.
+
 ## Non-Negotiable Loop
 
 Every issue moves through this state machine:
@@ -614,6 +648,12 @@ Reviewer briefs include:
   missing, contradictory, or non-reproducible terminal viewport screenshots,
   visible terminal text, logs, or timing evidence
 - Instruction to verify every acceptance criterion
+- **Reopen/recurrence flag**: state explicitly if this issue was ever closed
+  before (reopened), or if a sibling issue closed the same symptom. If so,
+  instruct the reviewer to apply the **Durable-fix gate** (D31): a
+  class-covering, gate-wired regression test is mandatory, and the area's
+  recently-fixed sibling symptoms must be re-checked (adjacency sweep). No
+  durable test ⇒ `CHANGES REQUESTED`.
 - Required deliverable: one review comment with `APPROVED` or `CHANGES REQUESTED`
 - Hard rule: do not edit code, commit, push, or close
 

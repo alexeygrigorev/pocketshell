@@ -17,6 +17,20 @@ public data class AgentDetection(
     public enum class Confidence { RecentFile, ProcessConfirmed }
 }
 
+/**
+ * Epic #821 slice A2 (hard-cut, D22): the OUTPUT-PARSING KIND-DETECTION
+ * entrypoints (`AgentConversationRepository.detect` / `detectForPane` /
+ * `detectForPanes`) that guessed an agent kind by cross-engine path-hint +
+ * `ps` matching are DELETED. A session's kind now comes from the recorded
+ * `@ps_agent_kind` (sessions we launched) or a one-shot host-side daemon
+ * guess (foreign sessions) — never from output parsing.
+ *
+ * What survives here is the SOURCE-PATH RESOLUTION surface the Conversation
+ * view still needs: [detect] is now a SOURCE SELECTOR for an ALREADY-KNOWN
+ * kind (the recorded/guessed kind pre-filters candidates upstream), ranking
+ * the same-kind candidates by recency + the #819 process-owned binding, and
+ * [expectedPathHints] / [encodeClaudeCwd] compute the per-engine log path.
+ */
 public class AgentDetector(
     // Issue #236: the previous 5-minute recency window killed real-world
     // Codex/OpenCode detection. Codex flushes its rollout JSONL only on
@@ -53,15 +67,16 @@ public class AgentDetector(
      * Confidence is `ProcessConfirmed` when [processLines] contains a row
      * naming the same agent; otherwise `RecentFile`.
      *
-     * Issue #186: when [requireProcessMatch] is `true`, the detector
+     * Issue #186: when [requireProcessMatch] is `true`, the selector
      * additionally requires that the agent's command name appear in
-     * [processLines] before returning a non-null detection. Per-pane
-     * callers ([com.pocketshell.app.session.AgentConversationRepository.detectForPane])
-     * pass a TTY-scoped process list and set this flag so a JSONL file
-     * created by a sibling window (which shares the cwd) does not light
-     * up the Conversation tab on a window where no agent is actually
-     * running. Session-scoped callers pass `false` (default) and accept
-     * the looser `RecentFile` confidence when the process scan misses.
+     * [processLines] before returning a non-null detection. The recorded
+     * Codex source path
+     * ([com.pocketshell.app.session.AgentConversationRepository.detectRecordedSessionForPane])
+     * passes a TTY-scoped process list and sets this flag so a JSONL file
+     * held open by a sibling window (which shares the cwd) does not bind
+     * the Conversation source on a window where no agent is actually
+     * running. The Claude / OpenCode recorded paths pass `false` (the
+     * session id is in the path, so a live process match is not required).
      *
      * Issue #819: [processOwnedSourcePaths] is the set of transcript source
      * paths actually held open by THIS pane's own agent process (resolved

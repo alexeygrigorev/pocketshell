@@ -4,7 +4,6 @@ import android.util.Log
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposJsonParser
-import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
@@ -46,19 +45,13 @@ import javax.inject.Inject
  * session created without `-c`) — the view model surfaces those under
  * an "Untracked" group.
  *
- * `agentKind` is the LIVE detection state. Issue #252: the gateway
- * delegates to the exact same detector the Conversation view uses
- * ([com.pocketshell.app.session.AgentConversationRepository]), via the
- * batched [com.pocketshell.app.session.AgentConversationRepository.detectForPanes]
- * — every session is classified from a CONSTANT 2 host-wide SSH
- * round-trips (one candidate enumeration across all cwds, one host-wide
- * `ps`), scoped per pane by cwd + TTY + foreground command from
- * `tmux list-panes -a`. That guarantees the session-list chip and the
- * Conversation tab agree by construction (they previously drifted: the
- * list kept a forked candidate-enumeration heuristic that predated
- * #183/#186/#236 and so labelled live Claude Code / Codex / OpenCode
- * sessions `Shell`) WITHOUT the ~2N sequential round-trips a per-session
- * `detectForPane` loop would cost on a multi-session list.
+ * `agentKind` is the session's classification. Epic #821: a session WE
+ * launched carries a recorded `@ps_agent_kind` ([recordedKind]) which is the
+ * SOLE authority for its kind — no detection round-trip at all. A FOREIGN
+ * session (no recorded option) gets a single host-side ONE-SHOT guess via the
+ * `pocketshell agents kind` daemon RPC (cgroup-scope classification), surfaced
+ * as "we think it's X — confirm/pick". The old output-parsing detector
+ * (`detectForPanes`) is hard-cut (D22).
  *
  * Issue #716 (default-optimistic + sticky agent-ness): a missing agent
  * detection is NO LONGER assumed to mean "plain shell" — detection is
@@ -116,6 +109,13 @@ data class FolderSessionWindowRow(
      * cached row).
      */
     val windowId: String? = null,
+    /**
+     * Epic #821 slice A2: the active pane's `#{pane_pid}`. Used ONLY for the
+     * foreign-session one-shot kind guess (`pocketshell agents kind` daemon
+     * RPC) — sessions we launched read their kind from `@ps_agent_kind` and
+     * never consult the pid. 0 / null when the probe path predates the column.
+     */
+    val panePid: Long? = null,
 )
 
 /**
@@ -192,20 +192,20 @@ class FolderListExecTimeoutException(
  *    authoritative kind, overriding the detection probe below.
  *  - `tmux list-panes -a -F '#{session_name}\t#{window_index}\t
  *    #{window_name}\t#{window_active}\t#{pane_active}\t
- *    #{pane_current_path}\t#{pane_tty}\t#{pane_current_command}'` so
- *    the active window's active-pane cwd + TTY + foreground command
- *    supersede `session_path` when they disagree, while every window's
- *    active pane remains available for compact metadata.
- *  - Agent detection probe (issue #252): one batched
- *    `AgentConversationRepository.detectForPanes` call for the whole
- *    list — a CONSTANT 2 host-wide round-trips (candidate enumeration
- *    across every cwd + one host-wide `ps`), each session then classified
- *    in-memory scoped to its active pane's cwd, TTY, and foreground
- *    command. This is the identical detector the Conversation view uses,
- *    so the session-list chip and the Conversation tab can never
- *    disagree, and the load does not scale with the session count.
- *    Sessions whose active pane has no live agent stay on
- *    [SessionAgentKind.Shell].
+ *    #{pane_current_path}\t#{pane_tty}\t#{pane_current_command}\t
+ *    #{window_id}\t#{pane_pid}'` so the active window's active-pane cwd +
+ *    TTY + foreground command supersede `session_path` when they disagree,
+ *    while every window's active pane remains available for compact
+ *    metadata. `#{pane_pid}` (epic #821 A2) feeds the foreign-session guess.
+ *  - Kind classification (epic #821, hard-cut D22): a recorded
+ *    `@ps_agent_kind` is the SOLE authority for a session WE launched (no
+ *    round-trip). FOREIGN sessions (no recorded option) get a single
+ *    host-side ONE-SHOT guess via the `pocketshell agents kind` daemon RPC
+ *    ([AgentKindRemoteSource]) — one exec for the whole list, the daemon
+ *    classifying each pane's cgroup scope by `#{pane_pid}`. The old
+ *    output-parsing `detectForPanes` heuristic is DELETED. Sessions whose
+ *    active pane the daemon does not name an agent for fall back to the
+ *    affirmative-shell-aware [SessionAgentKind] resolution.
  *
  * If any of the secondary probes fail (no active panes, exec error)
  * the gateway falls back to the `session_path` value alone — the folder
@@ -378,19 +378,14 @@ class SshFolderListGateway internal constructor(
         HostTmuxSessionListParser(),
     )
 
-    // Issue #252: reuse the SAME detection logic the Conversation view
-    // uses instead of maintaining a forked candidate-enumeration +
-    // process-scan heuristic here. The list path previously hard-coded a
-    // stale copy of the detection shell that predated #183 (Codex/OpenCode
-    // candidate enumeration), #186 (per-pane TTY-scoped process scan),
-    // OpenCode SQLite detection, and #236 (120-minute freshness window).
-    // That drift is exactly why a live Claude Code (and Codex/OpenCode)
-    // session classified as `Shell` in the list while the Conversation
-    // view rendered it correctly. Delegating to the batched
-    // [AgentConversationRepository.detectForPanes] keeps the two paths in
-    // lock-step by construction while collapsing the list-load to a
-    // constant 2 host-wide SSH round-trips (vs. ~2N sequential ones).
-    private val agentRepository = AgentConversationRepository()
+    // Epic #821 slice A2 (hard-cut, D22): the output-parsing kind detector
+    // (`AgentConversationRepository.detectForPanes`) is DELETED. Sessions WE
+    // launched are classified solely by the recorded `@ps_agent_kind`
+    // ([FolderSessionRow.recordedKind]); FOREIGN sessions (no recorded kind)
+    // get a single one-shot host-side guess via the `pocketshell agents kind`
+    // daemon RPC ([AgentKindRemoteSource]) — "we think it's X", which the user
+    // can confirm/pick. No per-attach output parsing remains in the list path.
+    private val agentKindRemoteSource = com.pocketshell.app.agents.AgentKindRemoteSource()
 
     override suspend fun listSessionsWithFolder(
         host: HostEntity,
@@ -908,10 +903,9 @@ class SshFolderListGateway internal constructor(
                     row.copy(cwd = cwd, windows = windowsBySession[row.sessionName].orEmpty())
                 }
 
-                // Issue #252: per-session agent detection delegated to
-                // the Conversation view's detector
-                // (AgentConversationRepository.detectForPane) so the
-                // list chip and the Conversation tab agree.
+                // Epic #821 (hard-cut D22): recorded `@ps_agent_kind` is the
+                // sole kind authority; foreign sessions get the one-shot daemon
+                // guess. No output-parsing detection on this list path.
                 val annotated = annotateAgentKinds(session, merged)
                 sessionsWithWatchedRootExpansion(
                     session = session,
@@ -1381,27 +1375,33 @@ class SshFolderListGateway internal constructor(
         session: SshSession,
         rows: List<FolderSessionRow>,
     ): List<FolderSessionRow> {
-        val agentKinds = runCatching {
-            detectAgentKinds(session = session, rows = rows)
-        }.getOrDefault(FolderAgentDetection())
+        val foreignGuess = runCatching {
+            guessForeignAgentKinds(session = session, rows = rows)
+        }.getOrDefault(emptyMap())
         return rows.map { row ->
-            // Epic #821 Workstream A: a recorded `@ps_agent_kind` is the
-            // authoritative kind for a session WE launched — it wins over
-            // output-parsing detection so the chip can never disagree with
-            // what the session was actually started as. Detection still runs
-            // (additive) and supplies the kind for foreign / pre-#821
-            // sessions that carry no recorded option.
+            // Epic #821: a recorded `@ps_agent_kind` is the SOLE authority for a
+            // session WE launched — no detection round-trip at all. FOREIGN
+            // sessions (no recorded option) get the one-shot host-side daemon
+            // guess ([guessForeignAgentKinds]); when the daemon does not name an
+            // agent the chip falls back to the affirmative-shell-aware
+            // [resolveUndetectedKind].
             val recorded = row.recordedKind
             val windows = row.windows.map { window ->
                 val key = WindowProbeKey(row.sessionName, window.index)
                 window.copy(
                     agentKind = recorded
-                        ?: agentKinds.windowKinds[key]
+                        ?: foreignGuess[key]
                         ?: resolveUndetectedKind(window.command),
                 )
             }
             val sessionKind = recorded
-                ?: agentKinds.sessionKinds[row.sessionName]
+                ?: row.windows
+                    .firstOrNull { it.active }
+                    ?.let { foreignGuess[WindowProbeKey(row.sessionName, it.index)] }
+                ?: row.windows
+                    .asSequence()
+                    .mapNotNull { foreignGuess[WindowProbeKey(row.sessionName, it.index)] }
+                    .firstOrNull()
                 ?: resolveUndetectedKind(
                     (windows.firstOrNull { it.active } ?: windows.firstOrNull())?.command,
                 )
@@ -1412,66 +1412,48 @@ class SshFolderListGateway internal constructor(
         }
     }
 
-
     /**
-     * Classify every session window's active pane by delegating to the
-     * SAME detector the Conversation view uses. This keeps issue #252's
-     * constant host-wide probe count while letting the project tree show
-     * compact per-window agent hints for multi-window sessions.
+     * Epic #821 slice A2 (hard-cut, D22): classify FOREIGN session windows (no
+     * recorded `@ps_agent_kind`) with the host-side ONE-SHOT daemon guess
+     * (`pocketshell agents kind` / `agents.kind_for_panes`). Only foreign rows
+     * are probed — recorded rows already know their kind and are skipped, so a
+     * project list of sessions-we-launched issues ZERO kind round-trips. Each
+     * foreign window's active pane is sent as `(WindowProbeKey, pane_pid)`; the
+     * daemon resolves the pid's cgroup scope and returns the agent kind. A
+     * `none`/`unknown`/absent verdict leaves the window out of the map so the
+     * caller falls back to [resolveUndetectedKind]. One host-side exec for the
+     * whole list (the CLI batches every pane in one RPC). Best-effort: any
+     * failure yields an empty map and the rows degrade to the undetected
+     * fallback exactly as before.
      */
-    private suspend fun detectAgentKinds(
+    private suspend fun guessForeignAgentKinds(
         session: com.pocketshell.core.ssh.SshSession,
         rows: List<FolderSessionRow>,
-    ): FolderAgentDetection {
+    ): Map<WindowProbeKey, SessionAgentKind> {
         val probeKeys = mutableMapOf<String, WindowProbeKey>()
-        val probes = rows.flatMap { row ->
-            row.windows.mapNotNull { window ->
-                val cwd = window.cwd?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val paneTty = window.tty?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val key = WindowProbeKey(row.sessionName, window.index)
-                val probeKey = key.asProbeKey()
-                probeKeys[probeKey] = key
-                AgentConversationRepository.PaneProbe(
-                    key = probeKey,
-                    cwd = cwd,
-                    paneTty = paneTty,
-                    paneCommand = window.command.orEmpty(),
-                )
+        val panes = rows
+            // Recorded sessions are the sole authority for their kind — never
+            // probed (AC: recorded sessions have zero kind round-trips).
+            .filter { it.recordedKind == null }
+            .flatMap { row ->
+                row.windows.mapNotNull { window ->
+                    val panePid = window.panePid?.takeIf { it > 0L } ?: return@mapNotNull null
+                    val key = WindowProbeKey(row.sessionName, window.index)
+                    val probeKey = key.asProbeKey()
+                    probeKeys[probeKey] = key
+                    com.pocketshell.app.agents.AgentKindRemoteSource.PaneRef(
+                        paneId = probeKey,
+                        panePid = panePid,
+                    )
+                }
             }
-        }
-        if (probes.isEmpty()) return FolderAgentDetection()
-
-        val detections = agentRepository.detectForPanes(
-            session = session,
-            panes = probes,
-        )
-        // `detectForPanes` only returns matched panes, so `windowKinds` only
-        // ever holds an AGENT kind (Claude/Codex/OpenCode), never Shell.
-        val windowKinds = detections.mapNotNull { (probeKey, detection) ->
+        if (panes.isEmpty()) return emptyMap()
+        val verdicts = agentKindRemoteSource.classify(session = session, panes = panes)
+        return verdicts.mapNotNull { (probeKey, verdict) ->
             val key = probeKeys[probeKey] ?: return@mapNotNull null
-            key to detection.agent.toSessionAgentKind()
+            val kind = verdict.kind?.toSessionAgentKind() ?: return@mapNotNull null
+            key to kind
         }.toMap()
-        // Issue #716: only publish a session kind when an agent was actually
-        // detected (active window wins, else any window's agent). A session
-        // with NO agent match is intentionally LEFT OUT of the map so
-        // `annotateAgentKinds` falls through to `resolveUndetectedKind` —
-        // affirmative-shell → Shell, otherwise → Probing. We must NOT default
-        // an undetected session to Shell here (the #716 sticky/optimistic fix).
-        val sessionKinds = rows.mapNotNull { row ->
-            val activeWindowKind = row.windows
-                .firstOrNull { it.active }
-                ?.let { windowKinds[WindowProbeKey(row.sessionName, it.index)] }
-            val anyAgentKind = row.windows
-                .asSequence()
-                .mapNotNull { windowKinds[WindowProbeKey(row.sessionName, it.index)] }
-                .firstOrNull()
-            val detected = activeWindowKind ?: anyAgentKind ?: return@mapNotNull null
-            row.sessionName to detected
-        }.toMap()
-        return FolderAgentDetection(
-            sessionKinds = sessionKinds,
-            windowKinds = windowKinds,
-        )
     }
 
     private fun AgentKind.toSessionAgentKind(): SessionAgentKind =
@@ -1481,11 +1463,6 @@ class SshFolderListGateway internal constructor(
             AgentKind.OpenCode -> SessionAgentKind.OpenCode
         }
 
-
-    private data class FolderAgentDetection(
-        val sessionKinds: Map<String, SessionAgentKind> = emptyMap(),
-        val windowKinds: Map<WindowProbeKey, SessionAgentKind> = emptyMap(),
-    )
 
     private data class WindowProbeKey(
         val sessionName: String,
@@ -1816,7 +1793,7 @@ class SshFolderListGateway internal constructor(
                 "'#{session_name}$FIELD_SEP#{window_index}$FIELD_SEP#{window_name}$FIELD_SEP" +
                 "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}" +
-                "$FIELD_SEP#{window_id}'"
+                "$FIELD_SEP#{window_id}$FIELD_SEP#{pane_pid}'"
 
         /**
          * Issue #726: sentinel exit code the [cappedCreateSessionCommand]
@@ -1903,7 +1880,7 @@ class SshFolderListGateway internal constructor(
                 "'#{session_name}$FIELD_SEP#{window_index}$FIELD_SEP#{window_name}$FIELD_SEP" +
                 "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}" +
-                "$FIELD_SEP#{window_id}'"
+                "$FIELD_SEP#{window_id}$FIELD_SEP#{pane_pid}'"
 
         /**
          * Parse the tab-delimited `list-sessions` output into
@@ -2028,7 +2005,11 @@ class SshFolderListGateway internal constructor(
                 // field absorbs any interior separators only when the id column
                 // is absent (a pre-#653 cached row), so we read the id from the
                 // last part and fall back to null when fewer than 9 parts.
-                val parts = line.split(FIELD_SEP, limit = 9)
+                // limit=10 so `#{pane_pid}` (the trailing 10th field, epic #821
+                // A2) and `#{window_id}` (9th, #653) are captured separately from
+                // `pane_current_command` (8th). Both trailing columns are
+                // structured (`@N` / an integer) and never contain `::`.
+                val parts = line.split(FIELD_SEP, limit = 10)
                 if (parts.size < 8) continue
                 val sessionName = parts[0].trim()
                 if (sessionName.isEmpty()) continue
@@ -2043,6 +2024,7 @@ class SshFolderListGateway internal constructor(
                     tty = parts[6].trim().takeIf { it.isNotEmpty() },
                     command = parts[7].trim().takeIf { it.isNotEmpty() },
                     windowId = parts.getOrNull(8)?.trim()?.takeIf { it.isNotEmpty() },
+                    panePid = parts.getOrNull(9)?.trim()?.toLongOrNull(),
                 )
             }
             return rows

@@ -61,6 +61,14 @@ public data class TmuxPaneState(
     // Empty when tmux has not yet been queried (initial bootstrap)
     // or when an older tmux fails to emit the field.
     val paneTty: String = "",
+    // Epic #821 slice A2: the pane's `#{pane_pid}` — the foreground process
+    // pid tmux reports for this pane. Used ONLY for the foreign-session
+    // one-shot kind guess: it is sent to the host `pocketshell agents kind`
+    // CLI / `agents.kind_for_panes` daemon RPC, which resolves it to a cgroup
+    // scope and classifies the agent running there. Recorded sessions never
+    // consult it (their kind is the authoritative `@ps_agent_kind`). 0 when
+    // tmux has not yet been queried or an older tmux omits the field.
+    val panePid: Long = 0L,
     val inCopyMode: Boolean = false,
     val terminalState: TerminalSurfaceState,
     // Issue #423: set when the local terminal surface for this pane has

@@ -8158,8 +8158,7 @@ class TmuxSessionViewModelTest {
 
         // Simulate the production clear path: drop the conversation
         // entry directly (mirrors what `clearAgentDetectionForPane`
-        // does when [detectForPane] returns null on a subsequent
-        // probe).
+        // does when a subsequent source-resolution probe returns null).
         vm.clearAgentDetectionForPaneForTest("%0")
 
         assertNull(

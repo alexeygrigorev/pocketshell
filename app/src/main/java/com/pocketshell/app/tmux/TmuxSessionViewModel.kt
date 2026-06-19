@@ -223,6 +223,11 @@ public class TmuxSessionViewModel @Inject constructor(
     // injectable so a burst-ingest test can wire a repository whose tail
     // drain runs on the test scheduler (deterministic batch coalescing).
     private val agentRepository: AgentConversationRepository = AgentConversationRepository(),
+    // Epic #821 slice A2: the host-side one-shot kind guess for FOREIGN
+    // sessions (no recorded `@ps_agent_kind`). Defaulted so existing unit-test
+    // constructors are unchanged; injectable so a test can stub the guess.
+    private val agentKindRemoteSource: com.pocketshell.app.agents.AgentKindRemoteSource =
+        com.pocketshell.app.agents.AgentKindRemoteSource(),
 ) : ViewModel() {
 
     /**
@@ -1533,6 +1538,19 @@ public class TmuxSessionViewModel @Inject constructor(
     // detection maps on park/restore/clear so a different session never inherits
     // a stale recorded kind.
     private val sessionRecordedKindCache: MutableMap<String, RecordedKindCacheEntry> =
+        ConcurrentHashMap()
+    // Epic #821 slice A2: per-tmux-session cache of the ONE-SHOT FOREIGN kind
+    // guess (`pocketshell agents kind` daemon RPC) for sessions that carry no
+    // recorded `@ps_agent_kind`. The RPC has no server-side TTL, so the "fire
+    // ONCE per foreign session" discipline is the CLIENT's job: we guess on the
+    // first sighting of a foreign session, cache the verdict here keyed by the
+    // tmux session id, and never re-probe on later reconciles/switches. A user
+    // confirm/pick then writes a durable `@ps_agent_kind` (ManualKindWriter) and
+    // the session reads back as recorded — so the guess sticks exactly like a
+    // recorded kind and is never re-run. A PRESENT entry whose [kind] is null
+    // means "guessed = not an agent / unknown" (still one-shot — do not re-probe).
+    // Cleared with the other per-runtime detection maps on park/restore/clear.
+    private val sessionForeignKindGuessCache: MutableMap<String, ForeignKindGuessEntry> =
         ConcurrentHashMap()
     // Issue #554: count consecutive null detections for a pane whose window
     // has a remembered agent status (the #495 optimistic seed). On reconnect,
@@ -3288,6 +3306,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     cwd = pane.cwd,
                     currentCommand = pane.currentCommand,
                     paneTty = pane.paneTty,
+                    panePid = pane.panePid,
                     inCopyMode = pane.inCopyMode,
                     terminalState = state,
                 )
@@ -3885,6 +3904,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentNullDetections.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
+        sessionForeignKindGuessCache.clear()
         clearAgentConversations()
         // Issue #448: drop any pending forward overlay when this runtime
         // is parked to the cache — it belongs to the view we're leaving.
@@ -3987,6 +4007,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentNullDetections.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
+        sessionForeignKindGuessCache.clear()
         paneAgentInputs.putAll(runtime.paneAgentInputs)
         replaceAgentConversations(runtime.agentConversations)
         remoteColumns = runtime.remoteColumns
@@ -7468,7 +7489,13 @@ public class TmuxSessionViewModel @Inject constructor(
         append(LIST_PANES_FIELD_SEPARATOR)
         append("#{pane_tty}")
         append(LIST_PANES_FIELD_SEPARATOR)
-        append("#{pane_in_mode}'")
+        append("#{pane_in_mode}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        // Epic #821 slice A2: `#{pane_pid}` feeds the foreign-session one-shot
+        // kind guess (`pocketshell agents kind` / `agents.kind_for_panes`).
+        // Appended LAST so older tmux that omit it leave every prior field's
+        // index unchanged (the parser tolerates its absence -> panePid 0).
+        append("#{pane_pid}'")
     }
 
     /**
@@ -7512,6 +7539,10 @@ public class TmuxSessionViewModel @Inject constructor(
                     // rotate panes between ptys on detach/reattach in
                     // rare cases).
                     paneTty = p.paneTty,
+                    // Epic #821 slice A2: refresh the pane pid for the
+                    // foreign-session kind guess (tmux can re-spawn a pane's
+                    // foreground process across detach/reattach).
+                    panePid = p.panePid,
                     inCopyMode = p.inCopyMode,
                 )
             } else {
@@ -7542,6 +7573,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     cwd = p.cwd,
                     currentCommand = p.currentCommand,
                     paneTty = p.paneTty,
+                    panePid = p.panePid,
                     inCopyMode = p.inCopyMode,
                     terminalState = state,
                 ).also { newRows += it }
@@ -8702,6 +8734,93 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private class RecordedKindCacheEntry(val kind: AgentKind?)
 
+    /**
+     * Epic #821 slice A2: box for the per-session ONE-SHOT FOREIGN kind guess.
+     * An ABSENT map entry means "not yet guessed" (the guess may still fire);
+     * a PRESENT entry whose [kind] is null means "guessed = not an agent (a
+     * shell) or unknown" — either way the guess has already fired and must NOT
+     * be re-run on later reconciles (the one-shot discipline). [kind] holds the
+     * guessed engine when the daemon classified the pane as an agent.
+     */
+    private class ForeignKindGuessEntry(val kind: AgentKind?)
+
+    /**
+     * Epic #821 slice A2: resolve a FOREIGN session's agent kind via the
+     * host-side ONE-SHOT daemon guess (`pocketshell agents kind`), cached per
+     * tmux session id so it fires AT MOST ONCE per foreign session. Returns the
+     * cached guess immediately on a hit; on a miss it sends the pane's
+     * `(pane_id, pane_pid)` to the daemon, caches the verdict, and returns it.
+     * A null result means the daemon did not classify the pane as an agent (a
+     * shell / unknown / no pid / tool missing) — the caller treats that as "no
+     * conversation for this pane" but does NOT re-probe.
+     */
+    private suspend fun resolveForeignKindGuess(
+        session: SshSession,
+        sessionTarget: String,
+        pane: TmuxPaneState,
+    ): AgentKind? {
+        val key = sessionTarget.trim()
+        sessionForeignKindGuessCache[key]?.let { return it.kind }
+        val panePid = pane.panePid.takeIf { it > 0L }
+        // No pid → cannot ask the daemon. Cache the (null) verdict so we don't
+        // re-probe a pane that never carries a pid, preserving the one-shot rule.
+        if (panePid == null) {
+            sessionForeignKindGuessCache.putIfAbsent(key, ForeignKindGuessEntry(null))
+            return null
+        }
+        val verdict = agentKindRemoteSource.classify(
+            session = session,
+            panes = listOf(
+                com.pocketshell.app.agents.AgentKindRemoteSource.PaneRef(
+                    paneId = pane.paneId,
+                    panePid = panePid,
+                ),
+            ),
+        )
+        val guessed = verdict[pane.paneId]?.kind
+        sessionForeignKindGuessCache.putIfAbsent(key, ForeignKindGuessEntry(guessed))
+        return sessionForeignKindGuessCache[key]?.kind
+    }
+
+    /**
+     * Epic #821 slice A2: resolve the Conversation [AgentDetection] for a
+     * FOREIGN session (no recorded `@ps_agent_kind`). The OLD output-parsing
+     * kind detector is hard-cut (D22). Instead:
+     *  1. ask the host daemon ONCE for its kind guess
+     *     ([resolveForeignKindGuess], cached per session id), and
+     *  2. if it guessed an agent kind, resolve the transcript SOURCE for that
+     *     KNOWN kind via the SAME recorded-source path
+     *     ([AgentConversationRepository.detectRecordedSessionForPane]) the
+     *     sessions-we-launched path uses — so the source-path resolution surface
+     *     foreign Conversation needs is preserved, only the KIND-guessing is
+     *     replaced.
+     * Returns `null` when the daemon did not classify the pane as an agent (the
+     * pane has no Conversation). The guess fires at most once per session; a
+     * later user confirm/pick writes a durable recorded kind and this path is
+     * never re-entered for that session.
+     */
+    private suspend fun resolveForeignSessionDetection(
+        session: SshSession,
+        sessionTarget: String,
+        pane: TmuxPaneState,
+        cwd: String,
+        tty: String,
+        command: String,
+    ): AgentDetection? {
+        val guessedKind = resolveForeignKindGuess(
+            session = session,
+            sessionTarget = sessionTarget,
+            pane = pane,
+        ) ?: return null
+        return agentRepository.detectRecordedSessionForPane(
+            session = session,
+            cwd = cwd,
+            paneTty = tty,
+            paneCommand = command,
+            recordedKind = guessedKind,
+        )
+    }
+
     private fun startAgentDetectionForPane(
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard? = null,
@@ -8796,11 +8915,19 @@ public class TmuxSessionViewModel @Inject constructor(
                             recordedKind = recordedKind,
                         )
                     } else {
-                        agentRepository.detectForPane(
+                        // Epic #821 slice A2: FOREIGN session (no recorded kind).
+                        // Output-parsing kind detection is hard-cut (D22); ask the
+                        // host daemon ONCE for its kind guess (cached per session
+                        // id), then resolve the Conversation SOURCE for the guessed
+                        // kind via the SAME recorded-source path. No guess → no
+                        // agent → null detection (the guess does not re-fire).
+                        resolveForeignSessionDetection(
                             session = session,
+                            sessionTarget = sessionTarget,
+                            pane = pane,
                             cwd = cwd,
-                            paneTty = tty,
-                            paneCommand = command,
+                            tty = tty,
+                            command = command,
                         )
                     }
                 } else {
@@ -8819,12 +8946,16 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                     when {
                         open.recordedKind == null ->
-                            // Foreign session — fall back to foreign detection.
-                            agentRepository.detectForPane(
+                            // Epic #821 slice A2: FOREIGN session — one-shot daemon
+                            // kind guess + recorded-source resolution (see the
+                            // cache-hit foreign arm above). No output parsing (D22).
+                            resolveForeignSessionDetection(
                                 session = session,
+                                sessionTarget = sessionTarget,
+                                pane = pane,
                                 cwd = cwd,
-                                paneTty = tty,
-                                paneCommand = command,
+                                tty = tty,
+                                command = command,
                             )
                         open.needsCodexResolution ->
                             // Recorded Codex needs the second owned-rollout pass.
@@ -9782,12 +9913,18 @@ public class TmuxSessionViewModel @Inject constructor(
         currentDetection: AgentDetection,
         refreshGuard: RuntimeRefreshGuard,
     ) {
+        // Epic #821 slice A2: a stream RETRY re-resolves the SOURCE for a pane
+        // whose kind is ALREADY KNOWN ([currentDetection.agent]) — never a fresh
+        // kind guess. Output-parsing kind detection is hard-cut (D22); reuse the
+        // recorded-source resolution scoped to the known kind so we re-bind the
+        // same engine's transcript without re-classifying.
         val detection = runCatching {
-            agentRepository.detectForPane(
+            agentRepository.detectRecordedSessionForPane(
                 session = session,
                 cwd = pane.cwd,
                 paneTty = pane.paneTty,
                 paneCommand = pane.currentCommand,
+                recordedKind = currentDetection.agent,
             )
         }.getOrNull()
         if (!isCurrentRuntime(refreshGuard)) return
@@ -10296,7 +10433,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * Issue #186 test seam: replay the "agent left this pane" path
-     * that production calls when a subsequent [detectForPane] returns
+     * that production calls when a subsequent detection round returns
      * null. Drives the same internal [clearAgentDetectionForPane] so
      * tests can assert the lock + conversation row clearing without
      * standing up a real SSH session.
@@ -11201,6 +11338,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // from the freshly-recorded kind. It is a pure perf cache, so a
                 // full clear is safe and avoids a key-by-name vs key-by-id miss.
                 sessionRecordedKindCache.clear()
+                sessionForeignKindGuessCache.clear()
                 refreshCurrentSessionRecordedKind()
             }.onFailure { error ->
                 Log.w(
@@ -11559,6 +11697,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentNullDetections.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
+        sessionForeignKindGuessCache.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -11673,6 +11812,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentNullDetections.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
+        sessionForeignKindGuessCache.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -11812,6 +11952,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentNullDetections.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
+        sessionForeignKindGuessCache.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -12004,14 +12145,16 @@ public class TmuxSessionViewModel @Inject constructor(
             paneIndex = paneIndex,
             cwd = parts.getOrNull(paneIndexIndex + 1).orEmpty(),
             currentCommand = parts.getOrNull(paneIndexIndex + 2).orEmpty(),
-            // Issue #186: `#{pane_tty}` is the 9th (or 8th, without
-            // session_name) field in the format string above. Older
-            // tmux versions that omit the field simply return empty,
-            // in which case per-pane agent detection skips this pane
-            // (see [detectForPane]) rather than fall back to a
-            // host-wide scan.
+            // Issue #186: `#{pane_tty}` scopes the recorded-source process
+            // scan to this pane. Older tmux versions that omit the field
+            // simply return empty, in which case per-pane source resolution
+            // skips this pane rather than fall back to a host-wide scan.
             paneTty = parts.getOrNull(paneIndexIndex + 3).orEmpty(),
             inCopyMode = parseTmuxBoolean(parts.getOrNull(paneIndexIndex + 4)),
+            // Epic #821 slice A2: `#{pane_pid}` is the LAST field. Older tmux
+            // (or unit tests on the legacy format) omit it -> 0, and the
+            // foreign-session kind guess simply skips the pane.
+            panePid = parts.getOrNull(paneIndexIndex + 5)?.trim()?.toLongOrNull() ?: 0L,
             sessionName = sessionName,
         )
     }
@@ -12040,6 +12183,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #550: copied from `#{pane_in_mode}`. Defaults false for
         // older tests / tmux versions that do not expose the format field.
         val inCopyMode: Boolean = false,
+        // Epic #821 slice A2: copied from `#{pane_pid}` for the foreign-session
+        // one-shot kind guess. Defaults 0 for older tmux / tests.
+        val panePid: Long = 0L,
         val sessionName: String = "",
     )
 

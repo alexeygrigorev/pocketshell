@@ -355,148 +355,6 @@ public class AgentConversationRepository internal constructor(
      */
     private val tailBatchWindowMillis: Long = 60L,
 ) {
-    suspend fun detect(
-        session: SshSession,
-        cwd: String,
-        processHints: List<String> = emptyList(),
-    ): AgentDetection? {
-        val normalizedCwd = cwd.trim().ifBlank { return null }
-        val nowMillis = System.currentTimeMillis()
-        val candidates = session.exec(detectionCommand(normalizedCwd))
-            .stdout
-            .lineSequence()
-            .mapNotNull(::parseCandidate)
-            .toList()
-        // Issue #183: extend the process scan to recognise Codex and
-        // OpenCode foreground processes in addition to Claude. The
-        // detector only promotes a candidate to `ProcessConfirmed`
-        // when the engine's command name appears in the scan output;
-        // before this fix the scan was Claude-only, so Codex/OpenCode
-        // detections silently stayed at `RecentFile` even when the
-        // agent was actively running.
-        val processLines = processHints + session.exec(
-            "ps -eo pid,ppid,comm,args 2>/dev/null | grep -E 'claude|codex|opencode' | grep -v grep || true",
-        )
-            .stdout
-            .lines()
-
-        return detector.detect(normalizedCwd, nowMillis, candidates, processLines)
-    }
-
-    suspend fun detect(session: SshSession): AgentDetection? {
-        // A fresh SSH exec channel cannot observe the live interactive
-        // shell's current directory after the user has cd'd. Non-tmux
-        // sessions therefore have no reliable cwd source for #23's
-        // cwd-correlated agent detection. Tmux callers pass
-        // #{pane_current_path} to detect(session, cwd, ...), which remains
-        // supported.
-        return null
-    }
-
-    /**
-     * Issue #186: per-window agent detection. Scopes the process scan to
-     * **this pane's TTY** (instead of doing a host-wide
-     * `ps -eo pid,ppid,comm,args | grep -E 'claude|codex|opencode'`) so a
-     * JSONL log written by an agent running in a sibling window does NOT
-     * register as a detection on a plain-shell pane that just happens to
-     * share the same cwd.
-     *
-     * Concretely: the maintainer's v0.2.8 feedback report had a 3-window
-     * tmux session where only Window 1 ran Claude. Pre-#186, Windows 2
-     * and 3 also saw the Conversation tab + "Claude Code session
-     * detected" hint because [detect] runs a host-wide process scan and
-     * the JSONL file is shared across the same cwd. This entry point
-     * fixes that by:
-     *
-     *  1. Restricting the process scan to the process subtree rooted at
-     *     rows whose controlling terminal is [paneTty] (e.g.
-     *     `/dev/pts/3`). This includes agent children whose own TTY is
-     *     `?`, as long as their parent belongs to this pane.
-     *  2. Including the pane's foreground process name ([paneCommand],
-     *     i.e. `#{pane_current_command}` from `list-panes`) so callers
-     *     that have already paid for a `list-panes` query don't need a
-     *     second round-trip for that signal.
-     *  3. Passing `requireProcessMatch = true` to [AgentDetector.detect]
-     *     so a recent JSONL alone is not enough — the agent process
-     *     must actually be live on THIS pane's TTY.
-     *
-     * Callers that want session-scoped (looser) detection should keep
-     * using [detect]; this method is intended for the tmux per-pane path
-     * in [com.pocketshell.app.tmux.TmuxSessionViewModel.startAgentDetectionForPane].
-     *
-     * @param paneTty value of `#{pane_tty}` from tmux's `list-panes`,
-     *   e.g. `/dev/pts/3`. When blank, the detection is suppressed
-     *   entirely — without a TTY there is no way to scope the process
-     *   scan, and a per-pane caller without a TTY signal is by
-     *   construction not a candidate for agent attribution.
-     * @param paneCommand value of `#{pane_current_command}` from tmux,
-     *   forwarded as an additional process-name hint. Most Node-based
-     *   CLIs report as `node` here, so the process-tree scan is the
-     *   primary signal; the pane command is best-effort.
-     */
-    suspend fun detectForPane(
-        session: SshSession,
-        cwd: String,
-        paneTty: String,
-        paneCommand: String,
-    ): AgentDetection? {
-        val normalizedCwd = cwd.trim().ifBlank { return null }
-        val normalizedTty = paneTty.trim().ifBlank { return null }
-        val nowMillis = System.currentTimeMillis()
-        val candidates = session.exec(detectionCommand(normalizedCwd))
-            .stdout
-            .lineSequence()
-            .mapNotNull(::parseCandidate)
-            .toList()
-        // Per-pane process list. We strip any leading `/dev/` from the
-        // tty because `ps` reports the controlling TTY as `pts/3`.
-        // Tmux usually reports the full path; we normalise here to keep
-        // the contract loose for callers. The scan is host-wide so we
-        // can preserve child rows whose TTY is `?` but whose parent is a
-        // pane-owned Node wrapper.
-        val ttyArg = normalizedTty.removePrefix("/dev/")
-        val processSnapshot = session.exec(
-            PROCESS_TREE_SCAN_COMMAND,
-        )
-            .stdout
-            .lines()
-            // Drop blank trailing rows and the ps header row.
-            .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
-        val paneProcesses = processLinesForPane(processSnapshot, ttyArg)
-        // The pane's foreground process name is a cheap signal we
-        // already have from `list-panes` — merge it in so callers that
-        // wrap a JS-based agent in a shell wrapper still register
-        // (the `comm` column on `ps` reports `node` for Claude /
-        // Codex / OpenCode in their Node form, but `args` carries the
-        // wrapper command name, which `namesAgent` already greps for).
-        val processLines = if (paneCommand.isBlank()) {
-            paneProcesses
-        } else {
-            paneProcesses + paneCommand
-        }
-        // Issue #819: bind the Codex source to the pane's OWN session by
-        // resolving the rollout JSONL files actually held open by this pane's
-        // process subtree (`/proc/<pid>/fd`). Without this, two same-cwd
-        // Codex rollouts (the pane's own + an orchestrator/sibling) both pass
-        // detection and the mtime tiebreak picks the busier sibling. The owner
-        // signal is only needed when there is MORE THAN ONE Codex candidate to
-        // disambiguate; with a single candidate the existing selection is
-        // already correct, so the extra `/proc/<pid>/fd` round-trip is skipped.
-        val processOwnedSourcePaths = if (candidates.count { it.agent == AgentKind.Codex } >= 2) {
-            resolveProcessOwnedCodexRollouts(session, pidsFromProcessRows(paneProcesses))
-        } else {
-            emptySet()
-        }
-        return detector.detect(
-            cwd = normalizedCwd,
-            nowMillis = nowMillis,
-            candidates = candidates,
-            processLines = processLines,
-            requireProcessMatch = true,
-            processOwnedSourcePaths = processOwnedSourcePaths,
-        )
-    }
-
     /**
      * Epic #821 slice #3 (#825): read the agent kind PocketShell recorded for
      * the tmux session [sessionTarget] at launch, from the host-side
@@ -543,12 +401,19 @@ public class AgentConversationRepository internal constructor(
     /**
      * Epic #821 slice #3 (#825): resolve the Conversation source for a session
      * whose agent kind PocketShell RECORDED at launch (`@ps_agent_kind` →
-     * [recordedKind]). Unlike [detectForPane], the kind is NOT re-guessed by
-     * the detector — it is fixed by [recordedKind], and only candidates of that
-     * exact kind are handed to the selection step. This kills the #807 / #819 /
-     * #820 mis-detected-source cluster where detection's cross-kind path-hint /
-     * mtime race binds the Conversation view to the WRONG kind or a busier
-     * sibling rollout of a different engine.
+     * [recordedKind]). The kind is NOT guessed — it is fixed by [recordedKind],
+     * and only candidates of that exact kind are handed to the selection step.
+     * This kills the #807 / #819 / #820 mis-detected-source cluster where the
+     * (now-deleted, epic #821 A2) output-parsing detector's cross-kind
+     * path-hint / mtime race bound the Conversation view to the WRONG kind or a
+     * busier sibling rollout of a different engine.
+     *
+     * Epic #821 slice A2: this is ALSO the source-resolution path for FOREIGN
+     * sessions — once the one-shot daemon guess
+     * ([com.pocketshell.app.agents.AgentKindRemoteSource]) names a kind, the
+     * caller passes it here as [recordedKind] so the same kind-fixed selection
+     * resolves the foreign transcript source. The KIND-guessing is hard-cut;
+     * the SOURCE-path resolution surface this method provides is kept.
      *
      * Engine-specific resolution, scoped to the recorded kind:
      *  - **Claude**: pick the most-recent candidate under
@@ -576,9 +441,9 @@ public class AgentConversationRepository internal constructor(
     ): AgentDetection? {
         val normalizedCwd = cwd.trim().ifBlank { return null }
         val normalizedTty = paneTty.trim().ifBlank { return null }
-        // Same cwd-scoped candidate enumeration as detectForPane, but we keep
-        // ONLY the candidates of the recorded kind — the detector never gets to
-        // pick the kind from a cross-kind path-hint / mtime race.
+        // cwd-scoped candidate enumeration, keeping ONLY the candidates of the
+        // recorded/guessed kind — the source selector never gets to pick the
+        // kind from a cross-kind path-hint / mtime race.
         val candidates = session.exec(detectionCommand(normalizedCwd))
             .stdout
             .lineSequence()
@@ -962,154 +827,6 @@ public class AgentConversationRepository internal constructor(
         }.getOrDefault(emptySet())
     }
 
-    /**
-     * A single pane to classify in [detectForPanes]. Carries the same
-     * three per-pane signals [detectForPane] takes, plus the caller's
-     * own key so the batched result can be mapped back to the caller's
-     * domain (e.g. the session name in the folder list).
-     */
-    data class PaneProbe(
-        val key: String,
-        val cwd: String,
-        val paneTty: String,
-        val paneCommand: String,
-    )
-
-    /**
-     * Issue #252 (latency follow-up): batched, host-wide equivalent of
-     * [detectForPane] for callers that need to classify MANY panes at
-     * once (the session list). [detectForPane] costs 2 SSH round-trips
-     * per call — the cwd-scoped candidate enumeration plus the TTY-scoped
-     * `ps`. Calling it once per session made the session-list load scale
-     * as ~2N sequential round-trips, a real latency regression on a list
-     * with several sessions.
-     *
-     * This method collapses that to a CONSTANT 2 round-trips regardless of
-     * N:
-     *
-     *  1. ONE candidate-enumeration exec covering every unique cwd. The
-     *     per-cwd shell block is the SAME [detectionCommand] used by
-     *     [detectForPane] / [detect] — concatenated in subshells, one per
-     *     cwd — so each row stays tagged with the cwd it was discovered
-     *     for (Claude's path-hint is cwd-encoded; Codex's tree is
-     *     host-wide; OpenCode's SQL is cwd-scoped). No shell logic is
-     *     forked.
-     *  2. ONE host-wide `ps` exec carrying the controlling TTY column, so
-     *     each pane's process list can be sliced by its own TTY in-memory
-     *     — preserving the per-pane `requireProcessMatch = true`
-     *     discipline (a sibling pane's agent must not light up a
-     *     plain-shell pane that shares the cwd).
-     *
-     * Classification itself is delegated to the SAME [AgentDetector.detect]
-     * the single-pane path uses, with the same `requireProcessMatch = true`
-     * gate and the same per-cwd candidate slice
-     * (`candidate.cwd == pane.cwd`) the shell-side `detectionCommand(cwd)`
-     * scoping enforces for [detectForPane]. So the list and the
-     * Conversation tab still agree by construction — only the remote I/O
-     * is hoisted out of the loop.
-     *
-     * Panes with a blank cwd or blank TTY are skipped (no per-pane
-     * attribution is possible), exactly as [detectForPane] returns null
-     * for them. Returned map only contains keys that produced a detection.
-     */
-    suspend fun detectForPanes(
-        session: SshSession,
-        panes: List<PaneProbe>,
-    ): Map<String, AgentDetection> {
-        // Normalise + drop panes that cannot be attributed (no cwd / no
-        // TTY) up front — same guards detectForPane applies per call.
-        val normalizedPanes = panes.mapNotNull { pane ->
-            val cwd = pane.cwd.trim().ifBlank { return@mapNotNull null }
-            val tty = pane.paneTty.trim().ifBlank { return@mapNotNull null }
-            NormalizedPaneProbe(
-                key = pane.key,
-                cwd = cwd,
-                ttyArg = tty.removePrefix("/dev/"),
-                paneCommand = pane.paneCommand,
-            )
-        }
-        if (normalizedPanes.isEmpty()) return emptyMap()
-
-        val nowMillis = System.currentTimeMillis()
-        val uniqueCwds = normalizedPanes.map { it.cwd }.distinct()
-
-        // Round-trip 1: one candidate enumeration across every cwd.
-        val candidates = session.exec(detectionCommandForCwds(uniqueCwds))
-            .stdout
-            .lineSequence()
-            .mapNotNull(::parseCandidate)
-            .toList()
-
-        // Round-trip 2: one host-wide process scan. The `pid` / `ppid`
-        // / `tty` columns let us slice per pane in-memory rather than
-        // paying a `ps -t` round trip per session. Keep `node` rows so
-        // wrapper launches can seed the pane-owned process subtree even
-        // when the real agent child reports TTY `?`; AgentDetector still
-        // requires an agent command token from the merged subtree.
-        val processLines = session.exec(
-            PROCESS_TREE_SCAN_COMMAND,
-        )
-            .stdout
-            .lines()
-            .filter { it.isNotBlank() }
-
-        val result = mutableMapOf<String, AgentDetection>()
-        for (pane in normalizedPanes) {
-            // Per-cwd candidate slice — mirrors the shell-side
-            // detectionCommand(cwd) scoping that detectForPane gets for
-            // free by enumerating a single cwd. Without this, an OpenCode
-            // session whose path-hint is cwd-agnostic could bleed onto a
-            // pane in a different cwd.
-            val paneCandidates = candidates.filter { it.cwd == pane.cwd }
-            if (paneCandidates.isEmpty()) continue
-
-            // Slice the host-wide ps output to THIS pane's process
-            // subtree. Exact TTY rows seed the subtree; descendants stay
-            // included even if their own TTY is `?`, which covers Node
-            // wrappers that own the pane while the native agent child is
-            // detached from the controlling terminal.
-            val ttyFiltered = processLinesForPane(processLines, pane.ttyArg)
-            val merged = if (pane.paneCommand.isBlank()) {
-                ttyFiltered
-            } else {
-                ttyFiltered + pane.paneCommand
-            }
-
-            // Issue #819: only pay the extra `/proc/<pid>/fd` round-trip when
-            // this pane has MORE THAN ONE same-cwd Codex candidate to
-            // disambiguate — the canonical orchestrator/sibling-shares-cwd
-            // case. With a single Codex candidate the existing selection is
-            // already correct, so the session-list latency contract (#252:
-            // constant 2 round-trips) is preserved for the common case.
-            val processOwnedSourcePaths =
-                if (paneCandidates.count { it.agent == AgentKind.Codex } >= 2) {
-                    resolveProcessOwnedCodexRollouts(session, pidsFromProcessRows(ttyFiltered))
-                } else {
-                    emptySet()
-                }
-
-            val detection = detector.detect(
-                cwd = pane.cwd,
-                nowMillis = nowMillis,
-                candidates = paneCandidates,
-                processLines = merged,
-                requireProcessMatch = true,
-                processOwnedSourcePaths = processOwnedSourcePaths,
-            )
-            if (detection != null) {
-                result[pane.key] = detection
-            }
-        }
-        return result
-    }
-
-    private data class NormalizedPaneProbe(
-        val key: String,
-        val cwd: String,
-        val ttyArg: String,
-        val paneCommand: String,
-    )
-
     private data class ProcessRow(
         val pid: Long,
         val ppid: Long,
@@ -1160,21 +877,6 @@ public class AgentConversationRepository internal constructor(
             raw = line,
         )
     }
-
-    /**
-     * Concatenate the per-cwd [detectionCommand] into one script, each cwd
-     * in its own subshell so a `set`/`cd`/variable from one block cannot
-     * leak into the next. The whole thing runs in a single SSH round-trip
-     * and emits the same `agent|epoch|cwd|path` rows [parseCandidate]
-     * already understands, each tagged with the cwd that produced it.
-     *
-     * Reusing [detectionCommand] verbatim keeps it the single source of
-     * truth for the candidate-enumeration shell — no forked heuristic.
-     */
-    internal fun detectionCommandForCwds(cwds: List<String>): String =
-        cwds.joinToString(separator = "\n") { cwd ->
-            "(\n${detectionCommand(cwd)}\n)"
-        }
 
     suspend fun readInitialEvents(
         session: SshSession,

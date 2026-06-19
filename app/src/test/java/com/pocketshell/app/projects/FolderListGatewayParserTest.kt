@@ -241,6 +241,23 @@ class FolderListGatewayParserTest {
     }
 
     @Test
+    fun parseSessionWindowRowsCapturesPanePidForForeignKindGuess() {
+        // Epic #821 A2: `#{pane_pid}` is the trailing 10th column, threaded onto
+        // the row for the foreign-session one-shot daemon kind guess. A row that
+        // predates the column (9-field, #653 shape) yields a null pid.
+        val stdout = """
+            with-pid::0::node::1::1::/work::/dev/pts/2::node::@0::4242
+            no-pid::0::bash::1::1::/srv::/dev/pts/9::bash::@1
+        """.trimIndent()
+        val windows = SshFolderListGateway.parseSessionWindowRows(stdout)
+        assertEquals(2, windows.size)
+        assertEquals(4242L, windows[0].panePid)
+        assertEquals("@0", windows[0].windowId)
+        assertNull("a row without the pane_pid column must yield a null pid", windows[1].panePid)
+        assertEquals("@1", windows[1].windowId)
+    }
+
+    @Test
     fun parseSessionWindowRowsTreatsMissingWindowIdColumnAsNull() {
         // Pre-#653 8-field shape (e.g. a row from an older cache or a tmux that
         // did not emit the id column): the parser still yields the row, with a

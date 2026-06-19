@@ -920,6 +920,22 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val panesSeededThisAttach: MutableSet<String> =
         java.util.Collections.newSetFromMap(ConcurrentHashMap())
+
+    /**
+     * Issue #830: pane IDs whose attach-time seed `capture-pane` round-trip is
+     * currently IN FLIGHT (marked the instant [seedPaneFromCapture] starts, before
+     * the wire exchange, and cleared when it returns). [panesSeededThisAttach] only
+     * becomes true AFTER the snapshot has been appended — too late to dedup a
+     * CONCURRENT reseed net (the pager-settle [reseedVisiblePaneIfBlank] launches a
+     * second capture in the window between the preload seed STARTING and its
+     * snapshot landing, so both nets read `visibleScreenIsBlank()==true` and each
+     * fires a redundant `capture-pane`). This in-flight set closes that race: a net
+     * that sees a seed already in flight for the pane skips its own capture and lets
+     * the in-flight seed paint the pane. Reset with [panesSeededThisAttach] at the
+     * start of each attach.
+     */
+    private val panesSeedInFlightThisAttach: MutableSet<String> =
+        java.util.Collections.newSetFromMap(ConcurrentHashMap())
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
     private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
     private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
@@ -2343,21 +2359,45 @@ public class TmuxSessionViewModel @Inject constructor(
      * user is actually looking at (page 0); the lazily-revealed background panes keep the
      * existing reveal-time blank-reseed safety net (#640/#662).
      */
-    private suspend fun reseedActivePaneForReattach(refreshGuard: RuntimeRefreshGuard) {
+    private suspend fun reseedActivePaneForReattach(
+        refreshGuard: RuntimeRefreshGuard,
+        skipWhenFreshlySeeded: Boolean = false,
+    ) {
         val client = clientRef ?: return
         if (client.disconnected.value) return
         if (!isCurrentRuntime(refreshGuard)) return
         val activePane = activeVisiblePane() ?: return
         val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
+        val blank = activePane.terminalState.visibleScreenIsBlank()
+        // Issue #830: the resize-completion caller flows through here on EVERY attach
+        // path, including a fresh COLD OPEN where [preloadVisibleContentForNewPanes]
+        // already captured this active pane THIS attach. On a cold open the
+        // post-`refresh-client -C` reflow streams the new-grid pane content back as
+        // live `%output`, so a non-blank, non-partial-blank active pane that was just
+        // seeded this attach is already being repainted at the correct grid — a
+        // second unconditional `capture-pane` here is the redundant cold-open reseed
+        // the #640 single-capture contract forbids (extra round-trip + relayout =
+        // flicker on a high-latency link). Skip the re-capture ONLY for that exact
+        // case; a reattach/reflow on a REUSED pane (not seeded this attach) or a
+        // blank / "one live line, rest blank" mis-wrapped pane (#553/#651/#717) still
+        // gets the unconditional full-viewport restore below. The other-pane blank
+        // backstop always runs.
+        val freshlySeededAndPainted = skipWhenFreshlySeeded &&
+            activePane.paneId in panesSeededThisAttach &&
+            !blank &&
+            !partialBlank
         Log.i(
             ISSUE_145_RECONNECT_TAG,
             "tmux-reattach-full-viewport-reseed pane=${activePane.paneId} " +
                 "window=${activePane.windowId} session=${activeTarget?.sessionName} " +
-                "partialBlank=$partialBlank status=${_connectionStatus.value}",
+                "partialBlank=$partialBlank freshlySeededAndPainted=$freshlySeededAndPainted " +
+                "status=${_connectionStatus.value}",
         )
-        // UNCONDITIONAL full-viewport restore of the active pane (id-tagged via the
-        // guard) — NOT gated on `visibleScreenIsBlank()`, so a partial blank is healed.
-        seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = false)
+        if (!freshlySeededAndPainted) {
+            // UNCONDITIONAL full-viewport restore of the active pane (id-tagged via the
+            // guard) — NOT gated on `visibleScreenIsBlank()`, so a partial blank is healed.
+            seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = false)
+        }
         // Then run the existing blank-net backstop over any OTHER visible pane that came
         // back fully blank (a no-op for the active pane just restored above).
         reseedBlankVisiblePanes(refreshGuard)
@@ -3846,6 +3886,8 @@ public class TmuxSessionViewModel @Inject constructor(
             // redundant second full reseed for panes the preload already
             // painted. Cleared here so a reconnect starts fresh.
             panesSeededThisAttach.clear()
+            // Issue #830: reset the in-flight seed tracker in lockstep.
+            panesSeedInFlightThisAttach.clear()
 
             awaitPanesReadyForAttach(
                 target = target,
@@ -5609,6 +5651,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // black) and retries, so a degraded reconnect can't strand a
                 // black pane.
                 panesSeededThisAttach.clear()
+                panesSeedInFlightThisAttach.clear()
                 val reattachGuard = RuntimeRefreshGuard(
                     generation = connectGeneration,
                     target = target,
@@ -5790,6 +5833,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // fresh-transport reconnect never strands a black pane on a
                 // live (green) connection.
                 panesSeededThisAttach.clear()
+                panesSeedInFlightThisAttach.clear()
                 val transportReattachGuard = RuntimeRefreshGuard(
                     generation = connectGeneration,
                     target = target,
@@ -6637,6 +6681,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // (the test seam used to flip Connected immediately and never
             // reseed, hiding the production ordering it is supposed to verify).
             panesSeededThisAttach.clear()
+            panesSeedInFlightThisAttach.clear()
             awaitPanesReadyForAttach(target, attempt, startedAtMs, trigger)
             reseedAllVisiblePanes()
             connectingTarget = null
@@ -7854,10 +7899,27 @@ public class TmuxSessionViewModel @Inject constructor(
         val pane = paneRows[paneId] ?: return
         val client = clientRef ?: return
         if (client.disconnected.value) return
+        // Issue #830: a pane already seeded THIS attach ([panesSeededThisAttach]),
+        // or with a seed round-trip still IN FLIGHT
+        // ([panesSeedInFlightThisAttach]), has its authoritative `capture-pane`
+        // snapshot applied or arriving. The pager settles on the active pane the
+        // instant the route swaps — in the narrow window between the preload seed
+        // STARTING and its snapshot landing, so a `visibleScreenIsBlank()` read here
+        // is a drain-timing artifact racing the in-flight seed, NOT a
+        // genuinely-never-seeded window. Re-seeding then is the redundant cold-open
+        // reseed the #640 single-capture contract forbids (a 2nd `capture-pane`
+        // round-trip + relayout = visible flicker on a high-latency link). The #662
+        // heal this watchdog exists for is a window with NO seed this attach (a
+        // reused pane whose attach-time seed was missing/wiped), so the skip is
+        // scoped to seeded / in-flight panes only and never suppresses a real
+        // black-window heal.
+        if (paneId in panesSeededThisAttach || paneId in panesSeedInFlightThisAttach) return
         if (!pane.terminalState.visibleScreenIsBlank()) return
         bridgeScope.launch {
             // Re-check inside the coroutine: the pane may have painted between
-            // the synchronous guard and dispatch (a late `%output` landed).
+            // the synchronous guard and dispatch (a late `%output` landed), or its
+            // attach-time seed may have started in the meantime.
+            if (paneId in panesSeededThisAttach || paneId in panesSeedInFlightThisAttach) return@launch
             if (!pane.terminalState.visibleScreenIsBlank()) return@launch
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
@@ -7903,20 +7965,30 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshGuard: RuntimeRefreshGuard?,
         recordMilestone: Boolean,
     ): Boolean {
-        var attempt = 0
-        while (true) {
-            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
-            if (client.disconnected.value) return false
-            if (seedPaneFromCaptureOnce(client, pane, refreshGuard, recordMilestone)) {
-                return true
+        // Issue #830: publish "a seed for this pane is in flight" BEFORE the first
+        // round-trip so a concurrent reseed net (the pager-settle
+        // [reseedVisiblePaneIfBlank]) dedups against the in-flight seed instead of
+        // racing it into a second redundant `capture-pane`. Cleared in the finally
+        // so the genuine #662 black-window heal still fires once no seed is pending.
+        panesSeedInFlightThisAttach.add(pane.paneId)
+        try {
+            var attempt = 0
+            while (true) {
+                if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+                if (client.disconnected.value) return false
+                if (seedPaneFromCaptureOnce(client, pane, refreshGuard, recordMilestone)) {
+                    return true
+                }
+                attempt += 1
+                if (attempt >= SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS) return false
+                // Short backoff so a flaky-link empty capture is re-tried after the
+                // channel has a moment to recover, without stalling a genuinely
+                // empty pane's reveal for long. The guard re-check at the top of the
+                // loop aborts immediately if the runtime was superseded mid-wait.
+                delay(SEED_CAPTURE_EMPTY_RETRY_DELAY_MS)
             }
-            attempt += 1
-            if (attempt >= SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS) return false
-            // Short backoff so a flaky-link empty capture is re-tried after the
-            // channel has a moment to recover, without stalling a genuinely
-            // empty pane's reveal for long. The guard re-check at the top of the
-            // loop aborts immediately if the runtime was superseded mid-wait.
-            delay(SEED_CAPTURE_EMPTY_RETRY_DELAY_MS)
+        } finally {
+            panesSeedInFlightThisAttach.remove(pane.paneId)
         }
     }
 
@@ -10344,12 +10416,19 @@ public class TmuxSessionViewModel @Inject constructor(
             // re-capture THEN runs the blank-net backstop over the other panes, so
             // background panes keep the #640/#662 reveal-time blank safety net.
             if (clientRef === client) {
+                // Issue #830: on a cold open the active pane was already seeded this
+                // attach by the preload pass and the post-`refresh-client` reflow
+                // streams its new-grid content back as live `%output`, so skip the
+                // redundant unconditional re-capture for a freshly-seeded, painted
+                // pane (a reattach/reflow on a reused or blank/mis-wrapped pane still
+                // re-captures — see [reseedActivePaneForReattach]).
                 reseedActivePaneForReattach(
                     RuntimeRefreshGuard(
                         generation = attachGeneration,
                         target = target,
                         client = client,
                     ),
+                    skipWhenFreshlySeeded = true,
                 )
             }
         }

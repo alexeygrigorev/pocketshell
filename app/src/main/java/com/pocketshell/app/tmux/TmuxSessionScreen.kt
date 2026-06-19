@@ -430,12 +430,26 @@ public fun TmuxSessionScreen(
     // session name (so the chip hides when toggling back to the same name).
     val rawPreviousSessionName by viewModel.previousSessionName.collectAsState()
     val previousSessionName = rawPreviousSessionName?.takeIf { it != sessionName }
+    // Epic #821 Slice 1: the active session's RECORDED `@ps_agent_kind`. `null`
+    // means foreign / not-yet-classified → the change-kind menu reads "What is
+    // this session?" and the picker opens in the unknown ("we don't know this
+    // session — choose") mode.
+    val currentSessionRecordedKind by viewModel.currentSessionRecordedKind.collectAsState()
     LaunchedEffect(status, canReconnect) {
         recordTmuxReconnectUiStateRendered(
             status = status,
             hostId = hostId,
             canReconnect = canReconnect,
         )
+    }
+    // Epic #821 Slice 1: read the active session's recorded `@ps_agent_kind`
+    // once it is connected (and on a session switch) so the change-kind menu
+    // label and the picker mode reflect the host. Re-read when the session name
+    // changes or the connection re-establishes.
+    LaunchedEffect(sessionName, status) {
+        if (status is ConnectionStatus.Connected) {
+            viewModel.refreshCurrentSessionRecordedKind()
+        }
     }
 
     val pagerState = rememberPagerState(pageCount = { unifiedPanes.size })
@@ -602,6 +616,8 @@ public fun TmuxSessionScreen(
     // Issue #497: in-app file viewer path-entry dialog (kebab "Open file…").
     var showOpenFileDialog by remember { mutableStateOf(false) }
     var openFilePath by remember { mutableStateOf("") }
+    // Epic #821 Slice 1: the session-kind classify / change picker.
+    var showKindPicker by remember { mutableStateOf(false) }
     // Voice/dictation surfaces — mirror SessionScreen so the tmux route
     // gets the prompt composer, the mic FAB, the inline-dictation key bar,
     // and the snippet picker. Without these the user can never dictate
@@ -1117,6 +1133,14 @@ public fun TmuxSessionScreen(
                 moreExpanded = false
                 dialogMode = TmuxDialogMode.StopSession
             },
+            onChangeKind = {
+                moreExpanded = false
+                // Re-read fresh before opening so the picker reflects the
+                // current host option (e.g. after an out-of-band change).
+                viewModel.refreshCurrentSessionRecordedKind()
+                showKindPicker = true
+            },
+            changeKindIsUnknown = currentSessionRecordedKind == null,
             onSwitchSession = {
                 moreExpanded = false
                 showSessionSwitcher = true
@@ -2051,6 +2075,27 @@ public fun TmuxSessionScreen(
                     }
                     dialogMode = null
                 },
+            )
+        }
+
+        // Epic #821 Slice 1: the session-kind classify / change picker. Opens
+        // in the "unknown" prompt mode for a foreign session (no recorded
+        // kind), otherwise the "change kind" mode pre-selected on the current
+        // recorded kind. On Save it writes the durable host-side
+        // `@ps_agent_kind` via ManualKindWriter and re-reads it.
+        if (showKindPicker) {
+            com.pocketshell.app.projects.SessionKindPickerSheet(
+                sessionName = sessionName,
+                onDismiss = { showKindPicker = false },
+                onPick = { kind ->
+                    viewModel.setCurrentSessionKind(kind)
+                    showKindPicker = false
+                },
+                isUnknown = currentSessionRecordedKind == null,
+                currentKind = currentSessionRecordedKind,
+                // Option B today: no guess. A follow-up (Option A) passes a
+                // cgroup-based suggestion here with zero other change.
+                suggestedKind = null,
             )
         }
 
@@ -3746,6 +3791,12 @@ internal const val TMUX_LIFECYCLE_DIALOG_CANCEL_TAG = "tmux:session:lifecycle-di
  */
 internal const val TMUX_BROWSE_FILES_BUTTON_TAG = "tmux:session:browse-files-button"
 /**
+ * Epic #821 Slice 1: stable test tag for the kebab's "Change kind" /
+ * "What is this session?" item, used by instrumentation to open the
+ * session-kind picker.
+ */
+internal const val TMUX_CHANGE_KIND_BUTTON_TAG = "tmux:session:change-kind-button"
+/**
  * Issue #448 (epic #432 slice C): stable test tags for the new-port
  * detection overlay and its actions, so instrumentation can assert the
  * overlay appears and drive Forward / Dismiss.
@@ -5197,6 +5248,13 @@ internal fun TmuxMoreMenu(
     onCreateSession: () -> Unit,
     onRenameSession: () -> Unit,
     onKillSession: () -> Unit,
+    // Epic #821 Slice 1: classify / re-classify this session's agent kind.
+    // The label adapts to whether the session has a recorded kind: an
+    // unclassified (foreign) session reads "What is this session?" and a
+    // classified one "Change kind". Defaulted so existing direct callers /
+    // tests of TmuxMoreMenu stay source-compatible.
+    onChangeKind: () -> Unit = {},
+    changeKindIsUnknown: Boolean = false,
     onSwitchSession: () -> Unit,
     onOpenJobs: () -> Unit,
     onOpenUsage: () -> Unit,
@@ -5233,6 +5291,18 @@ internal fun TmuxMoreMenu(
         DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
         DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
         DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
+        // Epic #821 Slice 1: classify a foreign session ("What is this
+        // session?") or re-classify any session ("Change kind"). Writes the
+        // durable host-side `@ps_agent_kind` option via ManualKindWriter.
+        DropdownMenuItem(
+            text = {
+                Text(
+                    if (changeKindIsUnknown) "What is this session?" else "Change kind",
+                )
+            },
+            onClick = onChangeKind,
+            modifier = Modifier.testTag(TMUX_CHANGE_KIND_BUTTON_TAG),
+        )
         DropdownMenuItem(text = { Text("Stop session") }, onClick = onKillSession)
         // Issue #445 (epic #432 slice A): per-host port-forward panel is a
         // host-scoped affordance, so it lives in the "On this host" group.

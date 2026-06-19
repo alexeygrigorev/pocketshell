@@ -23,6 +23,7 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -288,6 +289,30 @@ interface FolderListGateway {
         oldName: String,
         newName: String,
     ): Result<Unit> = Result.failure(UnsupportedOperationException("Session rename is not available."))
+
+    /**
+     * Epic #821 Slice 1: manually classify [sessionName] by writing the durable
+     * host-side `@ps_agent_kind` tmux user option to [kind] over a warm SSH
+     * lease (via [ManualKindWriter]). Used by both the "unknown → pick" path
+     * (a foreign session with no recorded kind) and the "change kind" action
+     * (rewrite the recorded kind of an already-classified session). The written
+     * value is the SAME option `record_agent_kind` writes at launch, so it
+     * reads back through the unchanged enumeration path
+     * ([FolderSessionRow.recordedKind]) and survives reconnect — no extra
+     * cache, one source of truth.
+     *
+     * The default keeps test fakes honest without forcing every unrelated fake
+     * gateway to learn the write; production overrides it below.
+     */
+    suspend fun setRecordedKind(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        kind: SessionAgentKind,
+    ): Result<Unit> = Result.failure(
+        UnsupportedOperationException("Setting the recorded session kind is not available."),
+    )
 }
 
 data class FolderImportPayload(
@@ -1267,6 +1292,26 @@ class SshFolderListGateway internal constructor(
         }
     }
 
+    override suspend fun setRecordedKind(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        kind: SessionAgentKind,
+    ): Result<Unit> {
+        val target = sessionName.trim()
+        if (target.isEmpty()) {
+            return Result.failure(IllegalArgumentException("No session to classify."))
+        }
+        return withLeaseSession(host, keyPath, passphrase) { session ->
+            ManualKindWriter.write(
+                session = session,
+                sessionName = target,
+                kind = kind,
+            )
+        }
+    }
+
     override suspend fun createEmptyProject(
         host: HostEntity,
         keyPath: String,
@@ -1956,12 +2001,14 @@ class SshFolderListGateway internal constructor(
          * the session.
          */
         internal fun recordedKindFromOption(raw: String?): SessionAgentKind? =
-            when (raw?.trim()?.lowercase()) {
-                "claude" -> SessionAgentKind.Claude
-                "codex" -> SessionAgentKind.Codex
-                "opencode" -> SessionAgentKind.OpenCode
-                else -> null
-            }
+            // Epic #821 Slice 1: the single option↔kind mapping lives in
+            // ui-kit ([sessionAgentKindFromOption]) so the read-back here and
+            // the `ManualKindWriter` / `record_agent_kind` write side never
+            // drift. A manually-classified shell records `@ps_agent_kind shell`
+            // and reads back as a recorded Shell (not null → default-Shell), so
+            // the in-session change-kind UI knows the session HAS a recorded
+            // kind and never re-prompts it as Unknown.
+            sessionAgentKindFromOption(raw)
 
         /**
          * Parse `list-panes -a` output into compact per-window rows. The

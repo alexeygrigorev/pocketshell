@@ -297,7 +297,10 @@ data class FlatSessionGroups(
             SessionAgentKind.Probing,
             SessionAgentKind.Exited,
             -> true
-            SessionAgentKind.Shell -> false
+            // Unknown (foreign, not-yet-classified) groups with shells (#821).
+            SessionAgentKind.Shell,
+            SessionAgentKind.Unknown,
+            -> false
         }
     }
 }
@@ -2654,7 +2657,10 @@ class FolderListViewModel internal constructor(
             SessionAgentKind.Probing,
             SessionAgentKind.Exited,
             -> true
-            SessionAgentKind.Shell -> false
+            // Unknown (foreign, not-yet-classified) groups with shells (#821).
+            SessionAgentKind.Shell,
+            SessionAgentKind.Unknown,
+            -> false
         }
     }
 }

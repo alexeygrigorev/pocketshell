@@ -2502,6 +2502,10 @@ internal fun sessionBadgeLabel(session: FolderSessionEntry): String = when (sess
     SessionAgentKind.Probing -> "Detecting"
     SessionAgentKind.Exited -> "Shell"
     SessionAgentKind.Shell -> "Shell"
+    // Epic #821 Slice 1: a foreign session with no recorded `@ps_agent_kind`.
+    // We do NOT guess (maintainer Option B) — the badge reads "Unknown" until
+    // the user classifies it through the change-kind picker.
+    SessionAgentKind.Unknown -> "Unknown"
 }
 
 internal fun sessionKindLabel(session: FolderSessionEntry): String = when (session.agentKind) {
@@ -2511,6 +2515,7 @@ internal fun sessionKindLabel(session: FolderSessionEntry): String = when (sessi
     SessionAgentKind.Probing -> "Detecting"
     SessionAgentKind.Exited -> "Shell"
     SessionAgentKind.Shell -> "Shell"
+    SessionAgentKind.Unknown -> "Unknown"
 }
 
 /**
@@ -2580,7 +2585,12 @@ private fun SessionAgentKind.isAgent(): Boolean = when (this) {
     SessionAgentKind.Probing,
     SessionAgentKind.Exited,
     -> true
-    SessionAgentKind.Shell -> false
+    // Unknown is a foreign, not-yet-classified session — treat it as a
+    // non-agent for the agent-styling/status-dot purposes until the user
+    // classifies it (epic #821 Slice 1).
+    SessionAgentKind.Shell,
+    SessionAgentKind.Unknown,
+    -> false
 }
 
 @Composable

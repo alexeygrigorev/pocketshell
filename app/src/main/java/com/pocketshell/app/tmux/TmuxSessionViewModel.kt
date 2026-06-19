@@ -29,6 +29,9 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
+import com.pocketshell.app.projects.ManualKindWriter
+import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationSyncStatus
@@ -1105,6 +1108,23 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val _previousSessionName: MutableStateFlow<String?> = MutableStateFlow(null)
     public val previousSessionName: StateFlow<String?> = _previousSessionName.asStateFlow()
+
+    /**
+     * Epic #821 Slice 1: the RECORDED `@ps_agent_kind` of the active session,
+     * read fresh from the host (the single source of truth — the tmux user
+     * option), NOT a competing cache. `null` means the session carries no
+     * recorded kind — i.e. it is FOREIGN / not-yet-classified, so the
+     * in-session "classify" UI surfaces it as [SessionAgentKind.Unknown] and
+     * offers the picker ("we don't know this session — choose"). When non-null
+     * the value drives the "change kind" flow's pre-selection. Refreshed
+     * on-demand (when the menu opens / a session connects) via
+     * [refreshCurrentSessionRecordedKind] and after a successful
+     * [setCurrentSessionKind] write, so it always reflects the host option.
+     */
+    private val _currentSessionRecordedKind: MutableStateFlow<SessionAgentKind?> =
+        MutableStateFlow(null)
+    public val currentSessionRecordedKind: StateFlow<SessionAgentKind?> =
+        _currentSessionRecordedKind.asStateFlow()
 
     // Last on-screen terminal grid reported by Compose. It can arrive
     // before or after the tmux control client attaches; once both are
@@ -10639,6 +10659,86 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+
+    /**
+     * Epic #821 Slice 1: read the active session's RECORDED `@ps_agent_kind`
+     * fresh from the host and publish it on [currentSessionRecordedKind]. The
+     * host-side tmux user option is the single source of truth — there is no
+     * client-side kind cache here (the conversation-open
+     * [sessionRecordedKindCache] is a detection-perf cache, not the
+     * classification authority, and cannot represent a manually-set Shell).
+     *
+     * Reads over the SAME warm SSH session the screen is already attached to
+     * (D21 — no new connection). `null` (option absent → foreign /
+     * not-yet-classified, or no warm session) leaves the UI to surface the
+     * session as [SessionAgentKind.Unknown] and offer the picker.
+     *
+     * Called on-demand: when the more-menu opens and after a successful
+     * [setCurrentSessionKind] write.
+     */
+    public fun refreshCurrentSessionRecordedKind() {
+        val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: run {
+            _currentSessionRecordedKind.value = null
+            return
+        }
+        val session = sessionRef ?: return
+        bridgeScope.launch {
+            val raw = withContext(Dispatchers.IO) {
+                runCatching {
+                    session.exec(
+                        "tmux show-options -v -t '${escapeSingleQuoted(target)}' " +
+                            "@ps_agent_kind 2>/dev/null || true",
+                    ).stdout
+                }.getOrNull()
+            }
+            _currentSessionRecordedKind.value = sessionAgentKindFromOption(raw)
+        }
+    }
+
+    /**
+     * Epic #821 Slice 1: manually classify the active session — the
+     * "unknown → pick" and "change kind" actions both land here. Writes the
+     * durable host-side `@ps_agent_kind` tmux user option via [ManualKindWriter]
+     * over the warm session (D21 — no new connection), then re-reads it so
+     * [currentSessionRecordedKind] reflects the host. The written option is the
+     * SAME one `record_agent_kind` writes at launch, so it survives reconnect /
+     * app restart and reads back through the unchanged tree enumeration — one
+     * source of truth, no third cache.
+     *
+     * On a successful write the conversation-open [sessionRecordedKindCache] is
+     * invalidated for this session so the next Conversation open re-resolves
+     * the source from the NEW kind (the cache holds the old verdict and cannot
+     * represent every kind, e.g. a Shell reclassification).
+     */
+    public fun setCurrentSessionKind(kind: SessionAgentKind) {
+        val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: return
+        val session = sessionRef ?: return
+        bridgeScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    ManualKindWriter.write(
+                        session = session,
+                        sessionName = target,
+                        kind = kind,
+                    )
+                }
+            }
+            result.onSuccess {
+                // Invalidate the detection-perf cache (keyed by tmux session id,
+                // not name) so the next Conversation open re-resolves the source
+                // from the freshly-recorded kind. It is a pure perf cache, so a
+                // full clear is safe and avoids a key-by-name vs key-by-id miss.
+                sessionRecordedKindCache.clear()
+                refreshCurrentSessionRecordedKind()
+            }.onFailure { error ->
+                Log.w(
+                    ISSUE_464_KILL_TAG,
+                    "set-session-kind-failed session=$target kind=$kind " +
+                        "err=${error.javaClass.simpleName}: ${error.message}",
+                )
+            }
+        }
+    }
 
     private fun sendLifecycleCommand(command: String) {
         val client = clientRef ?: return

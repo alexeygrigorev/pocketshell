@@ -451,6 +451,18 @@ JOURNEY_CLASSES=(
   # assumeFalse(isRunningOnCi())). It lives under com.pocketshell.app.tmux, so it
   # carries its fully-qualified name directly.
   "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest"
+  # Epic #821 Slice 1: manual session classification (Option B + change-kind).
+  # The epic exists because agent-kind fixes keep recurring, so the foreign →
+  # pick → durable round-trip MUST be gated at PR time (D31). This connected
+  # test drives SshFolderListGateway.setRecordedKind -> ManualKindWriter against
+  # the deterministic `agents` fixture (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222,
+  # or the pool-allocated port under --pool — no new Docker service/port), and
+  # asserts: a foreign session reads back recordedKind=null (Unknown signal, no
+  # guess), picking a kind writes `@ps_agent_kind` and reads back as that kind,
+  # change-kind rewrites it, and the kind PERSISTS host-side across a fresh SSH
+  # session (the reconnect/restart durability AC). It does NOT self-skip on CI.
+  # Lives under com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.ManualKindWriterDockerTest"
 )
 
 echo "=========================================================="

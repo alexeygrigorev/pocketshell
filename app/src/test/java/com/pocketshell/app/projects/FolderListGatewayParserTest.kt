@@ -87,6 +87,21 @@ class FolderListGatewayParserTest {
     }
 
     @Test
+    fun parseListSessionsRowsReadsManuallyRecordedShellAsRecordedKind() {
+        // Epic #821 Slice 1: a user can manually classify a foreign session as
+        // a plain shell — ManualKindWriter records `@ps_agent_kind shell`. That
+        // verdict reads back as a RECORDED Shell (not null → default-Shell), so
+        // the change-kind UI knows the session HAS a recorded kind and never
+        // re-prompts it as Unknown.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "classified::100::200::1::shell::/srv/app\n",
+        )
+        assertEquals(1, rows.size)
+        assertEquals(SessionAgentKind.Shell, rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Shell, rows[0].agentKind)
+    }
+
+    @Test
     fun parseListSessionsRowsKeepsPathWithEmbeddedSeparator() {
         // session_path is the absorbing last column; a path containing the
         // rare `::` literal still parses, and the recorded kind ahead of it

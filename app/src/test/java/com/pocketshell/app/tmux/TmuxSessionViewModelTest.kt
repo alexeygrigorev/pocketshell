@@ -9788,6 +9788,66 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun autoReconnectAcquireForcesFreshLeaseEvictingThePoisonedWarmEntry() = runTest(scheduler) {
+        // EPIC #792 Slice C / #822 WEDGE FIX — red→green for the production wiring.
+        //
+        // The #822 wedge: the AUTO-reconnect ladder re-dialled with the AutoReconnect
+        // trigger, which on base did NOT force a fresh lease. On a silent half-open drop
+        // sshj's `isConnected` lies (stays true), so the pool REUSED the poisoned warm
+        // entry and every attempt re-dialled the dead socket — the maintainer's stuck-
+        // Reconnecting wedge. Slice C adds AutoReconnect to `shouldForceFreshLease`, so
+        // `acquireLeaseForTmux(AutoReconnect)` now evicts the idle/poisoned lease and
+        // dials a FRESH transport — the SAME session recovers without the switch dance.
+        //
+        // RED on 8e1ccc99: AutoReconnect was not force-fresh, so this asserted the
+        // poisoned `staleSession` was REUSED (connectCount stays 1, isNewConnection
+        // false). GREEN after the fix: a fresh transport is dialled (connectCount 2).
+        // The `staleSession` LIES about isConnected (default connected=true) to model
+        // the half-open drop the pool's reuse predicate is fooled by.
+        val staleSession = FakeSshSession() // half-open: connected=true but conceptually dead
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(staleSession, freshSession)
+        // A non-zero idle TTL keeps the released lease genuinely WARM/idle (a 0 TTL would
+        // close it on release, hiding the reuse-vs-evict distinction). The half-open drop
+        // leaves it lying about isConnected, so the pool keeps it warm — the wedge state.
+        val manager = testLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        // Seed the pool with the (poisoned half-open) warm lease, then release it so it
+        // sits idle — exactly the warm-lease state an auto-reconnect re-dial hits.
+        manager.acquire(testLeaseTarget()).getOrThrow().release()
+        val vm = newVm(sshLeaseManager = manager)
+
+        val lease = vm.acquireLeaseForTmuxForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            trigger = TmuxConnectTrigger.AutoReconnect,
+        )
+
+        assertNotNull(lease)
+        assertSame(
+            "auto-reconnect must force-fresh: dial a NEW transport, not reuse the poisoned warm lease",
+            freshSession,
+            lease?.session,
+        )
+        assertTrue("the auto-reconnect lease must be a new connection", lease?.isNewConnection == true)
+        assertEquals(
+            "auto-reconnect must evict the poisoned warm lease and handshake fresh (the #822 fix)",
+            2,
+            connector.connectCount,
+        )
+        assertTrue("evicting the poisoned warm lease closes its (half-open dead) session", staleSession.closed)
+        lease?.release()
+    }
+
+    @Test
     fun normalAcquirePreservesSameLeaseCachedRuntimeReuse() = runTest(scheduler) {
         val warmSession = FakeSshSession()
         val connector = QueueLeaseConnector(warmSession)

@@ -76,6 +76,75 @@ class SshLeaseManagerTest {
         assertTrue(session.closed)
     }
 
+    // ----------------------------------------------------------------------
+    // EPIC #792 Slice C / #822 WEDGE — the poisoned-warm-lease reuse mechanism.
+    //
+    // The #822 wedge: on a silent HALF-OPEN drop sshj's `isConnected` LIES — it
+    // keeps reporting `true` until the ~60s keep-alive trips. The pool's `acquire`
+    // reuses any entry whose `session.isConnected` is true, so a poisoned (dead-but-
+    // lying) idle entry is REUSED and every auto-reconnect attempt re-dials the SAME
+    // dead socket — the maintainer's "stuck Reconnecting, only the switch dance
+    // recovers" wedge. The Slice C production fix makes the auto-reconnect ladder use
+    // the force-fresh-lease path (`shouldForceFreshLease(AutoReconnect)` →
+    // `acquireLeaseForTmux` evicts the idle lease via `evictIdle` before re-dialling),
+    // which EVICTS the poisoned entry so the re-dial gets a FRESH transport.
+    //
+    // These two tests pin BOTH sides of that mechanism deterministically (no
+    // toxiproxy, no emulator): the wedge (reuse) and its fix (evict-then-fresh). A
+    // [FakeSshSession] that LIES about `isConnected` (the `connected=true` flag stays
+    // set after the worker conceptually died) reproduces the half-open condition the
+    // emulator cannot deterministically inject without the Slice D LivenessProbe.
+
+    @Test
+    fun `WEDGE - a poisoned half-open idle lease that lies about isConnected is REUSED on reacquire`() =
+        runTest {
+            val poisoned = FakeSshSession() // connected=true, but conceptually dead (half-open)
+            val fresh = FakeSshSession()
+            val connector = QueueLeaseConnector(poisoned, fresh)
+            val manager = leaseManager(connector)
+
+            // Acquire + release: the entry sits warm/idle. The half-open drop now
+            // happens on the wire — but sshj's isConnected LIES, so the FakeSshSession
+            // keeps `connected=true` (the exact #822 condition).
+            manager.acquire(TARGET).getOrThrow().release()
+            runCurrent()
+
+            // A plain reacquire (the inline AutoReconnect path BEFORE the fix, which did
+            // NOT force-fresh) REUSES the poisoned entry — no new connect. This is the
+            // wedge: the re-dial rides the same dead socket and never recovers.
+            val reacquired = manager.acquire(TARGET).getOrThrow()
+            assertSame("the poisoned half-open lease was reused (the #822 wedge)", poisoned, reacquired.session)
+            assertEquals("no fresh transport was dialled (the wedge)", 1, connector.connectCount)
+            reacquired.release()
+        }
+
+    @Test
+    fun `FIX - force-fresh evicts the poisoned half-open idle lease then re-dials a FRESH transport`() =
+        runTest {
+            val poisoned = FakeSshSession()
+            val fresh = FakeSshSession()
+            val connector = QueueLeaseConnector(poisoned, fresh)
+            val manager = leaseManager(connector)
+
+            manager.acquire(TARGET).getOrThrow().release()
+            runCurrent()
+
+            // The Slice C force-fresh sequence the AutoReconnect trigger now performs:
+            // acquireLeaseForTmux evicts the idle lease (evictIdle) BEFORE acquiring.
+            val evicted = manager.evictIdle(TARGET.leaseKey)
+            assertTrue("the poisoned idle entry must be evicted by force-fresh", evicted)
+            assertTrue("evicting the poisoned entry closes its (dead) session", poisoned.closed)
+
+            // The follow-up acquire now dials a FRESH transport — the SAME session
+            // recovers instead of riding the poisoned socket.
+            val refreshed = manager.acquire(TARGET).getOrThrow()
+            assertSame("force-fresh dialled a brand-new transport", fresh, refreshed.session)
+            assertNotSame("the poisoned lease is NOT reused after the fix", poisoned, refreshed.session)
+            assertEquals("a fresh handshake was performed", 2, connector.connectCount)
+            assertTrue("the fresh transport is a new connection", refreshed.isNewConnection)
+            refreshed.release()
+        }
+
     @Test
     fun `default idle ttl keeps released lease warm for sixty seconds`() = runTest {
         val session = FakeSshSession()

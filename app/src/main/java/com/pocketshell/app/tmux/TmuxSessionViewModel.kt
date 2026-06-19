@@ -54,6 +54,7 @@ import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
 import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
+import com.pocketshell.app.tmux.connection.TransportEffects
 import com.pocketshell.app.tmux.connection.hostKeyFor
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.HostKey
@@ -577,6 +578,26 @@ public class TmuxSessionViewModel @Inject constructor(
         TmuxAttachEffects(
             object : TmuxAttachEffects.TmuxAttachIo {
                 override suspend fun runFastSwitch(body: suspend () -> Unit) = body()
+            },
+        )
+
+    /**
+     * EPIC #792 Slice C — the RECONNECT-LADDER IO owner (the #822 wedge surface). The SOLE
+     * dispatcher of the reconnect IO now the inline `scheduleAutoReconnect` direct calls and
+     * `startReconnectForSend` are deleted (D22 hard-cut, single reconnect entrypoint). The VM
+     * implements the [TransportEffects.ReconnectIo] capability (it just runs the supplied
+     * thunk — the former `scheduleAutoReconnect`/`startReconnectForSend` bodies closed over the
+     * caller's args, with the #822 lease-eviction wedge fix inside the auto body). Every former
+     * inline reconnect call routes through this one owner — the same entrypoint the future #823
+     * pull-to-reconnect affordance (Slice D) will call, never a third writer.
+     */
+    private val transportEffects: TransportEffects =
+        TransportEffects(
+            object : TransportEffects.ReconnectIo {
+                override fun runAutoReconnectLadder(body: () -> Unit) = body()
+
+                override fun runManualReconnect(): TransportEffects.ManualReconnectResult =
+                    TransportEffects.ManualReconnectResult(this@TmuxSessionViewModel.startReconnectForSendBody())
             },
         )
 
@@ -1924,11 +1945,20 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun reconnect(): Boolean {
         if (activeTarget == null && connectingTarget == null) return false
-        startReconnectForSend()
+        // EPIC #792 Slice C: route through the single [TransportEffects] reconnect owner —
+        // the inline direct call is deleted (D22 hard-cut, single reconnect entrypoint).
+        transportEffects.onManualReconnect()
         return true
     }
 
-    private fun startReconnectForSend(): Job? {
+    /**
+     * EPIC #792 Slice C: the manual / send-triggered reconnect IO BODY — the body of the
+     * former inline `startReconnectForSend`, now invoked ONLY through the single
+     * [TransportEffects] owner (see [transportEffects]). Cancels any in-flight auto-ladder
+     * and re-enters `connect(Reconnect)` (the force-fresh-lease trigger). Returns the
+     * connect [Job] (or null when there is no target) so the send path can join it.
+     */
+    private fun startReconnectForSendBody(): Job? {
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
@@ -3861,7 +3891,17 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun shouldForceFreshLease(trigger: TmuxConnectTrigger): Boolean =
         trigger == TmuxConnectTrigger.Reconnect ||
             trigger == TmuxConnectTrigger.LifecycleReattach ||
-            trigger == TmuxConnectTrigger.NetworkReconnect
+            trigger == TmuxConnectTrigger.NetworkReconnect ||
+            // EPIC #792 Slice C (the #822 wedge fix): the AUTO-reconnect ladder must ALSO
+            // force a fresh SSH lease. On a silent half-open drop sshj's `isConnected` lies
+            // (it stays true until the ~60s keep-alive trips), so the lease pool's
+            // `acquire()` REUSES the poisoned warm entry and every ladder attempt re-dials
+            // the SAME dead socket — the #822 "Reconnecting(1/4) stuck ~45s, only recovers
+            // via the switch-session dance" wedge (the switch dance recovered only because
+            // re-entering connect() to another host eventually evicted the poisoned lease).
+            // Forcing a fresh lease evicts the idle/poisoned entry first (acquireLeaseForTmux
+            // → evictIdle), so the SAME session auto-recovers WITHOUT the switch dance.
+            trigger == TmuxConnectTrigger.AutoReconnect
 
     private fun ConnectionTarget.toSshLeaseTarget(): SshLeaseTarget =
         SshLeaseTarget(
@@ -6212,7 +6252,15 @@ public class TmuxSessionViewModel @Inject constructor(
             intent = "unknown",
         )
 
-    private fun scheduleAutoReconnect(
+    /**
+     * EPIC #792 Slice C: the auto-reconnect ladder IO BODY — the body of the former inline
+     * `scheduleAutoReconnect`, now invoked ONLY through the single [TransportEffects] owner
+     * (see [transportEffects] / [scheduleAutoReconnect]). The #822 wedge fix lives in the
+     * lease handling: the `AutoReconnect` trigger now forces a fresh SSH lease
+     * ([shouldForceFreshLease]) so each attempt evicts the poisoned half-open warm lease and
+     * the same session auto-recovers WITHOUT the switch-session dance.
+     */
+    private fun scheduleAutoReconnectBody(
         target: ConnectionTarget,
         reason: String,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.AutoReconnect,
@@ -6428,6 +6476,30 @@ public class TmuxSessionViewModel @Inject constructor(
                 "maxAttempts" to delays.size,
             )
             autoReconnectJob = null
+        }
+    }
+
+    /**
+     * EPIC #792 Slice C: the SINGLE-OWNER auto-reconnect dispatcher. Every former inline
+     * `scheduleAutoReconnect(...)` call site (passive-disconnect surface, network-handoff
+     * reconnect, within-grace heal fallback) calls this, which routes the [scheduleAutoReconnectBody]
+     * IO through the single [TransportEffects] reconnect owner — there is no other reconnect
+     * entrypoint (D28(4) single active path / D22 hard-cut). Keeps the readable named call at
+     * each site while the dispatch flows through one owner.
+     */
+    private fun scheduleAutoReconnect(
+        target: ConnectionTarget,
+        reason: String,
+        trigger: TmuxConnectTrigger = TmuxConnectTrigger.AutoReconnect,
+        diagnosticFields: Array<out Pair<String, Any?>> = emptyArray(),
+    ) {
+        transportEffects.onAutoReconnect {
+            scheduleAutoReconnectBody(
+                target = target,
+                reason = reason,
+                trigger = trigger,
+                diagnosticFields = diagnosticFields,
+            )
         }
     }
 
@@ -9005,7 +9077,9 @@ public class TmuxSessionViewModel @Inject constructor(
             is ConnectionStatus.Switching,
             -> Unit
             else -> {
-                val reconnectJob = startReconnectForSend()
+                // EPIC #792 Slice C: route through the single [TransportEffects] reconnect
+                // owner — the inline direct call is deleted (D22 hard-cut, one entrypoint).
+                val reconnectJob = transportEffects.onManualReconnect().job
                     ?: return liveTmuxClientForSendOrNull()
                 reconnectJob.join()
             }

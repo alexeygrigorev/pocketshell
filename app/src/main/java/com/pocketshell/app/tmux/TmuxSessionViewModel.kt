@@ -47,7 +47,7 @@ import com.pocketshell.app.session.canRetryAgentStream
 import com.pocketshell.app.session.markOptimisticFailed
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
-import com.pocketshell.app.tmux.connection.ConnectionControllerShadowBridge
+import com.pocketshell.app.tmux.connection.ConnectionManager
 import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
@@ -507,10 +507,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * EPIC #687 slice 1c-iv-b-A2 (#739): the REAL [SshLeaseTransportPort] over the
      * VM's existing [sshLeaseManager]. This is the controller's `isWarm` source AND
      * the [ConnectionEffectDriver]'s real [TransportPort.transportEvents] input — NO
-     * stub `emptyFlow`/fake-`isWarm` fork for the driver's inputs (D22). The
-     * controller still reaches Live from the bridge's explicit real-feedback feeds,
-     * so it performs no transport IO; `ensureLease`/`evictStale` are never invoked
-     * in this observe-only slice (the inline `runConnect` remains the sole live IO).
+     * stub `emptyFlow`/fake-`isWarm` fork for the driver's inputs (D22). The transport IO
+     * (lease acquire/evict, re-dial) runs through the [TransportEffects]/[GraceEffects] IO
+     * bodies over [sshLeaseManager] directly, so the controller/driver only READ this port's
+     * `isWarm` snapshot + `transportEvents` flow; `ensureLease`/`evictStale` on this adapter
+     * are never invoked.
      *
      * [leaseKeyFor] resolves a controller [HostKey] back to the lease target ONLY
      * for the suspend IO methods (unused here); it maps from the active/connecting
@@ -522,7 +523,7 @@ public class TmuxSessionViewModel @Inject constructor(
             leaseKeyFor = { hostKey ->
                 val target = (activeTarget ?: connectingTarget)
                     ?.takeIf { hostKeyFor(it.toSshLeaseTarget().leaseKey) == hostKey }
-                    ?: error("no lease target for $hostKey (observe-only slice)")
+                    ?: error("no lease target for $hostKey")
                 target.toSshLeaseTarget()
             },
         ).apply {
@@ -535,8 +536,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * EPIC #687 slice 1c-iv-b-A2 (#739): the REAL [TmuxPort] over the VM's current
      * control client (swapped on every attach via [attachClient] →
      * [CurrentClientTmuxPort.setClient]). Its [TmuxPort.disconnected] oracle is the
-     * [ConnectionEffectDriver]'s real transport-drop input — not a stub. Observe-only:
-     * the driver collects [TmuxPort.disconnected] and never calls its IO methods.
+     * [ConnectionEffectDriver]'s real transport-drop input — not a stub. The driver collects
+     * [TmuxPort.disconnected] (to submit TransportDropped); the attach IO runs through the
+     * [TmuxAttachEffects] body, so this adapter's IO methods are never invoked.
      */
     private val connectionTmuxPort: CurrentClientTmuxPort =
         CurrentClientTmuxPort(
@@ -544,8 +546,15 @@ public class TmuxSessionViewModel @Inject constructor(
             scrollbackLines = SEED_SCROLLBACK_LINES,
         )
 
-    private val connectionControllerShadow: ConnectionControllerShadowBridge =
-        ConnectionControllerShadowBridge(transport = connectionTransportPort)
+    /**
+     * EPIC #792 Slice E — the connection FACADE. The single object the VM holds for the whole
+     * connect/attach/reattach/grace/lease/reconnect surface: it owns the
+     * `:shared:core-connection` [ConnectionController] (the SOLE connection-state authority) and
+     * the effect classes the driver dispatches to. Replaces the deleted
+     * `ConnectionControllerShadowBridge` — there is no shadow/mirror/dual-write remaining (D28).
+     */
+    private val connectionManager: ConnectionManager =
+        ConnectionManager(transport = connectionTransportPort)
 
     /**
      * EPIC #792 Slice B — the GRACE IO owner. Consolidates the three background-grace
@@ -580,7 +589,12 @@ public class TmuxSessionViewModel @Inject constructor(
     private val tmuxAttachEffects: TmuxAttachEffects =
         TmuxAttachEffects(
             object : TmuxAttachEffects.TmuxAttachIo {
-                override suspend fun runFastSwitch(body: suspend () -> Unit) = body()
+                override suspend fun attach(
+                    target: ConnectionTarget,
+                    attempt: Int,
+                    trigger: TmuxConnectTrigger,
+                    startedAtMs: Long,
+                ) = runFastSessionSwitch(target, attempt, trigger, startedAtMs)
             },
         )
 
@@ -605,24 +619,23 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
     /**
-     * EPIC #687 slice 1c-iv-b-A2 (#739) + slice 1c-iv-b-B1 (#738): the
-     * [ConnectionEffectDriver], wired over the REAL adapters — it observes the shadow
-     * [ConnectionController]'s [ConnectionController.state] transitions, the real
-     * [SshLeaseTransportPort.transportEvents] lease edges, and the real
-     * [CurrentClientTmuxPort.disconnected] transport-drop oracle.
+     * EPIC #792 Slice E: the [ConnectionEffectDriver], wired over the REAL adapters — it
+     * observes the AUTHORITATIVE [ConnectionController]'s [ConnectionController.state]
+     * transitions, the real [SshLeaseTransportPort.transportEvents] lease edges, and the real
+     * [CurrentClientTmuxPort.disconnected] transport-drop oracle, and dispatches each effect to
+     * the single-owner effect classes ([GraceEffects]/[TmuxAttachEffects]/[TransportEffects]).
      *
-     * Slice B1 (#738) takes the FIRST effect off observe-only: the driver now OWNS
-     * the clean BACKGROUND DETACH. On a transition INTO [ConnectionState.Backgrounded]
-     * it fires [backgroundedEffect] = [launchBackgroundDetachTeardown], which runs the
-     * EXISTING full teardown ([closeCurrentConnectionAndJoin] under `NonCancellable`)
-     * — the same job the deleted inline `backgroundDetachJob` trigger launched, with
-     * identical timing. The OPEN path (`runConnect`/`connectJob`) and the cold/warm
-     * projection read STAY inline (deferred to a re-planned slice); the driver still
-     * performs ZERO port IO for those. Started once, here, in [viewModelScope].
+     * The driver OWNS the clean BACKGROUND DETACH: on a transition INTO
+     * [ConnectionState.Backgrounded] it fires [backgroundedEffect] (→ the single [GraceEffects]
+     * owner → [launchBackgroundDetachTeardown]), which runs the full teardown
+     * ([closeCurrentConnectionAndJoin] under `NonCancellable`) — the same job the deleted inline
+     * `backgroundDetachJob` trigger launched, with identical timing. The driver holds no
+     * business logic itself (the Slice E thin-glue contract). Started once, here, in
+     * [viewModelScope].
      */
     private val connectionEffectDriver: ConnectionEffectDriver =
         ConnectionEffectDriver(
-            controller = connectionControllerShadow.connectionController,
+            controller = connectionManager.connectionController,
             tmuxPort = connectionTmuxPort,
             transportPort = connectionTransportPort,
             scope = viewModelScope,
@@ -741,7 +754,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val bg = isProcessBackgroundedForGraceOwner()
         val hasClient = clientRef != null
         val disconnected = clientRef?.disconnected?.value ?: true
-        val ctrl = connectionControllerShadow.connectionController.state.value
+        val ctrl = connectionManager.state
         val open = !bg && appActive && hasClient && !disconnected && ctrl is CoreConnectionState.Live
         if (!open) {
             Log.i(
@@ -889,7 +902,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Immediate indicator: walk the controller Live -> Reattaching now, so the
         // connection-lost indicator (header pill / band) surfaces immediately —
         // this is the #822 DETECTION half (V7).
-        connectionControllerShadow.connectionController.submit(
+        connectionManager.submit(
             CoreConnectionEvent.TransportDropped(reason = "liveness_probe_silent_drop"),
         )
         projectStatusFromController()
@@ -1002,7 +1015,7 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun driveRevealStateMachine() {
         viewModelScope.launch {
-            connectionControllerShadow.connectionController.state.collect { state ->
+            connectionManager.stateFlow.collect { state ->
                 revealStateMachine.onConnectionState(state)
                 _revealState.value = revealStateMachine.state.value
             }
@@ -1021,7 +1034,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * id)`.
      */
     private fun navigateRevealTo(target: ConnectionTarget) {
-        revealStateMachine.navigate(shadowSessionId(target), target.sessionName)
+        revealStateMachine.navigate(controllerSessionId(target), target.sessionName)
         _revealState.value = revealStateMachine.state.value
     }
 
@@ -1036,7 +1049,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun offerRevealSeed(paneId: String, frame: String) {
         val target = activeTarget ?: connectingTarget ?: return
         revealStateMachine.onSeed(
-            Seed(targetId = shadowSessionId(target), paneId = paneId, frame = frame),
+            Seed(targetId = controllerSessionId(target), paneId = paneId, frame = frame),
         )
         _revealState.value = revealStateMachine.state.value
     }
@@ -1060,7 +1073,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val activePaneId = _panes.value.firstOrNull()?.paneId ?: return
         revealStateMachine.onSeed(
             Seed(
-                targetId = shadowSessionId(target),
+                targetId = controllerSessionId(target),
                 paneId = activePaneId,
                 frame = REVEAL_LIVE_SENTINEL_FRAME,
             ),
@@ -1069,17 +1082,17 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * The opaque [HostKey] / [SessionId] the shadow bridge keys on, derived from
-     * the inline transition's active/connecting target. Returns null when there is
-     * no target (Idle transition), in which case the bridge mirrors an Idle.
+     * The opaque [HostKey] / [SessionId] the [connectionManager] controller keys on, derived
+     * from the inline transition's active/connecting target. Returns null when there is no
+     * target (Idle transition).
      */
-    private fun shadowHostAndTarget(): Pair<HostKey?, SessionId?> {
+    private fun controllerHostAndTarget(): Pair<HostKey?, SessionId?> {
         val target = activeTarget ?: connectingTarget ?: return (null to null)
-        return (shadowHostKey(target) to shadowSessionId(target))
+        return (controllerHostKey(target) to controllerSessionId(target))
     }
 
     /**
-     * EPIC #687 slice 1c-iv-prep: mint the shadow controller's [HostKey] through
+     * EPIC #687 slice 1c-iv-prep: mint the controller's [HostKey] through
      * the SAME [hostKeyFor] encoding the [liveLeaseKeys]-backed warm snapshot uses
      * (`hostKeyFor(leaseKey)`). Previously this path encoded the host as
      * `user@host:port/hostId` while the warm snapshot encoded it as
@@ -1088,10 +1101,10 @@ public class TmuxSessionViewModel @Inject constructor(
      * through [hostKeyFor] off the one [ConnectionTarget.toSshLeaseTarget] lease
      * key aligns the encoding so `isWarm` returns true for a warm host.
      */
-    private fun shadowHostKey(target: ConnectionTarget): HostKey =
+    private fun controllerHostKey(target: ConnectionTarget): HostKey =
         hostKeyFor(target.toSshLeaseTarget().leaseKey)
 
-    private fun shadowSessionId(target: ConnectionTarget): SessionId =
+    private fun controllerSessionId(target: ConnectionTarget): SessionId =
         SessionId("${target.hostId}/${target.sessionName}")
 
     /**
@@ -1102,17 +1115,16 @@ public class TmuxSessionViewModel @Inject constructor(
      * an explicit state. Zero behavior change: the projected value is byte-identical
      * to the previous direct assignment.
      *
-     * EPIC #687 slice 1c-iii: ALSO mirrors the transition into the OBSERVE-ONLY
-     * shadow controller ([connectionControllerShadow]). This is pure observation —
-     * the inline `_connectionStatus` write above is the sole source of truth; the
-     * shadow controller's resulting state is collected for equivalence only and
-     * drives nothing.
+     * EPIC #792 Slice E: ALSO drives the connection INTENT into the AUTHORITATIVE
+     * [connectionManager] (the controller). The controller's state is the SOLE source of
+     * the displayed status (no shadow/mirror remains — D28); this choke point is simply the
+     * cheapest place to read which host/target the VM is connecting/switching to.
      */
     private fun setConnectionState(state: ConnectionState) {
         _connectionState = state
         // EPIC #687 slice 1c-iv-a (THE STATUS FLIP): the inline path NO LONGER
         // writes [_connectionStatus]. The view-facing status is now projected SOLELY
-        // from the shadow [ConnectionController]'s state — the controller is the
+        // from the [ConnectionController]'s state — the controller is the
         // single source of truth for what the user SEES. The inline EFFECT machinery
         // (reconnect jobs, generation counter, named coroutine jobs, reduceConnection
         // bodies) keeps running UNCHANGED; it just no longer owns the displayed
@@ -1121,7 +1133,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // — byte-identical to the status this method used to write), NOT the
         // controller-driven [_connectionStatus]. 1c-iv-b hard-cuts the inline
         // [_connectionState]/effect machinery once the controller drives effects too.
-        observeConnectionTransitionInShadow(state)
+        driveControllerIntent(state)
         projectStatusFromController(state)
     }
 
@@ -1141,7 +1153,7 @@ public class TmuxSessionViewModel @Inject constructor(
         get() = connectionStatusFor(_connectionState)
 
     /**
-     * EPIC #687 slice 1c-iv-a: project the shadow [ConnectionController]'s state onto
+     * EPIC #687 slice 1c-iv-a: project the AUTHORITATIVE [ConnectionController]'s state onto
      * the view-facing [_connectionStatus] — the SINGLE status source. The coarse
      * SHAPE (Idle/Connecting/Switching/Connected/Reconnecting/Failed) comes from the
      * controller; the display PAYLOAD (host/port/user, reconnect attempt/reason, the
@@ -1160,7 +1172,7 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun projectStatusFromController(inlineState: ConnectionState) {
         _connectionStatus.value =
-            connectionStatusForController(connectionControllerShadow.shadowState, inlineState)
+            connectionStatusForController(connectionManager.state, inlineState)
     }
 
     /**
@@ -1180,55 +1192,54 @@ public class TmuxSessionViewModel @Inject constructor(
      * EPIC #687 slice 1c-iii / EPIC #792 Slice A: drive the controller's INTENT
      * directly from the inline transition. Previously this built an inline state NAME
      * string and mirrored it through `observeInlineTransition` (a string round-trip the
-     * bridge re-derived events from). Now it calls the bridge's TYPED intent entrypoints
-     * directly — the controller drives the intent state machine. This is NET-NEUTRAL with
+     * facade re-derived events from). Now it calls the [connectionManager]'s TYPED intent
+     * entrypoints directly — the controller drives the intent state machine. This is NET-NEUTRAL with
      * the deleted string mirror: each inline state maps to the SAME controller event it
      * mirrored before (`Connecting`→Enter, warm `Attaching`→Switch/Enter, `Live`/
      * `Backgrounded`→reveal-Live, `Reattaching`/`Reconnecting`→drop-escalation,
      * `Gone`→TargetGone, `Unreachable`→exhaust-ladder, `Idle`→no-op).
      * Never mutates VM state, never reads the controller state back.
      */
-    private fun observeConnectionTransitionInShadow(state: ConnectionState) {
-        val (host, target) = shadowHostAndTarget()
+    private fun driveControllerIntent(state: ConnectionState) {
+        val (host, target) = controllerHostAndTarget()
         when (state) {
             is ConnectionState.Idle -> Unit // controller stays Idle; nothing to drive.
             is ConnectionState.Connecting ->
-                if (host != null && target != null) connectionControllerShadow.enter(host, target)
+                if (host != null && target != null) connectionManager.enter(host, target)
             is ConnectionState.Attaching ->
-                if (host != null && target != null) connectionControllerShadow.switchTo(host, target)
+                if (host != null && target != null) connectionManager.switchTo(host, target)
             // Backgrounded keeps the prior live surface in the inline VM — same as Live
             // (the deleted mirror mapped both to the "Live" reveal branch).
             is ConnectionState.Live,
             is ConnectionState.Backgrounded,
             ->
-                if (host != null && target != null) connectionControllerShadow.revealLive(host, target)
+                if (host != null && target != null) connectionManager.revealLive(host, target)
             // Reattaching and Reconnecting both mirrored to the "Reconnecting"
             // drop-escalation branch.
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
             ->
                 if (host != null && target != null) {
-                    connectionControllerShadow.escalateReconnecting(host, target)
+                    connectionManager.escalateReconnecting(host, target)
                 }
             is ConnectionState.Gone ->
-                if (target != null) connectionControllerShadow.markGone(target)
-            is ConnectionState.Unreachable -> connectionControllerShadow.escalateUnreachable()
+                if (target != null) connectionManager.markGone(target)
+            is ConnectionState.Unreachable -> connectionManager.escalateUnreachable()
         }
     }
 
     /**
-     * EPIC #687 slice 1c-iv-prep: feed the shadow controller the REAL
-     * [com.pocketshell.core.connection.ConnectionEvent.SeedLanded] for a pane the
-     * write-path just captured. Observe-only — never mutates VM state, never reads
-     * the shadow state back. Keyed to the active/connecting target so a seed for
-     * the session the shadow tracks promotes it (Attaching/Reattaching → Live);
-     * the controller's own drop-by-id check ignores a seed for any other target.
+     * EPIC #792 Slice E: feed the AUTHORITATIVE controller the REAL
+     * [com.pocketshell.core.connection.ConnectionEvent.SeedLanded] for a pane the write-path
+     * just captured. Keyed to the active/connecting target so a seed for the current session
+     * promotes it (Attaching/Reattaching → Live); the controller's own drop-by-id check ignores
+     * a seed for any other target. After it the displayed status is re-projected.
      */
-    private fun observeSeedLandedInShadow(paneId: String) {
+    private fun feedControllerSeedLanded(paneId: String) {
         val target = activeTarget ?: connectingTarget ?: return
-        connectionControllerShadow.observeSeedLanded(
-            shadowHostKey(target),
-            shadowSessionId(target),
+        connectionManager.observeSeedLanded(
+            controllerHostKey(target),
+            controllerSessionId(target),
             paneId,
         )
         // The seed may have promoted the controller Attaching/Reattaching → Live;
@@ -2010,9 +2021,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     // `runFastSessionSwitch`) runs at this SAME synchronous trigger point
                     // inside the connectJob critical section (the no-flash / switch-latency
                     // ordering is preserved); only the dispatch owner moved.
-                    tmuxAttachEffects.runFastSwitch {
-                        runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
-                    }
+                    tmuxAttachEffects.runFastSwitch(
+                        target = target,
+                        attempt = attempt,
+                        trigger = effectiveTrigger,
+                        startedAtMs = fastSwitchStartedAtMs,
+                    )
                 } else {
                     // Slow path: full teardown of both the tmux client
                     // and the SSH session before the SSH lease acquisition.
@@ -2397,10 +2411,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 detachForBackground()
             else -> Unit
         }
-        // Feed the shadow controller the Background event — its transition INTO
+        // Feed the AUTHORITATIVE controller the Background event — its transition INTO
         // Backgrounded is what fires the [ConnectionEffectDriver]'s clean-detach
         // teardown (the SOLE detach trigger now the inline launch is deleted).
-        connectionControllerShadow.observeBackground()
+        connectionManager.observeBackground()
         // The controller moved to Backgrounded (mapped → Connected, the inline
         // "keep prior status on background" behavior); re-project after the inline
         // effects ran (they read inlineConnectionStatus, unaffected by this).
@@ -2626,9 +2640,9 @@ public class TmuxSessionViewModel @Inject constructor(
             graceEffects.onForegroundHealWithinGrace()
             return
         }
-        // EPIC #687 slice 1c-iii: observe-only — the single grace predicate in the
-        // shadow controller decides reattach-vs-reconnect; it drives nothing.
-        connectionControllerShadow.observeForeground()
+        // EPIC #792 Slice E: feed the AUTHORITATIVE controller the Foreground event — its
+        // single grace predicate decides reattach-vs-reconnect and drives the displayed status.
+        connectionManager.observeForeground()
         when (reduceConnection(ConnectionEvent.Foreground)) {
             ConnectionDecision.ReplayPendingReattach ->
                 replayPendingReattach()
@@ -2707,7 +2721,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         // The control channel is still live — promote the controller Reattaching → Live
         // so the displayed status stays the calm `Connected` (no Reconnecting/overlay).
-        connectionControllerShadow.observeForegroundReattachLive()
+        connectionManager.observeForegroundReattachLive()
         projectStatusFromController()
         viewModelScope.launch {
             if (client.disconnected.value) return@launch
@@ -2818,7 +2832,7 @@ public class TmuxSessionViewModel @Inject constructor(
         if (target == null) {
             // No target to heal against — fall back to the normal foreground decision so
             // a genuinely orphaned foreground still does the right (non-grace) thing.
-            connectionControllerShadow.observeForeground()
+            connectionManager.observeForeground()
             when (reduceConnection(ConnectionEvent.Foreground)) {
                 ConnectionDecision.ReplayPendingReattach -> replayPendingReattach()
                 ConnectionDecision.ResumePausedReconnect ->
@@ -2865,7 +2879,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Keep the displayed status CALM while we heal: the within-grace foreground is a
         // ride-through, not a reconnect. Promote the controller back toward Live so the
         // header indicator never shows Reconnecting/Disconnected during the heal.
-        connectionControllerShadow.observeForegroundReattachLive()
+        connectionManager.observeForegroundReattachLive()
         projectStatusFromController()
         viewModelScope.launch {
             // Re-open a fresh `-CC` control client over a freshly-acquired lease and
@@ -3410,10 +3424,9 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onNetworkChanged(change: TerminalNetworkChange) {
         val target = activeTarget ?: connectingTarget
-        // EPIC #687 slice 1c-iii: observe-only — feed the shadow controller the
-        // #548 validated-handoff signal it suppresses on (computed identically to
-        // the inline reducer). It drives nothing.
-        connectionControllerShadow.observeNetworkChanged(
+        // EPIC #792 Slice E: feed the AUTHORITATIVE controller the #548 validated-handoff
+        // signal it suppresses on (computed identically to the inline reducer).
+        connectionManager.observeNetworkChanged(
             validatedHandoff = change.previousValidated?.let { previous ->
                 !previous.hasSameNetworkIdentityAs(change.current)
             } ?: false,
@@ -5620,10 +5633,9 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun attachClient(client: TmuxClient) {
         resetControlClientSizeForAttach()
         clientRef = client
-        // EPIC #687 slice 1c-iv-b-A2 (#739): re-point the observe-only effect
-        // driver's real TmuxPort at the freshly attached client so its
-        // `disconnected` oracle follows the live channel. Observe-only — this only
-        // updates the flow the driver collects; it triggers no IO and no cutover.
+        // EPIC #792 Slice E: re-point the effect driver's real TmuxPort at the freshly
+        // attached client so its `disconnected` oracle follows the live channel — this
+        // updates the flow the driver collects to submit TransportDropped from reality.
         connectionTmuxPort.setClient(client)
         bindClientObservers(client)
         // EPIC #792 Slice D: lazily start the proactive drop detector on the first
@@ -8534,13 +8546,12 @@ public class TmuxSessionViewModel @Inject constructor(
         // attach so the post-attach reveal can skip the redundant second full
         // reseed for panes already painted in this pass.
         panesSeededThisAttach.add(pane.paneId)
-        // EPIC #687 slice 1c-iv-prep: feed the shadow controller the REAL
-        // "seed/capture landed" signal at the EXISTING point a capture-pane lands
-        // for a pane — a FIRE-AND-OBSERVE emit placed AFTER the panesSeededThisAttach
-        // write above, so it adds no write-path control flow. Combined with the real
-        // TransportLive feedback this is how the shadow controller reaches Live from
-        // genuine signals (the active-pane landing promotes Attaching → Live).
-        observeSeedLandedInShadow(pane.paneId)
+        // EPIC #792 Slice E: feed the AUTHORITATIVE controller the REAL "seed/capture
+        // landed" signal at the EXISTING point a capture-pane lands for a pane — placed
+        // AFTER the panesSeededThisAttach write above, so it adds no write-path control
+        // flow. Combined with the real TransportLive feedback this is how the controller
+        // reaches Live from genuine signals (the active-pane landing promotes Attaching → Live).
+        feedControllerSeedLanded(pane.paneId)
         // EPIC #687 P1: feed the id-tagged active-pane seed to the reveal state
         // machine at the SAME landing point. The captured `output` is non-empty
         // here (guarded above), so this reveals RevealState.Live ONLY for the
@@ -11408,9 +11419,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 "backgroundDetachActive=${backgroundDetachJob?.isActive == true}",
         )
         cancelTmuxSessionPrewarm()
-        // EPIC #687 slice 1c-iv-b-A2 (#739): stop the observe-only effect driver's
-        // collectors. Idempotent; viewModelScope also cancels them, but stopping
-        // explicitly keeps the inert driver tidy. No IO, no cutover.
+        // EPIC #792 Slice E: stop the connection facade's effect-driver collectors.
+        // Idempotent; viewModelScope also cancels them, but stopping explicitly keeps
+        // the driver tidy.
         connectionEffectDriver.stop()
         // EPIC #792 Slice D: stop the proactive liveness probe. Idempotent;
         // viewModelScope also cancels its loop, but stopping explicitly keeps the

@@ -717,7 +717,7 @@ class ConnectionEffectDriverTest {
     // the SAME real adapters production uses — the real [SshLeaseTransportPort] over
     // a real [SshLeaseManager], and the real [CurrentClientTmuxPort] over a real
     // [com.pocketshell.core.tmux.TmuxClient] — and the controller it observes is the
-    // bridge's real [ConnectionController] fed by those real signals (no stub
+    // manager's real [ConnectionController] fed by those real signals (no stub
     // `emptyFlow`). The driver still calls ZERO IO; it only OBSERVES.
 
     private val leaseKey = SshLeaseKey(host = "example.com", port = 22, user = "alice", credentialId = "7:key")
@@ -754,12 +754,12 @@ class ConnectionEffectDriverTest {
 
     /**
      * Slice 1c-iv-b-B2 (#742): the driver now SUBMITS TransportLive from the REAL
-     * lease-`Up` edge, wired EXACTLY as production wires it: over the bridge's real
+     * lease-`Up` edge, wired EXACTLY as production wires it: over the manager's real
      * [ConnectionController], the real [SshLeaseTransportPort], and the real
      * [CurrentClientTmuxPort]. A genuine [SshLeaseManager.acquire] emits a real
      * `Connected` lease state → a real [TransportUpDown.Up] for the lease's host →
      * the driver submits [ConnectionEvent.TransportLive], promoting the controller.
-     * No bridge mirror feed is used — the transport input ORIGINATES from the driver.
+     * No manager mirror feed is used — the transport input ORIGINATES from the driver.
      */
     @Test
     fun submitsTransportLive_fromRealLeaseUpEdge_overRealAdapters() = runTest {
@@ -768,10 +768,10 @@ class ConnectionEffectDriverTest {
         val transportPort = SshLeaseTransportPort(leaseManager, leaseKeyFor = { leaseTarget() })
         transportPort.warmSnapshot = { false } // cold open → Connecting (so Up promotes it)
         val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
-        val bridge = ConnectionControllerShadowBridge(transport = transportPort)
+        val manager = ConnectionManager(transport = transportPort)
         val recorded = mutableListOf<String>()
         val driver = ConnectionEffectDriver(
-            controller = bridge.connectionController,
+            controller = manager.connectionController,
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,
@@ -782,14 +782,14 @@ class ConnectionEffectDriverTest {
         // alignment) so the driver's host filter accepts the real Up edge.
         val leaseHost = hostKeyFor(leaseKey)
         // Epic #792 Slice A: the string mirror is deleted; drive the OPEN intent through
-        // the bridge's typed `enter` entrypoint (the `"Connecting"` branch's replacement).
-        bridge.enter(leaseHost, sessionA)
+        // the manager's typed `enter` entrypoint (the `"Connecting"` branch's replacement).
+        manager.enter(leaseHost, sessionA)
 
         // A real dial → a real `Connected` state event → a real Up edge → the driver
         // SUBMITS TransportLive, promoting Connecting → Attaching.
         leaseManager.acquire(leaseTarget()).getOrThrow()
-        // The active-pane seed landing (still bridge-fed intent) promotes to Live.
-        bridge.observeSeedLanded(leaseHost, sessionA, paneId = "%0")
+        // The active-pane seed landing (still manager-fed intent) promotes to Live.
+        manager.observeSeedLanded(leaseHost, sessionA, paneId = "%0")
 
         val states = driver.observations.value
             .filterIsInstance<ConnectionEffectDriver.Observation.StateTransition>()
@@ -810,9 +810,9 @@ class ConnectionEffectDriverTest {
         val leaseManager = realLeaseManager()
         val transportPort = SshLeaseTransportPort(leaseManager, leaseKeyFor = { leaseTarget() })
         val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
-        val bridge = ConnectionControllerShadowBridge(transport = transportPort)
+        val manager = ConnectionManager(transport = transportPort)
         val driver = ConnectionEffectDriver(
-            controller = bridge.connectionController,
+            controller = manager.connectionController,
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,
@@ -842,9 +842,9 @@ class ConnectionEffectDriverTest {
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
         val transportPort = SshLeaseTransportPort(realLeaseManager(), leaseKeyFor = { leaseTarget() })
         val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
-        val bridge = ConnectionControllerShadowBridge(transport = transportPort)
+        val manager = ConnectionManager(transport = transportPort)
         val driver = ConnectionEffectDriver(
-            controller = bridge.connectionController,
+            controller = manager.connectionController,
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,

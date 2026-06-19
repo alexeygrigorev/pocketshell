@@ -18,21 +18,25 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * EPIC #687 Phase-2, slice 1c-iv-b — the effect driver.
+ * EPIC #687 / #792 — the effect driver: the WIRING layer of the connection facade.
  *
- * Slice 1c-iv-b-A landed this as the INERT, OBSERVE-ONLY seam: it owns a
- * [CoroutineScope] and, through the already-built+unit-tested
- * [ConnectionPortAdapters] ([TmuxPort.disconnected] / [TransportPort.transportEvents])
- * plus the pure [ConnectionController]'s [ConnectionController.state] flow, it
- * COLLECTS every transition and signal the effect bodies fire off.
+ * Owned by [com.pocketshell.app.tmux.connection.ConnectionManager], the driver owns a
+ * [CoroutineScope] and, through the [ConnectionPortAdapters] ([TmuxPort.disconnected] /
+ * [TransportPort.transportEvents]) plus the [ConnectionController]'s
+ * [ConnectionController.state] flow, COLLECTS every transition and transport signal and
+ * dispatches the effect to the appropriate effect class (it submits the transport events
+ * to the controller, fires the [backgroundedEffect] / [foregroundReattachEffect] on the
+ * relevant state edges, and re-projects the displayed status). It holds NO business logic
+ * of its own — the controller decides, the effect classes do the coupled IO; this is the
+ * thin glue between them (the Slice E "slim driver" goal).
  *
- * Slice 1c-iv-b-B1 (#738) takes the FIRST effect off observe-only: the driver now
- * OWNS the clean background detach. When the controller's [ConnectionController.state]
- * transitions INTO [ConnectionState.Backgrounded], the driver fires
- * [backgroundedEffect] — the VM supplies the body that runs the EXISTING full
- * teardown ([com.pocketshell.app.tmux.TmuxSessionViewModel] `closeCurrentConnectionAndJoin`
- * under `NonCancellable`). The inline `backgroundDetachJob` *trigger* is deleted
- * (D22 hard-cut — no fallback); the driver is the sole detach trigger.
+ * The driver OWNS the clean background detach: when the controller's
+ * [ConnectionController.state] transitions INTO [ConnectionState.Backgrounded], it fires
+ * [backgroundedEffect] — the VM supplies the body that runs the EXISTING full teardown
+ * ([com.pocketshell.app.tmux.TmuxSessionViewModel] `closeCurrentConnectionAndJoin` under
+ * `NonCancellable`), routed through the single [GraceEffects] owner. The inline
+ * `backgroundDetachJob` *trigger* is deleted (D22 hard-cut — no fallback); the driver is
+ * the sole detach trigger.
  *
  * Slice 1c-iv-b-B2 (#742) takes the controller's TRANSPORT INPUTS off the shadow
  * mirror: the driver now SUBMITS [ConnectionEvent.TransportLive] /
@@ -376,7 +380,7 @@ class ConnectionEffectDriver(
     }
 
     companion object {
-        /** Logcat tag for the inert observe-only driver (1c-iv-b-A). */
+        /** Logcat tag for the connection effect driver (the facade's wiring layer). */
         const val TAG: String = "PsConnEffectDriver"
     }
 }

@@ -25,9 +25,9 @@ import org.junit.Test
 /**
  * EPIC #687 Phase-2, slice 1c-iv-b-B2 — the equivalence proof, now with the
  * controller's TRANSPORT inputs ORIGINATING from the [ConnectionEffectDriver] over
- * REAL port flows, NOT from the shadow bridge's mirror feeds.
+ * REAL port flows, NOT from the manager facade.s mirror feeds (deleted).
  *
- * Before B2 the bridge exposed `observeTransportLive` / `observeTransportDropped`
+ * Before B2 the manager exposed `observeTransportLive` / `observeTransportDropped`
  * mirror methods that the VM called from its inline lifecycle. B2 (#742) DELETED
  * those mirror feeds (D22 hard-cut): the driver now SUBMITS
  * [com.pocketshell.core.connection.ConnectionEvent.TransportLive] when the real
@@ -37,15 +37,15 @@ import org.junit.Test
  * THROUGH the driver's real-flow collectors and asserts the SAME parity the pre-B2
  * suite pinned stays green — proving the substitution preserves behavior.
  *
- * The INTENT (Enter/Switch via the bridge's TYPED intent entrypoints —
- * [ConnectionControllerShadowBridge.enter] / [ConnectionControllerShadowBridge.switchTo]
+ * The INTENT (Enter/Switch via the manager's TYPED intent entrypoints —
+ * [ConnectionManager.enter] / [ConnectionManager.switchTo]
  * etc., epic #792 Slice A which deleted the string mirror), the SEED feedback
- * ([ConnectionControllerShadowBridge.observeSeedLanded]), and the lifecycle
- * (background/foreground/network) still flow through the bridge — those are not moved in
+ * ([ConnectionManager.observeSeedLanded]), and the lifecycle
+ * (background/foreground/network) still flow through the manager — those are not moved in
  * B2. Only the two transport events became driver-fed.
  *
  *  1. On every PRESERVED behavior (cold connect, switch, beyond-grace foreground,
- *     network change, target-gone, exhausted-reconnect), the shadow controller's
+ *     network change, target-gone, exhausted-reconnect), the controller.s
  *     projected `ConnectionStatus` NAME MATCHES the inline `connectionStatusFor`
  *     status name the suite pins.
  *
@@ -54,7 +54,7 @@ import org.junit.Test
  *       (ii) a within-grace foreground → stays `Connected`/no-reconnect.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-class ConnectionControllerShadowEquivalenceTest {
+class ConnectionManagerEquivalenceTest {
 
     /** A controllable virtual clock for the within/beyond-grace boundary. */
     private class TestClock(var now: Long = 0L) : Clock {
@@ -94,8 +94,8 @@ class ConnectionControllerShadowEquivalenceTest {
     }
 
     /**
-     * The bridge + the driver, wired EXACTLY as production wires them (B2): the driver
-     * observes the bridge's real [com.pocketshell.core.connection.ConnectionController]
+     * The manager + the driver, wired EXACTLY as production wires them (B2): the driver
+     * observes the manager's real [com.pocketshell.core.connection.ConnectionController]
      * and submits the transport events from the fake ports' real flows. The harness
      * surfaces helpers that emit those flows so a test reads like the old mirror calls
      * but now drives the controller THROUGH the driver.
@@ -107,41 +107,41 @@ class ConnectionControllerShadowEquivalenceTest {
     ) {
         val transport = FakeTransportPort(warm)
         val tmux = FakeTmuxPort()
-        val bridge = ConnectionControllerShadowBridge(clock = clock, transport = transport)
+        val manager = ConnectionManager(clock = clock, transport = transport)
         val driver = ConnectionEffectDriver(
-            controller = bridge.connectionController,
+            controller = manager.connectionController,
             tmuxPort = tmux,
             transportPort = transport,
             scope = scope,
         ).also { it.start() }
 
         /** The displayed status name, projected from the controller's state. */
-        fun statusName(): String = bridge.shadowStatusName
-        val state: ConnectionState get() = bridge.shadowState
+        fun statusName(): String = manager.statusName
+        val state: ConnectionState get() = manager.state
 
-        // --- the inline INTENT / lifecycle feeds (bridge-driven; typed since #792 A) -
+        // --- the inline INTENT / lifecycle feeds (manager-driven; typed since #792 A) -
         // Epic #792 Slice A deleted the string `observeInlineTransition` mirror; the
-        // bridge now exposes TYPED intent entrypoints. This helper preserves the
+        // manager now exposes TYPED intent entrypoints. This helper preserves the
         // suite's `inline("Name", …)` call shape by routing each name to the SAME typed
         // entrypoint the VM now calls (1:1 with the deleted string-mirror branches).
         fun inline(name: String, host: HostKey?, target: SessionId?) {
             when (name) {
                 "Idle" -> Unit
-                "Connecting" -> if (host != null && target != null) bridge.enter(host, target)
-                "Attaching" -> if (host != null && target != null) bridge.switchTo(host, target)
-                "Live" -> if (host != null && target != null) bridge.revealLive(host, target)
+                "Connecting" -> if (host != null && target != null) manager.enter(host, target)
+                "Attaching" -> if (host != null && target != null) manager.switchTo(host, target)
+                "Live" -> if (host != null && target != null) manager.revealLive(host, target)
                 "Reconnecting" ->
-                    if (host != null && target != null) bridge.escalateReconnecting(host, target)
-                "Unreachable" -> bridge.escalateUnreachable()
-                "Gone" -> if (target != null) bridge.markGone(target)
+                    if (host != null && target != null) manager.escalateReconnecting(host, target)
+                "Unreachable" -> manager.escalateUnreachable()
+                "Gone" -> if (target != null) manager.markGone(target)
                 else -> error("unmapped inline name: $name")
             }
         }
-        fun background() = bridge.observeBackground()
-        fun foreground() = bridge.observeForeground()
-        fun networkChanged(validated: Boolean) = bridge.observeNetworkChanged(validated)
+        fun background() = manager.observeBackground()
+        fun foreground() = manager.observeForeground()
+        fun networkChanged(validated: Boolean) = manager.observeNetworkChanged(validated)
         fun seedLanded(host: HostKey, target: SessionId, paneId: String = "%0") =
-            bridge.observeSeedLanded(host, target, paneId)
+            manager.observeSeedLanded(host, target, paneId)
 
         // --- the REAL transport flows the DRIVER now submits from (B2) ---------------
         /** Emit the real lease-`Up` edge → driver submits TransportLive (current host). */
@@ -173,7 +173,7 @@ class ConnectionControllerShadowEquivalenceTest {
         scope.cancel()
     }
 
-    // --- PRESERVED behaviors: shadow MUST match the inline status name -----------
+    // --- PRESERVED behaviors: controller MUST match the inline status name -----------
 
     @Test
     fun coldConnect_thenLive_matchesInline() = runHarness(warm = { false }) {
@@ -287,7 +287,7 @@ class ConnectionControllerShadowEquivalenceTest {
         assertEquals(true, state is ConnectionState.Unreachable)
     }
 
-    // --- APPROVED DIVERGENCES: shadow MUST differ (do NOT make them match) -------
+    // --- APPROVED DIVERGENCES: controller MUST differ (do NOT make them match) -------
 
     /**
      * APPROVED DIVERGENCE #1 (recoverable drop, #685): a transport drop on a LIVE
@@ -347,7 +347,7 @@ class ConnectionControllerShadowEquivalenceTest {
 
     /**
      * The driver reaches [ConnectionState.Live] from the REAL FLOW transport input —
-     * the lease-`Up` edge it submits as TransportLive — with NO bridge mirror feed at
+     * the lease-`Up` edge it submits as TransportLive — with NO manager mirror feed at
      * all. A cold open (Connecting) + the driver-submitted TransportLive promotes to
      * Attaching; the seed landing promotes to Live. This is the B2 replacement for the
      * deleted `observeTransportLive` mirror, proven through the driver.
@@ -424,7 +424,7 @@ class ConnectionControllerShadowEquivalenceTest {
     // --- Epic #792 Slice A: typed INTENT entrypoints drive the controller directly ---
 
     /**
-     * The bridge's TYPED [ConnectionControllerShadowBridge.enter] drives the controller's
+     * The manager's TYPED [ConnectionManager.enter] drives the controller's
      * OPEN intent directly (no string mirror). A warm host routes straight to
      * [ConnectionState.Attaching]; a cold host to [ConnectionState.Connecting] — the
      * controller's own warm predicate decides, exactly as the deleted `"Connecting"`
@@ -432,19 +432,19 @@ class ConnectionControllerShadowEquivalenceTest {
      */
     @Test
     fun typedEnter_drivesControllerOpenIntent_directly() = runHarness(warm = { true }) {
-        bridge.enter(host, sessionA)
+        manager.enter(host, sessionA)
         assertEquals(true, state is ConnectionState.Attaching)
         assertEquals(sessionA, state.let { (it as ConnectionState.Attaching).targetId })
     }
 
     @Test
     fun typedEnter_coldHost_routesToConnecting_directly() = runHarness(warm = { false }) {
-        bridge.enter(host, sessionA)
+        manager.enter(host, sessionA)
         assertEquals(true, state is ConnectionState.Connecting)
     }
 
     /**
-     * The bridge's TYPED [ConnectionControllerShadowBridge.switchTo] drives a same-host
+     * The manager's TYPED [ConnectionManager.switchTo] drives a same-host
      * SWITCH directly: from a live-ish state it re-targets to [ConnectionState.Attaching]
      * on the new id WITHOUT a re-handshake; from Idle (the warm same-host OPEN case) it is
      * an Enter the warm predicate routes straight to Attaching. Same routing the deleted
@@ -452,12 +452,12 @@ class ConnectionControllerShadowEquivalenceTest {
      */
     @Test
     fun typedSwitchTo_fromLive_reTargetsToAttaching_directly() = runHarness(warm = { true }) {
-        bridge.enter(host, sessionA)
-        bridge.revealLive(host, sessionA)
+        manager.enter(host, sessionA)
+        manager.revealLive(host, sessionA)
         landLiveFromRealFeedback(sessionA, host)
         assertEquals(true, state is ConnectionState.Live)
         // Switch to B: re-target to Attaching on B (no Connecting, no re-handshake).
-        bridge.switchTo(host, sessionB)
+        manager.switchTo(host, sessionB)
         assertEquals(true, state is ConnectionState.Attaching)
         assertEquals(sessionB, state.let { (it as ConnectionState.Attaching).targetId })
     }
@@ -465,7 +465,7 @@ class ConnectionControllerShadowEquivalenceTest {
     @Test
     fun typedSwitchTo_fromIdle_warmOpensToAttaching_directly() = runHarness(warm = { true }) {
         assertEquals(true, state is ConnectionState.Idle)
-        bridge.switchTo(host, sessionA)
+        manager.switchTo(host, sessionA)
         assertEquals(true, state is ConnectionState.Attaching)
         assertEquals(sessionA, state.let { (it as ConnectionState.Attaching).targetId })
     }
@@ -508,47 +508,47 @@ class ConnectionControllerShadowEquivalenceTest {
     fun statusNameMapper_isThePinned1to1Projection() {
         assertEquals(
             "Idle",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(ConnectionState.Idle),
+            ConnectionManager.statusNameFor(ConnectionState.Idle),
         )
         assertEquals(
             "Connecting",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(
+            ConnectionManager.statusNameFor(
                 ConnectionState.Connecting(host, sessionA),
             ),
         )
         assertEquals(
             "Switching",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(
+            ConnectionManager.statusNameFor(
                 ConnectionState.Attaching(host, sessionA),
             ),
         )
         assertEquals(
             "Connected",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(
+            ConnectionManager.statusNameFor(
                 ConnectionState.Live(host, sessionA),
             ),
         )
         assertEquals(
             "Reconnecting",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(
+            ConnectionManager.statusNameFor(
                 ConnectionState.Reattaching(host, sessionA),
             ),
         )
         assertEquals(
             "Reconnecting",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(
+            ConnectionManager.statusNameFor(
                 ConnectionState.Reconnecting(host, sessionA, attempt = 1),
             ),
         )
         assertEquals(
             "Failed",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(
+            ConnectionManager.statusNameFor(
                 ConnectionState.Gone(host, sessionA),
             ),
         )
         assertEquals(
             "Failed",
-            ConnectionControllerShadowBridge.shadowStatusNameFor(
+            ConnectionManager.statusNameFor(
                 ConnectionState.Unreachable(host, sessionA),
             ),
         )

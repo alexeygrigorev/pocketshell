@@ -581,7 +581,19 @@ public class SshTerminalBridge(
          * drain has even been scheduled.
          */
         internal const val PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES: Int = 64 * 1024
-        internal const val PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES: Int = 16 * 1024
+
+        /**
+         * Must match `TerminalSession.MainThreadHandler.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES`
+         * (the vendored `mReceiveBuffer` size) — the bytes ONE
+         * `dispatchMessage(MSG_NEW_INPUT)` parses in a single uninterruptible
+         * `mEmulator.append`. #796 shrank it from 16 KB to 2 KB so the
+         * [MainThreadDrainScheduler] can apply an elapsed-time budget across
+         * slices and yield mid-burst (one atomic append of clear-heavy
+         * alt-screen content at 16 KB pinned the looper for >1 s). The on-main
+         * seed drain ([dispatchMainLooperDrains]) issues one dispatch per slice,
+         * so this must stay in lockstep with the vendored buffer size.
+         */
+        internal const val PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES: Int = 2 * 1024
         public const val MAX_SEED_GATE_LIVE_BUFFER_BYTES: Int = 2 * 1024 * 1024
 
         private const val TRACE_WAIT_THRESHOLD_NANOS: Long = 1_000_000

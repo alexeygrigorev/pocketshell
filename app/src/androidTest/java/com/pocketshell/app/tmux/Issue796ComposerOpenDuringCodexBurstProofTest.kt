@@ -318,6 +318,10 @@ class Issue796ComposerOpenDuringCodexBurstProofTest {
                 sessionName = "codex",
                 terminalKeyboardMode = TerminalKeyboardMode.RawCommand,
                 engineCommands = STABLE_ENGINE_COMMANDS,
+                // Issue #796 (REOPENED): this is a Codex (agent) pane — the gate
+                // skips the per-frame viewport scanners for it. A stable Boolean,
+                // so the pager stays skippable (the H3 property under test).
+                isAgentPane = true,
                 sessionNameForUnifiedPane = sessionNameForUnifiedPane,
                 onTerminalSizeChanged = onTerminalSizeChanged,
                 onSurfaceError = onSurfaceError,

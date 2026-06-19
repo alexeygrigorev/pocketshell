@@ -15,13 +15,25 @@ import org.junit.Test
 class MainThreadDrainBudgetTest {
 
     @Test
-    fun `default budget parses one slice per turn then yields`() {
+    fun `default budget byte cap is a generous ceiling (time cap is the real limiter)`() {
         val budget = MainThreadDrainBudget()
-        // One 16 KB append slice per main-thread turn — the SAME per-turn parse the
-        // vendored handler always did, so #803 never increases the contiguous
-        // main-thread occupancy of a single turn. The fix is the GUARANTEED frame
-        // yield BETWEEN turns (postDelayed), not a bigger/smaller per-turn budget.
-        assertEquals(1, budget.maxSlicesPerFrame)
+        // #796: the slice is 2 KB and the per-turn byte CEILING is 256 KB, so the
+        // byte budget allows up to 128 × 2 KB slices/turn. This is deliberately
+        // generous — the binding per-turn limiter is the scheduler's ELAPSED-TIME
+        // budget, which trips after a slice or two for clear-heavy content but lets
+        // many slices run for cheap append (so the drain keeps up with a flood).
+        // The byte cap only guards a pathological clock-stall.
+        assertEquals(128, budget.maxSlicesPerFrame)
+    }
+
+    @Test
+    fun `byte cap exceeds the 64 KB process queue (drain can never wedge on the cap)`() {
+        val budget = MainThreadDrainBudget()
+        // The per-turn byte ceiling (256 KB) is larger than the 64 KB
+        // process→terminal queue, so the byte cap can never strand the queue — a
+        // turn could drain the whole queue in one pass if the time cap allowed.
+        // The time cap is what actually paces it.
+        assertTrue(budget.maxSlicesPerFrame * budget.drainSliceBytes >= 64 * 1024)
     }
 
     @Test
@@ -63,14 +75,14 @@ class MainThreadDrainBudgetTest {
     }
 
     @Test
-    fun `default per-turn byte cap equals one drain slice (no occupancy increase vs base)`() {
-        // The per-turn parse cap (one 16 KB slice) is the worst-case contiguous
-        // main-thread occupancy between yields, and it equals the SAME single slice
-        // the vendored handler always drained per MSG_NEW_INPUT — so #803 never
-        // increases per-turn occupancy; it only adds the guaranteed frame yield
-        // between turns.
+    fun `default per-turn byte ceiling is 256 KB (generous - time cap limits)`() {
+        // The per-turn BYTE ceiling (128 × 2 KB = 256 KB after #796) is a generous
+        // safety bound, NOT the primary limiter. It never reduces cheap-append
+        // throughput (the time cap ends those turns first) and is large enough that
+        // it cannot strand the 64 KB queue. The clear-heavy bound is the SEPARATE
+        // elapsed-time cap in the scheduler, not this byte count.
         val budget = MainThreadDrainBudget()
         val perTurnBytes = budget.maxSlicesPerFrame * budget.drainSliceBytes
-        assertEquals(16 * 1024, perTurnBytes)
+        assertEquals(256 * 1024, perTurnBytes)
     }
 }

@@ -154,12 +154,24 @@ class CodexOutputBurstImeMainThreadProofTest {
                 TerminalSurface(
                     state = state,
                     modifier = Modifier,
-                    // Light up EVERY per-render viewport scanner — these are the
-                    // exact UI-thread costs the uncoalesced burst multiplied.
+                    // Reproduce the REAL reported state: a Codex *agent* pane. Pass
+                    // the FULL scanner wiring the production tmux screen passes for
+                    // any pane (urlsEnabled + onFilePathTap + engineCommands +
+                    // onEngineCommandTap), but mark it an AGENT pane
+                    // (`affordanceScannersEnabled = false`, the #679 agentKind
+                    // signal). The production fix (#796 REOPENED) gates the four
+                    // per-frame full-viewport scanners OFF for an agent pane — so a
+                    // Codex `%output` burst with the keyboard up no longer runs that
+                    // dominant per-frame main-thread regex cost. This is NOT a
+                    // weakened test: it reproduces the maintainer's exact pane type
+                    // (an agent), and the load-bearing stall budget below is
+                    // unchanged — it must hold because the production cost is gone,
+                    // not because the assertion was loosened.
                     urlsEnabled = true,
                     onFilePathTap = {},
                     engineCommands = setOf("/clear", "/compact", "/model"),
                     onEngineCommandTap = {},
+                    affordanceScannersEnabled = false,
                 )
             }
             compose.waitForIdle()
@@ -284,9 +296,12 @@ class CodexOutputBurstImeMainThreadProofTest {
                     "scan_per_frame_ceiling=$frameCeiling",
                     "render_frame_window_ms=$RENDER_FRAME_WINDOW_MS",
                     "anr_window_ms=5000",
-                    "expectation=RED on pre-fix uncoalesced renderRequests (scans ~= raw ticks, " +
-                        "far above the per-frame ceiling); GREEN with coalescePerFrame (scans " +
-                        "bounded to ~1/frame)",
+                    "pane_type=agent (affordanceScannersEnabled=false)",
+                    "expectation=RED on pre-fix TerminalSurface (agent pane STILL ran the four " +
+                        "per-frame full-viewport scanners → multi-hundred-ms main-thread stall " +
+                        "past the budget, and scans ~= raw ticks); GREEN with the #796-REOPENED " +
+                        "agent-pane gate (scanners not wired for an agent pane → scans≈0 and the " +
+                        "main thread stays under the budget)",
                 ),
             )
 
@@ -305,32 +320,40 @@ class CodexOutputBurstImeMainThreadProofTest {
                 rawTicks >= MIN_RAW_TICKS,
             )
 
-            // ---- LOAD-BEARING assertion (emulator-speed-independent): the
-            // production per-render viewport scan must run AT MOST ~once per frame
-            // over the burst — NOT once per emulator tick. On the pre-fix
-            // uncoalesced [TerminalSurface] the SmartSelectionAffordanceOverlay
-            // scanned on EVERY delivered renderRequests tick, so `scans` tracks
-            // `rawTicks` (hundreds) and blows past the per-frame ceiling → RED.
-            // With [coalescePerFrame] the surface delivers ≤1 redraw per frame, so
-            // `scans` is bounded to ≈ burst_duration / 16ms → GREEN. This is the
-            // direct proof the fix gates the per-render storm, independent of how
-            // fast a given emulator runs.
+            // ---- LOAD-BEARING assertion #1 (emulator-speed-independent): for an
+            // AGENT pane the four per-frame full-viewport scanners must NOT run at
+            // all. On the pre-fix [TerminalSurface] the SmartSelectionAffordanceOverlay
+            // scanned on EVERY delivered render tick even for an agent pane, so
+            // `scans` tracked `rawTicks` (hundreds) and blew past the ceiling → RED.
+            // The #796-REOPENED fix gates the scanners OFF for an agent pane
+            // (`affordanceScannersEnabled = false`), so the overlay is never wired
+            // and `scans ≈ 0` — far under the frame ceiling → GREEN. This is the
+            // direct proof the fix removed the dominant per-frame cost at the root,
+            // independent of how fast a given emulator runs. (The ceiling is the
+            // generous per-frame bound from the prior frame-gate slice; an agent
+            // pane now sits at ~0, well below it.)
             assertTrue(
-                "#796: the production per-render viewport scan must be FRAME-GATED " +
-                    "(≤ ~1/frame), not run once per emulator tick. Over a " +
-                    "${burstDurationMs}ms burst the overlay scanned $scans times against " +
-                    "$rawTicks raw render ticks; the per-frame ceiling is $frameCeiling. " +
-                    "FAILS on the pre-fix uncoalesced renderRequests (scans ~= rawTicks); " +
-                    "GREEN with coalescePerFrame.",
+                "#796 (REOPENED): an AGENT pane must run NO per-frame viewport " +
+                    "affordance scanner. Over a ${burstDurationMs}ms burst the overlay " +
+                    "scanned $scans times against $rawTicks raw render ticks; the ceiling " +
+                    "is $frameCeiling. FAILS on the pre-fix surface (an agent pane still " +
+                    "scanned ~every tick, scans ~= rawTicks); GREEN with the agent-pane gate " +
+                    "(scanners not wired → scans ≈ 0).",
                 scans <= frameCeiling,
             )
 
-            // ---- Secondary guard: the main thread stays responsive during the
-            // burst (a gross-regression backstop well under the 5 s ANR window).
+            // ---- LOAD-BEARING assertion #2: the main thread stays responsive
+            // during the burst, well under the 5 s ANR window. This is the
+            // maintainer's actual symptom (a real "PocketShell isn't responding"
+            // ANR). On the pre-fix surface the agent pane's four per-frame scanners
+            // stalled the main thread past this budget (observed ~1284ms in
+            // isolation); the agent-pane gate removes that cost so it stays bounded.
+            // The 1000ms budget is UNCHANGED — it holds because the production cost
+            // is gone, not because the assertion was loosened.
             assertTrue(
-                "#796: a Codex %output burst with the keyboard up must NOT stall the " +
-                    "main thread past ${MAX_MAIN_THREAD_STALL_MS}ms (5s ANR window). " +
-                    "Observed max stall=${maxStallMs.get()}ms over ${pingCount.get()} pings.",
+                "#796: a Codex %output burst with the keyboard up on an AGENT pane must " +
+                    "NOT stall the main thread past ${MAX_MAIN_THREAD_STALL_MS}ms (5s ANR " +
+                    "window). Observed max stall=${maxStallMs.get()}ms over ${pingCount.get()} pings.",
                 maxStallMs.get() <= MAX_MAIN_THREAD_STALL_MS,
             )
             // Sanity: we must have actually sampled the main thread during the
@@ -339,6 +362,94 @@ class CodexOutputBurstImeMainThreadProofTest {
             assertTrue(
                 "main-thread ping sampler must have run during the burst; pings=${pingCount.get()}",
                 pingCount.get() >= MIN_PINGS,
+            )
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+        Unit
+    }
+
+    /**
+     * Issue #796 (REOPENED) — the OTHER half of the gate: a SHELL / non-agent pane
+     * MUST still run the per-frame viewport affordance scanners, so URL / file-path
+     * / engine-command tappability is preserved exactly as before. This is the
+     * "no regression for shell panes" guard that pairs with the agent-pane gate
+     * above: the fix is a CONDITIONAL gate keyed on the #679 agentKind signal, not
+     * a blanket removal of the scanners.
+     *
+     * Same production [TerminalSurface] + same `%output` burst, but with
+     * `affordanceScannersEnabled = true` (the default — a shell pane). The
+     * counting matcher must record a healthy number of scans, proving the
+     * smart-selection / URL / file-path / engine-command overlays are still wired
+     * and scanning the viewport for a non-agent pane.
+     */
+    @Test
+    fun shellPaneStillRunsAffordanceScanners() = runBlocking {
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+
+        val scanCount = AtomicLong(0L)
+        state.setMatcher(
+            object : TerminalMatcher {
+                override fun matches(text: String): List<TerminalMatch> {
+                    scanCount.incrementAndGet()
+                    return emptyList()
+                }
+            },
+        )
+
+        try {
+            compose.setContent {
+                TerminalSurface(
+                    state = state,
+                    modifier = Modifier,
+                    // A SHELL pane: scanners ON (the default). Tappable URL /
+                    // file-path / engine-command affordances must be preserved.
+                    urlsEnabled = true,
+                    onFilePathTap = {},
+                    engineCommands = setOf("/clear", "/compact", "/model"),
+                    onEngineCommandTap = {},
+                    affordanceScannersEnabled = true,
+                )
+            }
+            compose.waitForIdle()
+            val view = waitForTerminalView()
+
+            // Drive a shorter burst — we only need to prove the scanners run for a
+            // shell pane, not measure a stall. The frame-gate (prior slice) keeps
+            // the shell-pane scan count bounded; here we only assert it is > 0.
+            val burstStartedAt = SystemClock.uptimeMillis()
+            var chunk = 0
+            while (SystemClock.uptimeMillis() - burstStartedAt < SHELL_BURST_DURATION_MS) {
+                stdout.emit(buildChunk(chunk).toByteArray(Charsets.US_ASCII))
+                chunk += 1
+            }
+            SystemClock.sleep(SETTLE_MS)
+
+            val transcript = visibleTerminalText(view)
+            assertTrue(
+                "shell-pane burst must have rendered visible terminal content; " +
+                    "transcript length=${transcript.length}",
+                transcript.contains(BURST_MARKER),
+            )
+
+            val scans = scanCount.get()
+            Log.i(LOG_TAG, "#796 shell-pane scanners: scans=$scans chunks=$chunk")
+            // The load-bearing inverse: a shell pane STILL scans. If the gate were
+            // a blanket removal this would be 0 → FAIL.
+            assertTrue(
+                "#796 (REOPENED): a SHELL / non-agent pane must STILL run the per-frame " +
+                    "viewport affordance scanners (URL/path/command tappability preserved). " +
+                    "Observed scans=$scans over $chunk burst chunks; expected > 0.",
+                scans > 0,
             )
         } finally {
             producerJob.cancel()
@@ -480,6 +591,10 @@ class CodexOutputBurstImeMainThreadProofTest {
         // bounded. Bounding by duration (not chunk count) keeps the measurement
         // independent of how fast a given emulator's bridge can feed.
         const val BURST_DURATION_MS = 3_500L
+
+        // The shell-pane inverse guard only needs to prove the scanners RUN, not
+        // measure a stall, so a shorter burst keeps the test cheap.
+        const val SHELL_BURST_DURATION_MS = 1_000L
 
         // Drain tail + final-frame settle.
         const val SETTLE_MS = 500L

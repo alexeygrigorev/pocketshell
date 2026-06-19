@@ -234,6 +234,21 @@ fun TerminalSurface(
     // disables engine-command detection entirely.
     engineCommands: Set<String> = emptySet(),
     onEngineCommandTap: ((String) -> Unit)? = null,
+    // Issue #796 (REOPENED): when `false`, the four per-frame full-viewport
+    // overlay scanners (URL / smart-selection-match / file-path / engine-command)
+    // are NOT wired at all for this surface — only the cheap #803-paced repaint
+    // runs. This is set `false` for an interactive-agent pane (the #679 session
+    // tree's agentKind/cgroup signal), whose tappable affordances now live in the
+    // Conversation view (#809/#818, the default agent view). The four scanners
+    // re-extract every visible row via `screen.getSelectedText(...)` and run
+    // several regex passes per row on the MAIN thread every frame; during a live
+    // Codex `%output` burst with the keyboard up that per-frame regex cost — not
+    // the #803-bounded VT-append — is what stalled the main thread into a real
+    // ANR. Dropping it for an agent pane removes the dominant per-frame cost at
+    // the root. Defaults to `true` so shell / non-agent panes (and every other
+    // caller / test) keep full URL/path/command tappability — UNCHANGED. Hard cut
+    // per D22: no settings flag, no per-pane "legacy scanner" fallback.
+    affordanceScannersEnabled: Boolean = true,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
@@ -361,8 +376,14 @@ fun TerminalSurface(
     // app context — which is the behaviour every reasonable host would want.
     // Suppressing the overlay entirely (urlsEnabled = false) is what tests
     // and code paths that explicitly do not want URL detection should use.
-    val effectiveUrlTap: ((String) -> Unit)? = remember(onUrlTap, urlsEnabled, context) {
-        if (!urlsEnabled) {
+    val effectiveUrlTap: ((String) -> Unit)? = remember(onUrlTap, urlsEnabled, affordanceScannersEnabled, context) {
+        if (!affordanceScannersEnabled) {
+            // Issue #796: an agent pane does not run the URL scanner at all —
+            // its affordances live in the Conversation view (#809/#818). A null
+            // tap disables both the per-frame `findVisibleUrls` scan below and
+            // the URL hit-test.
+            null
+        } else if (!urlsEnabled) {
             null
         } else if (onUrlTap != null) {
             onUrlTap
@@ -382,7 +403,18 @@ fun TerminalSurface(
     var visibleMatchRegions by remember { mutableStateOf<List<TerminalMatchRegion>>(emptyList()) }
     // Issue #770: engine-command detection is active only when the host both
     // supplies a tap sink and a non-empty command set for the detected engine.
-    val engineCommandsEnabled = onEngineCommandTap != null && engineCommands.isNotEmpty()
+    // Issue #796: an agent pane runs NO per-frame viewport scanner, so the
+    // engine-command overlay is off there too (its affordance lives in the
+    // Conversation view, #809/#818).
+    val engineCommandsEnabled =
+        affordanceScannersEnabled && onEngineCommandTap != null && engineCommands.isNotEmpty()
+    // Issue #796: the smart-selection match overlay and the file-path overlay are
+    // the other two per-frame full-viewport scanners. Gate BOTH on
+    // [affordanceScannersEnabled] so an agent pane wires none of the four
+    // scanners — only the cheap #803-paced repaint runs. Shell / non-agent panes
+    // (default `true`) are unchanged.
+    val matchScannerEnabled = affordanceScannersEnabled && matchListener != null
+    val filePathScannerEnabled = affordanceScannersEnabled && onFilePathTap != null
 
     LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick, coalescedRenderRequests) {
         val view = terminalView
@@ -432,17 +464,22 @@ fun TerminalSurface(
         visibleEngineCommands,
         effectiveUrlTap,
         onFilePathTap,
+        filePathScannerEnabled,
         engineCommandTap,
     ) {
         val view = terminalView
         val tap = effectiveUrlTap
-        if (view == null || (tap == null && onFilePathTap == null && engineCommandTap == null)) {
+        // Issue #796: an agent pane has scanners off, so the file-path tap is
+        // inert too (its snapshot stays empty and its affordance lives in
+        // Conversation). Mirror the scanner gate here for consistency.
+        val pathTapMaybe = if (filePathScannerEnabled) onFilePathTap else null
+        if (view == null || (tap == null && pathTapMaybe == null && engineCommandTap == null)) {
             viewClient.onTapMaybeUrl = null
         } else {
             val urlsSnapshot = visibleUrls
             val pathsSnapshot = visibleFilePaths
             val commandsSnapshot = visibleEngineCommands
-            val pathTap = onFilePathTap
+            val pathTap = pathTapMaybe
             val cmdTap = engineCommandTap
             viewClient.onTapMaybeUrl = { x, y ->
                 // URLs first: a URL's `/path` tail is already excluded from
@@ -534,14 +571,18 @@ fun TerminalSurface(
                     }
                 },
             )
-            if (matchListener != null) {
+            if (matchScannerEnabled) {
                 SelectionOverlay(
                     view = terminalView,
                     regions = visibleMatchRegions,
                     onTap = matchListener,
                 )
             }
-            if (matchListener != null || effectiveUrlTap != null) {
+            // Issue #796: the smart-selection affordance overlay runs a
+            // full-viewport `findVisibleTerminalMatches` scan per render frame —
+            // one of the four scanners. Only wire it when a scanner consumer is
+            // active AND scanners are enabled (an agent pane wires none).
+            if (matchScannerEnabled || effectiveUrlTap != null) {
                 SmartSelectionAffordanceOverlay(
                     view = terminalView,
                     // Issue #796: gate the per-render match scan to ≤1/frame.
@@ -552,7 +593,7 @@ fun TerminalSurface(
                 )
             }
             // Issue #500: tappable file-path affordance + hit-test snapshot.
-            if (onFilePathTap != null) {
+            if (filePathScannerEnabled) {
                 FilePathOverlay(
                     view = terminalView,
                     // Issue #796: gate the per-render file-path scan to ≤1/frame.

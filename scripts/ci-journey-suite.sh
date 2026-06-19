@@ -666,11 +666,48 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Issue #796 (REOPENED): core-terminal Codex `%output`-burst keyboard-up ANR
+# proof. The sibling of the #803 append-burst proof above. It composes the
+# production TerminalSurface for an AGENT pane (`affordanceScannersEnabled =
+# false`) with a synthetic `ime()` inset up (#780 model, HARD-asserted — no
+# CI self-skip), drives a tight `%output` burst, and asserts the agent pane
+# runs NO per-frame viewport scanner AND keeps the main thread under the 1s
+# stall budget (well within the 5s ANR window). It also runs the shell-pane
+# inverse (scanners STILL run for a non-agent pane). This guard was the #638/
+# #657 CI gap: it caught the ANR only at the release confidence gate (stage 09),
+# not at PR time. Adding it here closes the loop so the Codex ANR cannot reach a
+# green `main` again. Uses NO Docker fixture (in-process Compose UI test).
+CORE_TERMINAL_OUTPUT_BURST_IME_CLASS="com.pocketshell.core.terminal.ui.CodexOutputBurstImeMainThreadProofTest"
+OUTPUT_BURST_IME_STATUS="PASS"
+
+run_core_terminal_output_burst_ime() {
+  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS" \
+    --stacktrace
+}
+
+echo "=========================================================="
+echo ">>> CORE-TERMINAL #796 OUTPUT-BURST-IME PROOF: $CORE_TERMINAL_OUTPUT_BURST_IME_CLASS (attempt 1)"
+echo "=========================================================="
+output_burst_ime_start=$SECONDS
+if run_core_terminal_output_burst_ime; then
+  echo "OUTPUT_BURST_IME_PASS: passed on attempt 1 (elapsed $((SECONDS - output_burst_ime_start))s)"
+else
+  echo ">>> OUTPUT-BURST-IME PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+  if run_core_terminal_output_burst_ime; then
+    echo "OUTPUT_BURST_IME_FLAKE_RECOVERED: passed on retry (attempt 2)"
+  else
+    echo "OUTPUT_BURST_IME_FAILED: #796 proof failed twice"
+    OUTPUT_BURST_IME_STATUS="FAIL"
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
-# append-burst proof failed.
-if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$APPEND_BURST_STATUS" == "PASS" ]]; then
+# append-burst proof failed, OR the #796 output-burst-IME proof failed.
+if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 else
@@ -701,6 +738,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #803 append-burst proof (\`shared:core-terminal\`): **$APPEND_BURST_STATUS**"
   echo "- \`$CORE_TERMINAL_APPEND_BURST_CLASS\`"
+  echo
+  echo "Core-terminal #796 output-burst-IME ANR proof (\`shared:core-terminal\`): **$OUTPUT_BURST_IME_STATUS**"
+  echo "- \`$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -719,7 +759,7 @@ echo "=========================================================="
   # empty — so we MUST still write the header (with the append-burst class)
   # here, otherwise an append-burst-only regression falls through to the grep's
   # else-branch and is mislabeled as an infra abort, burying the real cause.
-  if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" ]]; then
+  if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" ]]; then
     echo
     echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
     for c in "${FAILED_CLASSES[@]}"; do
@@ -727,6 +767,9 @@ echo "=========================================================="
     done
     if [[ "$APPEND_BURST_STATUS" == "FAIL" ]]; then
       echo "- \`$CORE_TERMINAL_APPEND_BURST_CLASS\` (#803 append-burst proof)"
+    fi
+    if [[ "$OUTPUT_BURST_IME_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS\` (#796 output-burst-IME ANR proof)"
     fi
   fi
 } > "$SUMMARY"

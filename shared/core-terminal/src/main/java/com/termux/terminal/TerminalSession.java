@@ -352,7 +352,22 @@ public final class TerminalSession extends TerminalOutput {
             super(Looper.getMainLooper());
         }
 
-        private static final int PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES = 16 * 1024;
+        // PocketShell #796/#803: ONE MSG_NEW_INPUT dispatch parses at most this
+        // many bytes in a single, uninterruptible mEmulator.append() call. It was
+        // 16 KB, but a 16 KB slice of clear-heavy alt-screen content (an agent's
+        // full-viewport redraw: ESC[H + 30x ESC[K per chunk) does ~4000
+        // blockClear/allocateFullLineIfNecessary ops — far more main-thread WORK
+        // per byte than append text — and on a swiftshader emulator that one
+        // atomic append pinned the looper for >1 s (the #796 ANR). The byte budget
+        // did not model that work. Shrinking the per-dispatch slice gives the
+        // PocketShell MainThreadDrainScheduler a fine enough granularity to apply
+        // an ELAPSED-TIME budget across slices and yield mid-burst, so no single
+        // main-thread turn blows the frame/ANR deadline even for clear-heavy
+        // content. 2 KB keeps the worst-case single atomic append well under the
+        // responsiveness budget while keeping per-slice dispatch overhead low (the
+        // scheduler still drains several slices per turn for cheap append load, so
+        // normal throughput is unchanged).
+        private static final int PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES = 2 * 1024;
 
         final byte[] mReceiveBuffer = new byte[PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES];
 

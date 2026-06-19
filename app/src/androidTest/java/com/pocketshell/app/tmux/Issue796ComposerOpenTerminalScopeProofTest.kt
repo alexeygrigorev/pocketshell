@@ -217,6 +217,10 @@ class Issue796ComposerOpenTerminalScopeProofTest {
                 sessionName = SESSION_NAME,
                 terminalKeyboardMode = TerminalKeyboardMode.RawCommand,
                 engineCommands = STABLE_ENGINE_COMMANDS,
+                // Issue #796 (REOPENED): a Codex (agent) pane — the gate skips its
+                // per-frame viewport scanners. A stable Boolean, so the pager stays
+                // skippable (the property under test).
+                isAgentPane = true,
                 sessionNameForUnifiedPane = sessionNameForUnifiedPane,
                 onTerminalSizeChanged = onTerminalSizeChanged,
                 onSurfaceError = onSurfaceError,

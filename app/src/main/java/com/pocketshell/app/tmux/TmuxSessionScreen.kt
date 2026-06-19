@@ -1637,12 +1637,24 @@ public fun TmuxSessionScreen(
                     !deferTerminalAttachForSwap &&
                     unifiedPanes.isNotEmpty()
                 if (keepTerminalMounted) {
+                    // Issue #796 (REOPENED): the #679 session-tree agentKind signal
+                    // for the visible pane. The raw Terminal surface skips its four
+                    // per-frame viewport affordance scanners for an agent pane (the
+                    // Codex `%output` keyboard-up ANR cost); affordances live in the
+                    // Conversation view (#809/#818). Same `tmuxSessionIsAgentPane`
+                    // signal that drives the agent chips below — a stable Boolean, so
+                    // the pager stays skippable across overlay toggles (#796 H3).
+                    val terminalIsAgentPane = tmuxSessionIsAgentPane(
+                        hasLiveDetection = currentAgentConversation?.detection != null,
+                        presumedAgent = presumedAgent,
+                    )
                     TmuxTerminalPager(
                         unifiedPanes = unifiedPanes,
                         pagerState = pagerState,
                         sessionName = sessionName,
                         terminalKeyboardMode = appSettings.terminalKeyboardMode,
                         engineCommands = engineCommandSet,
+                        isAgentPane = terminalIsAgentPane,
                         sessionNameForUnifiedPane = stableSessionNameForUnifiedPane,
                         onTerminalSizeChanged = stableResizeRemotePty,
                         onSurfaceError = stableReportTerminalSurfaceFailure,
@@ -4230,6 +4242,17 @@ internal fun TmuxTerminalPager(
     sessionName: String,
     terminalKeyboardMode: TerminalKeyboardMode,
     engineCommands: Set<String>,
+    // Issue #796 (REOPENED): when this pane is an interactive-agent pane (the
+    // #679 session-tree agentKind signal, same source that drives the agent
+    // chips / Conversation default), the raw Terminal surface does NOT run the
+    // four per-frame full-viewport affordance scanners (URL / smart-match /
+    // file-path / engine-command). Those re-extract every visible row and run
+    // regex passes on the MAIN thread every frame; during a live Codex `%output`
+    // burst with the keyboard up that per-frame cost stalled the main thread into
+    // a real ANR. The agent affordances live in the Conversation view (#809/#818,
+    // the default agent view), so the raw Terminal tab is render-only for an agent
+    // pane. A shell / non-agent pane keeps full tappability (the flag is false).
+    isAgentPane: Boolean,
     sessionNameForUnifiedPane: (TmuxPaneState) -> String?,
     onTerminalSizeChanged: (columns: Int, rows: Int) -> Unit,
     onSurfaceError: (paneId: String, cause: Throwable) -> Unit,
@@ -4326,6 +4349,11 @@ internal fun TmuxTerminalPager(
                 // pane has an empty set and the affordance is off.
                 engineCommands = engineCommands,
                 onEngineCommandTap = onEngineCommandTap,
+                // Issue #796 (REOPENED): an agent pane runs NO per-frame viewport
+                // affordance scanners — that per-frame regex cost was the Codex
+                // `%output` keyboard-up ANR. Affordances live in Conversation
+                // (#809/#818). Shell / non-agent panes keep full tappability.
+                affordanceScannersEnabled = !isAgentPane,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 2.dp, vertical = 4.dp),

@@ -71,29 +71,49 @@ internal class MainThreadDrainBudget(
     internal companion object {
         /**
          * Matches `TerminalSession.MainThreadHandler.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES`
-         * and `SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES` (16 KB).
+         * and `SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES` (2 KB).
+         *
+         * #796 shrank this from 16 KB to 2 KB. A 2 KB slice is the largest
+         * uninterruptible `mEmulator.append` a single `dispatchMessage` can run,
+         * so it bounds the worst-case single atomic parse — and, crucially, gives
+         * the scheduler a fine enough granularity to enforce an ELAPSED-TIME
+         * budget BETWEEN slices (see [MainThreadDrainScheduler.runDrainTurn]).
          */
-        const val DEFAULT_DRAIN_SLICE_BYTES: Int = 16 * 1024
+        const val DEFAULT_DRAIN_SLICE_BYTES: Int = 2 * 1024
 
         /**
-         * One 16 KB `append` slice parsed per main-thread turn, then a frame
-         * yield. This is deliberately the SAME per-turn parse the vendored handler
-         * always did (one `drainProcessOutputSlice`), so the per-#803 change never
-         * INCREASES the contiguous main-thread occupancy of a single turn — it only
-         * adds the guaranteed `postDelayed` frame yield BETWEEN turns.
+         * The per-main-thread-turn BYTE cap — a SAFETY CEILING, not the primary
+         * limiter (#796). After #796 the binding constraint on a turn is the
+         * ELAPSED-TIME budget in [MainThreadDrainScheduler] (~8 ms), which governs
+         * BOTH content shapes:
+         *  - CLEAR-heavy alt-screen content: each 2 KB slice does hundreds of
+         *    `blockClear` ops, so the time budget trips after the first slice or
+         *    two — a clear-heavy turn yields well under 16 ms even though it
+         *    consumed only a few KB. This is the #796 ANR fix.
+         *  - CHEAP append text: a 2 KB slice parses in a fraction of a ms, so the
+         *    time budget lets a turn drain MANY slices (tens of KB) before 8 ms
+         *    elapses — keeping append throughput high so the drain KEEPS UP with a
+         *    producer flood and the burst fully settles (no stranded tail; the
+         *    [CodexAppendBurstMainThreadProofTest] final-marker correctness).
          *
-         * Why the yield is the fix (not a bigger/smaller per-turn budget): the
-         * pre-#803 path re-posted `MSG_NEW_INPUT` with `sendEmptyMessage` (NO
-         * delay). Under a producer flood that keeps the 64 KB queue full, those
-         * zero-delay re-posts are ALWAYS ready at the front of the looper, so they
-         * run back-to-back and starve any delayed/again-posted main-thread work
-         * (input dispatch, the frame-coalesced repaint) — the looper never idles
-         * for the whole burst. The #803 scheduler instead `postDelayed`s the
-         * continuation one frame out, so the looper is guaranteed a gap each frame
-         * to service input + render between parse turns. One slice/turn keeps each
-         * gap close (≈1 slice of latency) while still pacing the total parse across
-         * frames so the burst can never pin the thread past the frame budget.
+         * The byte cap is therefore set GENEROUSLY (128 × 2 KB = 256 KB) so it
+         * does NOT artificially throttle the cheap-append case — the time budget
+         * ends those turns first. It still bounds a pathological run where the
+         * clock somehow does not advance (so a turn can never consume the entire
+         * 64 KB queue plus more in one uninterrupted pass). Whichever budget trips
+         * first ends the turn; the remainder is reposted DELAYED so the burst
+         * still drains in FIFO order across frames.
+         *
+         * Why a frame yield BETWEEN turns is still load-bearing (unchanged from
+         * #803): the pre-#803 path re-posted `MSG_NEW_INPUT` with
+         * `sendEmptyMessage` (NO delay). Under a producer flood that keeps the
+         * 64 KB queue full those zero-delay re-posts are ALWAYS ready at the front
+         * of the looper, so they run back-to-back and starve input dispatch /
+         * the frame-coalesced repaint — the looper never idles for the whole
+         * burst. The scheduler `postDelayed`s the continuation one frame out, so
+         * the looper is guaranteed a gap each frame to service input + render
+         * between parse turns.
          */
-        const val DEFAULT_BYTES_PER_FRAME: Int = 16 * 1024
+        const val DEFAULT_BYTES_PER_FRAME: Int = 256 * 1024
     }
 }

@@ -471,6 +471,26 @@ JOURNEY_CLASSES=(
   # (no assumeFalse(isRunningOnCi()) on the load-bearing assertions — process.md
   # F3 / D31). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.SilentDropSyntheticSeamJourneyE2eTest"
+  # Issue #833 (Slice C resilience follow-up): a CLEAN sustained outage (clean
+  # FIN/connection-refused for the outage window, then the link returns) is the
+  # EOF-oracle sibling of the half-open silent drop above. The old silent-reattach
+  # grace loop tried a fresh transport exactly ONCE then spun, so the SAME session
+  # stayed wedged (stuck `Reconnecting`/non-Connected) until the full grace
+  # elapsed, forcing the switch-session dance. This journey injects the clean
+  # sustained outage DETERMINISTICALLY via two VM seams on the plain agents:2222
+  # channel (TmuxSessionViewModel.triggerCleanPassiveDropForTest fires the clean
+  # ReaderEof passive-disconnect path; forceCleanOutageForTest makes the grace
+  # loop's reconnect primitives fail-fast as if the link were down), so it runs
+  # per-PR WITHOUT the toxiproxy proxy family (the toxiproxy-faithful
+  # disableProxyFor sibling silentDropAutoRecoversWithoutSessionSwitchDance runs
+  # nightly). It asserts the USER-VISIBLE contract: a connection-lost indicator
+  # during the outage, then once the link returns the SAME session auto-recovers
+  # WITHOUT a switch dance and a fresh marker streams back through the recovered
+  # `-CC` channel. It drives ONLY the deterministic agents:2222 fixture
+  # (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222) tests.yml already brings up, and does
+  # NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the load-bearing
+  # assertions — process.md F3 / D31). It lives under com.pocketshell.app.proof.
+  "$FQCN_PREFIX.CleanOutageReattachResilienceE2eTest"
   # Epic #821 Slice 1: manual session classification (Option B + change-kind).
   # The epic exists because agent-kind fixes keep recurring, so the foreign →
   # pick → durable round-trip MUST be gated at PR time (D31). This connected

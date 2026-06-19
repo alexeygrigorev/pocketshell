@@ -1922,8 +1922,7 @@ class TmuxSessionViewModelTest {
         // a recoverable live-channel drop now surfaces a CALM Reconnecting band
         // (the controller heals through Reattaching/Reconnecting), NOT the scary
         // Failed/"Tap Reconnect" band and NOT the old silently-held Connected frame.
-        // The held client + bounded probe are unchanged; only the displayed status
-        // is the calm Reconnecting (was: Connected held during grace).
+        // Only the displayed status is the calm Reconnecting (was: Connected held).
         assertTrue(
             "recoverable drop must show the calm Reconnecting band, got ${vm.connectionStatus.value}",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
@@ -1933,10 +1932,21 @@ class TmuxSessionViewModelTest {
             deadClient,
             registry.clients.value[7L]?.client,
         )
-        assertEquals(
-            "silent fresh-transport probing must be bounded during grace",
-            1,
-            connector.connectCount,
+        // EPIC #792 #833: the silent-reattach grace loop must KEEP re-dialling a
+        // fresh transport across a SUSTAINED clean outage (the old one-shot latch
+        // wedged after a single attempt). With a 500ms grace + 250ms retry spacing
+        // the loop re-dials more than once before grace expires — proving the
+        // resilience fix — while still BOUNDED by the grace window (no hot loop /
+        // infinite re-dial: the count is small, paced by the retry delay).
+        assertTrue(
+            "silent fresh-transport probing must RE-DIAL across a sustained outage " +
+                "(resilience #833), got connectCount=${connector.connectCount}",
+            connector.connectCount >= 2,
+        )
+        assertTrue(
+            "silent fresh-transport probing must stay BOUNDED by the grace window " +
+                "(no hot loop), got connectCount=${connector.connectCount}",
+            connector.connectCount <= 4,
         )
 
         advanceTimeBy(2L)

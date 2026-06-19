@@ -799,6 +799,50 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun shouldRunLivenessProbeForTest(): Boolean = shouldRunLivenessProbe()
 
     /**
+     * EPIC #792 #833 test seam: simulate a SUSTAINED CLEAN OUTAGE (toxiproxy
+     * `disableProxyFor` analogue) deterministically on the plain `agents:2222`
+     * fixture. While armed, the silent-reattach grace loop's reconnect primitives
+     * fail-fast as if the link were down (a clean FIN / connection-refused), so the
+     * grace loop must KEEP re-dialling a fresh transport across the outage window.
+     * Clearing it lets the next grace-loop re-dial succeed over the real healthy
+     * channel — proving the SAME session auto-recovers WITHOUT the switch dance once
+     * the link returns. Production never sets it (default false). `@Volatile` so the
+     * grace-loop coroutine sees the flip from the instrumentation thread.
+     */
+    @Volatile
+    internal var forceCleanOutageForTest: Boolean = false
+
+    /**
+     * EPIC #792 #833 test seam: fire the CLEAN passive-disconnect path directly —
+     * the body the EOF oracle (`TmuxClient.disconnected` true-edge with a
+     * [TmuxDisconnectReason.ReaderEof]) drives. This is the clean-drop analogue of
+     * [triggerLivenessProbeDropForTest], letting a connected proof exercise the
+     * sustained-clean-outage reattach ladder without waiting on a real reader EOF or
+     * the toxiproxy proxy family. Returns false (no-op) if there is no current client.
+     */
+    internal fun triggerCleanPassiveDropForTest(): Boolean {
+        val client = clientRef ?: return false
+        handlePassiveClientDisconnect(
+            client = client,
+            disconnectEvent = TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderEof,
+                source = "test_clean_outage_seam",
+                intent = "synthetic_clean_drop",
+            ),
+        )
+        return true
+    }
+
+    /**
+     * EPIC #792 #833 test seam: the identity hash of the CURRENT control client (or
+     * null). A connected proof reads it before the synthetic clean drop and after
+     * recovery to PROVE the resilient grace loop re-dialled a FRESH transport (the
+     * recovered client is a different instance), not silently held the dead one.
+     */
+    internal fun currentClientIdentityForTest(): Int? =
+        clientRef?.let { System.identityHashCode(it) }
+
+    /**
      * A sustained drop was confirmed by the probe. Submit `TransportDropped` to
      * the controller for an immediate connection-lost indicator, then drive the
      * SINGLE reconnect entrypoint (`scheduleAutoReconnect` → `TransportEffects`,
@@ -5882,7 +5926,20 @@ public class TmuxSessionViewModel @Inject constructor(
     ): Boolean {
         if (passiveDisconnectGraceMs <= 0L) return false
         val preferFreshTransport = leaseRef != null
-        var transportReattachTried = false
+        // EPIC #792 #833: count fresh-transport reconnect attempts instead of a
+        // one-shot latch. A SUSTAINED clean outage fails the first fresh-transport
+        // attempt while the link is down, but the loop must keep RE-DIALLING a fresh
+        // transport across the bounded grace window so the SAME session auto-recovers
+        // the moment the link returns — WITHOUT the switch-session dance. The old
+        // `transportReattachTried` latch tried the fresh transport exactly once, and
+        // because a failed transport reconnect nulls `sessionRef`, every later
+        // iteration could only call the warm reattach (which can no longer succeed) —
+        // so the loop spun uselessly until the 60s grace elapsed, leaving the session
+        // wedged. We bound the re-dials with the existing 60s grace `withTimeoutOrNull`
+        // plus the per-attempt timeout + 250ms retry spacing (no hot loop / battery
+        // drain), and never short-circuit a HEALTHY warm reattach (the #635/#553
+        // within-grace warm path still runs first when no fresh transport is preferred).
+        var transportReattachAttempts = 0
         DiagnosticEvents.record(
             "connection",
             "silent_reattach_start",
@@ -5910,9 +5967,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (currentClient !== staleClient && currentClient?.disconnected?.value != true) {
                     return@withTimeoutOrNull true
                 }
-                val shouldProbeTransport = !transportReattachTried
-                if (preferFreshTransport && shouldProbeTransport) {
-                    transportReattachTried = true
+                // EPIC #792 #833: when a fresh transport is preferred, RE-DIAL it on
+                // EVERY iteration (not once) so a sustained clean outage that fails the
+                // first attempt keeps escalating into a retrying ladder — the SAME
+                // session recovers as soon as the link returns, with no switch dance.
+                // The grace `withTimeoutOrNull` + per-attempt timeout + 250ms spacing
+                // bound the re-dials.
+                if (preferFreshTransport) {
+                    transportReattachAttempts += 1
                     if (silentlyReconnectTransportAfterPassiveDisconnect(
                             staleClient = staleClient,
                             target = target,
@@ -5930,8 +5992,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 ) {
                     return@withTimeoutOrNull true
                 }
-                if (!preferFreshTransport && shouldProbeTransport) {
-                    transportReattachTried = true
+                // No warm lease to prefer (preferFreshTransport=false): the warm
+                // reattach above is the cheap within-grace path; if it can't recover
+                // (the warm SSH session itself is gone) escalate to a fresh transport,
+                // and keep RE-DIALLING that on every later iteration for the same
+                // sustained-outage resilience as the preferred-transport branch.
+                if (!preferFreshTransport) {
+                    transportReattachAttempts += 1
                     if (silentlyReconnectTransportAfterPassiveDisconnect(
                             staleClient = staleClient,
                             target = target,
@@ -5959,6 +6026,9 @@ public class TmuxSessionViewModel @Inject constructor(
                     "session" to target.sessionName,
                     "clientHash" to System.identityHashCode(staleClient),
                     "cause" to "grace_elapsed",
+                    // EPIC #792 #833: how many fresh-transport re-dials the resilient
+                    // grace loop made across the outage window before grace elapsed.
+                    "transportReattachAttempts" to transportReattachAttempts,
                     *shortAppSwitchReconnectFields(
                         trigger = TmuxConnectTrigger.AutoReconnect,
                         target = target,
@@ -5974,6 +6044,10 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         timeoutMs: Long,
     ): Boolean {
+        // EPIC #792 #833 test seam: while a synthetic clean outage is armed, every
+        // reattach fails as if the link were down — so the grace loop must keep
+        // re-dialling until the outage clears (see [forceCleanOutageForTest]).
+        if (forceCleanOutageForTest) return false
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         val startedAtMs = SystemClock.elapsedRealtime()
         val replacement = createTmuxClient(session, target.sessionName, target.startDirectory)
@@ -6147,6 +6221,20 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         timeoutMs: Long,
     ): Boolean {
+        // EPIC #792 #833 test seam: while a synthetic clean outage is armed, the
+        // fresh-transport re-dial fails as if the link were down (clean FIN /
+        // connection-refused). It FAITHFULLY models the real failed transport
+        // reconnect: it nulls the SSH session/lease (as the real `!ready`/catch paths
+        // at the end of this function do), so the warm reattach can no longer
+        // succeed — which is exactly what made the OLD one-shot latch wedge for the
+        // rest of the grace window. The resilient loop must keep RE-DIALLING a fresh
+        // transport until the outage clears (see [forceCleanOutageForTest]).
+        // Production never arms it.
+        if (forceCleanOutageForTest) {
+            sessionRef = null
+            leaseRef = null
+            return false
+        }
         val startedAtMs = SystemClock.elapsedRealtime()
         var acquiredLease: SshLease? = null
         var replacement: TmuxClient? = null

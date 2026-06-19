@@ -51,7 +51,9 @@ import com.pocketshell.app.tmux.connection.ConnectionControllerShadowBridge
 import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
+import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
+import com.pocketshell.app.tmux.connection.TmuxAttachEffects
 import com.pocketshell.app.tmux.connection.hostKeyFor
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.HostKey
@@ -542,6 +544,43 @@ public class TmuxSessionViewModel @Inject constructor(
         ConnectionControllerShadowBridge(transport = connectionTransportPort)
 
     /**
+     * EPIC #792 Slice B — the GRACE IO owner. Consolidates the three background-grace
+     * IO triggers (clean background detach, within-grace foreground reseed, within-grace
+     * silent heal) into one dispatcher. The VM implements the [GraceEffects.GraceIo]
+     * capability ([launchBackgroundDetachTeardown] / [launchForegroundReattachReseed] /
+     * [launchForegroundHealWithinGrace]); the effect class owns the dispatch so the
+     * driver seam AND the lifecycle entrypoints route through ONE owner — the inline twin
+     * invocation is deleted (D22 hard-cut, no dual-write).
+     */
+    private val graceEffects: GraceEffects =
+        GraceEffects(
+            object : GraceEffects.GraceIo {
+                override fun launchBackgroundDetachTeardown() =
+                    this@TmuxSessionViewModel.launchBackgroundDetachTeardown()
+
+                override fun launchForegroundReattachReseed() =
+                    this@TmuxSessionViewModel.launchForegroundReattachReseed()
+
+                override fun launchForegroundHealWithinGrace() =
+                    this@TmuxSessionViewModel.launchForegroundHealWithinGrace()
+            },
+        )
+
+    /**
+     * EPIC #792 Slice B — the ATTACH / fast-SWITCH IO owner. The SOLE owner of the warm
+     * same-host session-switch IO dispatch now the inline `runFastSessionSwitch` call is
+     * deleted. The VM implements the [TmuxAttachEffects.TmuxAttachIo] capability (it just
+     * runs the supplied thunk — the `runFastSessionSwitch` body closed over the connect()
+     * caller's args); the effect class is the single dispatch owner (D22 hard-cut).
+     */
+    private val tmuxAttachEffects: TmuxAttachEffects =
+        TmuxAttachEffects(
+            object : TmuxAttachEffects.TmuxAttachIo {
+                override suspend fun runFastSwitch(body: suspend () -> Unit) = body()
+            },
+        )
+
+    /**
      * EPIC #687 slice 1c-iv-b-A2 (#739) + slice 1c-iv-b-B1 (#738): the
      * [ConnectionEffectDriver], wired over the REAL adapters — it observes the shadow
      * [ConnectionController]'s [ConnectionController.state] transitions, the real
@@ -563,7 +602,9 @@ public class TmuxSessionViewModel @Inject constructor(
             tmuxPort = connectionTmuxPort,
             transportPort = connectionTransportPort,
             scope = viewModelScope,
-            backgroundedEffect = { launchBackgroundDetachTeardown() },
+            // EPIC #792 Slice B: the background-detach trigger routes through the single
+            // [GraceEffects] owner (it delegates to the VM's launchBackgroundDetachTeardown).
+            backgroundedEffect = { graceEffects.onBackgrounded() },
             // Slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach.
             // On the controller's Backgrounded→Reattaching edge (within grace + warm
             // lease) it fires the RESEED-ONLY body — re-promote Live + heal blank panes
@@ -571,10 +612,11 @@ public class TmuxSessionViewModel @Inject constructor(
             // The same body runs directly from `onAppForegrounded(resumedWithinGrace)`
             // in production (the controller does not reach that edge there because the
             // teardown — and thus the controller's Background — is deferred to
-            // grace-elapsed); both paths invoke the one [launchForegroundReattachReseed]
-            // owner. The deleted inline `probeCurrentRuntimeOnForegroundIfNeeded →
+            // grace-elapsed); both paths route through the one [GraceEffects] owner.
+            // The deleted inline `probeCurrentRuntimeOnForegroundIfNeeded →
             // connect(LifecycleReattach)` path is the superseded behavior (D22 hard-cut).
-            foregroundReattachEffect = { launchForegroundReattachReseed() },
+            // EPIC #792 Slice B: routes through the single [GraceEffects] owner.
+            foregroundReattachEffect = { graceEffects.onForegroundReattachReseed() },
             // Slice 1c-iv-b-B2 (#742): after the driver submits a TransportLive /
             // TransportDropped from the real flows, re-project _connectionStatus from
             // the controller's (now real-flow-driven) state — the controller is the
@@ -1675,7 +1717,15 @@ public class TmuxSessionViewModel @Inject constructor(
                     closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
                     _panes.value = emptyList()
                     rebuildUnifiedPanes()
-                    runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
+                    // EPIC #792 Slice B: the warm fast-switch IO is now owned by the
+                    // single [TmuxAttachEffects] dispatcher — the inline direct call is
+                    // deleted (D22 hard-cut, no dual-write). The IO body (the former
+                    // `runFastSessionSwitch`) runs at this SAME synchronous trigger point
+                    // inside the connectJob critical section (the no-flash / switch-latency
+                    // ordering is preserved); only the dispatch owner moved.
+                    tmuxAttachEffects.runFastSwitch {
+                        runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
+                    }
                 } else {
                     // Slow path: full teardown of both the tmux client
                     // and the SSH session before the SSH lease acquisition.
@@ -1990,10 +2040,10 @@ public class TmuxSessionViewModel @Inject constructor(
     private var pendingBackgroundDetachPreserveTarget: ConnectionTarget? = null
     private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
-    private var foregroundReattachReseedForTest: (() -> Unit)? = null
-    // EPIC #687 P2 (J1/#635): test seam for the within-grace foreground SILENT heal
-    // of a socket dropped while backgrounded (the NEW-path single-grace-owner path).
-    private var foregroundHealWithinGraceForTest: (() -> Unit)? = null
+    // EPIC #792 Slice B: the `foregroundReattachReseedForTest` /
+    // `foregroundHealWithinGraceForTest` dual-write override seams are DELETED — they
+    // were never set (always null → always fell through to the real body), and the grace
+    // IO is now dispatched through the single [graceEffects] owner (no dual-write, D22).
     private var processForegroundForClearedOverrideForTest: Boolean? = null
     private var latestConnectIntent: ConnectIntent? = null
     private var connectGeneration: Long = 0L
@@ -2254,7 +2304,9 @@ public class TmuxSessionViewModel @Inject constructor(
             // `foregroundReattachEffect` seam invokes this SAME body on the controller's
             // Backgrounded→Reattaching edge (the classification model, unit-tested in
             // `ConnectionEffectDriverTest`); both paths share the one reseed owner.
-            foregroundReattachReseedForTest?.invoke() ?: launchForegroundReattachReseed()
+            // EPIC #792 Slice B: route through the single [GraceEffects] owner (the dead
+            // `foregroundReattachReseedForTest` dual-write override is deleted).
+            graceEffects.onForegroundReattachReseed()
             return
         }
         // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. The App-level
@@ -2273,7 +2325,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // there is no competing second clock — this within-grace foreground heal is the
         // single owner of the within-grace recovery decision.
         if (resumedWithinGrace) {
-            foregroundHealWithinGraceForTest?.invoke() ?: launchForegroundHealWithinGrace()
+            // EPIC #792 Slice B: route through the single [GraceEffects] owner (the dead
+            // `foregroundHealWithinGraceForTest` dual-write override is deleted).
+            graceEffects.onForegroundHealWithinGrace()
             return
         }
         // EPIC #687 slice 1c-iii: observe-only — the single grace predicate in the

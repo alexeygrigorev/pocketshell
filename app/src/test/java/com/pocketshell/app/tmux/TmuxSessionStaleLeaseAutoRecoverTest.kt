@@ -76,9 +76,14 @@ class TmuxSessionStaleLeaseAutoRecoverTest {
      */
     private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        // EPIC #792 Slice D: disable the VM LivenessProbe auto-start — its infinite
+        // periodic `delay` loop would otherwise spin `advanceUntilIdle()` forever on
+        // this virtual-clock Main (this file does not use MainDispatcherRule).
+        com.pocketshell.app.tmux.LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
         try {
             body()
         } finally {
+            com.pocketshell.app.tmux.LivenessProbeTestOverride.clear()
             Dispatchers.resetMain()
         }
     }

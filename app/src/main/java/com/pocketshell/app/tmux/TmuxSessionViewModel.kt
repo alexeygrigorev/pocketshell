@@ -57,7 +57,10 @@ import com.pocketshell.app.tmux.connection.TmuxAttachEffects
 import com.pocketshell.app.tmux.connection.TransportEffects
 import com.pocketshell.app.tmux.connection.hostKeyFor
 import com.pocketshell.core.connection.ConnectionController
+import com.pocketshell.core.connection.ConnectionEvent as CoreConnectionEvent
+import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.RevealStateMachine
 import com.pocketshell.core.connection.Seed
@@ -652,6 +655,225 @@ public class TmuxSessionViewModel @Inject constructor(
             // foreground heal ([launchForegroundHealWithinGrace]) — the single owner.
             suppressTransportDrops = { shouldSuppressTransportDropsForSingleGraceOwner() },
         ).also { it.start() }
+
+    /**
+     * EPIC #792 Slice D (#822/V7a): the proactive mid-session drop detector.
+     *
+     * While the session is FOREGROUNDED + `Live` (and ONLY then — D21: no
+     * background work, no probe while backgrounded/within-grace/reconnecting), it
+     * pings the warm control channel every [LivenessProbeTestOverride] interval
+     * (default [LivenessProbe.DEFAULT_INTERVAL_MS]). On a SUSTAINED probe failure
+     * ([LivenessProbe.DEFAULT_FAILURE_THRESHOLD] consecutive failures) it fires
+     * [LivenessProbe.ProbeIo.onProbeFailed] ([onLivenessProbeDeclaredDrop]).
+     *
+     * That handler drives BOTH ends of the fix without adding a second writer:
+     *  - it submits [CoreConnectionEvent.TransportDropped] to the controller so the
+     *    connection-lost indicator surfaces immediately (#822 detection), AND
+     *  - it drives the SINGLE reconnect entrypoint — `scheduleAutoReconnect` →
+     *    Slice C `TransportEffects`, with the #822 force-fresh-lease wedge fix —
+     *    whose ladder body closes the dead `-CC` channel, evicts the poisoned warm
+     *    lease, and re-dials a FRESH transport, so the SAME session auto-recovers
+     *    with no switch dance (#822 wedge). The dead-client teardown happens INSIDE
+     *    that ladder body (`closeCurrentConnectionAndJoin`); the probe handler does
+     *    NOT call `client.close()` directly.
+     *
+     * So the probe adds exactly ONE new thing — proactive detection of a
+     * silently-dead channel — and reuses the entire tested recovery path. It is
+     * NEVER a second reconnect writer (D28). The drop is also submitted to the
+     * controller directly here for an immediate indicator independent of the
+     * driver's `disconnected` collection latency.
+     */
+    /**
+     * The proactive drop detector. Constructed + started LAZILY on the FIRST client
+     * attach ([ensureLivenessProbeStarted]) — NOT in the VM constructor. Lazy
+     * construction is deliberate: it reads the [LivenessProbeTestOverride] timing
+     * knobs at START time, by which point a connected emulator proof has already set
+     * the (short, deterministic) window in `@Before`; building it in the constructor
+     * would freeze the production defaults before the test override was installed
+     * (and there is no point probing before any session is attached anyway).
+     *
+     * The probe loop runs in [viewModelScope] (Main): its gate-checks +
+     * confirmed-drop effects touch Main-thread VM state (the controller,
+     * `setConnectionState`, the per-connection coroutines), so it MUST share the
+     * Main dispatcher in production + on the emulator. JVM unit tests
+     * (`runTest` + the virtual-clock Main) would otherwise hang — the infinite
+     * `delay(interval)` → `probe` → `delay` loop self-reschedules so
+     * `advanceUntilIdle()` never idles — so those tests DISABLE the auto-start
+     * ([LivenessProbeTestOverride.autoStartEnabled] = false) and drive the
+     * detection→recovery path through the explicit seams
+     * ([triggerLivenessProbeDropForTest]). The loop's deterministic timing is proven
+     * by the pure [LivenessProbe] virtual-clock test + the connected emulator proof.
+     */
+    @Volatile
+    private var livenessProbe: LivenessProbe? = null
+
+    /** Build + start the [livenessProbe] once, on the first client attach. Idempotent. */
+    private fun ensureLivenessProbeStarted() {
+        if (livenessProbe != null) return
+        if (!LivenessProbeTestOverride.autoStartEnabled) return
+        val probe = LivenessProbe(
+            io = object : LivenessProbe.ProbeIo {
+                override fun shouldProbe(): Boolean = shouldRunLivenessProbe()
+
+                override suspend fun probe(): Boolean = runLivenessProbePing()
+
+                override fun onProbeFailed(consecutiveFailures: Int) =
+                    onLivenessProbeDeclaredDrop(consecutiveFailures)
+            },
+            intervalMs = LivenessProbeTestOverride.intervalMs(),
+            perProbeTimeoutMs = LivenessProbeTestOverride.perProbeTimeoutMs(),
+            failureThreshold = LivenessProbeTestOverride.failureThreshold(),
+            log = { line -> Log.i(LIVENESS_PROBE_TAG, line) },
+        )
+        livenessProbe = probe
+        probe.start(viewModelScope)
+    }
+
+    /**
+     * The probe gate (no-false-positive guard 1): probe ONLY when the session is
+     * genuinely FOREGROUNDED + `Live` on the CURRENT, non-disconnected control
+     * client. A backgrounded app, an in-grace detach, an in-flight
+     * attach/reconnect (controller not `Live`), or no client all return false, so
+     * the probe never competes with a reconnect, never trips while backgrounded,
+     * and never fights the single grace owner.
+     */
+    private fun shouldRunLivenessProbe(): Boolean {
+        val bg = isProcessBackgroundedForGraceOwner()
+        val hasClient = clientRef != null
+        val disconnected = clientRef?.disconnected?.value ?: true
+        val ctrl = connectionControllerShadow.connectionController.state.value
+        val open = !bg && appActive && hasClient && !disconnected && ctrl is CoreConnectionState.Live
+        if (!open) {
+            Log.i(
+                LIVENESS_PROBE_TAG,
+                "gate closed bg=$bg appActive=$appActive hasClient=$hasClient " +
+                    "disconnected=$disconnected ctrl=${ctrl::class.simpleName}",
+            )
+        }
+        return open
+    }
+
+    /**
+     * One liveness ping over the warm control channel. Best-effort + non-fatal:
+     * [TmuxClient.probeLiveness] uses the drain-on-timeout path so a slow / busy
+     * but HEALTHY channel is never torn down by the probe itself. Returns true if
+     * the channel answered. The [LivenessProbe] wraps this in its own generous
+     * per-probe timeout and N-consecutive-failure criterion.
+     */
+    private suspend fun runLivenessProbePing(): Boolean {
+        // EPIC #792 Slice D — the per-PR synthetic-drop seam. When the test hook
+        // is armed the ping reports DEAD regardless of the real channel, so the
+        // silent-drop detection + recovery contract can be exercised
+        // DETERMINISTICALLY on the plain `agents:2222` fixture (no toxiproxy
+        // needed) — the same lever the toxiproxy half-open proof exercises on the
+        // real wire. Production default is false (the real probe runs).
+        if (forceLivenessProbeDeadForTest) return false
+        val client = clientRef ?: return false
+        return runCatching { client.probeLiveness() }.getOrDefault(false)
+    }
+
+    /**
+     * EPIC #792 Slice D test seam: arm the synthetic silent-drop. While true,
+     * [runLivenessProbePing] returns DEAD without touching the wire, so the
+     * connected per-PR proof reproduces a silent mid-session drop on the
+     * deterministic `agents:2222` fixture (no toxiproxy). The test clears it to
+     * let the SAME session recover over the (real, healthy) channel. Production
+     * never sets it (default false). `@Volatile` so the probe-loop coroutine sees
+     * the flip from the instrumentation thread.
+     */
+    @Volatile
+    internal var forceLivenessProbeDeadForTest: Boolean = false
+
+    /** EPIC #792 Slice D test seam: drive one liveness ping synchronously from a
+     *  test (returns alive/dead) so a unit/connected proof can assert the probe
+     *  primitive without waiting on the periodic loop. */
+    internal suspend fun runLivenessProbePingForTest(): Boolean = runLivenessProbePing()
+
+    /** EPIC #792 Slice D test seam: invoke the confirmed-drop handler directly
+     *  (the body the probe loop fires on a sustained failure) so a connected
+     *  proof can drive detection→recovery without the wall-clock probe cadence. */
+    internal fun triggerLivenessProbeDropForTest(consecutiveFailures: Int = 2) =
+        onLivenessProbeDeclaredDrop(consecutiveFailures)
+
+    /** EPIC #792 Slice D test seam: read the gate the probe loop consults. */
+    internal fun shouldRunLivenessProbeForTest(): Boolean = shouldRunLivenessProbe()
+
+    /**
+     * A sustained drop was confirmed by the probe. Submit `TransportDropped` to
+     * the controller for an immediate connection-lost indicator, then drive the
+     * SINGLE reconnect entrypoint (`scheduleAutoReconnect` → `TransportEffects`,
+     * the Slice C force-fresh-lease ladder) DIRECTLY. The dead `-CC` client is
+     * closed INSIDE that ladder body (`closeCurrentConnectionAndJoin`) — this
+     * handler does NOT call `client.close()` itself. NEVER a second reconnect
+     * writer (D28).
+     */
+    private fun onLivenessProbeDeclaredDrop(consecutiveFailures: Int) {
+        val client = clientRef ?: return
+        // Re-check the gate on the VM side too — a background/reconnect could have
+        // raced in during the probe window (the controller may already be off Live).
+        if (!shouldRunLivenessProbe()) return
+        val target = activeTarget ?: connectingTarget
+        Log.w(
+            LIVENESS_PROBE_TAG,
+            "liveness-probe declared silent drop consecutiveFailures=$consecutiveFailures " +
+                "session=${target?.sessionName} host=${target?.host} " +
+                "clientHash=${System.identityHashCode(client)} generation=$connectGeneration",
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "liveness_probe_silent_drop",
+            "source" to "liveness_probe",
+            "classification" to "proactive_mid_session_drop_detected",
+            "consecutiveFailures" to consecutiveFailures,
+            "hostId" to target?.hostId,
+            "host" to target?.host,
+            "port" to target?.port,
+            "user" to target?.user,
+            "session" to target?.sessionName,
+            "clientHash" to System.identityHashCode(client),
+            "generation" to connectGeneration,
+        )
+        ReconnectCauseTrail.record(
+            stage = "liveness_probe",
+            outcome = "silent_drop_detected",
+            cause = "probe_failure_threshold_reached",
+            trigger = TmuxConnectTrigger.AutoReconnect.logValue,
+            "session" to target?.sessionName,
+            "consecutiveFailures" to consecutiveFailures,
+            "generation" to connectGeneration,
+        )
+        // Immediate indicator: walk the controller Live -> Reattaching now, so the
+        // connection-lost indicator (header pill / band) surfaces immediately —
+        // this is the #822 DETECTION half (V7).
+        connectionControllerShadow.connectionController.submit(
+            CoreConnectionEvent.TransportDropped(reason = "liveness_probe_silent_drop"),
+        )
+        projectStatusFromController()
+        // RECOVERY half: drive the SINGLE reconnect entrypoint
+        // (`scheduleAutoReconnect` → `TransportEffects`, Slice C, with the #822
+        // force-fresh-lease wedge fix) DIRECTLY. A probe-confirmed drop is, by the
+        // N-consecutive-failure criterion, ALREADY a confirmed sustained outage —
+        // NOT a momentary blip — so it routes straight to the RESILIENT
+        // auto-reconnect ladder (force-fresh lease + the full retry backoff that
+        // rides through a transient outage), rather than the single-shot
+        // silent-reattach-then-maybe-escalate path a passive EOF takes (which can
+        // exhaust its one attempt inside the outage window and strand the session in
+        // Reconnecting — the #822 wedge). The ladder body closes the dead `-CC`
+        // channel + evicts the poisoned warm lease + re-dials a FRESH transport,
+        // healing the SAME session with no switch dance. This is the SAME single
+        // entrypoint #823's affordance calls — NOT a new reconnect writer (D28).
+        if (target != null) {
+            scheduleAutoReconnect(
+                target = target,
+                reason = "Liveness probe detected a silently-dead channel; reconnecting.",
+                trigger = TmuxConnectTrigger.AutoReconnect,
+                diagnosticFields = arrayOf(
+                    "source" to "liveness_probe",
+                    "consecutiveFailures" to consecutiveFailures,
+                ),
+            )
+        }
+    }
 
     /**
      * EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER suppression predicate the
@@ -5360,6 +5582,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // updates the flow the driver collects; it triggers no IO and no cutover.
         connectionTmuxPort.setClient(client)
         bindClientObservers(client)
+        // EPIC #792 Slice D: lazily start the proactive drop detector on the first
+        // attach (reads the timing override now, after any test set it). Idempotent.
+        ensureLivenessProbeStarted()
     }
 
     private fun bindClientObservers(client: TmuxClient) {
@@ -11099,6 +11324,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // collectors. Idempotent; viewModelScope also cancels them, but stopping
         // explicitly keeps the inert driver tidy. No IO, no cutover.
         connectionEffectDriver.stop()
+        // EPIC #792 Slice D: stop the proactive liveness probe. Idempotent;
+        // viewModelScope also cancels its loop, but stopping explicitly keeps the
+        // probe tidy and ensures no late ping fires against a torn-down client.
+        livenessProbe?.stop()
         connectionTmuxPort.setClient(null)
         connectJob?.cancel()
         connectJob = null
@@ -12787,6 +13016,75 @@ internal const val ISSUE_548_NETWORK_TAG: String = "PsTmuxNetwork"
  * 23-character `Log.isLoggable` cap.
  */
 internal const val ISSUE_576_COALESCER_TAG: String = "PsTmuxCoalescer"
+
+/**
+ * EPIC #792 Slice D (#822/V7a): logcat tag for the proactive mid-session
+ * liveness probe — the silent-drop detector. Greppable by the silent-drop
+ * journey to correlate the probe's drop-declaration with the surfaced indicator.
+ * Within the 23-character `Log.isLoggable` cap.
+ */
+internal const val LIVENESS_PROBE_TAG: String = "PsTmuxLiveness"
+
+/**
+ * EPIC #792 Slice D: test-only override for the [LivenessProbe]'s timing knobs,
+ * the analogue of [com.pocketshell.app.BackgroundGraceTestOverride]. A connected
+ * / emulator journey shortens the probe window deterministically WITHOUT
+ * weakening any assertion or self-skipping — production keeps the
+ * [LivenessProbe.DEFAULT_INTERVAL_MS] / DEFAULT_PER_PROBE_TIMEOUT_MS /
+ * DEFAULT_FAILURE_THRESHOLD defaults. The override is read once when the VM
+ * constructs its probe, so a proof sets it BEFORE launching the activity.
+ */
+internal object LivenessProbeTestOverride {
+    @Volatile
+    private var intervalMsOverride: Long? = null
+
+    @Volatile
+    private var perProbeTimeoutMsOverride: Long? = null
+
+    @Volatile
+    private var failureThresholdOverride: Int? = null
+
+    /**
+     * Whether a freshly-constructed VM auto-starts its probe loop. Production +
+     * the connected emulator proof keep this TRUE (the loop runs on the real Main
+     * looper). JVM unit tests set it FALSE: the probe's infinite periodic `delay`
+     * loop on the virtual-clock Main would otherwise hang `runTest`'s
+     * `advanceUntilIdle()`. Those tests drive the probe via the explicit VM seams
+     * instead.
+     */
+    @Volatile
+    var autoStartEnabled: Boolean = true
+
+    fun setAutoStartEnabledForTest(enabled: Boolean) {
+        autoStartEnabled = enabled
+    }
+
+    fun setForTest(intervalMs: Long?, perProbeTimeoutMs: Long?, failureThreshold: Int?) {
+        require(intervalMs == null || intervalMs > 0) { "intervalMs must be > 0" }
+        require(perProbeTimeoutMs == null || perProbeTimeoutMs > 0) {
+            "perProbeTimeoutMs must be > 0"
+        }
+        require(failureThreshold == null || failureThreshold >= 1) {
+            "failureThreshold must be >= 1"
+        }
+        intervalMsOverride = intervalMs
+        perProbeTimeoutMsOverride = perProbeTimeoutMs
+        failureThresholdOverride = failureThreshold
+    }
+
+    fun clear() {
+        setForTest(null, null, null)
+        autoStartEnabled = true
+    }
+
+    fun intervalMs(): Long = intervalMsOverride ?: LivenessProbe.DEFAULT_INTERVAL_MS
+
+    fun perProbeTimeoutMs(): Long =
+        perProbeTimeoutMsOverride ?: LivenessProbe.DEFAULT_PER_PROBE_TIMEOUT_MS
+
+    fun failureThreshold(): Int =
+        failureThresholdOverride ?: LivenessProbe.DEFAULT_FAILURE_THRESHOLD
+}
 
 /**
  * Issue #235: logcat tag for the auto-detach-on-background +

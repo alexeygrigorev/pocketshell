@@ -1720,6 +1720,135 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun livenessProbeDeclaredDropClosesTheClientAndDrivesTheSingleReconnectEntrypoint() =
+        runTest(scheduler) {
+            // EPIC #792 Slice D (#822/V7a): the LivenessProbe's confirmed-drop body
+            // must CLOSE the dead client + drive the EXISTING tested recovery path
+            // (the single TransportEffects reconnect entrypoint) — never a second
+            // reconnect writer. This pins that wiring at the production VM layer.
+            val diagnostics = installRecordingDiagnosticSink()
+            val registry = ActiveTmuxClients()
+            val connector = QueueLeaseConnector(FakeSshSession())
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(
+                    connector = connector,
+                    scope = this,
+                    idleTtlMillis = 0L,
+                ),
+            )
+            vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+            vm.setAutoReconnectDelaysForTest(listOf(0L))
+            try {
+                val liveClient = FakeTmuxClient()
+                val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+                vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+                    assertEquals("work", sessionName)
+                    reconnectClient
+                }
+                vm.replaceClientForTest(
+                    hostId = 7L,
+                    hostName = "alpha",
+                    host = "alpha.example",
+                    port = 22,
+                    user = "alex",
+                    keyPath = "/keys/a",
+                    sessionName = "work",
+                    client = liveClient,
+                )
+
+                // Pre-condition: settled Connected/Live, so the probe gate is OPEN.
+                assertTrue(
+                    "expected Connected before the probe-declared drop",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+                assertTrue(
+                    "the probe gate must be open while foregrounded + Live",
+                    vm.shouldRunLivenessProbeForTest(),
+                )
+                assertFalse(
+                    "the live client must not be disconnected before the probe fires",
+                    liveClient.disconnected.value,
+                )
+
+                // The probe declared a sustained silent drop. Drive its confirmed-
+                // drop body directly (the body the periodic loop fires) — this is the
+                // detection→recovery wiring under test, independent of probe cadence.
+                vm.triggerLivenessProbeDropForTest(consecutiveFailures = 2)
+                advanceUntilIdle()
+
+                // 1) The dead client was CLOSED by the probe (the single action that
+                //    drives the whole existing recovery path).
+                assertTrue(
+                    "the probe must CLOSE the dead client (flips disconnected → " +
+                        "existing recovery)",
+                    liveClient.disconnected.value,
+                )
+                // 2) The drop was DETECTED (a passive_disconnect fired off the closed
+                //    client) and a liveness_probe_silent_drop diagnostic was recorded.
+                assertTrue(
+                    "the probe must record its silent-drop detection",
+                    diagnostics.eventsNamed("liveness_probe_silent_drop").any {
+                        it.fields["session"] == "work" &&
+                            it.fields["source"] == "liveness_probe"
+                    },
+                )
+                // 3) Recovery ran through the SINGLE reconnect entrypoint (the same
+                //    AutoReconnect ladder a real EOF drives) — NOT a second writer.
+                assertEquals(
+                    "the probe-closed client must drive ONE reconnect dial via the " +
+                        "single TransportEffects entrypoint",
+                    1,
+                    connector.connectCount,
+                )
+                assertSame(reconnectClient, registry.clients.value[7L]?.client)
+                // 4) The SAME session auto-recovered to Connected — no switch dance.
+                assertEquals("work", vm.activeSessionNameForTest())
+                assertTrue(
+                    "the SAME session must auto-recover to Connected after the probe drop",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+            } finally {
+                diagnostics.close()
+            }
+        }
+
+    @Test
+    fun livenessProbeGateIsClosedWhenNotConnected() = runTest(scheduler) {
+        // The probe must NOT run when there is no live session (no false-positive
+        // teardown of a not-yet-connected / idle VM).
+        val vm = newVm()
+        assertFalse(
+            "the probe gate must be closed with no attached client",
+            vm.shouldRunLivenessProbeForTest(),
+        )
+    }
+
+    @Test
+    fun livenessProbePingReportsDeadWhenSyntheticSeamIsArmed() = runTest(scheduler) {
+        // The synthetic-drop seam makes the ping report DEAD without touching the
+        // wire — the deterministic per-PR detection lever (also proven on the
+        // emulator by SilentDropSyntheticSeamJourneyE2eTest).
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        assertTrue(
+            "a healthy attached client must ping alive",
+            vm.runLivenessProbePingForTest(),
+        )
+        vm.forceLivenessProbeDeadForTest = true
+        assertFalse(
+            "the synthetic-drop seam must make the ping report dead",
+            vm.runLivenessProbePingForTest(),
+        )
+        vm.forceLivenessProbeDeadForTest = false
+        assertTrue(
+            "clearing the seam restores the live ping",
+            vm.runLivenessProbePingForTest(),
+        )
+    }
+
+    @Test
     fun briefPassiveEofSilentlyReattachesWithoutDisconnectBandOrConnectAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()

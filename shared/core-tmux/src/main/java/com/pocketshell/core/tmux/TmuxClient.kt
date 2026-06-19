@@ -259,6 +259,36 @@ public interface TmuxClient : AutoCloseable {
     public suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse
 
     /**
+     * EPIC #792 Slice D (#822/V7a): a lightweight, NON-fatal liveness ping for
+     * the proactive mid-session drop probe (`LivenessProbe`).
+     *
+     * Sends a single best-effort control command and reports whether the channel
+     * answered. Crucially this uses the BEST-EFFORT, drain-on-timeout path
+     * ([sendBestEffortCommand]) — a slow / momentarily-busy but HEALTHY channel
+     * is NOT torn down by this probe (it must never self-inflict the very drop it
+     * is trying to detect). The caller (`LivenessProbe`) wraps this in its own
+     * generous per-probe timeout and an N-consecutive-failure criterion, so a
+     * single slow reply never declares a drop.
+     *
+     * Returns `true` if the command round-tripped (the channel is alive), `false`
+     * if it timed out best-effort, errored, or the client is closed/disconnected.
+     * Never throws for a transport failure — a dead channel is a `false`, not an
+     * exception, so the probe loop treats it as one failure tick.
+     *
+     * The default implementation sends `refresh-client` (a no-op idempotent
+     * control command with a small reply, already on tmux's best-effort
+     * allow-list) and returns whether a non-error response came back.
+     */
+    public suspend fun probeLiveness(): Boolean =
+        if (disconnected.value) {
+            false
+        } else {
+            runCatching { sendBestEffortCommand("refresh-client") }
+                .map { !it.isError }
+                .getOrDefault(false)
+        }
+
+    /**
      * Issue #215: server-clean teardown of the tmux `-CC` control client.
      *
      * Sends `detach-client` to the tmux server before tearing the SSH

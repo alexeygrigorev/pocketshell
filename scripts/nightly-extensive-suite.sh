@@ -88,6 +88,18 @@ NETWORK_FAULT_CLASSES=(
   # no longer tears itself down. The test now passes GREEN; enrolled here as the
   # standing nightly regression guard.
   "$FQCN_PREFIX.CodexRedrawOverflowReconnectE2eTest"
+  # EPIC #792 Slice D (#822/V7a): the FAITHFUL silent half-open drop proof. A
+  # toxiproxy `timeout=0` blackhole keeps the TCP socket established while
+  # dropping every byte (the authentic half-open Wi-Fi drop sshj's isConnected
+  # lies about for ~60s). On an IDLE channel with NO send, the LivenessProbe must
+  # surface the connection-lost indicator within the bounded probe window, and
+  # after the link returns the SAME session must auto-recover with no switch
+  # dance. This is the AUTHENTIC half-open reproduction; the per-PR
+  # SilentDropSyntheticSeam* sibling runs the same detection/recovery contract on
+  # the deterministic agents:2222 fixture via the probe's synthetic-drop seam (so
+  # D31's per-push gate is met without depending on the toxiproxy family). Reuses
+  # network-fault-proxy:2228 + toxiproxy API:8474 (no new fixture).
+  "$FQCN_PREFIX.SilentMidSessionDropDetectionE2eTest"
 )
 
 # The bootstrap setup-scenario class (opt-in via pocketshellBootstrapScenarios).

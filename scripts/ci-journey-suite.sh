@@ -451,6 +451,26 @@ JOURNEY_CLASSES=(
   # assumeFalse(isRunningOnCi())). It lives under com.pocketshell.app.tmux, so it
   # carries its fully-qualified name directly.
   "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest"
+  # ADDED (epic #792 Slice D, #822/V7a + #823 — D31 durable-fix gate): the
+  # PROACTIVE silent mid-session drop detection + auto-recovery journey. The
+  # maintainer's headline #822 bug: SSH silently drops on stable Wi-Fi while the
+  # user is reading / recording a voice note (no command in flight), so the dead
+  # channel is invisible for up to ~60s and the session wedges, recoverable only
+  # by switching to another session and back. The new LivenessProbe fixes it. This
+  # journey injects the silent drop DETERMINISTICALLY via the probe's synthetic-
+  # drop seam (TmuxSessionViewModel.forceLivenessProbeDeadForTest) + its injectable
+  # timing knobs (LivenessProbeTestOverride) on the plain agents:2222 channel, so
+  # it runs per-PR WITHOUT the toxiproxy proxy family this job deliberately leaves
+  # down (the toxiproxy-faithful half-open sibling SilentMidSessionDropDetection
+  # runs nightly). It asserts the USER-VISIBLE contract: (1) on a LIVE+IDLE session
+  # the connection-lost indicator surfaces within the (shortened) probe window with
+  # NO send, and (2) once the fault clears the SAME session auto-recovers + a fresh
+  # marker streams back through the recovered `-CC` channel — no switch dance. It
+  # drives ONLY the deterministic agents:2222 fixture (DEFAULT_HOST/PORT/USER ->
+  # 10.0.2.2:2222) that tests.yml already brings up, and does NOT self-skip on CI
+  # (no assumeFalse(isRunningOnCi()) on the load-bearing assertions — process.md
+  # F3 / D31). It lives under the com.pocketshell.app.proof prefix.
+  "$FQCN_PREFIX.SilentDropSyntheticSeamJourneyE2eTest"
   # Epic #821 Slice 1: manual session classification (Option B + change-kind).
   # The epic exists because agent-kind fixes keep recurring, so the foreign →
   # pick → durable round-trip MUST be gated at PR time (D31). This connected

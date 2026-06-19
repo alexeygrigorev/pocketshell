@@ -1,5 +1,6 @@
 package com.pocketshell.app.hosts
 
+import com.pocketshell.app.tmux.LivenessProbeTestOverride
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestDispatcher
@@ -40,9 +41,17 @@ class MainDispatcherRule(
             override fun evaluate() {
                 synchronized(mainDispatcherLock) {
                     Dispatchers.setMain(dispatcher)
+                    // EPIC #792 Slice D: the LivenessProbe is an infinite periodic
+                    // `delay` loop. Under `runTest` + the virtual-clock Main set above,
+                    // an auto-started probe would make `advanceUntilIdle()` spin forever
+                    // (the loop self-reschedules, so the scheduler never idles), hanging
+                    // every VM unit test. Disable the auto-start for the rule's duration;
+                    // tests drive the probe via the explicit VM seams instead.
+                    LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
                     try {
                         base.evaluate()
                     } finally {
+                        LivenessProbeTestOverride.clear()
                         Dispatchers.resetMain()
                     }
                 }

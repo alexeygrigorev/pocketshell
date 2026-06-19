@@ -848,23 +848,43 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1c-iii: feed the inline transition to the shadow controller.
-     * Observe-only — never mutates VM state, never reads the shadow state back.
+     * EPIC #687 slice 1c-iii / EPIC #792 Slice A: drive the controller's INTENT
+     * directly from the inline transition. Previously this built an inline state NAME
+     * string and mirrored it through `observeInlineTransition` (a string round-trip the
+     * bridge re-derived events from). Now it calls the bridge's TYPED intent entrypoints
+     * directly — the controller drives the intent state machine. This is NET-NEUTRAL with
+     * the deleted string mirror: each inline state maps to the SAME controller event it
+     * mirrored before (`Connecting`→Enter, warm `Attaching`→Switch/Enter, `Live`/
+     * `Backgrounded`→reveal-Live, `Reattaching`/`Reconnecting`→drop-escalation,
+     * `Gone`→TargetGone, `Unreachable`→exhaust-ladder, `Idle`→no-op).
+     * Never mutates VM state, never reads the controller state back.
      */
     private fun observeConnectionTransitionInShadow(state: ConnectionState) {
         val (host, target) = shadowHostAndTarget()
-        val inlineName = when (state) {
-            is ConnectionState.Idle -> "Idle"
-            is ConnectionState.Connecting -> "Connecting"
-            is ConnectionState.Attaching -> "Attaching"
-            is ConnectionState.Live -> "Live"
-            is ConnectionState.Backgrounded -> "Live"
-            is ConnectionState.Reattaching -> "Reconnecting"
-            is ConnectionState.Reconnecting -> "Reconnecting"
-            is ConnectionState.Gone -> "Gone"
-            is ConnectionState.Unreachable -> "Unreachable"
+        when (state) {
+            is ConnectionState.Idle -> Unit // controller stays Idle; nothing to drive.
+            is ConnectionState.Connecting ->
+                if (host != null && target != null) connectionControllerShadow.enter(host, target)
+            is ConnectionState.Attaching ->
+                if (host != null && target != null) connectionControllerShadow.switchTo(host, target)
+            // Backgrounded keeps the prior live surface in the inline VM — same as Live
+            // (the deleted mirror mapped both to the "Live" reveal branch).
+            is ConnectionState.Live,
+            is ConnectionState.Backgrounded,
+            ->
+                if (host != null && target != null) connectionControllerShadow.revealLive(host, target)
+            // Reattaching and Reconnecting both mirrored to the "Reconnecting"
+            // drop-escalation branch.
+            is ConnectionState.Reattaching,
+            is ConnectionState.Reconnecting,
+            ->
+                if (host != null && target != null) {
+                    connectionControllerShadow.escalateReconnecting(host, target)
+                }
+            is ConnectionState.Gone ->
+                if (target != null) connectionControllerShadow.markGone(target)
+            is ConnectionState.Unreachable -> connectionControllerShadow.escalateUnreachable()
         }
-        connectionControllerShadow.observeInlineTransition(inlineName, host, target)
     }
 
     /**

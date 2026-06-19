@@ -37,10 +37,12 @@ import org.junit.Test
  * THROUGH the driver's real-flow collectors and asserts the SAME parity the pre-B2
  * suite pinned stays green — proving the substitution preserves behavior.
  *
- * The INTENT (Enter/Switch via [ConnectionControllerShadowBridge.observeInlineTransition]),
- * the SEED feedback ([ConnectionControllerShadowBridge.observeSeedLanded]), and the
- * lifecycle (background/foreground/network) still flow through the bridge — those are
- * not moved in B2. Only the two transport events became driver-fed.
+ * The INTENT (Enter/Switch via the bridge's TYPED intent entrypoints —
+ * [ConnectionControllerShadowBridge.enter] / [ConnectionControllerShadowBridge.switchTo]
+ * etc., epic #792 Slice A which deleted the string mirror), the SEED feedback
+ * ([ConnectionControllerShadowBridge.observeSeedLanded]), and the lifecycle
+ * (background/foreground/network) still flow through the bridge — those are not moved in
+ * B2. Only the two transport events became driver-fed.
  *
  *  1. On every PRESERVED behavior (cold connect, switch, beyond-grace foreground,
  *     network change, target-gone, exhausted-reconnect), the shadow controller's
@@ -117,9 +119,24 @@ class ConnectionControllerShadowEquivalenceTest {
         fun statusName(): String = bridge.shadowStatusName
         val state: ConnectionState get() = bridge.shadowState
 
-        // --- the inline INTENT / lifecycle feeds (still bridge-driven in B2) ---------
-        fun inline(name: String, host: HostKey?, target: SessionId?) =
-            bridge.observeInlineTransition(name, host, target)
+        // --- the inline INTENT / lifecycle feeds (bridge-driven; typed since #792 A) -
+        // Epic #792 Slice A deleted the string `observeInlineTransition` mirror; the
+        // bridge now exposes TYPED intent entrypoints. This helper preserves the
+        // suite's `inline("Name", …)` call shape by routing each name to the SAME typed
+        // entrypoint the VM now calls (1:1 with the deleted string-mirror branches).
+        fun inline(name: String, host: HostKey?, target: SessionId?) {
+            when (name) {
+                "Idle" -> Unit
+                "Connecting" -> if (host != null && target != null) bridge.enter(host, target)
+                "Attaching" -> if (host != null && target != null) bridge.switchTo(host, target)
+                "Live" -> if (host != null && target != null) bridge.revealLive(host, target)
+                "Reconnecting" ->
+                    if (host != null && target != null) bridge.escalateReconnecting(host, target)
+                "Unreachable" -> bridge.escalateUnreachable()
+                "Gone" -> if (target != null) bridge.markGone(target)
+                else -> error("unmapped inline name: $name")
+            }
+        }
         fun background() = bridge.observeBackground()
         fun foreground() = bridge.observeForeground()
         fun networkChanged(validated: Boolean) = bridge.observeNetworkChanged(validated)
@@ -402,6 +419,55 @@ class ConnectionControllerShadowEquivalenceTest {
         assertEquals(true, state is ConnectionState.Attaching)
         seedLanded(host, sessionB) // B's seed lands B Live
         assertEquals(sessionB, (state as ConnectionState.Live).targetId)
+    }
+
+    // --- Epic #792 Slice A: typed INTENT entrypoints drive the controller directly ---
+
+    /**
+     * The bridge's TYPED [ConnectionControllerShadowBridge.enter] drives the controller's
+     * OPEN intent directly (no string mirror). A warm host routes straight to
+     * [ConnectionState.Attaching]; a cold host to [ConnectionState.Connecting] — the
+     * controller's own warm predicate decides, exactly as the deleted `"Connecting"`
+     * string-mirror branch did.
+     */
+    @Test
+    fun typedEnter_drivesControllerOpenIntent_directly() = runHarness(warm = { true }) {
+        bridge.enter(host, sessionA)
+        assertEquals(true, state is ConnectionState.Attaching)
+        assertEquals(sessionA, state.let { (it as ConnectionState.Attaching).targetId })
+    }
+
+    @Test
+    fun typedEnter_coldHost_routesToConnecting_directly() = runHarness(warm = { false }) {
+        bridge.enter(host, sessionA)
+        assertEquals(true, state is ConnectionState.Connecting)
+    }
+
+    /**
+     * The bridge's TYPED [ConnectionControllerShadowBridge.switchTo] drives a same-host
+     * SWITCH directly: from a live-ish state it re-targets to [ConnectionState.Attaching]
+     * on the new id WITHOUT a re-handshake; from Idle (the warm same-host OPEN case) it is
+     * an Enter the warm predicate routes straight to Attaching. Same routing the deleted
+     * `"Attaching"` string-mirror branch produced.
+     */
+    @Test
+    fun typedSwitchTo_fromLive_reTargetsToAttaching_directly() = runHarness(warm = { true }) {
+        bridge.enter(host, sessionA)
+        bridge.revealLive(host, sessionA)
+        landLiveFromRealFeedback(sessionA, host)
+        assertEquals(true, state is ConnectionState.Live)
+        // Switch to B: re-target to Attaching on B (no Connecting, no re-handshake).
+        bridge.switchTo(host, sessionB)
+        assertEquals(true, state is ConnectionState.Attaching)
+        assertEquals(sessionB, state.let { (it as ConnectionState.Attaching).targetId })
+    }
+
+    @Test
+    fun typedSwitchTo_fromIdle_warmOpensToAttaching_directly() = runHarness(warm = { true }) {
+        assertEquals(true, state is ConnectionState.Idle)
+        bridge.switchTo(host, sessionA)
+        assertEquals(true, state is ConnectionState.Attaching)
+        assertEquals(sessionA, state.let { (it as ConnectionState.Attaching).targetId })
     }
 
     // --- Item 1: the HostKey encoding is ALIGNED so isWarm works -----------------

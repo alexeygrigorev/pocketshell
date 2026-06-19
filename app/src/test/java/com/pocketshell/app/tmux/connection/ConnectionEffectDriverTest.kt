@@ -781,7 +781,9 @@ class ConnectionEffectDriverTest {
         // The controller's host MUST be the lease's hostKeyFor (the production
         // alignment) so the driver's host filter accepts the real Up edge.
         val leaseHost = hostKeyFor(leaseKey)
-        bridge.observeInlineTransition("Connecting", leaseHost, sessionA)
+        // Epic #792 Slice A: the string mirror is deleted; drive the OPEN intent through
+        // the bridge's typed `enter` entrypoint (the `"Connecting"` branch's replacement).
+        bridge.enter(leaseHost, sessionA)
 
         // A real dial → a real `Connected` state event → a real Up edge → the driver
         // SUBMITS TransportLive, promoting Connecting → Attaching.

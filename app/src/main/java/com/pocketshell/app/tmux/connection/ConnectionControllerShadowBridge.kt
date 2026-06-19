@@ -22,9 +22,22 @@ import kotlinx.coroutines.flow.emptyFlow
  * A real [ConnectionController] runs behind this bridge: the VM feeds it the
  * lifecycle inputs the inline path dispatches (Background / Foreground /
  * NetworkChanged) PLUS the open/switch/reveal INTENT mirrored from the single 1b
- * `setConnectionState` choke point ([observeInlineTransition] → Enter/Switch/
- * Live-reveal/TargetGone/drop-ladder), and the real seed-landing feedback
- * ([observeSeedLanded] at the existing `capture-pane` success point).
+ * `setConnectionState` choke point (the TYPED intent entrypoints [enter] / [switchTo] /
+ * [revealLive] / [escalateReconnecting] / [escalateUnreachable] / [markGone]), and the
+ * real seed-landing feedback ([observeSeedLanded] at the existing `capture-pane` success
+ * point).
+ *
+ * ## Intent is controller-direct (epic #792 Slice A — the mirror dies)
+ * The VM no longer mirrors a string-typed inline state NAME into the controller via a
+ * single `observeInlineTransition(inlineName: String, …)` re-deriver. Instead it calls
+ * the bridge's TYPED intent entrypoints directly — [enter] / [switchTo] (the open/switch
+ * INTENT), [revealLive] (the authoritative reveal moment), [escalateReconnecting] /
+ * [escalateUnreachable] (the inline drop/error escalation), [markGone] (target deleted).
+ * Each submits the matching [ConnectionEvent] to the controller, so the controller drives
+ * the intent state machine directly. This is behaviourally NET-NEUTRAL with the old
+ * string mirror: every branch the string `observeInlineTransition` handled now has a
+ * 1:1 typed entrypoint, submitting the SAME events. The redundant string round-trip is
+ * removed (D22 hard-cut — no dual-write path remains).
  *
  * ## Status source (slice 1c-iv-a — the FLIP)
  * The controller's [ConnectionState] now DRIVES the view-facing `_connectionStatus`
@@ -38,16 +51,17 @@ import kotlinx.coroutines.flow.emptyFlow
  * [SshLeaseTransportPort.transportEvents] and the [CurrentClientTmuxPort.disconnected]
  * oracle — so the bridge's former `observeTransportLive` / `observeTransportDropped`
  * mirror feeds are DELETED (D22 hard-cut). The Live PROMOTION still flows through
- * the inline reveal ([observeInlineTransition] `Live` → `promoteToLive`, the
- * authoritative "user is connected" moment) and the real [observeSeedLanded]
- * feedback (idempotent); the driver's real-flow TransportLive keeps the controller
- * Live across lease re-`Connected` events.
+ * the inline reveal ([revealLive] `→ promoteToLive`, the authoritative "user is
+ * connected" moment) and the real [observeSeedLanded] feedback (idempotent); the
+ * driver's real-flow TransportLive keeps the controller Live across lease
+ * re-`Connected` events.
  *
- * ## Why the inline mirror still feeds the INTENT (Enter/Switch/reveal)
+ * ## Why the VM still SOURCES the INTENT (Enter/Switch/reveal)
  * The controller must know WHICH host/target it is connecting/switching to before
- * a `TransportLive`/`SeedLanded` can promote it. The inline transition is the
- * cheapest place to read that intent (the VM already knows the active/connecting
- * target there), and mirroring Enter/Switch changes no write-path behavior.
+ * a `TransportLive`/`SeedLanded` can promote it. The VM's `setConnectionState` choke
+ * point is the cheapest place to read that intent (the VM already knows the
+ * active/connecting target there), so it calls the bridge's typed [enter]/[switchTo]
+ * entrypoints directly. Slice B moves the open/switch IO behind the controller too.
  *
  * The single [TransportPort.isWarm] snapshot the controller consults synchronously
  * is supplied by the VM's existing live-lease-key set (via the real
@@ -112,78 +126,83 @@ class ConnectionControllerShadowBridge(
         get() = shadowStatusNameFor(controller.state.value)
 
     /**
-     * Observe an inline VM connection transition (the single 1b `setConnectionState`
-     * choke point). Maps the inline state onto the controller's event vocabulary and
-     * submits it. Pure observation: the caller's `_connectionStatus` write is
-     * unaffected; the controller's resulting state is collected for equivalence only.
-     *
-     * @param inlineName the inline VM `ConnectionState` variant name
-     *   (`Idle/Connecting/Attaching/Live/Reconnecting/Unreachable/Gone/...`).
-     * @param host opaque host coordinates of the transition (null for Idle).
-     * @param targetId opaque session id of the transition (null for Idle).
+     * INTENT: a user-initiated OPEN (the inline `Connecting`/cold-open transition).
+     * Submits [ConnectionEvent.Enter] directly — the controller's warm predicate routes
+     * a warm host straight to [ConnectionState.Attaching] and a cold host to
+     * [ConnectionState.Connecting]. The VM calls this from its `setConnectionState`
+     * choke point; the controller drives the intent state machine. (Epic #792 Slice A:
+     * the typed replacement for the deleted string mirror's `"Connecting"` branch.)
      */
-    fun observeInlineTransition(inlineName: String, host: HostKey?, targetId: SessionId?) {
-        when (inlineName) {
-            "Idle" -> Unit // controller stays Idle; nothing to mirror.
-            "Connecting" -> {
-                if (host != null && targetId != null) {
-                    controller.submit(ConnectionEvent.Enter(host, targetId))
-                }
-            }
-            "Attaching" -> {
-                // Warm same-host open / switch. If the controller already has a
-                // host (live-ish), Switch; otherwise an Enter that the warm
-                // predicate routes straight to Attaching.
-                if (host != null && targetId != null) {
-                    if (controller.state.value !is ConnectionState.Idle) {
-                        controller.submit(ConnectionEvent.Switch(targetId))
-                    } else {
-                        controller.submit(ConnectionEvent.Enter(host, targetId))
-                    }
-                }
-            }
-            "Live" -> {
-                // EPIC #687 slice 1c-iv-a (THE STATUS FLIP): the inline reveal choke
-                // point is the AUTHORITATIVE "the user is now connected" moment — the
-                // VM only calls `setConnectionState(Live)` once the active pane is
-                // seeded and the surface is revealed. Now that the controller's state
-                // DRIVES the view-facing `_connectionStatus`, the inline Live mirror
-                // must promote the controller to [ConnectionState.Live] in lockstep so
-                // the displayed `Connected` flips at exactly the inline moment (no
-                // status-timing regression on any preserved path, including the test
-                // seams that fake a seeded reveal).
-                //
-                // 1c-iv-prep had this mirror only `ensureTargeting` to PROVE the
-                // controller can reach Live independently from the real
-                // TransportLive/SeedLanded feedback (a de-risking proof). Those real
-                // feeds REMAIN (idempotent — a TransportLive/SeedLanded for an
-                // already-Live current target is a no-op in the reducer); the inline
-                // reveal is simply the authoritative status moment for the flip.
-                if (host != null && targetId != null) {
-                    ensureTargeting(host, targetId)
-                    promoteToLive(host, targetId)
-                }
-            }
-            "Reconnecting" -> {
-                if (host != null && targetId != null) {
-                    ensureTargeting(host, targetId)
-                    // Inline "Reconnecting" is the beyond-grace / drop-escalation
-                    // silent ladder — model it as a transport drop from a live-ish
-                    // state.
-                    controller.submit(ConnectionEvent.TransportDropped("reconnect"))
-                }
-            }
-            "Unreachable" -> {
-                // Inline honest error: exhaust the controller's ladder so it
-                // surfaces Unreachable too (drive it to the budget).
-                exhaustToUnreachable()
-            }
-            "Gone" -> {
-                if (targetId != null) {
-                    controller.submit(ConnectionEvent.TargetGone(targetId))
-                }
-            }
+    fun enter(host: HostKey, targetId: SessionId) {
+        controller.submit(ConnectionEvent.Enter(host, targetId))
+    }
+
+    /**
+     * INTENT: a same-host fast SWITCH (the inline warm `Attaching` transition). Submits
+     * [ConnectionEvent.Switch] when the controller already holds a host (live-ish), so
+     * it re-targets to [ConnectionState.Attaching] WITHOUT a re-handshake. From Idle
+     * (the warm same-host OPEN case) it is an [ConnectionEvent.Enter] the warm predicate
+     * routes straight to [ConnectionState.Attaching]. (Epic #792 Slice A: the typed
+     * replacement for the deleted string mirror's `"Attaching"` branch — same routing.)
+     */
+    fun switchTo(host: HostKey, targetId: SessionId) {
+        if (controller.state.value !is ConnectionState.Idle) {
+            controller.submit(ConnectionEvent.Switch(targetId))
+        } else {
+            controller.submit(ConnectionEvent.Enter(host, targetId))
         }
+    }
+
+    /**
+     * INTENT: the authoritative REVEAL moment (the inline `Live` transition). The inline
+     * reveal choke point is the AUTHORITATIVE "the user is now connected" moment — the VM
+     * only calls `setConnectionState(Live)` once the active pane is seeded and the surface
+     * is revealed. Since the controller's state DRIVES the view-facing `_connectionStatus`,
+     * this promotes the controller to [ConnectionState.Live] in lockstep so the displayed
+     * `Connected` flips at exactly the inline moment (no status-timing regression on any
+     * preserved path, including the test seams that fake a seeded reveal).
+     *
+     * The real [observeSeedLanded] / driver-fed `TransportLive` feeds REMAIN (idempotent —
+     * a `TransportLive`/`SeedLanded` for an already-Live current target is a no-op in the
+     * reducer); the inline reveal is simply the authoritative status moment for the flip.
+     * (Epic #792 Slice A: the typed replacement for the deleted string mirror's `"Live"`
+     * branch — same `ensureTargeting` + `promoteToLive`.)
+     */
+    fun revealLive(host: HostKey, targetId: SessionId) {
+        ensureTargeting(host, targetId)
+        promoteToLive(host, targetId)
+    }
+
+    /**
+     * INTENT: the inline drop-escalation / beyond-grace silent reconnect ladder (the inline
+     * `Reconnecting` transition). Models the inline escalation as a transport drop from a
+     * live-ish state so the controller walks the same reconnect ladder. (Epic #792 Slice A:
+     * the typed replacement for the deleted string mirror's `"Reconnecting"` branch — same
+     * `ensureTargeting` + `TransportDropped`.)
+     */
+    fun escalateReconnecting(host: HostKey, targetId: SessionId) {
+        ensureTargeting(host, targetId)
+        controller.submit(ConnectionEvent.TransportDropped("reconnect"))
+    }
+
+    /**
+     * INTENT: the inline honest error (the inline `Unreachable` transition). Drives the
+     * controller's reconnect ladder past its budget so it surfaces [ConnectionState.Unreachable]
+     * too. (Epic #792 Slice A: the typed replacement for the deleted string mirror's
+     * `"Unreachable"` branch.)
+     */
+    fun escalateUnreachable() {
+        exhaustToUnreachable()
+    }
+
+    /**
+     * INTENT: a target deleted elsewhere (the inline `Gone` transition). Submits
+     * [ConnectionEvent.TargetGone]; the controller drops it by id if it does not match
+     * the current target. (Epic #792 Slice A: the typed replacement for the deleted string
+     * mirror's `"Gone"` branch.)
+     */
+    fun markGone(targetId: SessionId) {
+        controller.submit(ConnectionEvent.TargetGone(targetId))
     }
 
     /** Observe the app moving to the background (the inline `onAppBackgrounded`
@@ -225,9 +244,10 @@ class ConnectionControllerShadowBridge(
      * `Up` edge → `TransportLive`; [com.pocketshell.app.tmux.connection.CurrentClientTmuxPort.disconnected]
      * true-edge → `TransportDropped`), so the bridge's `observeTransportLive` /
      * `observeTransportDropped` mirror feeds are DELETED (D22 hard-cut — the driver
-     * is the sole transport-event source, no fallback). The remaining `observe*`
-     * methods feed the INTENT (Enter/Switch via [observeInlineTransition]) and the
-     * lifecycle (background/foreground/network) until later slices move those too.
+     * is the sole transport-event source, no fallback). The remaining intent methods
+     * ([enter]/[switchTo]/[revealLive]/[escalateReconnecting]/[escalateUnreachable]/
+     * [markGone]) feed the INTENT directly and the `observe*` lifecycle methods feed
+     * background/foreground/network until later slices move those too.
      */
 
     /**

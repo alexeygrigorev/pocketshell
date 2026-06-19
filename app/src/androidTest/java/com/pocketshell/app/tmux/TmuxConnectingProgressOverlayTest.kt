@@ -194,7 +194,13 @@ class TmuxConnectingProgressOverlayTest {
         }
 
         compose.onNodeWithTag(TMUX_CONNECTING_PROGRESS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(TMUX_CONNECTING_PROGRESS_BAR_TAG).assertIsDisplayed()
+        // Issue #750 (3rd occurrence, class-wide fix): the ReconnectingProgressRow
+        // band no longer carries its own linear progress bar — the reconnect
+        // SURFACE (centered "Attaching…" spinner when held, or the
+        // pull-to-reconnect box spinner in the steady state) is the SOLE animated
+        // indicator, so the band must NOT contain a progress bar. Assert its
+        // absence to lock the single-indicator invariant.
+        compose.onNodeWithTag(TMUX_CONNECTING_PROGRESS_BAR_TAG).assertDoesNotExist()
         compose.onNodeWithTag(TMUX_CONNECTING_SLOW_HINT_TAG).assertIsDisplayed()
         compose.onNodeWithTag(TMUX_RECONNECTING_RETRY_NOW_TAG).assertIsDisplayed()
         compose.onNodeWithTag(TMUX_CONNECTING_CANCEL_TAG).assertIsDisplayed()

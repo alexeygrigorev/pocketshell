@@ -434,6 +434,23 @@ JOURNEY_CLASSES=(
   # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under com.pocketshell.app.tmux.
   "com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest"
+  # ADDED (#750, 3rd occurrence — D31 durable-fix gate): the tmux non-Connected
+  # SINGLE-INDICATOR regression guard. The maintainer's "two loading indicators
+  # on the reconnect/reattach screen" symptom has now shipped THREE times because
+  # no CI gate ran the guard. This class HARD-asserts (via the
+  # ProgressBarRangeInfo.Indeterminate count, not a bare assertIsDisplayed) that
+  # EVERY non-Connected state shows EXACTLY ONE animated indicator — the centered
+  # "Attaching…" spinner while held, the pull-to-reconnect box spinner in the
+  # steady Reconnecting state (the under-header ReconnectingProgressRow band no
+  # longer carries its own linear bar after the class-wide #750 fix), and ZERO
+  # spinners in the idle Disconnected state. It wires the REAL production
+  # composables (ReconnectingProgressRow, FailedConnectionRow,
+  # SessionSurfaceReconnectWrapper). It is a PURE Compose screenshot/assertion test
+  # — NO Docker fixture, NO SSH/tmux, NO toxiproxy, NO 2222/2226 port — so it needs
+  # no tests.yml service change, and it does NOT self-skip on CI (no assumeTrue /
+  # assumeFalse(isRunningOnCi())). It lives under com.pocketshell.app.tmux, so it
+  # carries its fully-qualified name directly.
+  "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest"
 )
 
 echo "=========================================================="

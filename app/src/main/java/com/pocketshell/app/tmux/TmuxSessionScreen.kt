@@ -1604,6 +1604,18 @@ public fun TmuxSessionScreen(
             // guard. Breaking the wedge is connection-core logic owned by epic
             // #792 (Slice 2); this slice deliberately does not touch it.
             val pullToReconnectActive = !sessionLive && canReconnect
+            // Issue #750 (3rd occurrence): during the attach/reattach hold the
+            // surface content paints the centered "Attaching…"
+            // [SwitchingLoadingPlaceholder] (driven by `effectiveHidesTerminal`).
+            // That centered spinner is the SOLE indicator for this state, so the
+            // pull-to-reconnect wrapper below must NOT also run its own
+            // [PullToRefreshBox] spinner on top of it (the maintainer's reported
+            // cyan ring + gray spinner-in-a-chip stacked over "Attaching…"). The
+            // pull GESTURE stays mounted — only the duplicate box spinner is
+            // suppressed — so #823's pull-to-reconnect is preserved, and the box
+            // spinner returns as the SOLE affordance once the surface settles
+            // into a steady non-loader state (no centered "Attaching…").
+            val surfaceShowsCenteredLoader = effectiveHidesTerminal
             // The surface content (terminal pager / conversation / placeholders)
             // is captured once so it can render either inside the pull-to-reconnect
             // wrapper (not live) or bare (live) without duplicating the tree.
@@ -1824,6 +1836,9 @@ public fun TmuxSessionScreen(
                         status is ConnectionStatus.Connecting ||
                         status is ConnectionStatus.Switching,
                     onReconnect = { viewModel.reconnect() },
+                    // Issue #750: suppress the box's own spinner while the surface
+                    // already shows the centered "Attaching…" hold — one indicator.
+                    surfaceShowsCenteredLoader = surfaceShowsCenteredLoader,
                     content = surfaceContent,
                 )
             }
@@ -3625,6 +3640,19 @@ internal const val TMUX_PULL_TO_RECONNECT_TAG = "tmux:session:pull-to-reconnect"
  *
  * [isReconnecting] drives the [PullToRefreshBox] spinner so an in-flight
  * reconnect (or the auto-reconnect ladder) is visible after the pull.
+ *
+ * Issue #750 (3rd occurrence): the surface content ITSELF renders a centered
+ * loading indicator during the attach/reattach hold (the "Attaching…"
+ * [SwitchingLoadingPlaceholder], driven by `effectiveHidesTerminal`). When that
+ * overlay is up, the [PullToRefreshBox]'s own circular indicator would stack a
+ * SECOND spinner on top of it (the maintainer's reported cyan ring + gray
+ * spinner-in-a-chip). [surfaceShowsCenteredLoader] tells the wrapper the surface
+ * is already showing the sole indicator, so the box renders with `isRefreshing =
+ * false` — the pull GESTURE stays mounted (pull-to-reconnect still fires
+ * [onReconnect]) but the box spinner is suppressed. The instant the surface
+ * settles into a steady non-loader state (e.g. a Disconnected/Reconnecting
+ * placeholder with no centered "Attaching…"), [surfaceShowsCenteredLoader] flips
+ * false and the box spinner returns as the SOLE affordance — #823 is preserved.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -3632,12 +3660,17 @@ internal fun SessionSurfaceReconnectWrapper(
     pullToReconnectActive: Boolean,
     isReconnecting: Boolean,
     onReconnect: () -> Unit,
+    surfaceShowsCenteredLoader: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     if (pullToReconnectActive) {
         val state = rememberPullToRefreshState()
         PullToRefreshBox(
-            isRefreshing = isReconnecting,
+            // Issue #750: never run the box's own spinner while the surface
+            // already shows the centered "Attaching…" loader — exactly one
+            // indicator during the attach/reattach hold. The pull GESTURE stays
+            // live (suppressing the spinner does not disable the drag-to-refresh).
+            isRefreshing = isReconnecting && !surfaceShowsCenteredLoader,
             onRefresh = onReconnect,
             state = state,
             modifier = Modifier
@@ -3917,6 +3950,27 @@ internal fun ConnectingProgressOverlay(
     }
 }
 
+/**
+ * Issue #750 (3rd occurrence — class-wide single-indicator fix): the
+ * under-header Reconnecting band. It is now a pure TEXT + ACTIONS affordance
+ * ("Reconnecting to …", Retry now, Cancel) and intentionally carries NO
+ * [LinearProgressIndicator].
+ *
+ * The reconnect SURFACE already owns the canonical animated indicator for every
+ * non-Connected reconnect state:
+ *  - while the terminal is HELD (`effectiveHidesTerminal == true`) the centered
+ *    "Attaching…" [SwitchingLoadingPlaceholder] spinner is shown, and this band
+ *    is suppressed entirely by [shouldShowReconnectingProgressRow];
+ *  - in the STEADY reconnect state (`effectiveHidesTerminal == false`) the
+ *    [SessionSurfaceReconnectWrapper]'s [PullToRefreshBox] circular spinner is
+ *    shown (`isRefreshing = isReconnecting`).
+ *
+ * Before this fix the steady state painted BOTH the surface's circular spinner
+ * AND this band's linear bar at once — the maintainer's reported "two loading
+ * indicators" that #750 keeps regressing on. Dropping the linear bar here makes
+ * the surface spinner the SOLE animated indicator per state (hard-cut, D22),
+ * while the text + Retry now / Cancel actions stay as the always-useful band.
+ */
 @Composable
 internal fun ReconnectingProgressRow(
     status: ConnectionStatus.Reconnecting,
@@ -3931,15 +3985,6 @@ internal fun ReconnectingProgressRow(
             .padding(horizontal = 12.dp, vertical = 10.dp)
             .testTag(TMUX_CONNECTING_PROGRESS_TAG),
     ) {
-        LinearProgressIndicator(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .testTag(TMUX_CONNECTING_PROGRESS_BAR_TAG),
-            color = PocketShellColors.Accent,
-            trackColor = PocketShellColors.SurfaceElev,
-        )
-        Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,

@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -30,25 +33,37 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issues #757 + #750 screenshot evidence — captures the two tmux
- * connecting/attach states with the real session chrome above them so a
- * reviewer/maintainer can eyeball that:
+ * Issue #750 (3rd occurrence — class-wide single-indicator regression guard).
  *
- *  - #757: the "waiting for tmux panes…" connecting state now shows the canonical
- *    centered [LoadingIndicator.Spinner] (Medium) — the SAME animated affordance
- *    the "Attaching…" state uses — instead of the old static text with no spinner.
- *  - #750: the "Attaching…" reattach state shows EXACTLY ONE indicator (this
- *    centered spinner). The thin under-header progress line that used to render at
- *    the same time during a [Switching] switch has been removed, so the reattach
- *    screen no longer shows two loading indicators.
+ * The maintainer's recurring symptom is TWO loading indicators stacked on the
+ * tmux reconnect/reattach screen. It has now shipped three times, so this test
+ * is the durable, CI-wired (`scripts/ci-journey-suite.sh` → emulator-journey)
+ * guard that EVERY non-Connected state shows EXACTLY ONE animated
+ * (indeterminate-progress) indicator — never two.
  *
- * The placeholder composables ([EmptyPanesPlaceholder] /
- * [SwitchingLoadingPlaceholder]) are private to the screen, so this mounts the
- * real [ConsolidatedTopChrome] header + a byte-for-byte copy of each placeholder
- * body (the canonical labelled spinner on the same Surface/Background fill the
- * screen uses) to reproduce the exact on-screen layout. No top progress bar is
- * placed between the chrome and the centered spinner — proving the single-
- * indicator result.
+ * The canonical single indicator PER state (after the class-wide #750 fix):
+ *  - **Attaching / reattach hold** (`effectiveHidesTerminal == true`): the
+ *    centered "Attaching…" [SwitchingLoadingPlaceholder] spinner. The top
+ *    [ReconnectingProgressRow] is suppressed by [shouldShowReconnectingProgressRow]
+ *    AND the [PullToRefreshBox] box spinner is suppressed via
+ *    `surfaceShowsCenteredLoader = true`.
+ *  - **Steady Reconnecting** (`effectiveHidesTerminal == false`): the
+ *    [SessionSurfaceReconnectWrapper]'s [PullToRefreshBox] circular spinner. The
+ *    [ReconnectingProgressRow] band is still shown (its text + Retry now / Cancel
+ *    actions) but NO LONGER carries its own linear bar — so the box spinner is
+ *    the SOLE animated indicator. (Pre-fix the band's linear bar stacked a second
+ *    indeterminate node on top of the box spinner — the reviewer-caught failure.)
+ *  - **Disconnected** (no active reconnect): the calm [FailedConnectionRow]
+ *    "Tap to reconnect" band is the sole affordance and there is intentionally
+ *    NO animated spinner (the state is idle, waiting for the user) — assert ZERO
+ *    indeterminate-progress nodes so a future spinner regression is caught.
+ *
+ * Each capture HARD-asserts the indeterminate-progress count via
+ * [SemanticsProperties.ProgressBarRangeInfo] == [ProgressBarRangeInfo.Indeterminate]
+ * (a bare `assertIsDisplayed()` would not catch a duplicate), wires the REAL
+ * production composables ([ReconnectingProgressRow], [FailedConnectionRow],
+ * [SessionSurfaceReconnectWrapper]) with the exact production flags, and writes a
+ * full-device screenshot for visual review.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxConnectingStatesScreenshotTest {
@@ -91,32 +106,24 @@ class TmuxConnectingStatesScreenshotTest {
         }
         compose.onNodeWithText("waiting for tmux panes…").assertExists()
         compose.waitForIdle()
+        // EXACTLY ONE animated indicator — the centered spinner.
+        assertIndeterminateIndicatorCount(1)
         SystemClock.sleep(300)
         captureFullDevice(File(artifactDir(), "tmux-connecting-waiting-for-panes.png"))
     }
 
     @Test
     fun captureAttachingReattachStateSingleIndicator() {
-        // #750 (post-#766 regression): a reconnect/reattach projects
-        // [ConnectionStatus.Reconnecting] (the top [ReconnectingProgressRow] bar)
-        // WHILE the id-keyed reveal machine holds the terminal — the centered
-        // "Attaching…" spinner. This mounts the screen's REAL two-render-site
-        // layout (the actual [ReconnectingProgressRow] guarded by the screen's
-        // real [shouldShowReconnectingProgressRow] gate, plus the centered
-        // spinner) so the capture proves the GATE — not a copied body — leaves a
-        // single indicator. `effectiveHidesTerminal = true` is the reconnect/
-        // reattach reality (reveal machine maps Reattaching/Reconnecting →
-        // Seeding), so the top bar must be suppressed.
-        val reconnecting = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
-            host = "hetzner.example",
-            port = 22,
-            user = "alex",
-            attempt = 1,
-            maxAttempts = 3,
-            retryDelayMs = 0L,
-            reason = "Reconnecting…",
-        )
-        val effectiveHidesTerminal = true
+        // Attaching / reattach hold: the session surface is wrapped in the REAL
+        // #823 [SessionSurfaceReconnectWrapper] (pull-to-reconnect [PullToRefreshBox])
+        // AND the surface content paints the centered "Attaching…"
+        // [SwitchingLoadingPlaceholder] spinner. This is the state where
+        // `pullToReconnectActive` (`!sessionLive && canReconnect`) AND
+        // `isReconnecting` AND `surfaceShowsCenteredLoader` (`effectiveHidesTerminal`)
+        // are ALL true. The box spinner is suppressed via
+        // `surfaceShowsCenteredLoader = true` while the pull GESTURE stays mounted
+        // (#823 preserved), so the centered "Attaching…" spinner is the SOLE
+        // animated indicator.
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -131,58 +138,65 @@ class TmuxConnectingStatesScreenshotTest {
                         onBack = {},
                         onMore = {},
                     )
-                    // The screen's REAL top-bar render site, behind the REAL gate.
-                    // With the terminal held this evaluates false → no top line.
-                    if (shouldShowReconnectingProgressRow(reconnecting, effectiveHidesTerminal)) {
-                        ReconnectingProgressRow(
-                            status = reconnecting,
-                            sessionLabel = "tmux claude-main",
-                            onRetryNow = {},
-                            onCancel = {},
-                        )
-                    }
-                    // The centered "Attaching…" hold (SwitchingLoadingPlaceholder
-                    // body) — the SOLE indicator that should remain visible.
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .fillMaxWidth()
-                            .background(color = PocketShellColors.Background)
-                            .testTag(TMUX_SWITCHING_LOADING_TAG),
-                        contentAlignment = Alignment.Center,
+                            .fillMaxWidth(),
                     ) {
-                        LoadingIndicator.Spinner(
-                            size = SpinnerSize.Medium,
-                            label = "Attaching…",
-                        )
+                        SessionSurfaceReconnectWrapper(
+                            pullToReconnectActive = true,
+                            isReconnecting = true,
+                            onReconnect = {},
+                            surfaceShowsCenteredLoader = true,
+                        ) {
+                            // The centered "Attaching…" hold
+                            // (SwitchingLoadingPlaceholder body) — the SOLE
+                            // indicator that must remain.
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(color = PocketShellColors.Background)
+                                    .testTag(TMUX_SWITCHING_LOADING_TAG),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LoadingIndicator.Spinner(
+                                    size = SpinnerSize.Medium,
+                                    label = "Attaching…",
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
         compose.onNodeWithText("Attaching…").assertExists()
-        // Hard wiring assertion: the top under-header progress line is ABSENT
-        // while the centered hold is up — exactly one indicator on screen.
+        // #823's pull-to-reconnect wrapper is still mounted (gesture preserved).
         compose
-            .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
-            .assertCountEquals(0)
+            .onAllNodesWithTag(TMUX_PULL_TO_RECONNECT_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        // The centered "Attaching…" hold is present exactly once.
         compose
             .onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
             .assertCountEquals(1)
         compose.waitForIdle()
+        // EXACTLY ONE animated indicator: the centered "Attaching…" spinner. The
+        // box spinner is suppressed; a regression that re-runs it (or re-adds a top
+        // linear bar) would push this count to 2 and fail.
+        assertIndeterminateIndicatorCount(1)
         SystemClock.sleep(300)
         captureFullDevice(File(artifactDir(), "tmux-reattach-attaching-single-indicator.png"))
     }
 
     @Test
-    fun capturePullToReconnectDisconnectedSurface() {
-        // Issue #823 (Slice 1): screenshot evidence that the disconnected /
-        // "Reconnecting" session surface carries BOTH the existing visible
-        // reconnect controls (the amber [ReconnectingProgressRow] "Retry now"
-        // band and the calm [FailedConnectionRow] "Tap to reconnect" band) AND
-        // the new pull-to-reconnect gesture wrapper ([SessionSurfaceReconnectWrapper]
-        // with `pullToReconnectActive = true`) around the dropped-session
-        // placeholder. This reproduces the maintainer's "dropped session, give me
-        // a way to reconnect" state with every reconnect affordance present.
+    fun captureSteadyReconnectingSurfaceSingleIndicator() {
+        // STEADY reconnecting state (`effectiveHidesTerminal == false`): the REAL
+        // production composition mounts the [ReconnectingProgressRow] band (text +
+        // Retry now / Cancel) ON TOP of the [SessionSurfaceReconnectWrapper] whose
+        // [PullToRefreshBox] runs its circular spinner (`isReconnecting = true`,
+        // `surfaceShowsCenteredLoader` false). Pre-#750-class-wide-fix the band ALSO
+        // carried a linear bar → TWO indeterminate-progress nodes (the reviewer's
+        // deterministic failure). After the fix the band has NO bar, so the box
+        // spinner is the SOLE animated indicator — exactly ONE.
         val reconnecting = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
             host = "hetzner.example",
             port = 22,
@@ -206,23 +220,18 @@ class TmuxConnectingStatesScreenshotTest {
                         onBack = {},
                         onMore = {},
                     )
-                    // The existing visible reconnect controls (#685 / #720) that
-                    // remain available in a non-Connected state — the amber band's
-                    // "Retry now" and the calm "Tap to reconnect" band.
+                    // The REAL under-header reconnect band — text + Retry now /
+                    // Cancel, no linear bar after the #750 class-wide fix.
                     ReconnectingProgressRow(
                         status = reconnecting,
                         sessionLabel = "tmux claude-main",
                         onRetryNow = {},
                         onCancel = {},
                     )
-                    FailedConnectionRow(
-                        message = "Connection lost — tap to reconnect",
-                        onReconnect = {},
-                        canReconnect = true,
-                    )
                     // The #823 pull-to-reconnect surface wrapper around the
-                    // dropped-session placeholder. Pulling down here fires the same
-                    // reconnect() entrypoint the bands above call.
+                    // dropped-session placeholder. In the steady state the box's own
+                    // circular spinner IS shown (driven by `isReconnecting = true`)
+                    // as the SOLE animated indicator.
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -239,24 +248,105 @@ class TmuxConnectingStatesScreenshotTest {
                                     .background(color = PocketShellColors.Surface),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                LoadingIndicator.Spinner(
-                                    size = SpinnerSize.Medium,
-                                    label = "Pull down to reconnect…",
-                                )
+                                // A STATIC hint (no spinner) — the box's own
+                                // pull-to-refresh indicator is the sole spinner.
+                                androidx.compose.material3.Text("Pull down to reconnect…")
                             }
                         }
                     }
                 }
             }
         }
+        // The band's text + actions are present (band kept, only the bar dropped).
         compose.onNodeWithText("Retry now").assertExists()
+        compose
+            .onAllNodesWithTag(TMUX_PULL_TO_RECONNECT_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose.waitForIdle()
+        // EXACTLY ONE animated indicator: the [PullToRefreshBox] circular spinner.
+        // Pre-fix the band's linear bar added a second → count 2 (the failure).
+        assertIndeterminateIndicatorCount(1)
+        SystemClock.sleep(300)
+        captureFullDevice(File(artifactDir(), "tmux-steady-reconnecting-single-indicator.png"))
+    }
+
+    @Test
+    fun captureDisconnectedSurfaceNoSpinner() {
+        // DISCONNECTED / idle state: there is NO active reconnect, so the surface
+        // shows the calm [FailedConnectionRow] "Tap to reconnect" affordance and
+        // NO animated spinner (a spinner would falsely imply work in flight). The
+        // pull wrapper runs with `isReconnecting = false`, so its box spinner is
+        // also off. Assert ZERO indeterminate-progress nodes so a regression that
+        // re-introduces a spinner in the idle disconnected state is caught.
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "claude-main",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    FailedConnectionRow(
+                        message = "Connection lost — tap to reconnect",
+                        onReconnect = {},
+                        canReconnect = true,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    ) {
+                        SessionSurfaceReconnectWrapper(
+                            pullToReconnectActive = true,
+                            isReconnecting = false,
+                            onReconnect = {},
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(color = PocketShellColors.Surface),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                androidx.compose.material3.Text("Pull down to reconnect…")
+                            }
+                        }
+                    }
+                }
+            }
+        }
         compose.onNodeWithText("Tap to reconnect").assertExists()
         compose
             .onAllNodesWithTag(TMUX_PULL_TO_RECONNECT_TAG, useUnmergedTree = true)
             .assertCountEquals(1)
         compose.waitForIdle()
+        // ZERO animated indicators — the idle disconnected state must not spin.
+        assertIndeterminateIndicatorCount(0)
         SystemClock.sleep(300)
-        captureFullDevice(File(artifactDir(), "tmux-pull-to-reconnect-disconnected.png"))
+        captureFullDevice(File(artifactDir(), "tmux-disconnected-no-spinner.png"))
+    }
+
+    /**
+     * HARD single-indicator assertion: counts EVERY indeterminate-progress
+     * semantics node on screen (linear bar + circular spinner alike) and asserts
+     * the expected total. This is the load-bearing #750 invariant — it catches a
+     * second stacked indicator that a bare `assertIsDisplayed()` would miss.
+     */
+    private fun assertIndeterminateIndicatorCount(expected: Int) {
+        compose
+            .onAllNodes(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.ProgressBarRangeInfo,
+                    ProgressBarRangeInfo.Indeterminate,
+                ),
+                useUnmergedTree = true,
+            )
+            .assertCountEquals(expected)
     }
 
     private fun artifactDir(): File {

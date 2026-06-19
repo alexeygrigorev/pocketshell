@@ -17,12 +17,14 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -182,6 +184,131 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
         recordTiming("restore_to_list_ms", SystemClock.elapsedRealtime() - resumeAt)
         writeTimings()
+        Unit
+    }
+
+    /**
+     * Issue #834 — DELETING an agent session must NOT auto-open the (deleted)
+     * session's Conversation/Terminal view on the next resume.
+     *
+     * The maintainer's dogfood report: "when we deleted an agent session it
+     * still automatically opens the conversation view." Root cause: the killed
+     * session is the persisted "last active" record in
+     * [com.pocketshell.app.session.LastSessionStore]; nothing invalidated it on
+     * a kill, so the process-death restore re-opened it → #818 lands on its
+     * Conversation tab (showing a deleted session is the #686 hazard).
+     *
+     * This drives the EXACT delete journey on the deterministic Docker `agents`
+     * fixture, through the production singletons:
+     *
+     *  1. Attach to a real seeded session via the normal journey.
+     *  2. Background → `MainActivity.onStop` persists it (#177).
+     *  3. Broadcast a confirmed kill over the SAME singleton
+     *     [com.pocketshell.app.tmux.SessionLifecycleSignals] that BOTH delete
+     *     entry points use (`FolderListViewModel.killSession` /
+     *     `TmuxSessionViewModel.killCurrentSession`). `MainActivity`'s observer
+     *     hands it to the store, which clears the matching restore record and
+     *     tombstones the identity. (We also kill it server-side so the journey
+     *     is faithful.)
+     *  4. `recreate()` → the process-death cold-restore path.
+     *
+     * Acceptance: the deleted session's restore record is GONE, the app lands
+     * on the host list, and NO session screen (Conversation/Terminal) is shown
+     * for the deleted session.
+     */
+    @Test
+    fun deletingActiveSessionDoesNotAutoOpenItOnResume() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        clearLastSessionPrefs()
+
+        seedTmuxSession(key)
+        assertTrue("seeded session must be alive before the journey", sessionAlive(key))
+
+        val hostRowTag = seedDockerHost(key)
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        // ---- (1) Attach to the seeded session via the normal journey.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+
+        // ---- (2) Background -> onStop persists the last session (#177).
+        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- (3) DELETE the session: kill it server-side AND broadcast the
+        // confirmed-kill lifecycle signal on the production singleton, exactly
+        // as both Stop entry points do. MainActivity's #834 observer must
+        // invalidate the restore record. Resolve the host id we just seeded so
+        // the (hostId, sessionName) identity matches what was persisted.
+        killRemoteSession(key)
+        assertTrue("session must be gone server-side after delete", !sessionAlive(key))
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val entryPoint = EntryPointAccessors
+            .fromApplication(ctx, TestAccessEntryPoint::class.java)
+        val killedHostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
+        // The activity is in CREATED (still STARTED-collected? no — CREATED is
+        // below STARTED). Bring it to STARTED so the repeatOnLifecycle observer
+        // is collecting, emit the kill, then let it drain.
+        launchedActivity?.moveToState(Lifecycle.State.STARTED)
+        delay(LIFECYCLE_DRAIN_MS)
+        entryPoint.sessionLifecycleSignals().emitKilled(killedHostId, SEEDED_SESSION)
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // The store must no longer hold the deleted session as a restore target.
+        val storedAfterKill = entryPoint.lastSessionStore().read(maxAgeMillis = Long.MAX_VALUE)
+        val restoreClearedForKilled =
+            storedAfterKill == null ||
+                !(storedAfterKill.hostId == killedHostId &&
+                    storedAfterKill.sessionName == SEEDED_SESSION)
+        writeText(
+            "issue834-restore-record.txt",
+            buildString {
+                appendLine("killed_host_id=$killedHostId")
+                appendLine("killed_session=$SEEDED_SESSION")
+                appendLine("stored_host_id=${storedAfterKill?.hostId}")
+                appendLine("stored_session=${storedAfterKill?.sessionName}")
+                appendLine("restore_cleared_for_killed=$restoreClearedForKilled")
+                appendLine("expected_restore_cleared=true")
+            },
+        )
+        assertTrue(
+            "REGRESSION (#834): the deleted session is STILL the last-session " +
+                "restore target — it will auto-open (→ #818 Conversation) on resume",
+            restoreClearedForKilled,
+        )
+
+        // ---- (4) Resume via recreate -> process-death cold-restore path.
+        launchedActivity?.recreate()
+        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+
+        // ---- (5) The app must land on the host list, NOT a deleted-session
+        // screen. Give the route a moment to settle.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            onHostList(hostRowTag)
+        }
+
+        assertTrue(
+            "after deleting the session the app must land on the host list, " +
+                "not auto-open the deleted session",
+            onHostList(hostRowTag),
+        )
+        val sessionScreenStillUp = compose
+            .onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        assertTrue(
+            "the deleted session's screen (Conversation/Terminal) must NOT be " +
+                "showing on resume after a delete",
+            !sessionScreenStillUp,
+        )
         Unit
     }
 

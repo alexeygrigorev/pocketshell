@@ -49,6 +49,29 @@ class LastSessionStore @Inject constructor(
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
+     * Issue #834: identity of the most recently killed session, remembered in
+     * memory for this process. A session the user just deleted (tree/host-detail
+     * Stop or in-session Stop, both confirmed via
+     * [com.pocketshell.app.tmux.SessionLifecycleSignals.emitKilled]) must NEVER
+     * be persisted as the "last active" view again — otherwise the next
+     * foreground/process-death restore re-opens the dead session, which #818
+     * lands on its Conversation tab (showing a deleted session is the #686
+     * hazard).
+     *
+     * Clearing the on-disk record alone is not enough: the user may still be
+     * sitting on the now-dead session screen when they background the app, and
+     * `MainActivity.onStop` would re-`save()` that exact dead session, re-arming
+     * the restore. So [onSessionKilled] both clears any matching persisted
+     * record AND records this tombstone, and [save] refuses to persist a session
+     * whose identity matches it.
+     */
+    @Volatile
+    private var killedTombstone: SessionIdentity? = null
+
+    /** Minimal (hostId, sessionName) identity used for kill matching (#834). */
+    private data class SessionIdentity(val hostId: Long, val sessionName: String)
+
+    /**
      * Persisted snapshot of the last active `tmux -CC` session view.
      *
      * Only the fields needed to rebuild an
@@ -78,6 +101,21 @@ class LastSessionStore @Inject constructor(
      * the value is only read on the next foreground.
      */
     fun save(session: LastSession) {
+        // Issue #834: never persist a session the user just deleted. If the
+        // user backgrounds the app while still on the now-dead session screen,
+        // `onStop` would otherwise re-arm the restore for a session that no
+        // longer exists, and the next foreground/process-death restore would
+        // reopen it (→ #818 Conversation tab of a deleted session, the #686
+        // hazard). Clear the on-disk record instead of writing the dead one.
+        if (killedTombstone == session.identity()) {
+            Log.i(
+                LAST_SESSION_LOG_TAG,
+                "last-session-save-suppressed trigger=onStop reason=killed " +
+                    "hostId=${session.hostId} session=${session.sessionName}",
+            )
+            prefs.edit().clear().apply()
+            return
+        }
         Log.i(
             LAST_SESSION_LOG_TAG,
             "last-session-save trigger=onStop hostId=${session.hostId} " +
@@ -179,6 +217,64 @@ class LastSessionStore @Inject constructor(
         Log.i(LAST_SESSION_LOG_TAG, "last-session-clear trigger=onStop")
         prefs.edit().clear().apply()
     }
+
+    /**
+     * Issue #834: a session was confirmed killed (tree/host-detail Stop or
+     * in-session Stop). Drop it as a restore target so it is never re-opened:
+     *
+     *  1. If the persisted "last active" record points at this exact session,
+     *     clear it — otherwise the next process-death resume restores a deleted
+     *     session (→ #818 Conversation tab of a dead session, the #686 hazard).
+     *  2. Remember the killed identity as a tombstone so a later `onStop`
+     *     [save] for the SAME dead session (user still parked on the now-dead
+     *     screen) is refused rather than re-arming the restore.
+     *
+     * Matching is on (hostId, sessionName) — the same identity
+     * [com.pocketshell.app.tmux.SessionLifecycleSignals] broadcasts. A kill on
+     * one session never invalidates a different stored session.
+     */
+    fun onSessionKilled(hostId: Long, sessionName: String) {
+        val trimmed = sessionName.trim()
+        if (trimmed.isEmpty()) return
+        val killed = SessionIdentity(hostId = hostId, sessionName = trimmed)
+        killedTombstone = killed
+        val stored = read(maxAgeMillis = Long.MAX_VALUE)
+        if (stored != null && stored.identity() == killed) {
+            Log.i(
+                LAST_SESSION_LOG_TAG,
+                "last-session-clear trigger=killed hostId=$hostId session=$trimmed",
+            )
+            prefs.edit().clear().apply()
+        }
+    }
+
+    /**
+     * Issue #834: a session of [sessionName] on [hostId] was legitimately
+     * (re)opened. Clears the kill tombstone for that exact identity so a
+     * recreated same-name session is restorable again.
+     *
+     * tmux session names are user-chosen and habitually reused (`main`,
+     * `work`, `claude-main`), so a kill tombstone must NOT outlive the
+     * recreation of that identity — otherwise the next `onStop` [save] of the
+     * recreated live session is wrongly suppressed and the #177 fast-resume
+     * breaks for that name forever (the over-suppression the reviewer flagged).
+     * Matching is on (hostId, sessionName), identical to [onSessionKilled], so
+     * opening a DIFFERENT session never clears another session's tombstone.
+     */
+    fun onSessionOpened(hostId: Long, sessionName: String) {
+        val trimmed = sessionName.trim()
+        if (trimmed.isEmpty()) return
+        if (killedTombstone == SessionIdentity(hostId = hostId, sessionName = trimmed)) {
+            Log.i(
+                LAST_SESSION_LOG_TAG,
+                "last-session-tombstone-clear trigger=opened hostId=$hostId session=$trimmed",
+            )
+            killedTombstone = null
+        }
+    }
+
+    private fun LastSession.identity(): SessionIdentity =
+        SessionIdentity(hostId = hostId, sessionName = sessionName)
 
     /**
      * Rebuild the navigation destination from a persisted [LastSession].

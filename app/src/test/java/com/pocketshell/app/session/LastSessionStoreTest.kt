@@ -298,6 +298,160 @@ class LastSessionStoreTest {
         assertNull(session)
     }
 
+    // ---------------------------------------------------------------- #834
+    // Deleting a session must drop it as a restore target so the next
+    // foreground/process-death resume never re-opens the deleted session
+    // (which #818 lands on its Conversation tab — the #686 hazard). These
+    // tests pin the in-memory tombstone + record-invalidation logic
+    // `MainActivity` drives off `SessionLifecycleSignals.killedSessions`.
+
+    @Test
+    fun `onSessionKilled clears a stored record that points at the killed session`() {
+        // Repro of #834: the killed agent session is the persisted "last
+        // active". On d63b6a63 nothing cleared it, so a restore re-opened it.
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L)) // sessionName = "claude-main", hostId = 7
+
+        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+
+        // Read from a fresh instance to prove the clear reached disk.
+        assertNull(
+            "a deleted session must not survive as a restore target",
+            LastSessionStore(context).read(nowMillis = 2_000L),
+        )
+    }
+
+    @Test
+    fun `onSessionKilled does NOT clear a record for a different session`() {
+        // Guard: killing session A never invalidates a stored session B.
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L)) // "claude-main"
+
+        store.onSessionKilled(hostId = 7L, sessionName = "codex-side")
+
+        val read = LastSessionStore(context).read(nowMillis = 2_000L)
+        assertNotNull("an unrelated stored session must remain restorable", read)
+        assertEquals("claude-main", read!!.sessionName)
+    }
+
+    @Test
+    fun `onSessionKilled does NOT clear a same-name session on a different host`() {
+        // Identity is (hostId, sessionName): a same-named session on host 99
+        // must not be invalidated by a kill on host 7.
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L)) // host 7, "claude-main"
+
+        store.onSessionKilled(hostId = 99L, sessionName = "claude-main")
+
+        val read = LastSessionStore(context).read(nowMillis = 2_000L)
+        assertNotNull("a same-name session on another host must remain", read)
+        assertEquals(7L, read!!.hostId)
+    }
+
+    @Test
+    fun `save of a killed session is refused so onStop cannot re-arm a deleted restore`() {
+        // The user kills the session, then backgrounds the app while still
+        // parked on the now-dead session screen: `onStop` would otherwise
+        // re-`save()` the dead session and re-arm the restore. The tombstone
+        // makes that save a no-op (clears instead).
+        val store = LastSessionStore(context)
+        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+
+        store.save(sample(savedAtMillis = 5_000L)) // same identity as the kill
+
+        assertNull(
+            "a save for the just-killed session must not persist a restore target",
+            LastSessionStore(context).read(nowMillis = 6_000L),
+        )
+    }
+
+    @Test
+    fun `save of a different session still works after a kill`() {
+        // Guard: the tombstone only suppresses the exact killed identity;
+        // opening + saving a DIFFERENT session still arms a normal restore.
+        val store = LastSessionStore(context)
+        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+
+        store.save(sample(savedAtMillis = 5_000L).copyWith(sessionName = "codex"))
+
+        val read = LastSessionStore(context).read(nowMillis = 6_000L)
+        assertNotNull("a different session must still be restorable after a kill", read)
+        assertEquals("codex", read!!.sessionName)
+    }
+
+    @Test
+    fun `onSessionKilled with a blank session name is a no-op`() {
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L))
+
+        store.onSessionKilled(hostId = 7L, sessionName = "   ")
+
+        assertNotNull(
+            "a blank kill name must not clear an unrelated stored session",
+            LastSessionStore(context).read(nowMillis = 2_000L),
+        )
+    }
+
+    @Test
+    fun `recreated same-name session restores after a kill once reopened`() {
+        // Reviewer blocker: the kill tombstone must NOT permanently poison a
+        // session NAME. tmux names are habitually reused, so after deleting
+        // `claude-main` the user may create a NEW `claude-main` on the SAME
+        // host, open it, and background — that live session MUST restore.
+        val store = LastSessionStore(context)
+
+        // 1. Delete the original same-identity session.
+        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+
+        // 2. The user recreates + OPENS a new session of that identity
+        //    (navigator routes to the TmuxSession destination → onSessionOpened).
+        store.onSessionOpened(hostId = 7L, sessionName = "claude-main")
+
+        // 3. Background → onStop saves the now-live recreated session.
+        store.save(sample(savedAtMillis = 5_000L)) // host 7, "claude-main"
+
+        // 4. Next foreground must restore it — the tombstone is gone.
+        val read = LastSessionStore(context).read(nowMillis = 6_000L)
+        assertNotNull(
+            "a recreated same-name session must restore after a kill+reopen — " +
+                "the tombstone must not permanently suppress the name",
+            read,
+        )
+        assertEquals("claude-main", read!!.sessionName)
+        assertEquals(7L, read.hostId)
+    }
+
+    @Test
+    fun `opening a different session does NOT clear an unrelated kill tombstone`() {
+        // Guard: onSessionOpened only clears the tombstone for the SAME
+        // identity. Opening session B must not un-suppress a just-killed
+        // session A, so A still cannot re-arm a restore.
+        val store = LastSessionStore(context)
+        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+
+        store.onSessionOpened(hostId = 7L, sessionName = "codex-side")
+
+        // A's tombstone survives, so a save of A is still suppressed.
+        store.save(sample(savedAtMillis = 5_000L)) // host 7, "claude-main"
+        assertNull(
+            "killing A then opening B must not let A re-arm a restore",
+            LastSessionStore(context).read(nowMillis = 6_000L),
+        )
+    }
+
+    @Test
+    fun `opening a session with no tombstone is a harmless no-op`() {
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L))
+
+        // No kill happened; opening must not disturb the stored record.
+        store.onSessionOpened(hostId = 7L, sessionName = "claude-main")
+
+        val read = LastSessionStore(context).read(nowMillis = 2_000L)
+        assertNotNull(read)
+        assertEquals("claude-main", read!!.sessionName)
+    }
+
     private fun LastSessionStore.LastSession.copyWith(
         sessionName: String,
     ): LastSessionStore.LastSession = copy(sessionName = sessionName)

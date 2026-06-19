@@ -1,6 +1,8 @@
 package com.pocketshell.app.testaccess
 
 import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.app.session.LastSessionStore
+import com.pocketshell.app.tmux.SessionLifecycleSignals
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.SshKeyDao
 import dagger.hilt.EntryPoint
@@ -53,4 +55,21 @@ internal interface TestAccessEntryPoint {
      * SSH forward.
      */
     fun forwardingController(): ForwardingController
+
+    /**
+     * Issue #834: the singleton [SessionLifecycleSignals] so the
+     * delete→no-reopen connected test
+     * ([com.pocketshell.app.proof.ColdRestoreGoneSessionNoResurrectE2eTest])
+     * can broadcast a confirmed kill on the SAME instance `MainActivity`
+     * collects — exercising the production observer that invalidates the
+     * last-session restore target — instead of constructing a throwaway one.
+     */
+    fun sessionLifecycleSignals(): SessionLifecycleSignals
+
+    /**
+     * Issue #834: the singleton [LastSessionStore] so the connected test can
+     * assert from the SAME instance the activity restores from that a deleted
+     * session was dropped as a restore target.
+     */
+    fun lastSessionStore(): LastSessionStore
 }

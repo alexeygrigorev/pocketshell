@@ -73,6 +73,7 @@ import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import com.pocketshell.app.release.UpdateCheckScheduler
+import com.pocketshell.app.tmux.SessionLifecycleSignals
 import com.pocketshell.app.tmux.TmuxConnectTrigger
 import com.pocketshell.app.tmux.TmuxRestoreIntentSnapshot
 import com.pocketshell.app.tmux.TmuxSessionScreen
@@ -172,6 +173,19 @@ class MainActivity : FragmentActivity() {
      */
     @Inject
     lateinit var lastSessionStore: LastSessionStore
+
+    /**
+     * Issue #834: the process-scoped tmux lifecycle fan-out. We collect its
+     * confirmed-kill broadcasts so a deleted session is dropped as a
+     * last-session restore target — otherwise the next foreground/process-death
+     * resume re-opens the dead session (→ #818 Conversation tab of a deleted
+     * session, the #686 hazard). Both delete entry points (tree/host-detail
+     * Stop in `FolderListViewModel.killSession` and in-session Stop in
+     * `TmuxSessionViewModel.killCurrentSession`) emit here only after the kill
+     * is verified.
+     */
+    @Inject
+    lateinit var sessionLifecycleSignals: SessionLifecycleSignals
 
     @Inject
     lateinit var startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource
@@ -409,6 +423,16 @@ class MainActivity : FragmentActivity() {
                             if (dest is AppDestination.FolderList || dest is AppDestination.TmuxSession) {
                                 updateCheckScheduler.onHostOpened()
                             }
+                            // Issue #834: navigating to a tmux session is a
+                            // legitimate (re)open of that identity — clear any
+                            // kill tombstone for it so a RECREATED same-name
+                            // session restores normally (#177) instead of being
+                            // permanently suppressed by an earlier delete of the
+                            // same name. A no-op when nothing was tombstoned or
+                            // the identity differs.
+                            if (dest is AppDestination.TmuxSession) {
+                                lastSessionStore.onSessionOpened(dest.hostId, dest.sessionName)
+                            }
                         },
                         onComposerDraftChanged = { draft -> currentComposerDraft = draft },
                         initialComposerDraft = restoredComposerDraft,
@@ -437,6 +461,7 @@ class MainActivity : FragmentActivity() {
         }
         maybeRequestNotificationPermission()
         observeForwardingForNotificationPermission()
+        observeKilledSessionsForLastSession()
         StartupTiming.mark("main-on-create-end")
     }
 
@@ -462,6 +487,34 @@ class MainActivity : FragmentActivity() {
                         maybeRequestNotificationPermission()
                     }
                     wasActive = active
+                }
+            }
+        }
+    }
+
+    /**
+     * Issue #834: invalidate the last-session restore target when the user
+     * deletes a session, so a deleted session is never re-opened on the next
+     * foreground/process-death resume (which #818 would land on its Conversation
+     * tab — the #686 hazard). Both Stop entry points broadcast a confirmed kill
+     * over [sessionLifecycleSignals]; here we hand each one to the store, which
+     * clears any matching persisted record and tombstones the identity so a
+     * later `onStop` cannot re-save the now-dead session.
+     */
+    private fun observeKilledSessionsForLastSession() {
+        lifecycleScope.launch {
+            // Collect across STARTED so a kill broadcast while the activity is
+            // foregrounded (the dominant case — Stop is tapped from a visible
+            // tree/session screen) reaches the store before the user can
+            // background and trigger a restore.
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                sessionLifecycleSignals.killedSessions.collect { killed ->
+                    Log.i(
+                        "MainActivity",
+                        "issue834-killed-session-clear hostId=${killed.hostId} " +
+                            "session=${killed.sessionName}",
+                    )
+                    lastSessionStore.onSessionKilled(killed.hostId, killed.sessionName)
                 }
             }
         }

@@ -1814,6 +1814,236 @@ class TmuxSessionViewModelTest {
         }
 
     @Test
+    fun silentDropAutoReconnectForceEvictsPoisonedHalfOpenLeaseAndDialsFresh() =
+        runTest(scheduler) {
+            // EPIC #792 / #822 (THE WEDGE REGRESSION, D31 durable-fix gate).
+            //
+            // The on-device #822 symptom: on a SILENT half-open Wi-Fi drop (no
+            // network reason, mid voice-recording) the header stuck amber
+            // "Reconnecting" forever, and the ONLY recovery was the switch-away-
+            // and-back dance. The root cause is in the lease pool: sshj's
+            // `isConnected` LIES (stays true ~60s until the keep-alive miss-counter
+            // trips), so [SshLeaseManager.acquire] REUSES the poisoned warm entry,
+            // and EVERY auto-reconnect attempt re-dials the SAME dead socket. The
+            // switch dance recovered only because re-entering connect() to a
+            // DIFFERENT host eventually evicted the poisoned lease.
+            //
+            // The fix ([shouldForceFreshLease] now includes
+            // [TmuxConnectTrigger.AutoReconnect]) force-evicts the poisoned idle
+            // entry before each ladder re-dial, so the SAME session recovers onto a
+            // FRESH transport WITHOUT the switch dance.
+            //
+            // The sibling test
+            // `livenessProbeDeclaredDropClosesTheClientAndDrivesTheSingleReconnectEntrypoint`
+            // pins the detection→recovery WIRING but uses an EMPTY lease pool, so it
+            // passes EVEN IF the wedge fix is reverted (an empty pool always dials
+            // fresh). THIS test closes that gap: it pre-seeds the pool with the
+            // poisoned half-open lease the real device holds, so reverting the
+            // `AutoReconnect` line of [shouldForceFreshLease] makes the ladder reuse
+            // the poisoned entry (connectCount stays 1, the SAME dead session) and
+            // this assertion fails — the red→green proof of the actual wedge.
+            val diagnostics = installRecordingDiagnosticSink()
+            val registry = ActiveTmuxClients()
+            // First dial yields the POISONED half-open session (isConnected lies
+            // true); the second dial — only reached if the ladder force-evicts —
+            // yields a FRESH session.
+            val poisoned = FakeSshSession()
+            val fresh = FakeSshSession()
+            val connector = QueueLeaseConnector(poisoned, fresh)
+            // Keep a real (virtual-clock) lease pool with a NON-zero idle TTL so the
+            // released poisoned lease sits WARM/idle in the pool (the exact on-device
+            // state) rather than closing on release — that is what makes the next
+            // acquire reuse it unless force-evicted.
+            val leaseManager = testLeaseManager(
+                connector = connector,
+                scope = this,
+                idleTtlMillis = 60_000L,
+            )
+            val vm = newVm(registry = registry, sshLeaseManager = leaseManager)
+            vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+            vm.setAutoReconnectDelaysForTest(listOf(0L))
+            try {
+                // Pre-seed the pool with the poisoned half-open lease for the EXACT
+                // key the ladder will reconstruct from the target (hostId=1 + keyPath
+                // /keys/a -> credentialId "1:/keys/a"). Acquire then release so it
+                // sits warm/idle (refCount 0) and `isConnected` still lies true.
+                // NOTE: drive the seed with runCurrent(), NOT advanceUntilIdle() —
+                // the latter would advance the virtual clock past the 60s idle TTL
+                // and let the idle-close timer fire, closing the poisoned lease and
+                // emptying the pool (which would make the later reuse-vs-evict
+                // distinction vacuous). runCurrent() settles the bounded dial without
+                // advancing time, so the released lease sits warm/idle exactly as it
+                // does on-device within the warm window.
+                leaseManager.acquire(testLeaseTarget()).getOrThrow().release()
+                runCurrent()
+                assertEquals(
+                    "the poisoned lease is dialed once and pooled warm",
+                    1,
+                    connector.connectCount,
+                )
+                assertTrue(
+                    "the poisoned half-open lease still LIES isConnected==true while pooled " +
+                        "(the deceptive #822 case)",
+                    leaseManager.hasLiveLease(testLeaseTarget().leaseKey),
+                )
+
+                val liveClient = FakeTmuxClient()
+                val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+                vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+                    assertEquals("work", sessionName)
+                    reconnectClient
+                }
+                vm.replaceClientForTest(
+                    hostId = 1L,
+                    hostName = "alpha",
+                    host = "alpha.example",
+                    port = 22,
+                    user = "alex",
+                    keyPath = "/keys/a",
+                    sessionName = "work",
+                    client = liveClient,
+                )
+
+                assertTrue(
+                    "expected Connected before the silent half-open drop",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+                assertTrue(
+                    "the probe gate must be open while foregrounded + Live",
+                    vm.shouldRunLivenessProbeForTest(),
+                )
+
+                // The liveness probe declared a sustained SILENT drop (the #822
+                // scenario: no send, half-open Wi-Fi). Drive its confirmed-drop body
+                // directly — it walks the controller Live -> Reattaching (the
+                // immediate indicator) and drives the single AutoReconnect ladder.
+                vm.triggerLivenessProbeDropForTest(consecutiveFailures = 2)
+                advanceUntilIdle()
+
+                // THE WEDGE ASSERTION (red→green): the AutoReconnect ladder must have
+                // FORCE-EVICTED the poisoned half-open lease and dialed a SECOND,
+                // FRESH transport. Without the fix the ladder reuses the poisoned
+                // pooled entry, connectCount stays 1, and the session stays wedged.
+                assertEquals(
+                    "the silent-drop AutoReconnect ladder must FORCE-EVICT the poisoned " +
+                        "half-open lease and dial a FRESH transport (the #822 wedge fix). " +
+                        "connectCount==1 means it reused the poisoned lease — the wedge.",
+                    2,
+                    connector.connectCount,
+                )
+                assertTrue(
+                    "the poisoned half-open SSH session must be CLOSED by the force-evict " +
+                        "(not silently reused under the new client)",
+                    poisoned.closed,
+                )
+
+                // Recovery is on the SAME session, no switch dance.
+                assertEquals("work", vm.activeSessionNameForTest())
+                assertSame(reconnectClient, registry.clients.value[1L]?.client)
+                assertTrue(
+                    "the SAME session must auto-recover to Connected after the silent " +
+                        "half-open drop — WITHOUT a switch-to-another-session dance",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+
+                // The drop was DETECTED proactively (the headline #822 requirement:
+                // surface it, don't discover it only when a send fails).
+                assertTrue(
+                    "the probe must record its proactive silent-drop detection",
+                    diagnostics.eventsNamed("liveness_probe_silent_drop").any {
+                        it.fields["session"] == "work" &&
+                            it.fields["source"] == "liveness_probe"
+                    },
+                )
+                // The force-fresh-lease eviction was recorded for the AutoReconnect
+                // trigger (the mechanism that breaks the wedge).
+                assertTrue(
+                    "the AutoReconnect ladder must record the force-fresh-lease eviction " +
+                        "that breaks the #822 wedge",
+                    diagnostics.eventsNamed("tmux_force_fresh_ssh_lease").any {
+                        it.fields["trigger"] == TmuxConnectTrigger.AutoReconnect.logValue &&
+                            it.fields["evictedLease"] == true
+                    },
+                )
+            } finally {
+                diagnostics.close()
+            }
+        }
+
+    @Test
+    fun manualReconnectForceEvictsPoisonedHalfOpenLeaseAndDialsFresh() = runTest(scheduler) {
+        // EPIC #792 / #822 — the SECOND seam of the wedge class (D31 class coverage).
+        //
+        // The same poisoned-half-open-lease pathology must not strand the MANUAL /
+        // send-triggered reconnect either (the [reconnect] affordance #823 will call
+        // the SAME single TransportEffects entrypoint). The manual `Reconnect`
+        // trigger already force-evicts ([shouldForceFreshLease]); this pins that it
+        // dials a FRESH transport over the poisoned warm lease so a user tap (or a
+        // send-while-not-Connected) recovers the SAME session without the switch
+        // dance — covering the recovery-without-switch path for the manual seam.
+        val registry = ActiveTmuxClients()
+        val poisoned = FakeSshSession()
+        val fresh = FakeSshSession()
+        val connector = QueueLeaseConnector(poisoned, fresh)
+        val leaseManager = testLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        val vm = newVm(registry = registry, sshLeaseManager = leaseManager)
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        try {
+            // runCurrent() (not advanceUntilIdle) so the released poisoned lease sits
+            // warm/idle in the pool rather than being closed by the 60s idle timer —
+            // otherwise the reuse-vs-evict distinction below is vacuous.
+            leaseManager.acquire(testLeaseTarget()).getOrThrow().release()
+            runCurrent()
+            assertEquals(1, connector.connectCount)
+            assertTrue(
+                "the poisoned half-open lease must sit warm/idle (the deceptive #822 case)",
+                leaseManager.hasLiveLease(testLeaseTarget().leaseKey),
+            )
+
+            val deadClient = FakeTmuxClient()
+            val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+            vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+                assertEquals("work", sessionName)
+                reconnectClient
+            }
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = deadClient,
+            )
+
+            // The user taps Reconnect (the manual affordance / #823 entrypoint).
+            val started = vm.reconnect()
+            assertTrue("reconnect() must start with a target present", started)
+            advanceUntilIdle()
+
+            assertEquals(
+                "the manual reconnect must FORCE-EVICT the poisoned half-open lease and " +
+                    "dial a FRESH transport (no switch dance)",
+                2,
+                connector.connectCount,
+            )
+            assertTrue("the poisoned half-open session must be CLOSED by the force-evict", poisoned.closed)
+            assertEquals("work", vm.activeSessionNameForTest())
+            assertTrue(
+                "the SAME session must recover to Connected after a manual reconnect",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+        } finally {
+            vm.clearForTest()
+        }
+    }
+
+    @Test
     fun livenessProbeGateIsClosedWhenNotConnected() = runTest(scheduler) {
         // The probe must NOT run when there is no live session (no false-positive
         // teardown of a not-yet-connected / idle VM).

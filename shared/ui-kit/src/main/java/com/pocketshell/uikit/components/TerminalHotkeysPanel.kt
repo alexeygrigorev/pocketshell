@@ -14,14 +14,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.SemanticsPropertyReceiver
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.model.KeyBinding
@@ -66,6 +73,19 @@ data class HotkeySection(
 
 const val TERMINAL_HOTKEYS_PANEL_TAG: String = "terminal:hotkeys-panel"
 const val TERMINAL_HOTKEYS_PANEL_CLOSE_TAG: String = "terminal:hotkeys-panel-close"
+
+/**
+ * Test-only semantics flag (issue #755): `true` on a key slot whose label
+ * visually overflowed its slot, i.e. the glyph was **truncated** — the exact
+ * "keys cut off / `…`" symptom the maintainer reported. The panel sets this from
+ * the slot `Text`'s `onTextLayout` (`hasVisualOverflow`). A regression test reads
+ * it to hard-fail on truncation, which a `boundsInRoot` containment check cannot
+ * catch (Compose clamps a node's reported rect to its slot, so an overflowing
+ * label still reports as "contained"). Render-only; no behavioural effect.
+ */
+val HotkeyLabelTruncatedKey: SemanticsPropertyKey<Boolean> =
+    SemanticsPropertyKey("HotkeyLabelTruncated")
+var SemanticsPropertyReceiver.hotkeyLabelTruncated: Boolean by HotkeyLabelTruncatedKey
 
 @Composable
 fun TerminalHotkeysPanel(
@@ -179,6 +199,10 @@ private fun HotkeySlot(
         binding.kind == KeyKind.Arrow -> PocketShellColors.TextSecondary
         else -> PocketShellColors.Text
     }
+    // Tracks whether this key's label was truncated (glyph clipped) at the slot's
+    // measured width — exposed via [hotkeyLabelTruncated] for the #755 regression
+    // guard. Render-only.
+    var labelTruncated by remember { mutableStateOf(false) }
     Box(
         modifier = modifier
             .height(44.dp)
@@ -190,8 +214,9 @@ private fun HotkeySlot(
             .let { if (enabled) it.clickable(role = Role.Button, onClick = onTap) else it }
             // Merge the label Text into this clickable node so a test can match
             // a key by "label text + click action" (disambiguating the panel key
-            // from identically-labelled terminal content).
-            .semantics(mergeDescendants = true) {}
+            // from identically-labelled terminal content). Also publish the
+            // truncation flag so the #755 guard can read it off this node.
+            .semantics(mergeDescendants = true) { hotkeyLabelTruncated = labelTruncated }
             .padding(horizontal = 4.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -203,6 +228,10 @@ private fun HotkeySlot(
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             softWrap = false,
+            // `Clip` (the default for a single line) silently cuts the glyph;
+            // capture that as the truncation signal the #755 guard asserts on.
+            overflow = TextOverflow.Clip,
+            onTextLayout = { result -> labelTruncated = result.hasVisualOverflow },
         )
     }
 }

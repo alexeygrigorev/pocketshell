@@ -153,6 +153,22 @@ fix. Six gates, all blocking, enforced by the reviewer (mechanics in
 - **G6** — wrong-cost guard: the LOAD-BEARING assertion must be the green one; a
   green structural proxy over a red/absent behavior assertion is rejected (the
   #796 three-approvals trap).
+- **G9** — a test per acceptance criterion: every `- [ ]` acceptance-criterion
+  item must have a triggering automated test wired into a running gate;
+  manually-verified-but-untested ⇒ reject. (Maintainer directive 2026-06-20.)
+- **G10** — reproduce-first end-to-end for reported defects: the implementer
+  FIRST lands a test that reproduces the reported problem (red), THEN fixes
+  (green). For on-device-reported problems the reproduction MUST be end-to-end
+  (connected/Docker journey on the real path) and, when the bug only manifests
+  against a non-happy host/state, the **fixture that reproduces it must be added**
+  (old/mismatched CLI, failure, timeout, missing data). The happy-fixture-masks-
+  reality gap is how the v0.4.10 connect break (#847) shipped. Implementer
+  obligation in `.claude/agents/implementer.md` (steps 3b/4a); reviewer verifies
+  (G10). (Maintainer directive 2026-06-20.)
+
+The standing test-suite reliability program (find tests that don't trigger /
+pass vacuously / miss their criteria, then fix) is tracked under the test-audit
+epic; follow-up issues are filed from its findings.
 
 **Pending maintainer sign-off (higher-cost, NOT yet adopted):**
 - **G7 — pre-merge CI-green enforcement (#816).** `main` currently has no branch

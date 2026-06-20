@@ -68,6 +68,21 @@ reopens after shipping (#819/#635/#553/#567 — see #844). Each is blocking.
   requires the LOAD-BEARING one to be the green thing. A green secondary
   (scan-count, node-present) with a red/absent primary (stall budget, visible
   behavior) ⇒ `CHANGES REQUESTED` (the #796 three-approvals trap).
+- **G9 — A test per acceptance criterion (mandatory).** `APPROVED` requires that
+  EVERY `- [ ]` acceptance-criterion item has a corresponding automated test that
+  actually exercises it AND is wired into a gate that runs. Any criterion with no
+  triggering test ⇒ `CHANGES REQUESTED`. "The criterion is met (I checked
+  manually)" is not enough — there must be a test that will catch its regression.
+- **G10 — Reproduce-first end-to-end for reported defects (mandatory).** For a
+  reported problem/bug, confirm the implementer landed a test that **reproduces
+  the reported problem and fails on the unfixed code** (verify the red→green
+  yourself per G1). For a problem the maintainer hit on-device, that reproduction
+  MUST be **end-to-end** (a connected/Docker journey on the real path), and if the
+  bug only manifests against a non-happy host/state, the **fixture that
+  reproduces it must exist** (old/mismatched CLI, failure, timeout, missing data —
+  the happy fixture masking reality is how the v0.4.10 connect break shipped). A
+  unit-proxy reproduction for an on-device defect ⇒ `CHANGES REQUESTED` (or
+  `BLOCKED` per G4 if the e2e can't be produced this run).
 
 ## Three verdicts: APPROVED / CHANGES REQUESTED / BLOCKED
 
@@ -177,10 +192,11 @@ Blocking (must be `CHANGES REQUESTED`):
   (see "Active-rework adjacency sweep")
 - **Any acceptance criterion left UNPROVEN** (not run, not seen, no artifact) —
   unproven is not the same as passing
-- **Any G1–G6 universal gate violated** (no reviewer-run red→green on a defect
-  fix; class not covered; `0 tests completed` accepted; JVM-only proxy for a
-  user-facing fix → use BLOCKED; uncaptured "flake" hand-wave; load-bearing
-  assertion not the green one)
+- **Any G1–G6 / G9 / G10 universal gate violated** (no reviewer-run red→green on
+  a defect fix; class not covered; `0 tests completed` accepted; JVM-only proxy
+  for a user-facing fix → use BLOCKED; uncaptured "flake" hand-wave; load-bearing
+  assertion not the green one; **an acceptance criterion with no triggering test
+  (G9)**; **a reported defect without a reproduce-first end-to-end test (G10)**)
 
 Non-blocking (file as follow-up, do NOT reject for these):
 

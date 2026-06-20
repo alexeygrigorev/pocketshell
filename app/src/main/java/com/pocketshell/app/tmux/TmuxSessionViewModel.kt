@@ -10666,7 +10666,6 @@ public class TmuxSessionViewModel @Inject constructor(
                     while (true) {
                         val batch = newQueue.takeBatch() ?: break
                         val targetClient = client ?: clientRef ?: continue
-                        val sendStartedNs = System.nanoTime()
                         DiagnosticEvents.record(
                             "action",
                             "pane_input_batch",
@@ -10675,7 +10674,7 @@ public class TmuxSessionViewModel @Inject constructor(
                         )
                         runCatching { sendInputBytesToPane(targetClient, paneId, batch.bytes) }
                             .onSuccess {
-                                newQueue.recordSent(batch, System.nanoTime() - sendStartedNs)
+                                newQueue.recordSent(batch)
                             }
                     }
                 }
@@ -12798,7 +12797,7 @@ internal class TmuxPaneInputQueue(
         )
     }
 
-    fun recordSent(batch: TmuxPaneInputBatch, @Suppress("UNUSED_PARAMETER") sendDurationNs: Long) = synchronized(lock) {
+    fun recordSent(batch: TmuxPaneInputBatch) = synchronized(lock) {
         totalSentBytes += batch.bytes.size.toLong()
         sentBatchCount += 1
         maxObservedBatchBytes = maxOf(maxObservedBatchBytes, batch.bytes.size)

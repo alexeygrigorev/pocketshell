@@ -1441,7 +1441,6 @@ private fun RecordingSurface(
             Waveform(
                 amplitude = amplitude,
                 active = capturing,
-                transcribing = false,
                 modifier = Modifier
                     .weight(1f)
                     .height(32.dp)
@@ -2233,7 +2232,6 @@ private fun Waveform(
     amplitude: Float,
     active: Boolean,
     modifier: Modifier = Modifier,
-    @Suppress("UNUSED_PARAMETER") transcribing: Boolean = false,
 ) {
     // Smooth amplitude transitions so a sudden spike doesn't jerk the
     // bars. 80ms is faster than the human eye's flicker fusion threshold

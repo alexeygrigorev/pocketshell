@@ -507,7 +507,6 @@ and the `when` dispatch in [`MainActivity.kt`](../app/src/main/java/com/pocketsh
 | SSH keys [`SshKeysScreen.kt`](../app/src/main/java/com/pocketshell/app/hosts/SshKeysScreen.kt) | `ListRow`, `Kebab`, key rows, unlock dialog. | Not a nav destination but important form-management surface; needs `ScreenHeader` when standalone. | Shared key row, secret/unlock dialog. |
 | Voice session surface [`VoiceSessionSurface.kt`](../app/src/main/java/com/pocketshell/app/voice/VoiceSessionSurface.kt) | Dictation UI shared by raw SSH and tmux routes. | Must not drift from composer and mic tokens. | `MicButton`, shared recording states, shared transcript controls. |
 | Terminal lab [`TerminalLabActivity.kt`](../app/src/main/java/com/pocketshell/app/terminal/TerminalLabActivity.kt) | Dev/test terminal activity. | Not production nav, but can mislead future agents. | Keep as lab-only; do not source product components from it without review. |
-| Proof of life [`ProofOfLifeScreen.kt`](../app/src/main/java/com/pocketshell/app/proof/ProofOfLifeScreen.kt) | Legacy proof screen. | Not launcher UX. | Do not use as design precedent. |
 
 ## Migration Slices
 
@@ -655,7 +654,7 @@ Don't:
 - Use cards as page sections or nest cards inside cards.
 - Use semantic colours as decoration.
 - Add decorative animation or background-work-looking motion.
-- Use legacy `ProofOfLifeScreen` or `TerminalLabActivity` as design precedent.
+- Use the legacy `TerminalLabActivity` as design precedent.
 
 ## Migration Checklist
 

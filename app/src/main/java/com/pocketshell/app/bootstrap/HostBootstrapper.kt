@@ -608,7 +608,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
                 return InstallResult.Error("failed to detect OS: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
             }
             return when (uname.stdout.trim()) {
-                "Darwin" -> runInstall(session, posixShellCommand("brew install tmux"), needsRoot = false)
+                "Darwin" -> runInstall(session, posixShellCommand("brew install tmux"))
                 else -> InstallResult.UnsupportedOs(osId = null)
             }
         }
@@ -618,7 +618,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
 
         val needsRoot = pm.needsRoot && !runningAsRoot(session)
         val cmd = if (needsRoot) "sudo ${pm.command}" else pm.command
-        return runInstall(session, posixShellCommand(cmd), needsRoot)
+        return runInstall(session, posixShellCommand(cmd))
     }
 
     /**
@@ -671,7 +671,6 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     private suspend fun runInstall(
         session: SshSession,
         command: String,
-        @Suppress("UNUSED_PARAMETER") needsRoot: Boolean,
     ): InstallResult = try {
         val result: ExecResult = session.exec(command)
         if (result.exitCode == 0) {
@@ -695,7 +694,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             PythonToolInstaller.Uv -> "$executable ${uvToolInstallArgs(tool, upgrade = false)}"
             PythonToolInstaller.Pipx -> "$executable install ${tool.packageName}"
         }
-        return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
+        return runInstall(session, pathAwareCommand(command, bootstrapPath))
     }
 
     private suspend fun runPythonToolUpgrade(
@@ -710,7 +709,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             PythonToolInstaller.Uv -> "$executable ${uvToolInstallArgs(tool, upgrade = true)}"
             PythonToolInstaller.Pipx -> "$executable upgrade ${tool.packageName}"
         }
-        return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
+        return runInstall(session, pathAwareCommand(command, bootstrapPath))
     }
 
     private suspend fun runningAsRoot(session: SshSession): Boolean = try {

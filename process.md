@@ -128,6 +128,46 @@ The mechanics live in `.claude/agents/reviewer.md` ("Default posture",
 "Durable-fix gate", "Active-rework adjacency sweep"). This is locked decision
 **D31** in `docs/decisions.md`.
 
+## Stricter approval gates — universal, not just reopens (locked principle D32)
+
+The #844 meta-audit found D31 leaks because its red→green + class-coverage bar
+is mandatory only for issues *already known* to be reopens — but most reopens
+(#819, #635, #553, #567) were APPROVED *as first fixes* on a proxy and only
+*became* reopens after shipping. By the time D31 triggers, the bug has already
+reached the maintainer once. D32 closes that by applying the rigor to **every**
+fix. Six gates, all blocking, enforced by the reviewer (mechanics in
+`.claude/agents/reviewer.md` "Universal approval gates G1–G6"):
+
+- **G1** — reviewer-run red→green for ANY user-reported-defect fix (not just
+  reopens): see the test fail on base and pass with the fix, this run.
+- **G2** — class-coverage for any state-resolution / detection / source-binding
+  fix (foreign + sub-agent/nested + multi-window + missing-data + stale-cache),
+  not the single reported instance.
+- **G3** — ban "0 tests completed / all skipped" as a pass: assert test count
+  > 0 and the load-bearing test actually ran (the #635 vacuous-pass trap).
+- **G4** — no JVM-only acceptance for user-facing fixes; introduce a third
+  verdict **BLOCKED** (correct-but-unproven) that the orchestrator does NOT
+  merge, instead of APPROVING on a proxy when the on-device journey can't run.
+- **G5** — "infra/flake" requires a captured infra signature AND a clean re-run;
+  no captured re-run ⇒ treat as a real failure.
+- **G6** — wrong-cost guard: the LOAD-BEARING assertion must be the green one; a
+  green structural proxy over a red/absent behavior assertion is rejected (the
+  #796 three-approvals trap).
+
+**Pending maintainer sign-off (higher-cost, NOT yet adopted):**
+- **G7 — pre-merge CI-green enforcement (#816).** `main` currently has no branch
+  protection, and the orchestrator merges via `git apply`+push, so the per-push
+  `emulator-journey` gate reports red *after* the commit lands. G7 makes the
+  journey/Unit/Integration checks required+blocking before a slice reaches
+  `main`. This reshapes the merge mechanic — maintainer call.
+- **G8 — second adversarial reviewer** for the worst-reopen areas
+  (connection/reconnect/lease, conversation-source/agent-detection, terminal
+  render/ANR): a second pass whose only job is to attack the root-cause
+  attribution and class coverage. Doubles review effort on hot areas — maintainer
+  call (could be scoped to already-reopened-once fixes).
+
+Evidence + full rationale: issue #844. This is locked decision **D32**.
+
 ## Non-Negotiable Loop
 
 Every issue moves through this state machine:

@@ -32,6 +32,51 @@ comes back broken. Internalise these:
   outcome than a wrong `APPROVED`. Reopened issues cost the maintainer far more
   than another review round.
 
+## Universal approval gates G1–G6 (apply to EVERY review — locked D32)
+
+These extend the Durable-fix gate to ALL fixes, not just known reopens. They
+exist because bugs were APPROVED on a proxy *as first fixes* and only *became*
+reopens after shipping (#819/#635/#553/#567 — see #844). Each is blocking.
+
+- **G1 — Reviewer-run red→green for ANY user-reported-defect fix (not just
+  reopens).** You must personally see the regression test FAIL on base (revert
+  the fix, or run the implementer's documented red) and PASS with it, THIS run.
+  A test that passes with AND without the fix proves nothing ⇒ `CHANGES
+  REQUESTED`.
+- **G2 — Class-coverage for any state-resolution / detection / source-binding
+  fix.** For "wrong/stale X shown" bugs (session source, agent kind, pane
+  binding, reconnect state), the test must enumerate the CLASS — foreign +
+  nested/sub-agent + multi-window + missing-data + stale-cache — not the single
+  reported instance.
+- **G3 — Ban "0 tests completed / all skipped" as a pass.** Assert the run's
+  reported test count > 0 AND that the load-bearing test is among those
+  executed. `Tests 0/1 completed`, `(N skipped)` on the load-bearing assertion,
+  or a green build that ran nothing = automatic `CHANGES REQUESTED`.
+- **G4 — No JVM-only acceptance for user-facing fixes; use the BLOCKED verdict.**
+  When the property under test is on-device (terminal/render/IME/connection/
+  conversation/tmux) and you cannot produce the emulator+Docker journey artifact
+  THIS run, the verdict is **BLOCKED** (see the third verdict below) — never
+  `APPROVED` on a JVM/component proxy. BLOCKED is honest; APPROVED-but-broken
+  costs a reopen.
+- **G5 — "Infra/flake" requires captured proof.** You may attribute a failure to
+  infra (sibling-install SIGKILL #672, AVD/#470 stall) ONLY if you capture (a)
+  the infra signature (signal-9 + fewer tests than expected) AND (b) a
+  subsequent clean re-run of the same test. No captured clean re-run ⇒ treat it
+  as a real failure ⇒ `CHANGES REQUESTED`.
+- **G6 — Wrong-cost guard.** When a proof has a load-bearing behavior/
+  responsiveness assertion AND a secondary structural assertion, `APPROVED`
+  requires the LOAD-BEARING one to be the green thing. A green secondary
+  (scan-count, node-present) with a red/absent primary (stall budget, visible
+  behavior) ⇒ `CHANGES REQUESTED` (the #796 three-approvals trap).
+
+## Three verdicts: APPROVED / CHANGES REQUESTED / BLOCKED
+
+Post exactly one. **BLOCKED** (new, per G4) = the change may be correct but the
+required on-device/journey proof cannot be produced this run (emulator down,
+journey infra stalled). It is NOT an approval — the orchestrator does NOT merge a
+BLOCKED slice; it holds until the proof is producible (e.g. after the journey
+infra is fixed). Never downgrade a BLOCKED to APPROVED on a JVM proxy.
+
 ## Workflow
 
 1. Read `agents.md` in the repo root for process context.
@@ -82,7 +127,7 @@ comes back broken. Internalise these:
    that a test found a node.
 7. Verify each `- [ ]` acceptance-criterion item explicitly. Each gets a one-line verdict in your comment.
 8. Look beyond the acceptance criteria for: bugs, missing tests, dead code, scope creep, security issues, style drift, version-catalog mismatches, anything touched outside scope.
-9. Post a single review comment on the issue, starting with `APPROVED` or `CHANGES REQUESTED`:
+9. Post a single review comment on the issue, starting with `APPROVED`, `CHANGES REQUESTED`, or `BLOCKED` (per G4):
    ```bash
    gh issue comment N --body "$(cat <<'COMMENT_EOF'
    APPROVED
@@ -132,6 +177,10 @@ Blocking (must be `CHANGES REQUESTED`):
   (see "Active-rework adjacency sweep")
 - **Any acceptance criterion left UNPROVEN** (not run, not seen, no artifact) —
   unproven is not the same as passing
+- **Any G1–G6 universal gate violated** (no reviewer-run red→green on a defect
+  fix; class not covered; `0 tests completed` accepted; JVM-only proxy for a
+  user-facing fix → use BLOCKED; uncaptured "flake" hand-wave; load-bearing
+  assertion not the green one)
 
 Non-blocking (file as follow-up, do NOT reject for these):
 

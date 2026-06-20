@@ -6,14 +6,14 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -86,41 +86,62 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class ReconnectRepaintE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    // Issue #788: createAndroidComposeRule<MainActivity>() (not
+    // createEmptyComposeRule + hand-rolled ActivityScenario.launch) fixes the
+    // #470 swiftshader interop-placement stall. The rule launches MainActivity in
+    // its `before()`, so the DB host row + remote session are seeded BEFORE launch
+    // by [SeedBeforeLaunchRule] in the chain.
+    val compose = createAndroidComposeRule<MainActivity>()
 
+    // Issue #470 blocker #1 (grant) + #788 seed-before-launch ordering:
+    //   grant perms -> seed remote session + DB host row -> launch MainActivity.
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private lateinit var fixtureKey: String
+    private lateinit var hostRowTag: String
+
+    // Baseline sshd workers captured BEFORE the app connects (in the seed phase),
+    // so the test body can identify the app's worker by set-difference.
+    private var baselineSshdPids: Set<Int> = emptySet()
+
     private val timings = mutableListOf<String>()
 
     @After
     fun closeLaunchedActivity() {
-        launchedActivity?.close()
-        launchedActivity = null
-        runBlocking { runCatching { cleanupRemoteTmuxSession(readFixtureKey()) } }
+        // Issue #788: restore RESUMED before the rule's auto-close so close()
+        // does not crash if the body left the scenario in a non-RESUMED state.
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+        runBlocking {
+            if (::fixtureKey.isInitialized) {
+                runCatching { cleanupRemoteTmuxSession(fixtureKey) }
+            }
+        }
+    }
+
+    /**
+     * Issue #788: seed remote tmux session + DB host row BEFORE MainActivity
+     * launches (run by [SeedBeforeLaunchRule]). Also captures the baseline sshd
+     * worker PIDs before the app connects so the body's set-difference is valid.
+     */
+    private suspend fun seedBeforeLaunch() {
+        val key = readFixtureKey()
+        fixtureKey = key
+        waitForSshFixtureReady(SshKey.Pem(key))
+        baselineSshdPids = listSshdPidsForTestuser(key)
+        seedAltScreenSession(key)
+        hostRowTag = seedDockerHost(key)
     }
 
     @Test
     fun reconnectRepaintsFullPaneContentNotJustLiveDeltas() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-
-        // Baseline sshd workers BEFORE the app connects, so we can identify the
-        // app's worker by set-difference once it attaches.
-        val baselineSshdPids = listSshdPidsForTestuser(key)
-        seedAltScreenSession(key)
-
-        val hostRowTag = seedDockerHost(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        val key = fixtureKey
 
         // ---- (1) Tap host, attach to the seeded session.
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        waitForHostRowPresent(hostRowTag)
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         waitForText(SEEDED_SESSION, timeoutMs = 20_000)
         compose.onNodeWithText(SEEDED_SESSION).performClick()
@@ -329,16 +350,35 @@ class ReconnectRepaintE2eTest {
 
     private fun waitForText(text: String, timeoutMs: Long) {
         compose.waitUntil(timeoutMillis = timeoutMs) {
-            compose.onAllNodesWithText(text, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+            // Issue #788: tolerate the transient "No compose hierarchies found"
+            // ISE on the first frames before composition registers.
+            runCatching {
+                compose.onAllNodesWithText(text, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+    }
+
+    /**
+     * Issue #788: cold-compose-aware host-row presence poll under
+     * createAndroidComposeRule (MainActivity's cold compose can take ~28s on a
+     * contended swiftshader emulator). Early-exits the instant the row appears.
+     */
+    private fun waitForHostRowPresent(hostRowTag: String) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
     }
 
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -348,7 +388,7 @@ class ReconnectRepaintE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -389,7 +429,7 @@ class ReconnectRepaintE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

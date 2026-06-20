@@ -10,14 +10,14 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -119,16 +119,35 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class MultiSessionSwitchJourneyE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    // Issue #788: `createAndroidComposeRule<MainActivity>()` (NOT
+    // `createEmptyComposeRule()` + a hand-rolled `ActivityScenario.launch`) so
+    // the Compose test clock drives the SAME foreground MainActivity the Termux
+    // `TerminalView` AndroidView interop child is placed into — fixing the #470
+    // swiftshader interop-placement / enumeration stall (the TerminalView never
+    // PLACED into the window). The rule launches MainActivity in its own
+    // `before()` phase, so the DB host row + remote tmux sessions must be seeded
+    // BEFORE launch — done by [SeedBeforeLaunchRule] in the RuleChain below.
+    val compose = createAndroidComposeRule<MainActivity>()
 
-    // Issue #470 blocker #1: grant runtime permissions before the activity
-    // launches so the system GrantPermissionsActivity never steals focus
-    // from the Compose hierarchy ("No compose hierarchies found").
+    // Issue #470 blocker #1: grant runtime permissions before MainActivity
+    // launches so the system GrantPermissionsActivity never steals focus from
+    // the Compose hierarchy ("No compose hierarchies found").
+    //
+    // Issue #788 seed-before-launch ordering (deterministic via RuleChain —
+    // outer `before()` first):
+    //   1. PreGrantPermissionsRule  — grant runtime perms (no focus theft)
+    //   2. SeedBeforeLaunchRule      — seed remote tmux sessions + DB host row
+    //   3. compose                   — launch MainActivity (reads populated DB)
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { description -> seedForCurrentTest(description.methodName) })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    // Resolved during [seedForCurrentTest], read by the test bodies after launch.
+    private lateinit var fixtureKey: String
+    private lateinit var hostRowTag: String
+
     private val timings = mutableListOf<String>()
 
     private val pickerWaitMs: Long =
@@ -136,37 +155,64 @@ class MultiSessionSwitchJourneyE2eTest {
 
     @After
     fun closeLaunchedActivity() {
-        launchedActivity?.close()
-        launchedActivity = null
-        runBlocking {
-            runCatching { cleanupSeededSessions(readFixtureKey()) }
+        // Issue #788: the body cycles the rule-owned scenario to CREATED during
+        // bg->fg grace tests; restore it to RESUMED before the compose rule's own
+        // `after()` -> ActivityScenario.close() runs, so close() does not crash
+        // with "Current state was null … Last stage = STARTED" (the FATAL
+        // AndroidRuntime "Process crashed" the reviewer hit). Best-effort: if the
+        // activity is already gone, close() becomes a no-op rather than a crash.
+        runCatching {
+            compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         }
+        runBlocking {
+            if (::fixtureKey.isInitialized) {
+                runCatching { cleanupSeededSessions(fixtureKey) }
+            }
+        }
+    }
+
+    /**
+     * Issue #788: seed lambda invoked by [SeedBeforeLaunchRule] in the rule's
+     * `before()` phase, BEFORE [compose] launches MainActivity. The seed varies
+     * per test method (plain three-session vs. distinct-project), so we dispatch
+     * on the method name carried by the rule's [org.junit.runner.Description].
+     * Each branch establishes the remote tmux sessions + DB host row and the
+     * flat host-detail view mode + clears logcat — exactly the work the bodies
+     * used to do inline before `ActivityScenario.launch`.
+     */
+    private suspend fun seedForCurrentTest(methodName: String) {
+        val key = readFixtureKey()
+        fixtureKey = key
+        waitForSshFixtureReady(SshKey.Pem(key))
+        when (methodName) {
+            "backToPickerThenOpenShowsSingleTargetIdentityNeverStaleProjectCrumb" -> {
+                seedTmuxSessionsInDistinctProjects(key)
+                hostRowTag = seedDockerHost(key, "Issue686 Single Identity")
+            }
+            "firstOpenFromHostDetailReusesWarmLeaseNoFreshHandshake" -> {
+                seedTmuxSessions(key)
+                hostRowTag = seedDockerHost(key, "Issue620 First Open")
+            }
+            else -> {
+                seedTmuxSessions(key)
+                hostRowTag = seedDockerHost(key, "Issue638 Multi Switch")
+            }
+        }
+        forceFlatHostDetailViewMode()
+        // Clear logcat so the reconnect-trigger scan only counts connect attempts
+        // that happen during THIS test's switches, not a sibling's.
+        clearLogcat()
     }
 
     @Test
     fun rapidMultiSessionSwitchAlwaysShowsCorrectSessionWithoutSpuriousReconnect() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-
-        // Three live sessions so the journey is A -> B -> C -> A (and beyond),
-        // exercising more than the two-session A<->B toggle the existing
-        // suite covers.
-        seedTmuxSessions(key)
-        val hostRowTag = seedDockerHost(key, "Issue638 Multi Switch")
-        forceFlatHostDetailViewMode()
-
-        // Clear logcat so the reconnect-trigger scan only counts connect
-        // attempts that happen during THIS test's switches, not a sibling's.
-        clearLogcat()
-
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        // Issue #788: the three live sessions (A/B/C) + DB host row + flat
+        // host-detail mode were already seeded BEFORE MainActivity launched, by
+        // [seedForCurrentTest] in the rule chain's `before()`. The journey is
+        // A -> B -> C -> A, exercising more than the two-session A<->B toggle.
 
         // ---- (0) Attach to the FIRST session from the host-detail list.
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        waitForHostRowPresent(hostRowTag)
         val attachAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         waitForFolderListReady(hostRowTag)
@@ -252,21 +298,9 @@ class MultiSessionSwitchJourneyE2eTest {
      */
     @Test
     fun firstOpenFromHostDetailReusesWarmLeaseNoFreshHandshake() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-
-        seedTmuxSessions(key)
-        val hostRowTag = seedDockerHost(key, "Issue620 First Open")
-        forceFlatHostDetailViewMode()
-        clearLogcat()
-
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        // Issue #788: sessions + DB host row + flat mode seeded BEFORE launch by
+        // the rule chain's `before()`.
+        waitForHostRowPresent(hostRowTag)
 
         // Open host detail — this kicks the warm-lease acquire (#370/#620). The
         // warm handshake is the ONE legitimate dial; capture the handshake count
@@ -374,24 +408,11 @@ class MultiSessionSwitchJourneyE2eTest {
      */
     @Test
     fun backToPickerThenOpenShowsSingleTargetIdentityNeverStaleProjectCrumb() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-
-        // Seed the three sessions in DISTINCT project directories so each header
-        // crumb is a DISTINCT, unambiguous project leaf (proj-a / proj-b /
-        // proj-c). With distinct crumbs a stale-crumb desync is directly visible.
-        seedTmuxSessionsInDistinctProjects(key)
-        val hostRowTag = seedDockerHost(key, "Issue686 Single Identity")
-        forceFlatHostDetailViewMode()
-        clearLogcat()
-
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        // Issue #788: the three sessions in DISTINCT project directories
+        // (proj-a / proj-b / proj-c) + DB host row + flat mode were seeded
+        // BEFORE launch by the rule chain's `before()`. With distinct crumbs a
+        // stale-crumb desync is directly visible.
+        waitForHostRowPresent(hostRowTag)
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         waitForFolderListReady(hostRowTag)
         waitForText(SESSION_A, timeoutMs = pickerWaitMs)
@@ -1035,9 +1056,37 @@ class MultiSessionSwitchJourneyE2eTest {
 
     private fun waitForText(text: String, timeoutMs: Long) {
         compose.waitUntil(timeoutMillis = timeoutMs) {
-            compose.onAllNodesWithText(text, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+            // Issue #788: under createAndroidComposeRule the first frame before
+            // the activity's composition registers (and transiently during a
+            // screen transition) throws IllegalStateException "No compose
+            // hierarchies found" instead of returning an empty node list — wrap
+            // so the poll keeps trying rather than propagating the transient ISE.
+            runCatching {
+                compose.onAllNodesWithText(text, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+    }
+
+    /**
+     * Issue #788: cold-compose-aware presence poll for the host row.
+     *
+     * `createAndroidComposeRule<MainActivity>()` launches MainActivity in the
+     * rule's `before()`; on a contended swiftshader emulator its cold compose to
+     * the HostList route can take ~28 s, so the host row genuinely is not COMPOSED
+     * within a tight 10 s budget even though it was seeded into the DB before
+     * launch. The poll uses [TerminalTestTimeouts.screenRenderPresenceTimeoutMs]
+     * (early-exits the instant the row appears) and tolerates the transient
+     * "No compose hierarchies found" ISE on the very first frames.
+     */
+    private fun waitForHostRowPresent(hostRowTag: String) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
     }
 
@@ -1187,7 +1236,7 @@ class MultiSessionSwitchJourneyE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -1317,7 +1366,7 @@ class MultiSessionSwitchJourneyE2eTest {
         // throwing on the first miss.
         var connection: InputConnection? = null
         compose.waitUntil(timeoutMillis = 30_000) {
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 if (view != null && view.currentSession != null && view.mEmulator != null) {
                     view.requestFocus()
@@ -1332,7 +1381,7 @@ class MultiSessionSwitchJourneyE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -1346,7 +1395,7 @@ class MultiSessionSwitchJourneyE2eTest {
 
     private fun terminalGridSize(): GridSize {
         var grid: GridSize? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -1364,7 +1413,7 @@ class MultiSessionSwitchJourneyE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

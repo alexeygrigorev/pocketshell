@@ -3,7 +3,7 @@ package com.pocketshell.app.proof
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -11,7 +11,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -72,46 +71,66 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class ColdRestoreGoneSessionNoResurrectE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    // Issue #788: createAndroidComposeRule<MainActivity>() so the Compose test
+    // clock drives the SAME foreground activity the Termux TerminalView interop
+    // child is placed into — fixing the #470 swiftshader interop-placement /
+    // enumeration stall. The rule launches MainActivity in its `before()`, so the
+    // remote tmux session + DB host row are seeded BEFORE launch by the chain.
+    // The rule-owned scenario also drives `recreate()` (the process-death restore
+    // path) in the body — the rule tracks the recreated activity.
+    val compose = createAndroidComposeRule<MainActivity>()
 
+    // Issue #470 blocker #1 (grant) + #788 seed-before-launch ordering:
+    //   grant perms -> clear prefs + seed remote session + DB host row -> launch.
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private lateinit var fixtureKey: String
+    private lateinit var hostRowTag: String
     private val timings = mutableListOf<String>()
 
     @After
     fun tearDown() {
-        launchedActivity?.close()
-        launchedActivity = null
+        // Issue #788: restore RESUMED before the rule's auto-close so close()
+        // does not crash if the body left the recreated scenario non-RESUMED.
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
         runBlocking {
-            runCatching { killRemoteSession(readFixtureKey()) }
+            if (::fixtureKey.isInitialized) {
+                runCatching { killRemoteSession(fixtureKey) }
+            }
         }
         clearLastSessionPrefs()
     }
 
-    @Test
-    fun coldRestoreToKilledSessionDoesNotRecreateAndLandsOnList() = runBlocking {
+    /**
+     * Issue #788: clear last-session prefs + seed the remote tmux session + DB
+     * host row BEFORE MainActivity launches (run by [SeedBeforeLaunchRule]). The
+     * pref clear must precede launch so MainActivity reads a clean baseline (the
+     * test then persists the last session itself via the lifecycle path). Both
+     * test methods seed identically.
+     */
+    private suspend fun seedBeforeLaunch() {
         val key = readFixtureKey()
+        fixtureKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
         clearLastSessionPrefs()
-
-        // Real tmux session, named to match a picker entry so the normal
-        // attach journey can reach it. The `tmux` shim delegates to the real
-        // binary, so has-session / kill-session are authoritative.
+        // Real tmux session, named to match a picker entry so the normal attach
+        // journey can reach it. The `tmux` shim delegates to the real binary, so
+        // has-session / kill-session are authoritative.
         seedTmuxSession(key)
         assertTrue("seeded session must be alive before the journey", sessionAlive(key))
+        hostRowTag = seedDockerHost(key)
+    }
 
-        val hostRowTag = seedDockerHost(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+    @Test
+    fun coldRestoreToKilledSessionDoesNotRecreateAndLandsOnList() = runBlocking {
+        val key = fixtureKey
 
         // ---- (1) Attach to the seeded session via the normal journey.
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        waitForHostRowPresent(hostRowTag)
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         waitForText(SEEDED_SESSION, timeoutMs = 20_000)
         compose.onNodeWithText(SEEDED_SESSION).performClick()
@@ -119,7 +138,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
         // ---- (2) Background -> onStop persists the last session (#177).
         val stopAt = SystemClock.elapsedRealtime()
-        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         delay(LIFECYCLE_DRAIN_MS)
         recordTiming("stop_drain_ms", SystemClock.elapsedRealtime() - stopAt)
 
@@ -137,8 +156,8 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         // process-death cold-restore path reads the persisted snapshot and
         // attaches ColdRestore.
         val resumeAt = SystemClock.elapsedRealtime()
-        launchedActivity?.recreate()
-        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        compose.activityRule.scenario.recreate()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         recordTiming("recreate_ms", SystemClock.elapsedRealtime() - resumeAt)
 
         // ---- (5) Give the cold-restore attach-only preflight time to run,
@@ -218,29 +237,17 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
      */
     @Test
     fun deletingActiveSessionDoesNotAutoOpenItOnResume() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-        clearLastSessionPrefs()
-
-        seedTmuxSession(key)
-        assertTrue("seeded session must be alive before the journey", sessionAlive(key))
-
-        val hostRowTag = seedDockerHost(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        val key = fixtureKey
 
         // ---- (1) Attach to the seeded session via the normal journey.
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        waitForHostRowPresent(hostRowTag)
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         waitForText(SEEDED_SESSION, timeoutMs = 20_000)
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
 
         // ---- (2) Background -> onStop persists the last session (#177).
-        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         delay(LIFECYCLE_DRAIN_MS)
 
         // ---- (3) DELETE the session: kill it server-side AND broadcast the
@@ -257,7 +264,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         // The activity is in CREATED (still STARTED-collected? no — CREATED is
         // below STARTED). Bring it to STARTED so the repeatOnLifecycle observer
         // is collecting, emit the kill, then let it drain.
-        launchedActivity?.moveToState(Lifecycle.State.STARTED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.STARTED)
         delay(LIFECYCLE_DRAIN_MS)
         entryPoint.sessionLifecycleSignals().emitKilled(killedHostId, SEEDED_SESSION)
         delay(LIFECYCLE_DRAIN_MS)
@@ -286,8 +293,8 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         )
 
         // ---- (4) Resume via recreate -> process-death cold-restore path.
-        launchedActivity?.recreate()
-        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        compose.activityRule.scenario.recreate()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
 
         // ---- (5) The app must land on the host list, NOT a deleted-session
         // screen. Give the route a moment to settle.
@@ -404,9 +411,29 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
     private fun waitForText(text: String, timeoutMs: Long) {
         compose.waitUntil(timeoutMillis = timeoutMs) {
-            compose.onAllNodesWithText(text, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+            // Issue #788: tolerate the transient "No compose hierarchies found"
+            // ISE on the first frames (and during the recreate transition) under
+            // createAndroidComposeRule.
+            runCatching {
+                compose.onAllNodesWithText(text, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+    }
+
+    /**
+     * Issue #788: cold-compose-aware host-row presence poll under
+     * createAndroidComposeRule (MainActivity cold compose can take ~28s on a
+     * contended swiftshader emulator). Early-exits the instant the row appears.
+     */
+    private fun waitForHostRowPresent(hostRowTag: String) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
     }
 

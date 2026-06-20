@@ -49,6 +49,26 @@ internal object TerminalTestTimeouts {
     private const val LOCAL_PER_CHARACTER_STALL_CEILING_MS: Long = 10_000L
     private const val CI_PER_CHARACTER_STALL_CEILING_MS: Long = 30_000L
 
+    // --- Cold-compose screen-render presence budget (issue #788) ----------
+    //
+    // `createAndroidComposeRule<MainActivity>()` launches MainActivity in the
+    // rule's `before()` phase. On a contended swiftshader emulator MainActivity's
+    // COLD compose to the HostList route is ~28 s (observed
+    // `PsStartup processElapsedMs=28248`), and the deeper host -> session-row
+    // render can exceed a flat 60 s under load. The rows genuinely exist (seeded
+    // in the DB / live in the tree) — they are simply not COMPOSED yet within a
+    // tight budget, so a navigation presence `waitUntil` times out even though
+    // nothing is wrong.
+    //
+    // This budget backs the navigation PRESENCE polls only (host-row /
+    // session-row / picker-entry "does this node exist yet"), which early-exit
+    // the instant the node appears — so a fast emulator pays nothing. It stays
+    // well under the 300 s per-test `ci-journey-suite.sh` watchdog. The local
+    // budget is still generous (90 s) to absorb a busy dev box without ever
+    // approaching the watchdog.
+    private const val LOCAL_SCREEN_RENDER_PRESENCE_TIMEOUT_MS: Long = 90_000L
+    private const val CI_SCREEN_RENDER_PRESENCE_TIMEOUT_MS: Long = 150_000L
+
     // --- Keyboard-hide ceilings (decoupled IME ack vs. layout settle) ----
     //
     // Issue #142 split the keyboard-hide responsiveness assertion into two
@@ -106,6 +126,23 @@ internal object TerminalTestTimeouts {
             CI_PER_CHARACTER_STALL_CEILING_MS
         } else {
             LOCAL_PER_CHARACTER_STALL_CEILING_MS
+        }
+
+    /**
+     * Issue #788 — timeout for a navigation PRESENCE poll (host-row /
+     * session-row / picker-entry "has this node been composed yet") under the
+     * `createAndroidComposeRule<MainActivity>()` harness, where MainActivity's
+     * cold compose to the target route can take ~28 s on a contended swiftshader
+     * emulator. The poll early-exits the instant the node appears, so a fast
+     * emulator pays nothing; the generous budget only matters when a cold/loaded
+     * emulator is slow to compose the awaited screen. Stays well under the 300 s
+     * per-test `ci-journey-suite.sh` watchdog.
+     */
+    fun screenRenderPresenceTimeoutMs(): Long =
+        if (isRunningOnCi()) {
+            CI_SCREEN_RENDER_PRESENCE_TIMEOUT_MS
+        } else {
+            LOCAL_SCREEN_RENDER_PRESENCE_TIMEOUT_MS
         }
 
     /**

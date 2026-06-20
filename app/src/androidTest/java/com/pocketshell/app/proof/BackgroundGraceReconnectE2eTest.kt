@@ -6,7 +6,7 @@ import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -15,7 +15,6 @@ import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.BACKGROUND_GRACE_MILLIS
@@ -66,48 +65,85 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class BackgroundGraceReconnectE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    // Issue #788: createAndroidComposeRule<MainActivity>() so the Compose test
+    // clock drives the SAME foreground activity the Termux TerminalView interop
+    // child is placed into — fixing the #470 swiftshader interop-placement /
+    // enumeration stall. The rule launches MainActivity in its `before()`, so the
+    // remote tmux session + DB host row are seeded BEFORE launch by the chain.
+    val compose = createAndroidComposeRule<MainActivity>()
 
+    // Issue #470 blocker #1 (grant) + #788 seed-before-launch ordering
+    // (deterministic via RuleChain — outer `before()` first):
+    //   grant perms -> seed remote session + DB host row -> launch MainActivity.
+    // NOTE: the @Before setUp() (clear prefs, install diagnostics, grace
+    // override) still runs INSIDE all rule statements, i.e. AFTER MainActivity
+    // launches. The pieces that MUST precede launch (remote seed + DB row) live
+    // in [seedBeforeLaunch]; the @Before-only state (diagnostics sink, grace
+    // override) is read lazily by the lifecycle path and is fine post-launch.
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private lateinit var fixtureKey: String
+    private lateinit var hostRowTag: String
     private var diagnostics: RecordingDiagnosticSink? = null
-    private var seededKey: String? = null
     private val timings = mutableListOf<String>()
 
     @Before
     fun setUp() {
+        // Issue #788: the diagnostics sink is installed in @Before (which runs
+        // AFTER MainActivity launches under createAndroidComposeRule). That is
+        // fine — the events the assertions read are emitted during the bg->fg
+        // cycle the body drives later, and the body clears the sink before each
+        // measured cycle. The pref/override clears that the app reads AT LAUNCH
+        // moved into [seedBeforeLaunch] so they precede the rule's launch.
+        diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+    }
+
+    /**
+     * Issue #788: establish all LAUNCH-time state BEFORE MainActivity launches
+     * (run by [SeedBeforeLaunchRule], which evaluates before the compose rule's
+     * `before()`):
+     *  - clear last-session + background-grace prefs and the grace override, so
+     *    MainActivity reads a clean baseline on its first composition (these are
+     *    read at launch — clearing them in @Before, post-launch, would be too
+     *    late);
+     *  - seed the remote tmux session + DB host row the app will attach to.
+     */
+    private suspend fun seedBeforeLaunch() {
         clearLastSessionPrefs()
         clearBackgroundGraceSetting()
         BackgroundGraceTestOverride.setForTest(null)
-        diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        val key = readFixtureKey()
+        fixtureKey = key
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSession(key)
+        hostRowTag = seedDockerHost(key)
     }
 
     @After
     fun tearDown() {
-        runCatching { launchedActivity?.close() }
-        launchedActivity = null
+        // Issue #788: the body cycles the rule-owned scenario to CREATED during
+        // the bg->fg grace cycle; restore RESUMED before the compose rule's own
+        // `after()` -> ActivityScenario.close() runs so close() does not crash
+        // with "Current state was null … Last stage = STARTED" (the FATAL
+        // AndroidRuntime "Process crashed" the reviewer hit). @After runs INSIDE
+        // the rule statement, BEFORE the rule's after(). Best-effort.
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
         BackgroundGraceTestOverride.setForTest(null)
         diagnostics?.close()
         diagnostics = null
         clearLastSessionPrefs()
         clearBackgroundGraceSetting()
-        seededKey?.let { key ->
-            runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }
+        if (::fixtureKey.isInitialized) {
+            runCatching { runBlocking { cleanupRemoteTmuxSession(fixtureKey) } }
         }
     }
 
     @Test
     fun quickAppSwitchWithinBackgroundGraceDoesNotShowOrRecordReconnect() = runBlocking<Unit> {
-        val key = readFixtureKey()
-        seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
-        seedTmuxSession(key)
-
-        val hostRowTag = seedDockerHost(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
@@ -119,10 +155,10 @@ class BackgroundGraceReconnectE2eTest {
         // but foreground arrives before the short injected window elapses.
         BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
         val withinStart = SystemClock.elapsedRealtime()
-        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         waitForDiagnostic("background_grace_start", "within-grace background")
         waitForClientCountAtLeast(1, "inside grace before foreground")
-        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         waitForDiagnostic("background_grace_foreground", "within-grace foreground") {
             it.fields["withinGrace"] == true
         }
@@ -143,13 +179,13 @@ class BackgroundGraceReconnectE2eTest {
         diagnostics!!.clear()
         BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
         val postStart = SystemClock.elapsedRealtime()
-        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         waitForDiagnostic("background_grace_elapsed", "post-grace elapsed") {
             it.fields["teardown"] == true
         }
         waitForDiagnostic("terminal_background_teardown", "post-grace teardown")
         waitForClientCountAtMost(0, "post-grace detached")
-        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         waitForDiagnostic("background_grace_foreground", "post-grace foreground") {
             it.fields["withinGrace"] == false
         }
@@ -164,13 +200,6 @@ class BackgroundGraceReconnectE2eTest {
 
     @Test
     fun sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect() = runBlocking<Unit> {
-        val key = readFixtureKey()
-        seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
-        seedTmuxSession(key)
-
-        val hostRowTag = seedDockerHost(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
@@ -185,7 +214,7 @@ class BackgroundGraceReconnectE2eTest {
         // reconnect/reattach diagnostic emitted during the cycle.
         BackgroundGraceTestOverride.setForTest(null)
         val switchStart = SystemClock.elapsedRealtime()
-        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         waitForDiagnostic("background_grace_start", "six-second production-grace background") {
             (it.fields["millis"] as? Number)?.toLong() == BACKGROUND_GRACE_MILLIS
         }
@@ -196,7 +225,7 @@ class BackgroundGraceReconnectE2eTest {
             diagnostics!!.eventsNamed("background_grace_elapsed").isEmpty(),
         )
 
-        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         assertNoVisibleReconnect("immediately after six-second production-grace foreground")
         waitForDiagnostic("background_grace_foreground", "six-second production-grace foreground") {
@@ -219,16 +248,24 @@ class BackgroundGraceReconnectE2eTest {
     }
 
     private fun attachSeededTmuxSession(hostRowTag: String) {
-        compose.waitUntil(timeoutMillis = 15_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        // Issue #788: cold-compose-aware presence budget + tolerate the transient
+        // "No compose hierarchies found" ISE on the first frames under
+        // createAndroidComposeRule (MainActivity cold compose can take ~28s on a
+        // contended swiftshader emulator). Early-exits the instant the row appears.
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
-            compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -238,7 +275,7 @@ class BackgroundGraceReconnectE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -259,7 +296,7 @@ class BackgroundGraceReconnectE2eTest {
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
         var status: TmuxSessionViewModel.ConnectionStatus =
             TmuxSessionViewModel.ConnectionStatus.Idle
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             status = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
                 .connectionStatus
                 .value
@@ -283,7 +320,7 @@ class BackgroundGraceReconnectE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -480,7 +517,7 @@ class BackgroundGraceReconnectE2eTest {
     }
 
     private suspend fun listClientsRaw(): String {
-        val key = requireNotNull(seededKey)
+        val key = fixtureKey
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
             port = DEFAULT_PORT,
@@ -587,7 +624,7 @@ class BackgroundGraceReconnectE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

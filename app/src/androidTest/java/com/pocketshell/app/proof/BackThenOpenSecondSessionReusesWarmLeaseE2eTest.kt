@@ -6,7 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -14,8 +14,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -109,16 +109,24 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    // Issue #788: createAndroidComposeRule<MainActivity>() so the Compose test
+    // clock drives the SAME foreground activity the Termux TerminalView interop
+    // child is placed into — fixing the #470 swiftshader interop-placement /
+    // enumeration stall. The rule launches MainActivity in its `before()`, so the
+    // two live tmux sessions + watched-root DB host row are seeded BEFORE launch
+    // by the chain.
+    val compose = createAndroidComposeRule<MainActivity>()
 
-    // Issue #470 blocker #1: grant runtime permissions before the activity
-    // launches so the system GrantPermissionsActivity never steals focus from
-    // the Compose hierarchy ("No compose hierarchies found").
+    // Issue #470 blocker #1 (grant) + #788 seed-before-launch ordering:
+    //   grant perms -> seed two remote sessions + watched-root DB host -> launch.
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private lateinit var fixtureKey: String
+    private lateinit var hostRowTag: String
     private val timings = mutableListOf<String>()
 
     private val pickerWaitMs: Long =
@@ -126,37 +134,46 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
 
     @After
     fun tearDown() {
+        // Issue #788: restore RESUMED before the rule's auto-close so close()
+        // does not crash if the body left the scenario in a non-RESUMED state.
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
         // Always disarm the test hook so a failure mid-test cannot leak a forced
         // symptom into a sibling test sharing the process.
         SshFolderListGateway.forcedStaleChannelSymptoms.set(0)
-        launchedActivity?.close()
-        launchedActivity = null
-        runBlocking { runCatching { cleanupSeededSessions(readFixtureKey()) } }
+        runBlocking {
+            if (::fixtureKey.isInitialized) {
+                runCatching { cleanupSeededSessions(fixtureKey) }
+            }
+        }
     }
 
-    @Test
-    fun backThenOpenSecondSessionReusesWarmLeaseNoReconnect() = runBlocking {
+    /**
+     * Issue #788: seed two live remote tmux sessions (A, B) + a watched-root DB
+     * host row BEFORE MainActivity launches (run by [SeedBeforeLaunchRule]). Also
+     * disarms the forced stale-channel hook so the seed phase starts clean.
+     */
+    private suspend fun seedBeforeLaunch() {
         SshFolderListGateway.forcedStaleChannelSymptoms.set(0)
         val key = readFixtureKey()
+        fixtureKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
-
         seedTmuxSessions(key)
         // Seed a watched root so the picker discovery poll ALWAYS runs the
         // SSH-lease path (the watched-root expansion), which is the lease the
         // eviction would poison. The path need not exist on the remote — the
         // expansion best-effort-degrades — it only needs to make
         // `watchedRoots.isEmpty()` false so the lease path runs every poll.
-        val hostRowTag = seedDockerHostWithWatchedRoot(key, "Issue758 Back Open")
+        hostRowTag = seedDockerHostWithWatchedRoot(key, "Issue758 Back Open")
         forceFlatHostDetailViewMode()
+    }
 
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+    @Test
+    fun backThenOpenSecondSessionReusesWarmLeaseNoReconnect() = runBlocking {
+        // Issue #788: sessions + watched-root host seeded BEFORE launch by the
+        // rule chain's `before()`; the forced-symptom hook was disarmed there too.
 
         // ---- (0) Open the FIRST session A from the host-detail picker.
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        waitForHostRowPresent(hostRowTag)
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         // Pass the #740 re-poke recovery so a cold-AVD first-open enumeration
         // stall (#470 infra) self-heals (Back to the host list + re-tap) instead
@@ -451,6 +468,23 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
     }
 
     /**
+     * Issue #788: cold-compose-aware host-row presence poll under
+     * createAndroidComposeRule (MainActivity cold compose can take ~28s on a
+     * contended swiftshader emulator). Early-exits the instant the row appears,
+     * and tolerates the transient "No compose hierarchies found" ISE on the very
+     * first frames before composition registers.
+     */
+    private fun waitForHostRowPresent(hostRowTag: String) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+    }
+
+    /**
      * Issue #740 first-open enumeration-stall recovery: pop Back to the host
      * list (via the folder-list back affordance), wait for the host row, then
      * re-tap it to re-trigger the warm-lease acquire + `tmux list-sessions`
@@ -517,7 +551,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -572,7 +606,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -586,7 +620,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
 
     private fun terminalGridSize(): GridSize {
         var grid: GridSize? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -604,7 +638,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

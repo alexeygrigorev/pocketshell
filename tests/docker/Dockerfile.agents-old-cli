@@ -17,6 +17,14 @@ FROM alpine:latest
 # from /opt/pocketshell-agent-fixture-version (env does not survive sshd exec).
 ARG OLD_CLI_FIXTURE_VERSION=0.4.9
 
+# Issue #849: the connect-path RPC failure MODE the old-CLI stub applies to
+# `tree` / `agents kind` / `profiles`. Baked to a file (sshd does not preserve a
+# container ENV) the stub reads at exec time. Default `unknown` keeps the #847
+# behaviour (Click rejects the unknown subcommand); a fixture built with
+# `--build-arg OLD_CLI_MODE=hang` or `=slow` reproduces the wedged / slow-
+# responding connect-path host instead — covering the WHOLE connect-break class.
+ARG OLD_CLI_MODE=unknown
+
 RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
@@ -55,6 +63,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-agent-entrypoint \
     && printf '%s\n' "$OLD_CLI_FIXTURE_VERSION" > /opt/pocketshell-agent-fixture-version \
+    && printf '%s\n' "$OLD_CLI_MODE" > /opt/pocketshell-old-cli-mode \
     && chown -R testuser:testuser /home/testuser/.ssh
 
 EXPOSE 22

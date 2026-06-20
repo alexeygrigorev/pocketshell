@@ -19,7 +19,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeFalse
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -52,15 +51,17 @@ import java.io.FileOutputStream
  * `tree get` errors); after the fix the hydrate degrades gracefully and the
  * freshening reconcile runs in a `finally`, so the live tree renders.
  *
- * ## CI gating
+ * ## CI gating (issue #849 — this test now RUNS on CI)
  *
- * The default GitHub `emulator-journey` workflow starts only the `agents`
- * fixture on 2222, not `agents-old-cli` on 2238, so this test is gated with
- * `assumeFalse(isRunningOnCi())`. The always-runnable backstop for the same
- * property is the JVM `FolderListViewModelOldCliHydrateTest` (wired into the
- * per-push Unit job). This connected test is documented for the pre-release
- * confidence gate (`scripts/pre-release-confidence-gate.sh`), which brings up
- * `agents-old-cli` so a CLI-mismatch connect-hang is caught before any tag.
+ * Previously this test self-skipped with `assumeFalse(isRunningOnCi())` because
+ * the GitHub `emulator-journey` workflow started only the `agents` fixture on
+ * 2222. As of #849 that workflow ALSO brings up `agents-old-cli` on 2238 and
+ * adds this class to `scripts/ci-journey-suite.sh::JOURNEY_CLASSES`, so the
+ * self-skip is GONE — this connected test IS the per-PR + pre-release regression
+ * net for the v0.4.10 connect-break (old host CLI → "loading tree" hang). The
+ * pre-release confidence gate (`scripts/pre-release-confidence-gate.sh`) also
+ * brings up 2238. The JVM `FolderListViewModelOldCliHydrateTest` (per-push Unit
+ * job) remains the always-runnable backstop.
  *
  * Docker service: `agents-old-cli` on host port `2238`.
  */
@@ -76,16 +77,12 @@ class FolderListOldCliHydrateDockerTest {
 
     @Before
     fun setUp(): Unit = runBlocking {
-        // The old-CLI fixture (port 2238) is not part of the default CI
-        // emulator-journey workflow; the JVM test is the CI backstop.
-        // JUSTIFIED: genuine opt-in Docker-fixture skip — this connect-hang
-        // repro needs the agents-old-cli fixture (no `tree` command) on 2238,
-        // which CI does not start; FolderListViewModelOldCliHydrateTest (JVM,
-        // per-push) is the gated backstop. (#850 C1 escape hatch.)
-        assumeFalse(
-            "agents-old-cli fixture (port $OLD_CLI_PORT) is not started by the default CI workflow",
-            com.pocketshell.app.proof.TerminalTestTimeouts.isRunningOnCi(),
-        )
+        // Issue #849: NO assumeFalse(isRunningOnCi()) self-skip. The
+        // emulator-journey workflow (and the pre-release gate) now start the
+        // agents-old-cli fixture on 2238, so this connect-break regression
+        // RUNS on CI. waitForSshFixtureReady below HARD-fails fast if 2238 is
+        // unreachable, so a missing fixture surfaces loudly instead of a vacuous
+        // skip — process.md G3/G10.
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets

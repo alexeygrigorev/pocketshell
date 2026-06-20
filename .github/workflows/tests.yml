@@ -220,10 +220,21 @@ jobs:
   #
   # This is intentionally the FAST subset (scripts/ci-journey-suite.sh), not the
   # full connected suite — the heavy/long-running + toxiproxy network-fault +
-  # bootstrap-matrix suites stay in nightly-extensive.yml. The selected proof
-  # needs no toxiproxy proxy family, so this job brings up ONLY the
-  # deterministic `agents` fixture, keeping it deterministic (the maintainer
-  # already gets CI email spam — a flaky per-push job would make that worse).
+  # bootstrap-matrix suites stay in nightly-extensive.yml. The selected proofs
+  # need no toxiproxy proxy family, so this job brings up only the deterministic
+  # `agents` (2222) fixture plus the deterministic `agents-old-cli` (2238, issue
+  # #849) fixture — both plain SSH/tmux, keeping the job deterministic (the
+  # maintainer already gets CI email spam — a flaky per-push job would make that
+  # worse).
+  #
+  # Issue #849 (epic #848, ADDED): the v0.4.10 connect-break regression tests
+  # (FolderListOldCliHydrateDockerTest + FolderListBootstrapSkipTreeLoadsDockerTest)
+  # + the #759 agent-launch version-mismatch guard
+  # (AgentLaunchVersionMismatchHintE2eTest) are now in scripts/ci-journey-suite.sh.
+  # The two old-CLI Docker tests need a host whose `pocketshell` CLI is OLDER than
+  # the client, so this job now ALSO starts the `agents-old-cli` fixture on host
+  # port 2238 (below). Before this, those tests self-skipped on CI and the whole
+  # connect-break class was structurally invisible to CI — the exact #848 gate gap.
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
     runs-on: ubuntu-latest
@@ -473,8 +484,10 @@ jobs:
       # BackgroundGraceReconnect, plus the share-auth pair ShareTarget +
       # SharePassphraseDialog promoted in #727) all drive the plain deterministic
       # `agents` fixture on host port 2222 (emulator 10.0.2.2:2222) and NONE of
-      # them need the opt-in toxiproxy network-fault proxies. Bring up ONLY
-      # `agents` so the job is deterministic.
+      # them need the opt-in toxiproxy network-fault proxies. Bring up `agents`
+      # (2222) plus the deterministic `agents-old-cli` (2238, issue #849) fixture
+      # below — both are plain SSH/tmux fixtures with NO toxiproxy, so the job
+      # stays deterministic.
       - name: Start Docker fixture (agents)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents
@@ -495,6 +508,40 @@ jobs:
             -o UserKnownHostsFile=/dev/null \
             testuser@127.0.0.1 \
             'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
+
+      # Issue #849 (epic #848): bring up the OLD-CLI fixture on host port 2238 so
+      # the v0.4.10 connect-break regression tests
+      # (FolderListOldCliHydrateDockerTest + FolderListBootstrapSkipTreeLoadsDockerTest)
+      # actually RUN on CI. The fixture's `pocketshell` is OLDER than the client
+      # (no `tree` / `agents kind` subcommands) and reports an older `--version`,
+      # so it reproduces the maintainer's 0.4.9-host scenario (cold-start hydrate
+      # errors + the bootstrap "Host setup needed" sheet on connect). Without
+      # this fixture started, those tests self-skipped on CI and the whole
+      # connect-break class was structurally invisible to CI (the #848 gate gap).
+      - name: Start Docker fixture (agents-old-cli, issue #849)
+        run: |
+          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents-old-cli
+
+      - name: Wait for the agents-old-cli fixture to report healthy
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents-old-cli /tmp/agents-old-cli-health.log 60
+          cat /tmp/agents-old-cli-health.log
+
+      # Confirm the 2238 fixture really IS an old CLI (rejects `tree` with a
+      # non-zero exit) while staying live (tmux works), so the regression tests
+      # exercise the real CLI-mismatch path and never pass vacuously against a
+      # fixture that silently accepted the new subcommand.
+      - name: Verify agents-old-cli is a CLI mismatch (issue #849)
+        run: |
+          chmod 600 tests/docker/test_key
+          ssh -i tests/docker/test_key -p 2238 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=3 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'pocketshell tree get </dev/null; rc=$?; if [ "$rc" -eq 0 ]; then echo "old-cli fixture unexpectedly accepted tree get (rc=0)" >&2; exit 1; fi; tmux -V >/dev/null && echo "old-cli mismatch confirmed: tree get rc=$rc, host still live"'
 
       # Issue #760: the journey job intermittently failed with
       # "WARNING | Failed to load snapshot 'default_boot'" followed by
@@ -648,6 +695,9 @@ jobs:
           docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log 2>/dev/null || true
           docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
+          # Issue #849: also capture the old-CLI (2238) fixture diagnostics.
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents-old-cli > artifacts/docker/agents-old-cli.log 2>/dev/null || true
+          docker inspect pocketshell-test-agents-old-cli > artifacts/docker/agents-old-cli-inspect.json 2>/dev/null || true
 
       - name: Publish journey suite summary
         if: always()

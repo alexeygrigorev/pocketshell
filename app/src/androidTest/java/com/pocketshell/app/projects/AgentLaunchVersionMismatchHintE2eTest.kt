@@ -2,18 +2,13 @@ package com.pocketshell.app.projects
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.core.ssh.ExecResult
-import com.pocketshell.core.ssh.SshPortForward
-import com.pocketshell.core.ssh.SshSession
-import com.pocketshell.core.ssh.SshShell
-import kotlinx.coroutines.Job
+import com.pocketshell.app.proof.FakeOldHostSshSession
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
-import java.io.InputStream
 
 /**
  * On-device (instrumented) proof for issue #759: when the host's `pocketshell`
@@ -45,7 +40,11 @@ class AgentLaunchVersionMismatchHintE2eTest {
     @Test
     fun outdatedHostAgentLaunchSurfacesFriendlyHintOnDevice(): Unit = runBlocking {
         val gateway = SshFolderListGateway()
-        val session = OutdatedHostFakeSession()
+        // Reusable extracted seam (issue #853): an old host that rejects the
+        // new-in-this-release subcommands (here: `agent`, surfaced by the
+        // launch pre-flight). The default installed version (0.3.33) predates
+        // the `agent` subcommand — the #759 maintainer dogfood host.
+        val session = FakeOldHostSshSession()
 
         val error = runCatching {
             gateway.createSessionOnSession(
@@ -63,7 +62,10 @@ class AgentLaunchVersionMismatchHintE2eTest {
         // The friendly, actionable hint — names the installed version, the
         // required minimum, and a copyable update command.
         assertTrue("expected a surfaced failure, got $error", error is RuntimeException)
-        assertTrue("hint must name installed version: $hint", hint.contains("0.3.33"))
+        assertTrue(
+            "hint must name installed version: $hint",
+            hint.contains(FakeOldHostSshSession.DEFAULT_OLD_VERSION),
+        )
         assertTrue(
             "hint must name required minimum: $hint",
             hint.contains(AgentLaunchVersionCheck.MIN_AGENT_POCKETSHELL_VERSION),
@@ -107,59 +109,5 @@ class AgentLaunchVersionMismatchHintE2eTest {
                 commands.forEach { appendLine(it) }
             },
         )
-    }
-
-    /**
-     * An on-device fake [SshSession] for an OUTDATED host: the start-directory
-     * probe and the capped create succeed, but `pocketshell agent --help`
-     * answers with Click's `No such command 'agent'` and `pocketshell
-     * --version` reports the pre-0.3.34 version. Records every command so the
-     * test can assert no doomed `send-keys` was issued.
-     */
-    private class OutdatedHostFakeSession : SshSession {
-        val execCommands = mutableListOf<String>()
-
-        override val isConnected: Boolean = true
-
-        override suspend fun exec(command: String): ExecResult {
-            execCommands += command
-            return when {
-                command.contains("test -d") ->
-                    ExecResult(stdout = "", stderr = "", exitCode = 0)
-                command.contains("create-detached") || command.contains("new-session") ->
-                    ExecResult(stdout = "", stderr = "", exitCode = 0)
-                command.contains("pocketshell agent --help") ->
-                    ExecResult(
-                        stdout = "",
-                        stderr = "Error: No such command 'agent'. " +
-                            "(Did you mean one of: 'agent-log', 'usage'?)",
-                        exitCode = 2,
-                    )
-                command.contains("pocketshell --version") ->
-                    ExecResult(stdout = "pocketshell, version 0.3.33", stderr = "", exitCode = 0)
-                else -> ExecResult(stdout = "", stderr = "", exitCode = 0)
-            }
-        }
-
-        override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
-
-        override fun openLocalPortForward(
-            remoteHost: String,
-            remotePort: Int,
-            localPort: Int,
-        ): SshPortForward = error("not used")
-
-        override fun startShell(): SshShell = error("not used")
-
-        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
-
-        override suspend fun uploadStream(
-            input: InputStream,
-            length: Long,
-            name: String,
-            remotePath: String,
-        ): String = error("not used")
-
-        override fun close() = Unit
     }
 }

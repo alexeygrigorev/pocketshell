@@ -16,7 +16,6 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.SeedBeforeLaunchRule
-import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -26,7 +25,6 @@ import com.pocketshell.core.storage.entity.HostEntity
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -69,11 +67,15 @@ import org.junit.runner.RunWith
  * release → reconcile journey reaches Ready over a real SSH transport, and the
  * orchestrator re-tests against the real hetzner host before release.
  *
- * ## CI gating
+ * ## CI gating (issue #849 — this test now RUNS on CI)
  *
- * The default `emulator-journey` workflow starts only `agents` on 2222, not
- * `agents-old-cli` on 2238, so this is `assumeFalse(isRunningOnCi())`-gated. The
- * always-runnable backstop is the JVM inversion test (per-push Unit job).
+ * Previously `assumeFalse(isRunningOnCi())`-gated because the workflow started
+ * only `agents` on 2222. As of #849 the `emulator-journey` workflow ALSO brings
+ * up `agents-old-cli` on 2238 and adds this class to
+ * `scripts/ci-journey-suite.sh::JOURNEY_CLASSES`, so the self-skip is GONE — the
+ * bootstrap-Skip → warm-lease-release → tree-loads journey is now gated at PR
+ * time and in the pre-release gate. The always-runnable backstop is the JVM
+ * inversion test (per-push Unit job).
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListBootstrapSkipTreeLoadsDockerTest {
@@ -89,16 +91,13 @@ class FolderListBootstrapSkipTreeLoadsDockerTest {
 
     @Test
     fun bootstrapSkipThenTreeReachesReadyNotTimeoutPanel() {
-        // JUSTIFIED: genuine opt-in Docker-fixture skip — this bootstrap-Skip
-        // connect journey needs the agents-old-cli fixture (rejects `tree`, so
-        // the "Host setup needed" sheet appears) on port 2238, which the default
-        // CI emulator-journey workflow does not start. The always-runnable CI
-        // backstop for the same #847 timeout-inversion property is the JVM
-        // FolderListViewModelConnectTimeoutInversionTest (per-push Unit job).
-        assumeFalse(
-            "agents-old-cli fixture (port $OLD_CLI_PORT) is not started by the default CI workflow",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
+        // Issue #849: NO assumeFalse(isRunningOnCi()) self-skip. The
+        // emulator-journey workflow (and the pre-release gate) now start the
+        // agents-old-cli fixture on 2238, so this bootstrap-Skip connect journey
+        // RUNS on CI. The seedOldCliHost() SeedBeforeLaunchRule HARD-fails fast
+        // (waitForSshFixtureReady + a `tree get` non-zero require) if 2238 is
+        // unreachable, so a missing fixture surfaces loudly instead of a vacuous
+        // skip — process.md G3/G10.
 
         // Tap the seeded old-CLI host.
         compose.waitUntil(timeoutMillis = 20_000) { countTag(hostRowTag) > 0 }

@@ -503,6 +503,45 @@ JOURNEY_CLASSES=(
   # session (the reconnect/restart durability AC). It does NOT self-skip on CI.
   # Lives under com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.ManualKindWriterDockerTest"
+  # ADDED (#853, epic #848): the OUTDATED-host agent-launch friendly-hint guard
+  # (#759). When the host `pocketshell` predates the `agent` subcommand (the
+  # maintainer's v0.3.34 dogfood failure) an agent launch must surface the
+  # friendly "update pocketshell" hint — not the raw Click `No such command
+  # 'agent'` — and must NOT type the doomed launch line into the new pane. This
+  # is the ONE existing old-host guard and it previously ran in NO suite at all
+  # (epic #848 gate gap), so the version-mismatch class was invisible to CI.
+  # It drives the PRODUCTION SshFolderListGateway.createSessionOnSession against
+  # the REUSABLE on-device FakeOldHostSshSession seam (no Docker fixture, no
+  # SSH/tmux, no toxiproxy, no port) — so it needs NO tests.yml service change
+  # and runs deterministically on CI. It does NOT self-skip on CI. It lives
+  # under com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.AgentLaunchVersionMismatchHintE2eTest"
+  # ADDED (#849, epic #848): the OLD-CLI cold-start tree-HYDRATE connect proof
+  # — the gate half of the v0.4.10 P0 (#847). When the host `pocketshell` is
+  # OLDER than the client (no `tree` subcommand), the cold-start hydrate's
+  # `tree get` errors; on v0.4.10 the freshening reconcile never ran after it,
+  # so the app hung on "loading tree" and would not connect. This connected
+  # test drives the PRODUCTION FolderListViewModel + a REAL TreeRemoteSource
+  # against the dedicated `agents-old-cli` fixture (port 2238) and HARD-asserts
+  # the app leaves Loading and renders the LIVE tree (the seeded session
+  # appears) within the connect window. RED on v0.4.10; GREEN after the #847
+  # fix. The emulator-journey workflow now brings up the 2238 fixture (and the
+  # pre-release gate already did), so this no longer self-skips on CI — it IS
+  # the v0.4.10 connect-break regression net. It lives under
+  # com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest"
+  # ADDED (#849, epic #848): the OLD-CLI bootstrap-Skip → tree connect JOURNEY.
+  # Tapping a host whose CLI is older than the app raises the "Host setup
+  # needed" sheet; tapping Skip RELEASES the warm `warm-host-connect` lease and
+  # the tree's cold-start reconcile must still reach a usable state — it must
+  # NOT land on the #847 "Session list didn't load within 12000ms" error panel.
+  # This connected UI journey drives createAndroidComposeRule<MainActivity> +
+  # the #788 seed-before-launch harness against the `agents-old-cli` fixture
+  # (port 2238). RED on the un-fixed timeout-inversion; GREEN after the #847
+  # bound. Like its sibling above it no longer self-skips on CI now the 2238
+  # fixture is started by the workflow. It lives under
+  # com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.FolderListBootstrapSkipTreeLoadsDockerTest"
 )
 
 echo "=========================================================="

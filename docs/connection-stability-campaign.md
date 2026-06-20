@@ -104,12 +104,45 @@ state machines on the same edges. 3 CRITICAL / 4 HIGH / 5 MED:
   (~2min worst), manual Reconnect skipped while auto ladder active. **S7
   (LOW-MED)** — teardown correctness is convention-dependent, latent #822 risk.
 
-## Lanes L5 / L6 — end-to-end adverse-condition stress (PENDING)
+## Lane L5 — end-to-end adverse-condition stress ([#843] comment)
 
-Fresh-build emulator+Docker stress (link cuts #552, bg/fg, rapid switching,
-network on/off, long holds, voice-during-drop, reconnect storms, multi-session).
-**These quantify how often C1–C3 / S1–S7 actually bite** → decides
-ship-now-then-harden vs fix-then-ship. Results will be appended here.
+**Headline: could not get a single GREEN journey run, even isolated on a clean
+box.** Every journey stalled at attach/session-enumeration before its scenario.
+
+- **F1 (P0 → #846):** on a clean isolated `emulator-5556`, `--no-pool`,
+  `agents:2222`, no fault, low load, `rapidMultiSessionSwitch...` still FAILS —
+  the seeded tmux session never lists in the picker (`stall_repokes=2`), with the
+  `GrantPermissionsActivity` focus-theft co-symptom. **Recurrence of CLOSED
+  #470.** The per-PR journey gate is effectively RED on this box → it cannot
+  distinguish a regression from baseline → **D31 journey enforcement is broken**,
+  and reviewers fall back to JVM proofs (the #844 thoroughness root cause).
+  **#835 only bounded+relabeled the stall; it did NOT make journeys pass.**
+- **F2 (P1 → #845):** transport-up storm — one SSH lease emits 9 `up` / 1 `down`
+  in isolation (46/7 at scale). Candidate root of the flap (#794) / stale-session
+  (#686). Emitter `ConnectionEffectDriver.kt:360`.
+- **F3 (P2 infra):** sibling-lane contention (non-`--pool` lanes don't take the
+  per-serial flock; toxiproxy ports hardcoded/single-instance) poisoned scenarios
+  1/4. Recommendation: all emulator lanes use `--pool`; serialize toxiproxy.
+
+Scenario verdicts: 3 = FAIL (clean repro); 2 = BLOCKED→FAIL; 1/4 = BLOCKED
+(contention); 5/6 = NOT RUN (attach blocked by F1). **No clean reconnect-behavior
+evidence was obtainable because the journey gate itself is broken (#846).**
+
+### Release + testing implication
+The journey gate being red-on-box (#846) means: (a) the v0.4.10 release emulator
+validation likely cannot pass on this box; (b) we cannot journey-validate `main`'s
+connection stability. BUT `main` is still a strict improvement over the
+maintainer's old installed build (12 merges + the #792 C/D/E + #833 slices), and
+Unit/Integration/Python CI is green. Ship-decision is therefore a maintainer
+release-gate call: ship on non-journey evidence + #846 as a known infra
+limitation, vs block the release on #846. **#846 is the top hardening priority —
+without a runnable journey gate, every on-device claim is unverified.**
+
+## Lane L6 — multi-session / reconnect-storm e2e (results pending / contention-affected)
+
+Ran concurrently with L5 and was affected by the F3 contention (shared
+emulator + hardcoded toxiproxy ports). Treat L6 evidence as suspect until re-run
+solo after #846 unblocks the gate. Results appended when validated.
 
 ## Review-rigor meta-audit ([#844]) → locked decision D32
 

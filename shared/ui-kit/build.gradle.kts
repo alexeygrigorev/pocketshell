@@ -76,5 +76,9 @@ dependencies {
     testImplementation(libs.roborazzi.compose)
     testImplementation(libs.roborazzi.junit.rule)
     testImplementation(libs.compose.ui.test.manifest)
+    // `createComposeRule` for JVM (Robolectric) behaviour tests of the shared
+    // components — content / slot / callback assertions on the host JVM
+    // (`:shared:ui-kit:testDebugUnitTest`), no emulator needed (#756).
+    testImplementation(libs.compose.ui.test.junit4)
     testImplementation(libs.junit)
 }

@@ -126,6 +126,18 @@ import kotlinx.coroutines.launch
  *   test harness keeps its inert contract. NOTE: a [ConnectionState.Reattaching] reached
  *   from a transport DROP (the silent heal ladder) is NOT a foreground return and does
  *   NOT fire this effect — only the `Backgrounded -> Reattaching` edge does.
+ * @param foregroundReconnectEffect fired SYNCHRONOUSLY when the controller transitions
+ *   [ConnectionState.Backgrounded] -> [ConnectionState.Reconnecting] — the BEYOND-grace
+ *   foreground return (#766 slice 2a). The VM supplies the body that re-homes the inline
+ *   `reduceConnection(Foreground)` arm dispatch: it replays the stashed `pendingReattach`
+ *   (a fresh connect to the detached session) or resumes a `pausedAutoReconnect`, selected
+ *   via the inline-equivalent `reduceForeground` predicate. This is the post-grace
+ *   counterpart of [foregroundReattachEffect]: a within-grace foreground keeps the warm
+ *   `-CC` channel and reseeds; a beyond-grace foreground (lease evicted on the App-grace
+ *   teardown) re-dials. Defaults to a no-op so the observe-only test harness keeps its
+ *   inert contract. NOTE: a [ConnectionState.Reconnecting] reached from the reconnect
+ *   LADDER (a transport drop, not a foreground return) is NOT fired by this — only the
+ *   `Backgrounded -> Reconnecting` edge does.
  * @param onControllerTransition fired AFTER each driver-submitted transport event so
  *   the VM re-projects `_connectionStatus` from the controller's state (the controller
  *   is the single status source). Defaults to a no-op (tests read [observations]/
@@ -139,6 +151,7 @@ class ConnectionEffectDriver(
     private val scope: CoroutineScope,
     private val backgroundedEffect: () -> Unit = {},
     private val foregroundReattachEffect: () -> Unit = {},
+    private val foregroundReconnectEffect: () -> Unit = {},
     private val onControllerTransition: () -> Unit = {},
     // EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER gate. When this returns true, the
     // driver SUPPRESSES the `TransportDropped` submission for a control-channel drop —
@@ -174,7 +187,9 @@ class ConnectionEffectDriver(
      * Begin observing. Launches three collectors in [scope]:
      *  - [ConnectionController.state] transitions (fires [backgroundedEffect] on the
      *    Backgrounded entry — slice B1; fires [foregroundReattachEffect] on the
-     *    Backgrounded -> Reattaching within-grace foreground edge — slice 1c-iv-c #754),
+     *    Backgrounded -> Reattaching within-grace foreground edge — slice 1c-iv-c #754;
+     *    fires [foregroundReconnectEffect] on the Backgrounded -> Reconnecting
+     *    beyond-grace foreground edge — slice 2a #766),
      *  - [TmuxPort.disconnected] — the transport-drop oracle; its true-edge is
      *    submitted as [ConnectionEvent.TransportDropped] (slice B2),
      *  - [TransportPort.transportEvents] — the lease up/down edge stream; an `Up` for
@@ -223,6 +238,19 @@ class ConnectionEffectDriver(
             // transport DROP (the silent heal) is NOT a foreground return.
             if (current is ConnectionState.Reattaching && previous is ConnectionState.Backgrounded) {
                 foregroundReattachEffect()
+            }
+            // Slice 2a (#766): the driver OWNS the BEYOND-grace FOREGROUND return — the
+            // re-home of the inline `reduceConnection(Foreground)` arm dispatch. The
+            // beyond-grace foreground is the controller's Backgrounded -> Reconnecting
+            // edge (the App-grace teardown evicted the warm lease, so the controller's
+            // own grace predicate is not-warm -> Reconnecting). On that edge the driver
+            // fires the VM-supplied effect that replays `pendingReattach` / resumes a
+            // `pausedAutoReconnect` (selected via the inline-equivalent reduceForeground
+            // predicate). Only the Backgrounded -> Reconnecting edge fires this; a
+            // Reconnecting reached from the reconnect LADDER (a transport drop, not a
+            // foreground return) is NOT a foreground arm.
+            if (current is ConnectionState.Reconnecting && previous is ConnectionState.Backgrounded) {
+                foregroundReconnectEffect()
             }
             previous = current
         }

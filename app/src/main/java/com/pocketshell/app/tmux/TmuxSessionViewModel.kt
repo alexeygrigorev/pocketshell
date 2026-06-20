@@ -644,9 +644,13 @@ public class TmuxSessionViewModel @Inject constructor(
             tmuxPort = connectionTmuxPort,
             transportPort = connectionTransportPort,
             scope = viewModelScope,
-            // EPIC #792 Slice B: the background-detach trigger routes through the single
-            // [GraceEffects] owner (it delegates to the VM's launchBackgroundDetachTeardown).
-            backgroundedEffect = { graceEffects.onBackgrounded() },
+            // EPIC #766 Slice 2a: the controller's `-> Backgrounded` edge now DRIVES the
+            // full background decision (the re-home of the inline `reduceConnection(Background)`
+            // dispatch). [onControllerBackgrounded] selects pause-vs-detach via the
+            // inline-equivalent [reduceBackground] predicate (the #685 trap) and, on the
+            // detach arm, routes the clean-detach teardown through the single [GraceEffects]
+            // owner ([graceEffects.onBackgrounded] -> launchBackgroundDetachTeardown).
+            backgroundedEffect = { onControllerBackgrounded() },
             // Slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach.
             // On the controller's Backgrounded→Reattaching edge (within grace + warm
             // lease) it fires the RESEED-ONLY body — re-promote Live + heal blank panes
@@ -659,6 +663,13 @@ public class TmuxSessionViewModel @Inject constructor(
             // connect(LifecycleReattach)` path is the superseded behavior (D22 hard-cut).
             // EPIC #792 Slice B: routes through the single [GraceEffects] owner.
             foregroundReattachEffect = { graceEffects.onForegroundReattachReseed() },
+            // EPIC #766 Slice 2a: the controller's Backgrounded -> Reconnecting edge (the
+            // BEYOND-grace foreground) now DRIVES the foreground arm dispatch (the re-home
+            // of the inline `reduceConnection(Foreground)`). [onControllerForegrounded]
+            // selects replay-vs-resume via the inline-equivalent [reduceForeground]
+            // predicate (pendingReattach / pausedAutoReconnect) — the controller edge is
+            // only the TRIGGER, not the divergent display-status gate.
+            foregroundReconnectEffect = { onControllerForegrounded() },
             // Slice 1c-iv-b-B2 (#742): after the driver submits a TransportLive /
             // TransportDropped from the real flows, re-project _connectionStatus from
             // the controller's (now real-flow-driven) state — the controller is the
@@ -2412,31 +2423,61 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onAppBackgrounded() {
         appActive = false
-        // EPIC #687 slice 1c-iv-b-B1 (#738): run the inline SYNCHRONOUS bookkeeping
-        // FIRST — [detachForBackground] sets `pendingReattach` and stashes
-        // `pendingBackgroundDetachPreserveTarget`. THEN drive the controller to
-        // Backgrounded, which fires the DRIVER's teardown effect
-        // ([launchBackgroundDetachTeardown]). This ordering guarantees the bookkeeping
-        // is in place before the driver launches the teardown — the driver collector
-        // resumes off [observeBackground] (eagerly on the test main dispatcher; on the
-        // next Main turn in production), so [detachForBackground] must have run first.
-        // `pauseReconnectForBackground` (the no-client-detach branch) is unaffected:
-        // the controller has no live host to enter Backgrounded, so no teardown fires.
-        when (reduceConnection(ConnectionEvent.Background)) {
-            ConnectionDecision.PauseReconnectForBackground ->
-                pauseReconnectForBackground()
-            ConnectionDecision.DetachForBackground ->
-                detachForBackground()
-            else -> Unit
-        }
-        // Feed the AUTHORITATIVE controller the Background event — its transition INTO
-        // Backgrounded is what fires the [ConnectionEffectDriver]'s clean-detach
-        // teardown (the SOLE detach trigger now the inline launch is deleted).
+        // EPIC #766 Slice 2a: the BACKGROUND decision is now DRIVEN by the
+        // [ConnectionController]'s `-> Backgrounded` EDGE (fired by the
+        // [ConnectionEffectDriver]'s `backgroundedEffect`), NOT by the inline
+        // [reduceConnection] classifier. Feeding the AUTHORITATIVE controller the
+        // Background event is the SOLE trigger: its transition INTO Backgrounded fires
+        // [onControllerBackgrounded], which runs the inline-equivalent pause-vs-detach
+        // bookkeeping AND the clean-detach teardown ([launchBackgroundDetachTeardown]),
+        // in that order. The collector resumes off [observeBackground] eagerly on the
+        // test main dispatcher (so the bookkeeping is synchronous in tests, exactly as
+        // before); on the next Main turn in production (harmless — the only readers of
+        // `pendingReattach` are the much-later foreground lifecycle event, and the
+        // teardown which runs AFTER the bookkeeping inside the same effect).
+        //
+        // The inline `reduceConnection(Background)` arm is no longer consulted (Slice
+        // 2a); the #685 trap is avoided because [onControllerBackgrounded] re-applies
+        // the inline-equivalent [reduceBackground] predicate (reading
+        // `clientRef`/`sessionRef`/`inlineConnectionStatus`) to select the arm — the
+        // controller edge is only the TRIGGER, not the divergent display-status gate.
         connectionManager.observeBackground()
         // The controller moved to Backgrounded (mapped → Connected, the inline
-        // "keep prior status on background" behavior); re-project after the inline
-        // effects ran (they read inlineConnectionStatus, unaffected by this).
+        // "keep prior status on background" behavior); re-project after the effect ran.
         projectStatusFromController()
+    }
+
+    /**
+     * EPIC #766 Slice 2a — the controller-EDGE-driven BACKGROUND effect. Fired by the
+     * [ConnectionEffectDriver] when the [ConnectionController] transitions INTO
+     * [ConnectionState.Backgrounded]. This is the re-home of the former inline
+     * `reduceConnection(Background)` dispatch: the controller edge is the TRIGGER, but
+     * the pause-vs-detach SELECTION still runs through the inline-equivalent
+     * [reduceBackground] predicate so behavior is byte-identical (the #685
+     * non-byte-identical-predicate trap — the controller transitions to Backgrounded
+     * whenever it holds a host, e.g. even from `Reconnecting`, but the inline predicate
+     * also gates on `clientRef`/`sessionRef`, so the arm selection MUST re-read VM state
+     * rather than trust the controller's display state).
+     *
+     * Ordering: the SELECTION ([detachForBackground] sets `pendingReattach` /
+     * `pendingBackgroundDetachPreserveTarget`) runs FIRST, then the teardown
+     * ([graceEffects.onBackgrounded] -> [launchBackgroundDetachTeardown], which reads
+     * those fields). [reduceBackground] returning [ConnectionDecision.Ignore] (no
+     * client/session) is the no-detach case — neither the bookkeeping nor the teardown
+     * runs, matching the inline `else -> Unit` arm.
+     */
+    private fun onControllerBackgrounded() {
+        when (reduceBackground()) {
+            ConnectionDecision.PauseReconnectForBackground ->
+                pauseReconnectForBackground()
+            ConnectionDecision.DetachForBackground -> {
+                detachForBackground()
+                // The clean-detach teardown reads the bookkeeping just set above; run it
+                // AFTER, through the single [GraceEffects] owner.
+                graceEffects.onBackgrounded()
+            }
+            else -> Unit
+        }
     }
 
     /**
@@ -2658,10 +2699,42 @@ public class TmuxSessionViewModel @Inject constructor(
             graceEffects.onForegroundHealWithinGrace()
             return
         }
-        // EPIC #792 Slice E: feed the AUTHORITATIVE controller the Foreground event — its
-        // single grace predicate decides reattach-vs-reconnect and drives the displayed status.
+        // EPIC #766 Slice 2a: the FOREGROUND arm dispatch is now DRIVEN by the
+        // [ConnectionController]'s foreground EDGE (fired by the [ConnectionEffectDriver]),
+        // NOT by the inline [reduceConnection] classifier. Feeding the AUTHORITATIVE
+        // controller the Foreground event is the SOLE trigger: beyond the App-level grace
+        // (the only way this branch is reached — the within-grace fast paths returned
+        // above) the App-grace teardown evicted the warm lease, so the controller's own
+        // grace predicate is not-warm and it walks Backgrounded -> Reconnecting, firing
+        // [onControllerForegrounded] which replays `pendingReattach` / resumes a
+        // `pausedAutoReconnect` (selected via the inline-equivalent [reduceForeground]
+        // predicate — the #685 trap: the controller edge is the trigger, the inline
+        // predicate the gate). The inline `reduceConnection(Foreground)` arm is no longer
+        // consulted (Slice 2a).
         connectionManager.observeForeground()
-        when (reduceConnection(ConnectionEvent.Foreground)) {
+        // The controller's single grace predicate decided reattach-vs-reconnect:
+        // within grace (warm lease) it is Reattaching and the active-pane reseed will
+        // land it back to Live → Connected (the approved #685 Bug-A divergence — NO
+        // probe churn); beyond grace it is Reconnecting (matches inline). Re-project
+        // after the driver-fired effects ran.
+        projectStatusFromController()
+    }
+
+    /**
+     * EPIC #766 Slice 2a — the controller-EDGE-driven beyond-grace FOREGROUND effect.
+     * Fired by the [ConnectionEffectDriver] when the [ConnectionController] transitions
+     * [ConnectionState.Backgrounded] -> [ConnectionState.Reconnecting] (the beyond-grace
+     * foreground return). This is the re-home of the former inline
+     * `reduceConnection(Foreground)` dispatch: the controller edge is the TRIGGER, but
+     * the replay-vs-resume SELECTION still runs through the inline-equivalent
+     * [reduceForeground] predicate (`pendingReattach` / `pausedAutoReconnect`) so behavior
+     * is byte-identical (the #685 non-byte-identical-predicate trap — the arm selection
+     * MUST re-read VM state, not the controller's display state). The no-arm case
+     * ([ConnectionDecision.Ignore]) logs the same "no-pending" skip the inline `else` arm
+     * logged.
+     */
+    private fun onControllerForegrounded() {
+        when (reduceForeground()) {
             ConnectionDecision.ReplayPendingReattach ->
                 replayPendingReattach()
             ConnectionDecision.ResumePausedReconnect ->
@@ -2676,12 +2749,6 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                 }
         }
-        // The controller's single grace predicate decided reattach-vs-reconnect:
-        // within grace (warm lease) it is Reattaching and the active-pane reseed will
-        // land it back to Live → Connected (the approved #685 Bug-A divergence — NO
-        // probe churn); beyond grace it is Reconnecting (matches inline). Re-project
-        // after the inline effects ran.
-        projectStatusFromController()
     }
 
     /**
@@ -2850,13 +2917,14 @@ public class TmuxSessionViewModel @Inject constructor(
         if (target == null) {
             // No target to heal against — fall back to the normal foreground decision so
             // a genuinely orphaned foreground still does the right (non-grace) thing.
+            // EPIC #766 Slice 2a: the foreground arm dispatch is driven by the controller
+            // edge (the driver fires [onControllerForegrounded]); the inline
+            // `reduceConnection(Foreground)` consultation is removed. By construction this
+            // branch has NO `pendingReattach`/`pausedAutoReconnect` (the `target`-deriving
+            // expression above already proved both null), so [reduceForeground] is `Ignore`
+            // and the driver-fired effect is a no-op — exactly the prior inline `else`
+            // behavior, just without re-consulting the classifier here.
             connectionManager.observeForeground()
-            when (reduceConnection(ConnectionEvent.Foreground)) {
-                ConnectionDecision.ReplayPendingReattach -> replayPendingReattach()
-                ConnectionDecision.ResumePausedReconnect ->
-                    pausedAutoReconnect?.let { resumePausedAutoReconnect(it) }
-                else -> Unit
-            }
             projectStatusFromController()
             return
         }

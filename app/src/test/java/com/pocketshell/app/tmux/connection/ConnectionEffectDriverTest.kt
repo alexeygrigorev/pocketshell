@@ -385,6 +385,120 @@ class ConnectionEffectDriverTest {
         scope.cancel()
     }
 
+    // --- EPIC #766 slice 2a: the BEYOND-grace foreground arm effect -------------
+    //
+    // The new `foregroundReconnectEffect` seam re-homes the inline
+    // `reduceConnection(Foreground)` replay/resume arm onto the controller's
+    // Backgrounded -> Reconnecting EDGE. These pin: (1) it fires exactly on the
+    // beyond-grace foreground edge, (2) it does NOT fire on the within-grace
+    // (Reattaching) foreground edge, and (3) it does NOT fire on a Reconnecting
+    // reached from the reconnect LADDER (a transport drop, not a foreground return).
+    // Without the new edge wiring in the driver, assertion (1) is RED (the effect
+    // never fires); with it, GREEN.
+
+    @Test
+    fun firesForegroundReconnectEffectOnBeyondGraceForegroundEdge() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val clock = TestClock()
+        var reconnectArmTriggers = 0
+        var reseedTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        // Beyond grace: warm-snapshot false forces Backgrounded -> Reconnecting.
+        val transportPort = InertTransportPort(warm = false)
+        val controller = ConnectionController(clock = clock, transport = transportPort)
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            foregroundReattachEffect = { reseedTriggers += 1 },
+            foregroundReconnectEffect = { reconnectArmTriggers += 1 },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.TransportLive)
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.Background) // -> Backgrounded
+        assertEquals("no foreground arm before foreground", 0, reconnectArmTriggers)
+
+        clock.now = ConnectionController.DEFAULT_GRACE_MS + 1L
+        controller.submit(ConnectionEvent.Foreground) // Backgrounded -> Reconnecting(1)
+
+        assertEquals(
+            "driver fires the beyond-grace foreground arm on Backgrounded -> Reconnecting",
+            1,
+            reconnectArmTriggers,
+        )
+        assertEquals(
+            "the within-grace reseed effect must NOT fire on the beyond-grace edge",
+            0,
+            reseedTriggers,
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun doesNotFireForegroundReconnectEffectOnWithinGraceForegroundEdge() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val clock = TestClock()
+        var reconnectArmTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        // Within grace: warm-snapshot true forces Backgrounded -> Reattaching.
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = clock, transport = transportPort)
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            foregroundReconnectEffect = { reconnectArmTriggers += 1 },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.Background) // -> Backgrounded
+        clock.now = 1_000L
+        controller.submit(ConnectionEvent.Foreground) // Backgrounded -> Reattaching
+
+        assertEquals(
+            "the beyond-grace foreground arm must NOT fire on the within-grace edge",
+            0,
+            reconnectArmTriggers,
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun doesNotFireForegroundReconnectEffectOnReconnectLadderDrop() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        var reconnectArmTriggers = 0
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            foregroundReconnectEffect = { reconnectArmTriggers += 1 },
+        ).also { it.start() }
+
+        // A transport-drop reconnect ladder reaches Reconnecting (Live -> Reattaching ->
+        // Reconnecting), but it is NOT a foreground return, so the foreground arm effect
+        // must NOT fire — only the Backgrounded -> Reconnecting edge does.
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
+        controller.submit(ConnectionEvent.TransportDropped("keepalive")) // -> Reattaching
+        controller.submit(ConnectionEvent.TransportDropped("keepalive")) // -> Reconnecting(1)
+
+        assertEquals(
+            "the foreground arm must only fire on Backgrounded -> Reconnecting",
+            0,
+            reconnectArmTriggers,
+        )
+        scope.cancel()
+    }
+
     // --- EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER drop-suppression gate ----
     //
     // `suppressTransportDrops` is the no-double-drive invariant: when it returns

@@ -3777,6 +3777,103 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // --- EPIC #766 slice 2a: the bg/fg arms are DRIVEN by the controller edge ----
+    //
+    // These pin the re-home of the inline `reduceConnection(Background/Foreground)`
+    // arm dispatch onto the ConnectionController state EDGE fired by the
+    // ConnectionEffectDriver. Each asserts the post-migration decision matches the
+    // inline reducer's prior behavior (D31 per-event red→green): if the bg/fg arms
+    // were NOT wired to the driver edge, the detach/replay would never run and these
+    // would be RED. The #685 trap is covered: the detach arm fires only when the
+    // inline-equivalent predicate (clientRef/sessionRef present) holds even though the
+    // controller transitions to Backgrounded whenever it holds a host.
+
+    @Test
+    fun backgroundDetachArmIsDrivenByControllerBackgroundedEdge() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        assertTrue(
+            "precondition: live (controller Live -> displayed Connected)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+
+        // The controller's -> Backgrounded edge fired the detach arm (re-home of the
+        // inline ConnectionDecision.DetachForBackground): teardown ran AND the pending
+        // reattach bookkeeping was stashed — exactly the inline reducer's prior behavior.
+        assertTrue(
+            "controller Backgrounded edge must drive the clean detach (detachCleanly)",
+            client.detachCleanlyCalled,
+        )
+        assertTrue("controller Backgrounded edge must seed pending reattach", vm.hasPendingReattachForTest())
+    }
+
+    @Test
+    fun backgroundEdgeDoesNotDetachWhenNoClientOrSession() = runTest(scheduler) {
+        // The #685 trap: the controller transitions to Backgrounded whenever it holds a
+        // host, but the inline-equivalent predicate also gates on clientRef/sessionRef.
+        // With no live client/session, the inline reducer returned Ignore — so the
+        // re-homed arm must NOT detach or stash a reattach (no client to tear down).
+        val vm = newVm()
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+
+        assertFalse(
+            "background with no live client/session must not stash a pending reattach",
+            vm.hasPendingReattachForTest(),
+        )
+    }
+
+    @Test
+    fun foregroundReplayArmIsDrivenByControllerForegroundEdge() = runTest(scheduler) {
+        val vm = newVm()
+        var foregroundReattachCount = 0
+        vm.setForegroundReattachForTest { foregroundReattachCount += 1 }
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+        assertTrue("background must stash a pending reattach", vm.hasPendingReattachForTest())
+
+        // Beyond grace (the lease was evicted on the detach teardown -> controller's grace
+        // predicate is not-warm), the controller walks Backgrounded -> Reconnecting, which
+        // fires the re-homed foreground arm (ConnectionDecision.ReplayPendingReattach).
+        vm.onAppForegrounded()
+        advanceUntilIdle()
+
+        assertFalse(
+            "controller foreground edge must consume the pending reattach",
+            vm.hasPendingReattachForTest(),
+        )
+        assertEquals(
+            "controller foreground edge must drive the replay reattach exactly once",
+            1,
+            foregroundReattachCount,
+        )
+    }
+
     @Test
     fun shortAppSwitchPassiveDisconnectResumesAutoReconnectOnScreenStart() = runTest(scheduler) {
         val registry = ActiveTmuxClients()

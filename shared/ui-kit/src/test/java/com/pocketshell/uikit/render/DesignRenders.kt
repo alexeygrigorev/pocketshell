@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.draw.clip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -1423,6 +1424,83 @@ class DesignRenders {
                     "Workspace settings" to true,
                 ),
             )
+        }
+    }
+
+    /**
+     * Issue #857: the session (tmux) overflow kebab, opened, now grouped into
+     * logical sections (header + divider per section) instead of one flat list.
+     *
+     * Caveat (#555): the real `TmuxMoreMenu` lives in the `app` module, which the
+     * ui-kit render harness can't import, and a `DropdownMenu` paints into a popup
+     * window that Roborazzi's single composition snapshot doesn't capture. This
+     * fixture is a faithful static mirror of the live menu's grouping, item copy,
+     * and order so the design (sections, dividers, section labels) is visually
+     * checkable here. The live composable is validated on the emulator.
+     */
+    @Test
+    fun sessionKebabMenu() = render("session-kebab-menu") {
+        SessionKebabMenuPanel(
+            sections = listOf(
+                "This session" to listOf(
+                    "Rename session",
+                    "What is this session?",
+                    "Stop session",
+                    "Detach",
+                ),
+                "Sessions" to listOf(
+                    "+ New session",
+                    "Switch session",
+                ),
+                "Files" to listOf(
+                    "Browse files…",
+                    "Open file…",
+                ),
+                "Connection" to listOf(
+                    "Port forwarding",
+                ),
+                "Host & app" to listOf(
+                    "Recurring jobs",
+                    "Usage",
+                    "Settings",
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Static mirror of the grouped `TmuxMoreMenu` opened menu: a [SurfaceElev]
+     * rounded panel where each section is a muted [DropdownMenuSectionHeader]-style
+     * label, its items as [PocketShellType.bodyDense] rows, and a
+     * [HorizontalDivider] between sections — matching the real menu chrome.
+     */
+    @Composable
+    private fun SessionKebabMenuPanel(sections: List<Pair<String, List<String>>>) {
+        Surface(
+            color = PocketShellColors.SurfaceElev,
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                sections.forEachIndexed { index, (header, items) ->
+                    if (index > 0) {
+                        HorizontalDivider()
+                    }
+                    Text(
+                        text = header,
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
+                    items.forEach { label ->
+                        Text(
+                            text = label,
+                            color = PocketShellColors.Text,
+                            style = PocketShellType.bodyDense,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+            }
         }
     }
 

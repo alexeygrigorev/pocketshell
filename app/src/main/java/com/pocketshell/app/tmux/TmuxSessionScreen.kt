@@ -5306,16 +5306,23 @@ internal fun TmuxMoreMenu(
         expanded = expanded,
         onDismissRequest = onDismiss,
     ) {
-        // Issue #782: PocketShell no longer manages tmux windows, so the kebab
-        // has no "In this session" window group — the only session-scoped ops
-        // left are on-this-host session lifecycle + host shortcuts.
-        DropdownMenuSectionHeader(text = "On this host")
-        DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
-        DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
+        // Issue #857: the kebab was a flat, ungrouped list that mixed
+        // current-session actions, an identify/classify item, file actions,
+        // connection, and app settings. It is now grouped into logical sections
+        // (header + divider per section). Every item keeps its exact onClick and
+        // test tag — this is ordering/grouping only, no behaviour change.
+        // (Issue #782 already removed the tmux-window group; the only session-
+        // scoped ops left are session lifecycle + host shortcuts.)
+        //
+        // --- This session: act on the session you're looking at right now. ---
+        DropdownMenuSectionHeader(text = "This session")
         DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
         // Epic #821 Slice 1: classify a foreign session ("What is this
         // session?") or re-classify any session ("Change kind"). Writes the
         // durable host-side `@ps_agent_kind` option via ManualKindWriter.
+        // Issue #857: moved up next to Rename — it identifies/changes *this*
+        // session, so it belongs with the current-session actions rather than
+        // buried mid-lifecycle between Rename and Stop.
         DropdownMenuItem(
             text = {
                 Text(
@@ -5326,10 +5333,46 @@ internal fun TmuxMoreMenu(
             modifier = Modifier.testTag(TMUX_CHANGE_KIND_BUTTON_TAG),
         )
         DropdownMenuItem(text = { Text("Stop session") }, onClick = onKillSession)
-        // Issue #445 (epic #432 slice A): per-host port-forward panel is a
-        // host-scoped affordance, so it lives in the "On this host" group.
-        // Navigating away pushes onto the hand-rolled back-stack; back
-        // returns to this exact session/window.
+        // Issue #235: explicit "I'm done with this session for now" affordance —
+        // frees the tmux server-side window-size lock (max(phone, desktop) ->
+        // desktop dimensions) without killing the session. Still a current-
+        // session action (Detach -> sessions dashboard), so it lives in the
+        // "This session" group next to the lifecycle items.
+        DropdownMenuItem(
+            text = { Text("Detach") },
+            onClick = onDetach,
+            modifier = Modifier.testTag(TMUX_DETACH_BUTTON_TAG),
+        )
+
+        // --- Sessions: move between / create sessions on this host. ---
+        HorizontalDivider()
+        DropdownMenuSectionHeader(text = "Sessions")
+        DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
+        DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
+
+        // --- Files: open / browse files on this host. ---
+        HorizontalDivider()
+        DropdownMenuSectionHeader(text = "Files")
+        // Issue #528: browse the remote filesystem and tap a file to open it in
+        // the viewer.
+        DropdownMenuItem(
+            text = { Text("Browse files…") },
+            onClick = onBrowseFiles,
+            modifier = Modifier.testTag(TMUX_BROWSE_FILES_BUTTON_TAG),
+        )
+        // Issue #497: open a server file (image / text) in the in-app viewer.
+        DropdownMenuItem(
+            text = { Text("Open file…") },
+            onClick = onOpenFile,
+            modifier = Modifier.testTag(TMUX_OPEN_FILE_BUTTON_TAG),
+        )
+
+        // --- Connection: per-host networking. ---
+        HorizontalDivider()
+        DropdownMenuSectionHeader(text = "Connection")
+        // Issue #445 (epic #432 slice A): per-host port-forward panel. Navigating
+        // away pushes onto the hand-rolled back-stack; back returns to this exact
+        // session/window.
         DropdownMenuItem(
             text = {
                 if (forwardingState.visible) {
@@ -5366,37 +5409,13 @@ internal fun TmuxMoreMenu(
                 }
                 .testTag(TMUX_PORT_FORWARDING_BUTTON_TAG),
         )
-        // Issue #528: browse the remote filesystem and tap a file to open it in
-        // the viewer. Host-scoped, so it sits in the "On this host" group next
-        // to the type-a-path "Open file…" fast option.
-        DropdownMenuItem(
-            text = { Text("Browse files…") },
-            onClick = onBrowseFiles,
-            modifier = Modifier.testTag(TMUX_BROWSE_FILES_BUTTON_TAG),
-        )
-        // Issue #497: open a server file (image / text) in the in-app viewer.
-        // Host-scoped affordance, so it lives in the "On this host" group.
-        DropdownMenuItem(
-            text = { Text("Open file…") },
-            onClick = onOpenFile,
-            modifier = Modifier.testTag(TMUX_OPEN_FILE_BUTTON_TAG),
-        )
+
+        // --- Host & app: cross-host / global affordances. ---
         HorizontalDivider()
-        // Issue #235: explicit "I'm done with this session for now"
-        // affordance — frees the tmux server-side window-size lock
-        // (max(phone, desktop) -> desktop dimensions) without
-        // killing the session. Placed at the top of the cross-host
-        // section so it sits next to the back-to-host-list mental
-        // model (Detach -> sessions dashboard) without crowding the
-        // destructive Stop session item.
-        DropdownMenuItem(
-            text = { Text("Detach") },
-            onClick = onDetach,
-            modifier = Modifier.testTag(TMUX_DETACH_BUTTON_TAG),
-        )
+        DropdownMenuSectionHeader(text = "Host & app")
         DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
-        // Issue #114 Fix A: jump to the cross-host Usage / quota
-        // panel from inside a live tmux session.
+        // Issue #114 Fix A: jump to the cross-host Usage / quota panel from
+        // inside a live tmux session.
         DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
         DropdownMenuItem(
             text = { Text("Settings") },

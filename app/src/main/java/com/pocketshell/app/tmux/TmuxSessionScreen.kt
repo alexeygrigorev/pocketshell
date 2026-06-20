@@ -3546,6 +3546,13 @@ internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:to
 /** Issue #176: stable test tag prefix for a `SystemNote` row in the tmux conversation pane. */
 internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversation:system-note:"
 /**
+ * Issue #840 (slice 2): stable test tag prefix for the leading [DisclosureIcon]
+ * on a `SystemNote` row's header — the shared expand/collapse affordance the row
+ * previously lacked entirely.
+ */
+internal const val TMUX_CONVERSATION_SYSTEM_NOTE_DISCLOSURE_TAG_PREFIX =
+    "tmux:conversation:system-note:disclosure:"
+/**
  * Issue #154/#786: stable test tags for the conversation navigation polish.
  * Issue #786 (hard-cut, D22): the "Search in conversation" field was DELETED —
  * the maintainer wants the whole screen given to the transcript — so its
@@ -5090,13 +5097,24 @@ private fun ConversationSystemNoteRow(
             .padding(bottom = SystemNoteBlockBottomPadding)
             .testTag(TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id),
     ) {
-        // Chat-style header matching message blocks
+        // Chat-style header matching message blocks. #840 slice 2: lead with the
+        // shared rotating [DisclosureIcon] so the (clickable) row carries the same
+        // expand/collapse affordance as every other disclosure surface — it had
+        // none before, which was its own inconsistency.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = MessageHeadBottomPadding),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(SystemNoteHeadGap),
         ) {
+            DisclosureIcon(
+                expanded = isExpanded,
+                tint = PocketShellColors.TextMuted,
+                modifier = Modifier.testTag(
+                    TMUX_CONVERSATION_SYSTEM_NOTE_DISCLOSURE_TAG_PREFIX + note.id,
+                ),
+            )
             Text(
                 text = actorLabel,
                 color = PocketShellColors.TextMuted,
@@ -5218,6 +5236,9 @@ private val ChatPaneVPadding = 8.dp
 private val MessageHeadBottomPadding = 8.dp
 private val MessageHeadLetterSpacing = 0.8.sp
 private val SystemNoteBlockBottomPadding = 22.dp
+
+/** #840 slice 2: gap between the leading disclosure icon and the actor label. */
+private val SystemNoteHeadGap = 8.dp
 
 /**
  * .tool-call card tokens.

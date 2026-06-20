@@ -2324,6 +2324,70 @@ class DesignRenders {
         }
     }
 
+    // Issue #840 slice 2: the two DEFERRED disclosure surfaces — the folder/
+    // session tree row (was a screen-private hand-built `DisclosureIndicator`
+    // drawing two distinct triangle Paths) and the conversation system-note row
+    // (had NO affordance at all). Both now use the SAME shared rotating
+    // DisclosureIcon, collapsed AND expanded, so one PNG proves the unification
+    // on these two extra surfaces (the issue's "≥2 surfaces" AC for slice 2).
+    @Test
+    fun disclosureIconSlice2() = render("disclosure-icon-slice2") {
+        Column(modifier = Modifier.padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Surface 3 — folder / session tree row", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+            FolderTreeRowMirror(name = "cable-world · 3 agents", expanded = false)
+            FolderTreeRowMirror(name = "cable-world · 3 agents", expanded = true)
+
+            Text("Surface 4 — conversation system-note row", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+            SystemNoteRowMirror(actor = "SYSTEM", preview = "context compacted · 12k tokens", expanded = false)
+            SystemNoteRowMirror(actor = "SYSTEM", preview = "context compacted · 12k tokens", expanded = true)
+        }
+    }
+
+    // Issue #840 slice 2: mirrors the folder-tree header row (FolderListScreen)
+    // — the shared DisclosureIcon (TextSecondary, 16dp) leads the status dot +
+    // name, replacing the deleted private filled-triangle indicator. Matches the
+    // #478 tree aesthetic: ▶ collapsed / ▼ expanded, one shape rotated.
+    @Composable
+    private fun FolderTreeRowMirror(name: String, expanded: Boolean) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DisclosureIcon(expanded = expanded, tint = PocketShellColors.TextSecondary, size = 16.dp)
+            Spacer(modifier = Modifier.width(5.dp))
+            Box(modifier = Modifier.size(8.dp).background(PocketShellColors.Green, CircleShape))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(name, color = PocketShellColors.Text, style = PocketShellType.bodyDense, fontWeight = FontWeight.SemiBold)
+        }
+    }
+
+    // Issue #840 slice 2: mirrors the conversation system-note row
+    // (ConversationSystemNoteRow) — it gains a LEADING shared DisclosureIcon
+    // (TextMuted) it previously lacked entirely, so the (clickable) row carries
+    // the same expand/collapse affordance as every other disclosure surface.
+    @Composable
+    private fun SystemNoteRowMirror(actor: String, preview: String, expanded: Boolean) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                DisclosureIcon(expanded = expanded, tint = PocketShellColors.TextMuted)
+                Text(actor, color = PocketShellColors.TextMuted, style = PocketShellType.labelMono, fontWeight = FontWeight.Bold)
+            }
+            Text(
+                if (expanded) "context compacted · 12k tokens → 3k tokens (full body shown when expanded)" else preview,
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.bodyDense,
+                maxLines = if (expanded) 3 else 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
     // Issue #840: mirrors the composer pending-transcription queue toggle row
     // (PromptComposerSheet) using the same shared DisclosureIcon with the accent
     // tint, so the render proves the second surface uses the identical icon.

@@ -55,7 +55,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -83,6 +82,7 @@ import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
@@ -1812,10 +1812,11 @@ private fun FolderHeader(
             .padding(start = 4.dp, end = 0.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        DisclosureIndicator(
+        DisclosureIcon(
             expanded = expanded,
+            tint = PocketShellColors.TextSecondary,
+            size = 16.dp,
             modifier = Modifier
-                .size(16.dp)
                 .testTag(folderDetailDisclosureTestTag(folder.path)),
         )
         Spacer(modifier = Modifier.width(5.dp))
@@ -2337,35 +2338,6 @@ private fun CompactTreeIconButton(
                 maxLines = 1,
             )
         }
-    }
-}
-
-@Composable
-private fun DisclosureIndicator(
-    expanded: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    // Filled chevron triangle — ▼ when expanded, ▶ when collapsed — matching
-    // the maintainer's target mockup (#478).
-    val color = PocketShellColors.TextSecondary
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val triangle = Path().apply {
-            if (expanded) {
-                // Pointing down (▼).
-                moveTo(w * 0.22f, h * 0.34f)
-                lineTo(w * 0.78f, h * 0.34f)
-                lineTo(w * 0.5f, h * 0.66f)
-            } else {
-                // Pointing right (▶).
-                moveTo(w * 0.34f, h * 0.22f)
-                lineTo(w * 0.66f, h * 0.5f)
-                lineTo(w * 0.34f, h * 0.78f)
-            }
-            close()
-        }
-        drawPath(path = triangle, color = color)
     }
 }
 

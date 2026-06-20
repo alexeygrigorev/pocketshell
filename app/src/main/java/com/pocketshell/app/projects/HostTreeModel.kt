@@ -197,6 +197,115 @@ internal class HostTreeModel {
     }
 
     /**
+     * Epic #821 slice C (issue #837): SEED the tree from the host-side durable
+     * registry on a cold start, BEFORE the first reconcile, so re-launching the
+     * app renders the held ORDER + EXPAND/COLLAPSE state INSTANTLY (no Loading
+     * flash, no order shuffle) — instead of starting empty and waiting for the
+     * first authoritative probe.
+     *
+     * Each persisted node carries only the small *presentation* state that is
+     * truly lost on process death: the session NAME (its identity + intrinsic
+     * slot via insertion order), its FOLDER PATH (bucket placement), the user's
+     * COLLAPSE choice, and an optional one-shot FOREIGN-GUESS kind. The richer
+     * per-session content (windows, lastActivity, attached, the CONFIRMED kind
+     * via `@ps_agent_kind`) is re-seeded by the immediately-following reconcile —
+     * so a hydrated node is a placeholder that holds its slot until the probe
+     * fills it.
+     *
+     * Hydrate is a no-op once the tree already has a snapshot (a live probe /
+     * by-id mutation has already populated it): it must NEVER clobber fresher
+     * authoritative content with a stale registry seed. It also nulls each
+     * placeholder node's [SessionNode.optimisticSince] so the FIRST reconcile is
+     * free to prune any registry session that is no longer live (reconcile's own
+     * optimistic-grace guard only spares app-inserted nodes, not registry seeds).
+     *
+     * @param nodes the persisted node list from `tree.get`, in display order.
+     */
+    fun hydrate(nodes: List<HydratedNode>) {
+        if (nodes.isEmpty()) return
+        // Do not overwrite an already-populated tree — a live probe / by-id
+        // mutation is always fresher than the durable registry seed.
+        if (hasSnapshot) return
+
+        val collapsedPaths = LinkedHashSet<String>()
+        nodes.forEach { node ->
+            val placeholder = SessionNode(
+                lastActivity = null,
+                attached = false,
+                agentKind = node.foreignGuess ?: SessionAgentKind.Probing,
+                windows = emptyList(),
+                // A registry seed is NOT app-inserted: leave it prunable by the
+                // first reconcile if the session is gone.
+                optimisticSince = null,
+            )
+            sessions[node.sessionName] = placeholder
+            val canonicalFolder = FolderListViewModel.canonicalisePath(node.folderPath)
+                .ifBlank { FolderListViewModel.UNTRACKED_PATH }
+            sessionFolderPaths[node.sessionName] = canonicalFolder
+            if (node.collapsed && canonicalFolder.isNotBlank()) {
+                collapsedPaths.add(canonicalFolder)
+            }
+        }
+        // Seed the user's collapse memory so a folder they closed stays closed
+        // across the restart. The matching expanded set is the complement
+        // [project] resolves on the next emit, honouring these collapses.
+        userCollapsedProjectPaths = userCollapsedProjectPaths + collapsedPaths
+        hasSnapshot = true
+    }
+
+    /**
+     * Epic #821 slice C (issue #837): EXPORT the current tree state as the node
+     * list to persist via `tree.upsert` after a mutation (toggle expand,
+     * rename/insert, post-reconcile). Carries ONLY the durable presentation
+     * state — session name + intrinsic order + folder path + the user's collapse
+     * choice + the optional foreign-guess kind. It NEVER exports the confirmed
+     * agent kind: that lives in `@ps_agent_kind` (one source of truth), so a
+     * recorded/confirmed kind is deliberately omitted from the registry.
+     *
+     * A folder is reported `collapsed` when it is in [userCollapsedProjectPaths]
+     * (the user's explicit close), so the choice round-trips through the
+     * registry.
+     */
+    fun exportNodes(): List<HydratedNode> {
+        var order = 0
+        return sessions.entries.map { (name, node) ->
+            val folderPath = sessionFolderPaths[name] ?: FolderListViewModel.UNTRACKED_PATH
+            HydratedNode(
+                sessionName = name,
+                order = order++,
+                folderPath = folderPath,
+                collapsed = folderPath in userCollapsedProjectPaths,
+                foreignGuess = node.agentKind.takeIf { it.isForeignGuessExportable() },
+            )
+        }
+    }
+
+    /**
+     * A node persisted to / restored from the durable registry. The bridge type
+     * between [HostTreeModel] and `TreeRemoteSource` — it carries only the small
+     * durable presentation state (NO confirmed kind; that stays in
+     * `@ps_agent_kind`). [foreignGuess] is the one-shot foreign-guess hint.
+     */
+    data class HydratedNode(
+        val sessionName: String,
+        val order: Int,
+        val folderPath: String,
+        val collapsed: Boolean,
+        val foreignGuess: SessionAgentKind? = null,
+    )
+
+    /**
+     * Only the three concrete detected agent kinds are exportable as a
+     * foreign-guess hint. [SessionAgentKind.Probing] / [SessionAgentKind.Shell]
+     * / [SessionAgentKind.Exited] are transient/derived and carry no durable
+     * hint worth persisting.
+     */
+    private fun SessionAgentKind.isForeignGuessExportable(): Boolean =
+        this == SessionAgentKind.Claude ||
+            this == SessionAgentKind.Codex ||
+            this == SessionAgentKind.OpenCode
+
+    /**
      * Reconcile the held tree against a fresh authoritative probe snapshot
      * (#679 reconcile). Diffs incoming sessions/windows against held nodes:
      *
@@ -410,6 +519,33 @@ internal class HostTreeModel {
         hasSnapshot = true
     }
 
+    /**
+     * Epic #821 slice C (issue #837): apply a `tree.reconcile` DELTA to the held
+     * tree without a full reload — the "refresh to see which sessions are gone,
+     * without reloading everything" path. Prunes each session in [goneNames]
+     * from the held tree by id (sparing nodes still within their optimistic
+     * grace, exactly like [reconcile]). Returns `true` when at least one node was
+     * pruned, so the caller can persist + re-emit. ADDED sessions are NOT folded
+     * here — they need a full probe to fetch their content, so the caller kicks a
+     * reconcile when the delta reports additions.
+     */
+    fun applyReconcileGoneDelta(
+        goneNames: Collection<String>,
+        now: Long = System.currentTimeMillis(),
+    ): Boolean {
+        var pruned = false
+        goneNames.forEach { name ->
+            val node = sessions[name] ?: return@forEach
+            val since = node.optimisticSince
+            if (since != null && (now - since) < OPTIMISTIC_GRACE_MS) return@forEach
+            sessions.remove(name)
+            sessionFolderPaths.remove(name)
+            stickyBuckets.remove(name)
+            pruned = true
+        }
+        return pruned
+    }
+
     /** Toggle the expanded state of [projectPath] (#471 user tap). */
     fun toggleProjectExpanded(projectPath: String) {
         val canonical = FolderListViewModel.canonicalisePath(projectPath)
@@ -428,6 +564,16 @@ internal class HostTreeModel {
 
     /** Current expanded-folder set (intrinsic, for the rendered Ready state). */
     fun expandedPaths(): Set<String> = expandedProjectPaths
+
+    /**
+     * Test seam: force the next [reconcileDue] check to report due by clearing
+     * [lastReconciledAt], so a resume-when-stale unit test can drive the delta
+     * reconcile path without depending on the wall clock.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun markReconcileDueForTest() {
+        lastReconciledAt = null
+    }
 
     /** Whether a reconcile is due given [staleAfterMs] since [lastReconciledAt]. */
     fun reconcileDue(now: Long, staleAfterMs: Long): Boolean {

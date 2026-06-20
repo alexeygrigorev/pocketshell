@@ -92,6 +92,12 @@ METHOD_TTLS: Mapping[str, float] = {
     # not hidden for long.
     "sessions.list": 5.0,
     "jobs.list": 5.0,
+    # `tree.get` is the cold-start hydrate read. Short TTL like `sessions.list`
+    # so a `tree.upsert` mutation (which also invalidates it explicitly) is not
+    # masked for long and an external edit is not hidden. `tree.upsert` and
+    # `tree.reconcile` carry NO TTL (mutations) so their results are never
+    # cached.
+    "tree.get": 5.0,
 }
 
 # Length-prefix is a 4-byte unsigned big-endian integer. ``struct``
@@ -574,6 +580,32 @@ def _agents_kind_for_panes_handler(params: Mapping[str, Any]) -> dict[str, Any]:
     return {"results": _cgroup_agents.kind_for_panes(panes)}
 
 
+# ---------------------------------------------------------------------------
+# Methods: tree.* (epic #821 slice C / issue #837)
+# ---------------------------------------------------------------------------
+
+
+def _tree_get_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``tree.get`` to the durable per-host tree registry."""
+    from pocketshell import tree as _tree
+
+    return _tree.daemon_handler_get(dict(params))
+
+
+def _tree_upsert_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``tree.upsert`` to the durable per-host tree registry."""
+    from pocketshell import tree as _tree
+
+    return _tree.daemon_handler_upsert(dict(params))
+
+
+def _tree_reconcile_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``tree.reconcile`` to the durable per-host tree registry."""
+    from pocketshell import tree as _tree
+
+    return _tree.daemon_handler_reconcile(dict(params))
+
+
 # Single shared registry; tests can register additional methods via
 # :meth:`Daemon.register_method` on a fresh instance without touching
 # this dict.
@@ -592,6 +624,9 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "jobs.remove": _jobs_remove_handler,
     "jobs.status": _jobs_status_handler,
     "agents.kind_for_panes": _agents_kind_for_panes_handler,
+    "tree.get": _tree_get_handler,
+    "tree.upsert": _tree_upsert_handler,
+    "tree.reconcile": _tree_reconcile_handler,
 }
 
 
@@ -612,6 +647,13 @@ METHOD_CACHE_INVALIDATIONS: Mapping[str, tuple[str, ...]] = {
     "jobs.edit": ("jobs.list",),
     "jobs.remove": ("jobs.list",),
     "jobs.trigger": ("jobs.list",),
+    # `tree.upsert` rewrites the host's persisted node list, so the cached
+    # `tree.get` cold-start read is stale the moment it lands — drop it so the
+    # very next `tree.get` reflects the just-persisted ordering/expansion.
+    # `tree.reconcile` prunes gone nodes from the registry, so it must also
+    # invalidate the `tree.get` cache.
+    "tree.upsert": ("tree.get",),
+    "tree.reconcile": ("tree.get",),
 }
 
 

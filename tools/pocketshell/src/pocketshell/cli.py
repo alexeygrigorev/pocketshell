@@ -36,6 +36,7 @@ from pocketshell.push import push_group
 from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
 from pocketshell.sessions import sessions_group
+from pocketshell.tree import tree_group
 from pocketshell.usage import usage_command
 
 
@@ -60,6 +61,7 @@ cli.add_command(agents_group, name="agents")
 cli.add_command(profiles_group, name="profiles")
 cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")
+cli.add_command(tree_group, name="tree")
 cli.add_command(agent_log_command, name="agent-log")
 cli.add_command(repos_group, name="repos")
 cli.add_command(github_group, name="github")

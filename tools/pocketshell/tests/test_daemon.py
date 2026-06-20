@@ -843,6 +843,56 @@ def test_daemon_registry_includes_agents_kind_for_panes() -> None:
     assert "agents.kind_for_panes" not in daemon_mod.METHOD_TTLS
 
 
+def test_daemon_registry_includes_tree_methods() -> None:
+    """Epic #821 slice C: the three `tree.*` methods are registered, only
+    `tree.get` is cached (short TTL), and both mutations invalidate it."""
+    assert "tree.get" in daemon_mod.DEFAULT_METHODS
+    assert "tree.upsert" in daemon_mod.DEFAULT_METHODS
+    assert "tree.reconcile" in daemon_mod.DEFAULT_METHODS
+    # Only the read carries a TTL; the mutations are never cached.
+    assert daemon_mod.METHOD_TTLS["tree.get"] == 5.0
+    assert "tree.upsert" not in daemon_mod.METHOD_TTLS
+    assert "tree.reconcile" not in daemon_mod.METHOD_TTLS
+    # Both mutations evict the cached cold-start read.
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["tree.upsert"] == ("tree.get",)
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["tree.reconcile"] == ("tree.get",)
+
+
+def test_tree_upsert_invalidates_tree_get_cache(tmp_path: Path) -> None:
+    """A successful `tree.upsert` evicts the cached `tree.get` envelope so the
+    next read reflects the just-persisted ordering/expansion immediately."""
+    from pocketshell import tree as tree_mod
+
+    paths = tree_mod.TreePaths(tree_dir=tmp_path / "tree")
+
+    def get_handler(params: dict) -> dict:
+        return tree_mod.get_tree(params, paths=paths)
+
+    def upsert_handler(params: dict) -> dict:
+        return tree_mod.upsert_tree(params, paths=paths)
+
+    daemon = daemon_mod.Daemon(
+        socket_path=tmp_path / "daemon.sock",
+        methods={"tree.get": get_handler, "tree.upsert": upsert_handler},
+    )
+
+    first = _dispatch_in_memory(daemon, "tree.get", {"host": "h1"})
+    assert first["result"]["nodes"] == []
+    assert first["cached"] is False
+
+    cached = _dispatch_in_memory(daemon, "tree.get", {"host": "h1"})
+    assert cached["cached"] is True
+
+    mutation = _dispatch_in_memory(
+        daemon, "tree.upsert", {"host": "h1", "nodes": [{"session": "a"}]}
+    )
+    assert mutation["result"]["status"] == "ok"
+
+    after = _dispatch_in_memory(daemon, "tree.get", {"host": "h1"})
+    assert after["cached"] is False
+    assert [n["session"] for n in after["result"]["nodes"]] == ["a"]
+
+
 def test_agents_kind_for_panes_round_trip(
     running_daemon: subprocess.Popen,
     sandbox_socket: Path,

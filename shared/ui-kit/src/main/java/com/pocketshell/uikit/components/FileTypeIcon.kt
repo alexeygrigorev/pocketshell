@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.PocketShellColors
+import java.util.Locale
 
 /**
  * The coarse visual class of a remote filesystem entry — issue #762.
@@ -73,6 +74,49 @@ fun FileTypeIcon(
         )
     }
 }
+
+/**
+ * The coarse 6-bucket icon class for a filesystem entry derived from its
+ * **name** alone — issue #762, slice C.
+ *
+ * This is the shared, one-source-of-truth extension → [FileIconClass] map so the
+ * file explorer's rows and the file viewer's header lead with the **same** glyph
+ * for the same file (design-consistency principle). Folders / symlinks come off
+ * the caller's known type; this name-based map covers regular files: a final
+ * extension routes to image / code-or-text / archive, and everything else is a
+ * generic [FileIconClass.BINARY].
+ *
+ * A dotfile (`.bashrc`), a no-extension name (`Makefile`), or a trailing-dot
+ * name has no extension and falls through to [FileIconClass.BINARY] unless the
+ * caller knows better (e.g. the viewer's content sniff — see the file-viewer
+ * overload that maps a confirmed render type).
+ */
+fun fileIconClassForName(name: String): FileIconClass = when (extensionOf(name)) {
+    in IMAGE_EXTENSIONS -> FileIconClass.IMAGE
+    in CODE_EXTENSIONS -> FileIconClass.CODE
+    in ARCHIVE_EXTENSIONS -> FileIconClass.ARCHIVE
+    else -> FileIconClass.BINARY
+}
+
+/** Lower-cased final extension of a basename, or "" when there is none. */
+private fun extensionOf(name: String): String {
+    val base = name.substringAfterLast('/').substringAfterLast('\\')
+    val dot = base.lastIndexOf('.')
+    // No dot, leading-dot dotfile (".bashrc"), or trailing dot → no extension.
+    if (dot <= 0 || dot == base.lastIndex) return ""
+    return base.substring(dot + 1).lowercase(Locale.US)
+}
+
+private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico")
+
+private val CODE_EXTENSIONS = setOf(
+    "kt", "java", "js", "ts", "tsx", "jsx", "py", "sh", "bash", "go", "rs",
+    "c", "cpp", "cc", "h", "hpp", "json", "yaml", "yml", "toml", "xml", "html",
+    "css", "scss", "md", "txt", "log", "patch", "diff", "rb", "php", "sql",
+    "gradle", "kts", "properties", "ini", "cfg", "conf",
+)
+
+private val ARCHIVE_EXTENSIONS = setOf("zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "jar")
 
 /** Accessibility label for the icon class so the row reads its type to a11y. */
 private fun FileIconClass.contentDescription(): String = when (this) {

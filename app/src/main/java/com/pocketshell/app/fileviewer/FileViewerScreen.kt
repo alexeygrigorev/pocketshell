@@ -88,8 +88,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.FileIconClass
+import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.fileIconClassForName
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -106,6 +109,9 @@ import java.util.Locale
 const val FILE_VIEWER_SCREEN_TAG = "fileViewerScreen"
 const val FILE_VIEWER_BACK_TAG = "fileViewerBack"
 const val FILE_VIEWER_TITLE_TAG = "fileViewerTitle"
+
+// Issue #762 slice C — the leading file-type icon in the viewer header.
+const val FILE_VIEWER_TYPE_ICON_TAG = "fileViewerTypeIcon"
 const val FILE_VIEWER_LOADING_TAG = "fileViewerLoading"
 const val FILE_VIEWER_IMAGE_TAG = "fileViewerImage"
 const val FILE_VIEWER_TEXT_TAG = "fileViewerText"
@@ -195,6 +201,9 @@ const val FILE_VIEWER_DOWNLOAD_ONLY_TAG = "fileViewerDownloadOnly"
 const val FILE_VIEWER_DOWNLOAD_BUTTON_TAG = "fileViewerDownloadButton"
 const val FILE_VIEWER_FILE_SIZE_TAG = "fileViewerFileSize"
 const val FILE_VIEWER_FILE_NAME_TAG = "fileViewerFileName"
+
+// Issue #762 slice C — the file-type icon leading the download-only card.
+const val FILE_VIEWER_DOWNLOAD_TYPE_ICON_TAG = "fileViewerDownloadTypeIcon"
 
 /**
  * In-app file viewer — issue #497.
@@ -395,6 +404,7 @@ internal fun FileViewerScaffold(
             FileViewerAppBar(
                 hostName = hostName,
                 displayPath = state.displayPath(),
+                fileIconClass = state.fileIconClass(),
                 shareable = state.shareable(),
                 onBack = onBack,
                 // Review header actions only make sense for a text file in
@@ -561,6 +571,22 @@ private fun FileViewerUiState.displayPath(): String = when (this) {
 }
 
 /**
+ * Issue #762 slice C — the coarse [FileIconClass] for the viewer header's
+ * leading icon. The viewer content-sniffs the bytes ([FileTypeDetector]), so for
+ * a confirmed render type it knows the class better than the extension does: an
+ * [FileViewerUiState.Image] is an IMAGE even if the suffix lied. For the rest
+ * (text/pdf/audio/binary/still-loading) it falls back to the SAME shared
+ * name-based map the explorer rows use ([fileIconClassForName]) so the glyph
+ * matches the list. A text file maps to the CODE/text bucket, exactly as it does
+ * in the explorer.
+ */
+private fun FileViewerUiState.fileIconClass(): FileIconClass = when (this) {
+    is FileViewerUiState.Image -> FileIconClass.IMAGE
+    is FileViewerUiState.TextContent -> FileIconClass.CODE
+    else -> fileIconClassForName(displayPath())
+}
+
+/**
  * Issue #559 — what the viewer can hand to the share sheet / clipboard for the
  * currently-opened file. Every previewable state maps to a [Shareable]; the
  * [FileViewerUiState.Loading] and [FileViewerUiState.CannotPreview] (without a
@@ -688,6 +714,10 @@ internal fun shareFileName(displayPath: String, fallbackExtension: String): Stri
 private fun FileViewerAppBar(
     hostName: String,
     displayPath: String,
+    // Issue #762 slice C — the coarse file-type icon for the opened file, the
+    // SAME shared [FileTypeIcon] the explorer rows lead with so a file reads
+    // identically in the list and in the viewer (design-consistency).
+    fileIconClass: FileIconClass,
     shareable: Shareable?,
     onBack: () -> Unit,
     reviewActions: (@Composable () -> Unit)? = null,
@@ -715,17 +745,26 @@ private fun FileViewerAppBar(
         titleTestTag = FILE_VIEWER_TITLE_TAG,
         modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
         leading = {
-            Box(
-                modifier = Modifier
-                    .size(PocketShellDensity.tapTargetMin)
-                    .clickable(role = Role.Button, onClick = onBack)
-                    .testTag(FILE_VIEWER_BACK_TAG),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "‹",
-                    color = PocketShellColors.TextSecondary,
-                    style = MaterialTheme.typography.headlineSmall,
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(PocketShellDensity.tapTargetMin)
+                        .clickable(role = Role.Button, onClick = onBack)
+                        .testTag(FILE_VIEWER_BACK_TAG),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "‹",
+                        color = PocketShellColors.TextSecondary,
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                }
+                // Issue #762 slice C — the file-type icon sits between the back
+                // chevron and the title, so the opened file leads with the same
+                // glyph the explorer row showed for it.
+                FileTypeIcon(
+                    iconClass = fileIconClass,
+                    modifier = Modifier.testTag(FILE_VIEWER_TYPE_ICON_TAG),
                 )
             }
         },
@@ -2119,6 +2158,14 @@ private fun DownloadOnlyPanel(
             fontSize = 14.sp,
         )
         Spacer(Modifier.height(20.dp))
+        // Issue #762 slice C — the same shared file-type icon leads the
+        // download-only card so the (un-previewable) file still reads by type.
+        FileTypeIcon(
+            iconClass = fileIconClassForName(fileName),
+            sizeDp = 40,
+            modifier = Modifier.testTag(FILE_VIEWER_DOWNLOAD_TYPE_ICON_TAG),
+        )
+        Spacer(Modifier.height(12.dp))
         Text(
             text = fileName,
             color = PocketShellColors.Text,

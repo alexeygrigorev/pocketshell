@@ -3254,6 +3254,52 @@ class DesignRenders {
     }
 
     /**
+     * Issue #762 slice C: the file VIEWER header now leads with the SAME shared
+     * [FileTypeIcon] the explorer rows use, so an opened file reads identically
+     * in the list and in the viewer (design-consistency). The real
+     * `FileViewerScreen` is app-only, so this fixture mirrors its `ScreenHeader`
+     * leading slot — back chevron + [FileTypeIcon] — for each render type:
+     *  - a code/text file (`.kt` → CODE), an image (IMAGE), an archive
+     *    (ARCHIVE), and a generic binary (BINARY).
+     * The emulator screenshot of the live viewer header is the acceptance check.
+     */
+    @Test
+    fun fileViewerHeaderTypeIcon() = render("file-viewer-header-type-icon") {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            FileViewerHeaderRow("MainActivity.kt", "~/app/MainActivity.kt", FileIconClass.CODE)
+            FileViewerHeaderRow("screenshot.png", "~/shots/screenshot.png", FileIconClass.IMAGE)
+            FileViewerHeaderRow("release.tar.gz", "~/dist/release.tar.gz", FileIconClass.ARCHIVE)
+            FileViewerHeaderRow("core.dump", "~/tmp/core.dump", FileIconClass.BINARY)
+        }
+    }
+
+    /** Mirror of the file viewer's `ScreenHeader` leading slot (back + type icon). */
+    @Composable
+    private fun FileViewerHeaderRow(name: String, path: String, iconClass: FileIconClass) {
+        ScreenHeader(
+            title = name,
+            subtitle = path,
+            leading = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "‹",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 22.sp,
+                        )
+                    }
+                    FileTypeIcon(iconClass = iconClass)
+                }
+            },
+            trailing = {
+                FileExplorerHeaderText("Save")
+                Spacer(modifier = Modifier.width(12.dp))
+                FileExplorerHeaderText("Share")
+            },
+        )
+    }
+
+    /**
      * Issue #836 — the "Host ready" bottom-sheet success row. After a host
      * becomes ready the PROMINENT (filled, primary) action must be **Continue**
      * (go to the host's sessions), and **Open Usage** must be the secondary

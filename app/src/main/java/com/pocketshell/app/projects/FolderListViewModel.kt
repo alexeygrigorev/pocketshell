@@ -42,6 +42,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -1430,6 +1431,31 @@ class FolderListViewModel internal constructor(
      * skips clobbering an already-populated tree, so a reconcile that beat the
      * hydrate is never overwritten.
      *
+     * ## Fail-safe: the hydrate NEVER gates connect (issue #847)
+     *
+     * The hydrate is a pure PRESENTATION optimisation (instant held order +
+     * collapse). The freshening reconcile is what actually POPULATES the tree
+     * and clears "loading tree". v0.4.10 shipped a release-breaking regression
+     * (#847): on a host whose `pocketshell` CLI is OLDER than the client (no
+     * `tree` subcommand), the hydrate's `tree get` errored, and because the
+     * freshening reconcile was CHAINED AFTER the hydrate with NO bound on the
+     * `tree get`, a slow/failed/wedged `tree get` left the reconcile un-run and
+     * the screen pinned on "loading tree" forever — the app would not connect.
+     *
+     * The fix keeps the hydrate-BEFORE-reconcile ordering (so a successful
+     * `tree get` still seeds the held order + collapse memory before the
+     * reconcile lands — the #837 durability contract, see
+     * [FolderListViewModelTreeDurabilityTest]) but makes it FAIL-SAFE:
+     *  - the hydrate body (warm-session await + `tree get` + parse) is BOUNDED
+     *    by [HYDRATE_TIMEOUT_MS], so a wedged/never-returning old-CLI `tree get`
+     *    can no longer suspend the coroutine forever; and
+     *  - the freshening reconcile runs in a `finally`, so it ALWAYS fires —
+     *    whether the hydrate seeded, returned nothing, errored, or timed out —
+     *    and connect can never hang behind `tree get`.
+     * `getTree` is itself exit-code-guarded + catch-all, so a missing/old/
+     * erroring CLI yields an empty seed promptly and the `finally` reconcile
+     * runs without delay; the timeout is the last-line defence for a true wedge.
+     *
      * NO POLLING: this runs ONCE per cold-start open.
      */
     private fun hydrateTreeOnColdStart(params: BoundParams) {
@@ -1444,21 +1470,50 @@ class FolderListViewModel internal constructor(
         hydrateTreeJob = viewModelScope.launch {
             // Foreground-gated, mirroring the reconcile path (D21-clean).
             processStarted.first { it }
-            val session = awaitWarmSession()
-            if (bound != params) return@launch
-            if (session != null) {
-                val nodes = source.getTree(session, params.hostName)
-                if (bound != params) return@launch
-                if (nodes.isNotEmpty()) {
-                    tree.hydrate(nodes.map { it.toHydratedNode() })
-                    // Render the seeded tree immediately — instant held
-                    // order/collapse, no Loading flash, BEFORE the reconcile.
-                    if (rootSnapshotLoaded) emitReady()
+            var hostChanged = false
+            try {
+                // Bound the best-effort seed so a wedged/old host CLI can't keep
+                // this coroutine alive: a missing `tree` command, a parse failure,
+                // or a never-returning exec all collapse to "no seed", and the
+                // `finally` reconcile below is the authoritative tree.
+                withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
+                    val session = awaitWarmSession() ?: return@withTimeoutOrNull
+                    if (bound != params) {
+                        hostChanged = true
+                        return@withTimeoutOrNull
+                    }
+                    // `getTree` returns an empty list for a missing/old/erroring
+                    // CLI and never throws except on cancellation. Run it in a
+                    // CHILD coroutine on [ioDispatcher] so a TRUE wedge (the #470
+                    // blocking stdout read inside `exec`, which a plain
+                    // `withTimeout` can't interrupt because the read sits in a
+                    // non-cancellable `Dispatchers.IO` block) is still bounded:
+                    // when [HYDRATE_TIMEOUT_MS] expires the parent is cancelled at
+                    // `await()` — a real suspension point — and the orphaned read
+                    // is reaped with the warm lease. In unit tests [ioDispatcher]
+                    // is the virtual test dispatcher, so a fast `getTree` resolves
+                    // synchronously and the hydrate-before-reconcile ordering is
+                    // preserved (the #837 durability contract).
+                    val nodes = async(ioDispatcher) { source.getTree(session, params.hostName) }.await()
+                    if (bound != params) {
+                        hostChanged = true
+                        return@withTimeoutOrNull
+                    }
+                    if (nodes.isNotEmpty()) {
+                        tree.hydrate(nodes.map { it.toHydratedNode() })
+                        // Render the seeded order/collapse immediately — instant
+                        // held shape, no Loading flash, BEFORE the reconcile.
+                        if (rootSnapshotLoaded) emitReady()
+                    }
                 }
+            } finally {
+                // Issue #847: the freshening reconcile is the load-bearing step —
+                // it populates the tree and clears "loading tree", so it MUST fire
+                // whether the hydrate seeded, no-op'd, errored, or timed out. Skip
+                // only when the host actually changed (a new bind drives its own
+                // hydrate/reconcile) or this job was cancelled.
+                if (!hostChanged && bound == params) maybeReconcileOnOpen(params)
             }
-            // Freshen AFTER the hydrate so the reconcile (which sets hasSnapshot)
-            // never beats — and thus no-ops — the seed.
-            if (bound == params) maybeReconcileOnOpen(params)
         }
     }
 
@@ -2213,6 +2268,17 @@ class FolderListViewModel internal constructor(
          * than blocking the screen.
          */
         const val WARM_SESSION_AWAIT_MS: Long = 8_000L
+
+        /**
+         * Issue #847: outer bound on the cold-start tree-HYDRATE best-effort seed
+         * coroutine (warm-session await + `tree get` + parse). The freshening
+         * reconcile is launched independently and is NOT gated by this — this only
+         * caps how long the (cosmetic) order/collapse seed coroutine may live so a
+         * wedged / old / mismatched host CLI can never keep it alive indefinitely.
+         * Sized above [WARM_SESSION_AWAIT_MS] (the dominant term on a healthy cold
+         * start) plus a normal sub-second `tree get`.
+         */
+        const val HYDRATE_TIMEOUT_MS: Long = 10_000L
 
         /**
          * Issue #702: outer bound on a single [runReconcile] gateway call. Sized

@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+# Issue #847: deterministic fixture for a host whose `pocketshell` CLI is
+# OLDER than the Android client — i.e. it predates the new-in-0.4.10 `tree`
+# and `agents kind` subcommands.
+#
+# This is the MISSING fixture that let the v0.4.10 connect-hang ship: the
+# normal `agents` fixture always carries the matching 0.4.10 CLI, so the
+# old-CLI / command-missing path on the cold-start tree HYDRATE was never
+# exercised in review (#837 gate gap). On a real old host, `pocketshell tree
+# get` (the cold-start hydrate read added in #837) errors with Click's
+#   `Error: No such command 'tree'.`
+# and exits non-zero — and the v0.4.10 client hung on "loading tree" instead
+# of degrading to the live tree.
+#
+# This stub reproduces that exactly: `tree` and `agents kind` are rejected the
+# way an older Click CLI rejects an unknown subcommand (stderr message + exit
+# 2), while every OTHER subcommand (usage / sessions / jobs / agent-log /
+# profiles / agent) delegates byte-for-byte to the REAL fixture stub so the
+# rest of the connect / probe path behaves identically to a current host. The
+# only difference from `agent-bin/pocketshell` is that the two new commands are
+# absent, which is precisely the maintainer's 0.4.9-host scenario.
+
+real_fixture="${POCKETSHELL_REAL_FIXTURE:-/usr/local/lib/pocketshell-real-fixture}"
+
+case "${1:-}" in
+  tree)
+    # New in 0.4.10 — absent on this old CLI. Click prints this exact shape
+    # to stderr and exits 2 for an unknown top-level command.
+    printf "Error: No such command 'tree'.\n" >&2
+    exit 2
+    ;;
+  agents)
+    # `agents kind` is new in 0.4.10 (#827). An old CLI has no `agents` group
+    # at all, so reject it the same way.
+    printf "Error: No such command 'agents'.\n" >&2
+    exit 2
+    ;;
+esac
+
+# Everything else behaves exactly like the current fixture.
+exec "$real_fixture" "$@"

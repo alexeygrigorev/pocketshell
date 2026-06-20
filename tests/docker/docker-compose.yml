@@ -98,6 +98,25 @@ services:
       - "${AGENTS_HOST_PORT:-2222}:22"
     healthcheck: *ssh-healthcheck
 
+  # Issue #847: agents fixture whose host `pocketshell` CLI is OLDER than the
+  # Android client — it lacks the new-in-0.4.10 `tree` / `agents kind`
+  # subcommands, reproducing the maintainer's 0.4.9-host scenario that made
+  # v0.4.10 hang on "loading tree". Bound on host port 2238 (distinct from
+  # `agents`/2222, `tmux`/2224, `flaky-agent`/2226, bootstrap/2230-2236,
+  # `real-agent`/2240, agents-pool/2243-2245). A connected test against this
+  # fixture asserts the client connects + renders the LIVE tree on a CLI
+  # mismatch instead of hanging. NOT started by the default workflow; the
+  # connected test that uses it is gated accordingly.
+  agents-old-cli:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.agents-old-cli
+    image: pocketshell-test:agents-old-cli
+    container_name: pocketshell-test-agents-old-cli
+    ports:
+      - "2238:22"
+    healthcheck: *ssh-healthcheck
+
   # Issue #632 (slice 2): the 7 bootstrap setup-detection fixtures bind disjoint
   # host ports 2230-2236, so they can be sharded across multiple emulators and
   # brought up concurrently under DISTINCT compose projects

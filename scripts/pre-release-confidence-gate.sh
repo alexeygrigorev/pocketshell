@@ -1323,6 +1323,31 @@ run_bash_step "docker-agents-pocketshell-version" \
 run_bash_step "docker-agents-ssh-sanity" \
   "chmod 600 '$SSH_KEY' && ssh -i '$SSH_KEY' -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'for tool in claude codex opencode quse tmuxctl uv; do command -v \"\$tool\"; done && quse --json >/dev/null && tmuxctl jobs list --session codex >/dev/null'"
 
+# Issue #847: bring up the OLD-CLI agents fixture (port 2238) whose
+# `pocketshell` lacks the new-in-0.4.10 `tree` / `agents kind` subcommands, and
+# assert the host-side shape that triggered the v0.4.10 connect-hang:
+#   * `pocketshell tree get` errors with a NON-ZERO `No such command` exit
+#     (the cold-start hydrate read fails — the exact CLI mismatch), AND
+#   * the host is otherwise live (`tmux` works), so a correct client MUST fall
+#     back to the live tree instead of hanging on "loading tree".
+# This is the deterministic Docker half of the #847 regression gate. The
+# end-to-end on-emulator proof that the APP itself connects + renders the live
+# tree on this old-CLI host is
+# `com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest` (run it
+# against this fixture with
+# `scripts/connected-test.sh --suffix iNNN :app:connectedDebugAndroidTest \
+#   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest`);
+# the always-runnable JVM backstop for the same property is
+# `FolderListViewModelOldCliHydrateTest` (per-push Unit job).
+run_step "docker-agents-old-cli-up" docker compose -f "$COMPOSE_FILE" up -d --build agents-old-cli
+run_bash_step "docker-agents-old-cli-health" \
+  "source '$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh' && wait_for_container_healthy '$COMPOSE_FILE' agents-old-cli '$RUN_DIR/docker-agents-old-cli-health.log' 60"
+# The old CLI rejects `tree` BEFORE reading stdin (Click exits on the unknown
+# command), so we don't need a valid JSON payload — `</dev/null` is enough. A
+# zero exit would mean the fixture is NOT an old CLI, which fails the gate.
+run_bash_step "docker-agents-old-cli-mismatch-sanity" \
+  "chmod 600 '$SSH_KEY' && ssh -i '$SSH_KEY' -p 2238 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'pocketshell tree get </dev/null; rc=\$?; if [ \"\$rc\" -eq 0 ]; then echo \"old-cli fixture unexpectedly accepted tree get (rc=0)\" >&2; exit 1; fi; tmux -V >/dev/null && echo \"old-cli mismatch confirmed: tree get rc=\$rc, host still live\"'"
+
 run_bash_step "emulator-readiness" \
   "$(emulator_readiness_script)"
 update_emulator_serial

@@ -1,0 +1,56 @@
+# Issue #847: agents fixture whose `pocketshell` CLI is OLDER than the Android
+# client — it predates the new-in-0.4.10 `tree` and `agents kind` subcommands.
+#
+# Identical to Dockerfile.agents in every other respect (same seeded tmux
+# sessions, same usage/sessions/jobs/agent-log/profiles fixtures), so the only
+# behavioural difference is the missing `tree` / `agents kind` commands — which
+# is exactly the maintainer's 0.4.9-host scenario that made v0.4.10 hang on
+# "loading tree". A connected test against this fixture proves the client now
+# connects + renders the LIVE tree on a CLI mismatch instead of hanging.
+FROM alpine:latest
+
+RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git \
+    && ssh-keygen -A \
+    && adduser -D -s /bin/sh testuser \
+    && passwd -u testuser \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh
+
+COPY tests/docker/sshd_config /etc/ssh/sshd_config
+COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
+COPY tests/docker/test_key /root/test_key
+
+# Install the FULL real fixture set, but keep the real `pocketshell` stub at a
+# delegate path and drop the OLD-CLI wrapper in its place on the PATH. The
+# wrapper rejects `tree` / `agents kind` like an old Click CLI and delegates
+# everything else to the real stub.
+COPY tests/docker/agent-bin/ /usr/local/bin/
+COPY tests/docker/agent-bin/pocketshell /usr/local/lib/pocketshell-real-fixture
+COPY tests/docker/agent-bin-old-cli/pocketshell /usr/local/bin/pocketshell
+
+COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
+COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+COPY app/build.gradle.kts /opt/pocketshell-app-build.gradle.kts
+
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
+    && chmod +x /usr/local/bin/claude \
+        /usr/local/bin/codex \
+        /usr/local/bin/opencode \
+        /usr/local/bin/pocketshell \
+        /usr/local/lib/pocketshell-real-fixture \
+        /usr/local/bin/quse \
+        /usr/local/bin/agent-log-explorer \
+        /usr/local/bin/tmux \
+        /usr/local/bin/tmuxctl \
+        /usr/local/bin/uv \
+        /usr/local/bin/systemctl \
+        /usr/local/bin/pocketshell-tui-smoke \
+        /usr/local/bin/pocketshell-agent-entrypoint \
+    && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
+    && test -n "$version" \
+    && printf '%s\n' "$version" > /opt/pocketshell-agent-fixture-version \
+    && chown -R testuser:testuser /home/testuser/.ssh
+
+EXPOSE 22
+
+CMD ["/usr/local/bin/pocketshell-agent-entrypoint"]

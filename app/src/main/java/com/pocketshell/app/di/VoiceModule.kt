@@ -3,7 +3,9 @@ package com.pocketshell.app.di
 import android.Manifest
 import android.content.Context
 import androidx.annotation.RequiresPermission
+import com.pocketshell.app.composer.ComposerDraftStore
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.SharedPrefsComposerDraftStore
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.settings.VoiceTranscriptionProvider
@@ -175,6 +177,20 @@ object VoiceModule {
     fun provideConnectivityProbe(
         observer: ConnectivityObserver,
     ): PromptComposerViewModel.ConnectivityProbe = ConnectivityObserverProbe(observer)
+
+    /**
+     * Issue #832: bind the durable per-session composer draft store onto the
+     * SharedPreferences-backed [SharedPrefsComposerDraftStore]. Singleton so
+     * every activity-scoped composer over the app lifetime shares the one
+     * prefs file — a draft persisted while focused on session A is reloaded
+     * when the user switches back to A, instead of being silently lost on the
+     * first session switch (the maintainer's #832 dogfood report).
+     */
+    @Provides
+    @Singleton
+    fun provideComposerDraftStore(
+        store: SharedPrefsComposerDraftStore,
+    ): ComposerDraftStore = store
 }
 
 /**

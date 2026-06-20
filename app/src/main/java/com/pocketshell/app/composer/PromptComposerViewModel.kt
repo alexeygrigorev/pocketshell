@@ -102,6 +102,13 @@ public class PromptComposerViewModel @Inject constructor(
     internal val pendingTranscriptionStore: PendingTranscriptionQueue =
         DisabledPendingTranscriptionQueue,
     internal val connectivity: ConnectivityProbe = AlwaysOnlineConnectivityProbe,
+    // Issue #832: durable per-session draft store. Defaults to the no-op
+    // stub so the rich existing unit/connected tests that build the
+    // ViewModel directly keep compiling untouched; production wiring in
+    // `VoiceModule` always provides the SharedPreferences-backed store so a
+    // draft survives a session switch (and a process-death recreate) keyed
+    // by the session it was authored in. See [ComposerDraftStore].
+    private val composerDraftStore: ComposerDraftStore = DisabledComposerDraftStore,
     private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
@@ -296,6 +303,12 @@ public class PromptComposerViewModel @Inject constructor(
         // focused session (keep it) or was authored elsewhere (discard it).
         // An empty draft has no owner — clearing it releases the stamp.
         savedStateHandle[KEY_DRAFT_OWNER] = if (newText.isEmpty()) null else composerTarget
+        // Issue #832: mirror the live draft into the durable per-session
+        // store so it survives a session switch (the SavedStateHandle slot is
+        // a single owner-stamped slot the #746 switch discards). Keyed by the
+        // session that owns this draft; nothing to persist when no target is
+        // wired yet (proof-of-life / pre-target restore).
+        composerTarget?.let { composerDraftStore.save(it, newText) }
         _uiState.update { it.copy(draft = newText, error = null) }
     }
 
@@ -753,6 +766,11 @@ public class PromptComposerViewModel @Inject constructor(
         // was sent from. Stamp the owner so switching away discards it rather
         // than carrying the banner into an unrelated session.
         savedStateHandle[KEY_DRAFT_OWNER] = composerTarget
+        // Issue #832: the failed-send draft is the EXACT case the maintainer
+        // reported losing. Persist it to the durable per-session store so
+        // switching away and back reloads it (the "Your draft was kept"
+        // promise becomes recoverable, not just true for an instant).
+        composerTarget?.let { composerDraftStore.save(it, request.text) }
         _uiState.update { current ->
             current.copy(
                 draft = request.text,
@@ -787,6 +805,10 @@ public class PromptComposerViewModel @Inject constructor(
         attachmentJob = null
         savedStateHandle[KEY_DRAFT] = ""
         savedStateHandle[KEY_DRAFT_OWNER] = null
+        // Issue #832: discard is the explicit "throw it away" control, so it
+        // must also drop the durable per-session slot — otherwise the next
+        // switch back would reload the draft the user just discarded.
+        composerTarget?.let { composerDraftStore.clear(it) }
         _uiState.update { current ->
             current.copy(
                 draft = "",
@@ -799,15 +821,28 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #746: tell the composer which session/pane it is currently
+     * Issue #746 / #832: tell the composer which session/pane it is currently
      * targeting (`"<hostId>/<sessionName>"`). The host screen calls this when
-     * the focused session changes. Because the composer ViewModel is
-     * activity-scoped and shared across every session on a host, a draft (and
-     * its "Not sent" banner) authored in session A would otherwise reappear in
-     * session B. When the new target differs from the session that owns the
-     * current draft, the stale draft is discarded so it never bleeds across
-     * sessions. A draft authored before any target was wired (owner == null)
-     * is adopted by the first target so process-death-restored drafts are not
+     * the focused session changes.
+     *
+     * The composer ViewModel is activity-scoped and shared across every
+     * session on a host, so the in-memory [UiState.draft] must only ever show
+     * the CURRENT session's draft (#746 no-bleed). #832 makes that scoping
+     * **durable**: instead of throwing away the outgoing session's draft on a
+     * switch (the pre-#832 behaviour, which is exactly the maintainer's lost
+     * failed-send draft), we
+     *
+     *  1. persist the outgoing session's draft to the per-session
+     *     [composerDraftStore] (the live [onDraftChange] / [restoreFailedSend]
+     *     writes already keep it current, so this is the safety net for the
+     *     orphan-adopt case below), then
+     *  2. load the INCOMING session's draft from the store into the in-memory
+     *     state — empty when that session has none.
+     *
+     * So switching A→B→A reloads A's draft instead of finding it gone, while B
+     * still never sees A's draft. A draft authored before any target was wired
+     * (owner == null, e.g. a SavedStateHandle process-death restore) is
+     * adopted by the first target so a legitimately-recovered prompt is not
      * dropped on the first switch callback.
      */
     public fun onComposerTargetChanged(targetKey: String?) {
@@ -817,24 +852,51 @@ public class PromptComposerViewModel @Inject constructor(
         val draftOwner = savedStateHandle.get<String>(KEY_DRAFT_OWNER)
         val hasDraft = _uiState.value.draft.isNotEmpty() ||
             _uiState.value.attachments.isNotEmpty()
-        if (!hasDraft) {
-            // No draft to bleed; just (re)stamp the owner to the new target so
-            // a brand-new draft is attributed correctly.
+
+        // Issue #746 orphan-adopt: a draft authored before any target was
+        // known (process-death restore) is attributed to the FIRST target so
+        // the user is not robbed of a recovered prompt. Stamp + persist it
+        // under the new owner, then keep it on screen (do not reload).
+        if (hasDraft && draftOwner == null) {
+            savedStateHandle[KEY_DRAFT_OWNER] = targetKey
+            composerDraftStore.save(targetKey, _uiState.value.draft)
             return
         }
-        when (draftOwner) {
-            // Draft authored before any target was known: adopt it for this
-            // target instead of discarding a legitimately-restored prompt.
-            null -> savedStateHandle[KEY_DRAFT_OWNER] = targetKey
-            // Draft belongs to a DIFFERENT session: discard so it does not
-            // appear where it was never authored (issue #746 hard-cut).
-            else -> if (draftOwner != targetKey) {
-                DiagnosticEvents.record(
-                    "action",
-                    "composer_discard_on_session_switch",
-                )
-                discardDraft()
-            }
+
+        // Persist the outgoing session's draft under its owner so a return
+        // switch can reload it. (Live writes already do this; this covers any
+        // gap, e.g. a draft set without going through [onDraftChange].)
+        if (hasDraft && draftOwner != null && draftOwner != targetKey) {
+            composerDraftStore.save(draftOwner, _uiState.value.draft)
+            DiagnosticEvents.record("action", "composer_persist_on_session_switch")
+        }
+
+        // Load the incoming session's durable draft (empty when none) so the
+        // in-memory state shows ONLY this session's draft — no bleed, but also
+        // no loss of the other session's draft.
+        val incoming = composerDraftStore.load(targetKey).orEmpty()
+        if (incoming == _uiState.value.draft &&
+            _uiState.value.attachments.isEmpty() &&
+            _uiState.value.error == null
+        ) {
+            // Already showing exactly this session's draft (e.g. same text, no
+            // banner) — only (re)stamp the owner, no visual churn.
+            savedStateHandle[KEY_DRAFT] = incoming
+            savedStateHandle[KEY_DRAFT_OWNER] = if (incoming.isEmpty()) null else targetKey
+            return
+        }
+        savedStateHandle[KEY_DRAFT] = incoming
+        savedStateHandle[KEY_DRAFT_OWNER] = if (incoming.isEmpty()) null else targetKey
+        _uiState.update { current ->
+            current.copy(
+                draft = incoming,
+                // The incoming session's restored draft has no in-flight
+                // attachment tiles or stale banner — those are session-local
+                // transient state that does not survive the switch.
+                attachments = emptyList(),
+                attachmentUpload = AttachmentUploadState.Idle,
+                error = null,
+            )
         }
     }
 

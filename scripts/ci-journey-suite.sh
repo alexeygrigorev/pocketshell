@@ -242,6 +242,19 @@ JOURNEY_CLASSES=(
   # regression cannot silently return. It lives under com.pocketshell.app.composer,
   # not the proof prefix, so it carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerDiscardE2eTest"
+  # ADDED (#832 — durable per-session composer draft store): a draft authored in
+  # session A and lost on a FAILED attachment-send (despite the "Your draft was
+  # kept" banner) must survive. The ComposerDraftStore persists the per-session
+  # draft so restoreFailedSend re-folds it back into the composer instead of
+  # dropping it, and switching A→B→A restores A's draft (no cross-session bleed).
+  # RED on the unfixed code (the failed send drops the text); the durable store
+  # flips it GREEN. Pure Compose-rule UI test, NO Docker fixture (no SSH/tmux),
+  # does NOT self-skip on CI. Per the "load-bearing journeys run at PR time"
+  # principle (#638/#691) it runs per-push so the draft-loss regression cannot
+  # silently return (D31/G9 — an on-device regression test no gate runs is the
+  # same as no test). Lives under com.pocketshell.app.composer, not the proof
+  # prefix, so it carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.ComposerDraftDurabilityE2eTest"
   # ADDED (epic #687 Phase 1 / P1 — the device-truth gate J3, #686/#658): switch
   # A→B while session A keeps STREAMING (a late/stale capture from A races the
   # switch) must show B in the rendered PANE BODY + header label and paint NO

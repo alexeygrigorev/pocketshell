@@ -184,6 +184,7 @@ class PromptComposerViewModelTest {
         voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
         speechRecognitionProvider: PromptComposerViewModel.SpeechRecognitionProvider =
             UnavailableSpeechRecognitionProvider,
+        composerDraftStore: ComposerDraftStore = DisabledComposerDraftStore,
         savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
@@ -193,6 +194,7 @@ class PromptComposerViewModelTest {
             apiKeyStorage = storage,
             voiceSettings = voiceSettings,
             speechRecognitionProvider = speechRecognitionProvider,
+            composerDraftStore = composerDraftStore,
             savedStateHandle = savedStateHandle,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
@@ -3226,6 +3228,138 @@ class PromptComposerViewModelTest {
         assertEquals("typed in B", vm.uiState.value.draft)
         // Switching away from B discards B's draft.
         vm.onComposerTargetChanged("1/sessionA")
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    // -- Issue #832: durable per-session draft store ------------------------
+
+    @Test
+    fun failedSendDraftSurvivesSwitchAwayAndBack() = runTest {
+        // Issue #832 reproduction (the maintainer's exact dogfood scenario): an
+        // attachment/send fails mid-session (silent drop), the composer keeps
+        // the draft ("Your draft was kept"), the user switches to another
+        // session, then returns — and the draft MUST still be there. Before the
+        // durable per-session store this draft was discarded on the FIRST
+        // switch and was unrecoverable through the UI.
+        //
+        // RED without the fix: with the per-session store wired, the switch
+        // back used to find an empty draft (the old onComposerTargetChanged
+        // discarded it). GREEN: the store reloads session A's draft.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/sessionA")
+
+        // The send into session A fails; the composer keeps the draft.
+        vm.restoreFailedSend(
+            PromptComposerViewModel.SendRequest(text = "draft for A", withEnter = true),
+        )
+        assertEquals("draft for A", vm.uiState.value.draft)
+        assertNotNull(vm.uiState.value.error)
+
+        // The user switches to session B: A's draft must NOT bleed into B.
+        vm.onComposerTargetChanged("1/sessionB")
+        assertEquals("", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.error)
+
+        // The user returns to session A: the kept draft is restored.
+        vm.onComposerTargetChanged("1/sessionA")
+        assertEquals("draft for A", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun multipleSessionsEachKeepTheirOwnDurableDraft() = runTest {
+        // Issue #832 class-coverage: distinct drafts in three sessions all
+        // survive arbitrary switching; each session only ever shows its own.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+
+        vm.onComposerTargetChanged("1/a")
+        vm.onDraftChange("alpha draft")
+        vm.onComposerTargetChanged("1/b")
+        assertEquals("", vm.uiState.value.draft)
+        vm.onDraftChange("bravo draft")
+        vm.onComposerTargetChanged("2/c")
+        assertEquals("", vm.uiState.value.draft)
+        vm.onDraftChange("charlie draft")
+
+        // Cycle back through every session: each reloads its own draft.
+        vm.onComposerTargetChanged("1/a")
+        assertEquals("alpha draft", vm.uiState.value.draft)
+        vm.onComposerTargetChanged("2/c")
+        assertEquals("charlie draft", vm.uiState.value.draft)
+        vm.onComposerTargetChanged("1/b")
+        assertEquals("bravo draft", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun editingDraftAfterSwitchBackUpdatesTheRightSessionsStore() = runTest {
+        // Issue #832: an edit after returning to a session is persisted under
+        // THAT session, not the one we switched away from.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/a")
+        vm.onDraftChange("a v1")
+        vm.onComposerTargetChanged("1/b")
+        vm.onComposerTargetChanged("1/a")
+        vm.onDraftChange("a v2")
+
+        assertEquals("a v2", store.load("1/a"))
+        assertNull(store.load("1/b"))
+    }
+
+    @Test
+    fun discardClearsTheDurableSlotSoSwitchBackIsEmpty() = runTest {
+        // Issue #832: Discard is the explicit "throw it away" control — it must
+        // drop the durable slot too, otherwise a switch back resurrects the
+        // draft the user just discarded.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/a")
+        vm.restoreFailedSend(
+            PromptComposerViewModel.SendRequest(text = "stale prompt", withEnter = true),
+        )
+        assertEquals("stale prompt", store.load("1/a"))
+
+        vm.discardDraft()
+        assertNull(store.load("1/a"))
+
+        // Switch away and back: the discarded draft does not come back.
+        vm.onComposerTargetChanged("1/b")
+        vm.onComposerTargetChanged("1/a")
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun deliveredSendClearsTheDurableSlot() = runTest {
+        // Issue #832: a confirmed delivery wipes the draft AND its durable
+        // slot, so the next time the user lands on that session the composer
+        // is a clean slate (not a resurrected just-sent prompt).
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/a")
+        vm.onDraftChange("about to send")
+        assertEquals("about to send", store.load("1/a"))
+
+        vm.markSendDelivered()
+        assertNull(store.load("1/a"))
+
+        vm.onComposerTargetChanged("1/b")
+        vm.onComposerTargetChanged("1/a")
         assertEquals("", vm.uiState.value.draft)
     }
 

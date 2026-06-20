@@ -10898,7 +10898,32 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun resizeRemotePty(columns: Int, rows: Int) {
         if (columns <= 0 || rows <= 0) return
-        if (columns == remoteColumns && rows == remoteRows) return
+        if (columns == remoteColumns && rows == remoteRows) {
+            // Issue #717 (the missed-heal gate): a composer/keyboard-dismiss after a
+            // voice-send fires `onTerminalSizeChanged` with the EXACT same grid the
+            // last `onSizeChanged` already recorded (the dictation chrome mount/unmount
+            // re-measures the TerminalView back to the same dims within one measure
+            // pass). On origin/main this returned BLINDLY — before
+            // `maybeRefreshControlClientSize` was ever called — so the active pane the
+            // IME transition wiped stayed BLACK with only a stray cursor / lone live
+            // line, exactly the maintainer's #717 black pane. The same-dimension
+            // short-circuit inside `maybeRefreshControlClientSize` (the
+            // `appliedControlClient*` branch) DOES heal, but a true-same-grid resize
+            // never reached it because of this top-level early-return. So mirror that
+            // branch here: run the cheap active-pane heal (a single `capture-pane`, NO
+            // `refresh-client -C` wire op) when the active pane actually looks lost.
+            // `maybeHealActivePaneOnNoOpResize` pre-checks blank/partial-blank, so a
+            // normally-painted pane stays a no-op (a routine keyboard toggle of a good
+            // pane costs nothing — preserving the #285 "Compose layout churn must not
+            // spam tmux" intent). The remote tmux grid is authoritative, so the
+            // re-capture restores the lost frame keyed to the target session id.
+            val client = clientRef
+            val target = activeTarget
+            if (client != null && target != null) {
+                maybeHealActivePaneOnNoOpResize(client, target)
+            }
+            return
+        }
         remoteColumns = columns
         remoteRows = rows
         maybeRefreshControlClientSize()

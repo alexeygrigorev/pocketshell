@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -69,7 +70,7 @@ class GitHistoryScaffoldTest {
     @Test
     fun loadingStateShowsSpinner() {
         setState(GitHistoryUiState.Loading("/home/u/git/proj"))
-        compose.onNodeWithTag(GIT_HISTORY_LOADING_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_LOADING_TAG)
     }
 
     private fun overview() = GitRepoOverview(
@@ -108,9 +109,9 @@ class GitHistoryScaffoldTest {
         )
         // Default tab is Overview — switch to History first.
         compose.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_HISTORY_ROW_TAG_PREFIX + "a1b2c3d").assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_ROW_TAG_PREFIX + "a1b2c3d")
         compose.onNodeWithText("Add timeline view").assertIsDisplayed()
-        compose.onNodeWithTag(GIT_HISTORY_ROW_TAG_PREFIX + "9f8e7d6").assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_ROW_TAG_PREFIX + "9f8e7d6")
     }
 
     @Test
@@ -124,10 +125,10 @@ class GitHistoryScaffoldTest {
             ),
         )
         // Overview is the default landing tab.
-        compose.onNodeWithTag(GIT_OVERVIEW_STATUS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(GIT_BRANCH_ROW_TAG_PREFIX + "main").assertIsDisplayed()
-        compose.onNodeWithTag(GIT_BRANCH_ROW_TAG_PREFIX + "feature/x").assertIsDisplayed()
-        compose.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + "/home/u/git/proj").assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_OVERVIEW_STATUS_TAG)
+        compose.assertNodeFullyWithinRoot(GIT_BRANCH_ROW_TAG_PREFIX + "main")
+        compose.assertNodeFullyWithinRoot(GIT_BRANCH_ROW_TAG_PREFIX + "feature/x")
+        compose.assertNodeFullyWithinRoot(GIT_WORKTREE_ROW_TAG_PREFIX + "/home/u/git/proj")
         compose.onNodeWithText("Dirty").assertIsDisplayed()
     }
 
@@ -145,7 +146,7 @@ class GitHistoryScaffoldTest {
             onOpenGitHub = { opened = it },
         )
         // Overview is the default landing tab; the action sits at the top.
-        compose.onNodeWithTag(GIT_OPEN_ON_GITHUB_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_OPEN_ON_GITHUB_TAG)
         compose.onNodeWithTag(GIT_OPEN_ON_GITHUB_TAG).performClick()
         assertEquals("https://github.com/owner/repo", opened)
     }
@@ -174,7 +175,7 @@ class GitHistoryScaffoldTest {
                 overview = null,
             ),
         )
-        compose.onNodeWithTag(GIT_OVERVIEW_STATUS_UNAVAILABLE_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_OVERVIEW_STATUS_UNAVAILABLE_TAG)
     }
 
     @Test
@@ -187,7 +188,7 @@ class GitHistoryScaffoldTest {
             ),
         )
         compose.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_HISTORY_EMPTY_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_EMPTY_TAG)
     }
 
     @Test
@@ -200,7 +201,7 @@ class GitHistoryScaffoldTest {
             ),
         )
         compose.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_HISTORY_TRUNCATED_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_TRUNCATED_TAG)
     }
 
     @Test
@@ -231,9 +232,9 @@ class GitHistoryScaffoldTest {
             ),
         )
         compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_ISSUE_ROW_TAG_PREFIX + "649").assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_ISSUE_ROW_TAG_PREFIX + "649")
         compose.onNodeWithText("view GitHub issues in-app").assertIsDisplayed()
-        compose.onNodeWithTag(GIT_ISSUE_ROW_TAG_PREFIX + "648").assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_ISSUE_ROW_TAG_PREFIX + "648")
     }
 
     @Test
@@ -249,7 +250,7 @@ class GitHistoryScaffoldTest {
             ),
         )
         compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_ISSUES_HINT_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_ISSUES_HINT_TAG)
         compose.onNodeWithText("install gh (https://cli.github.com) and run `gh auth login`")
             .assertIsDisplayed()
     }
@@ -267,7 +268,7 @@ class GitHistoryScaffoldTest {
             ),
         )
         compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_ISSUES_EMPTY_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_ISSUES_EMPTY_TAG)
     }
 
     @Test
@@ -283,16 +284,25 @@ class GitHistoryScaffoldTest {
             ),
         )
         compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_ISSUES_UNAVAILABLE_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_ISSUES_UNAVAILABLE_TAG)
     }
 
     // ---- create-issue form (issue #650) ------------------------------------
+    //
+    // The create-issue form renders inside a Material3 [ModalBottomSheet], which
+    // composes into a SEPARATE window/root. `assertNodeFullyWithinRoot` reads a
+    // single `onRoot()` (the activity root) to bound the node, so it cannot
+    // correctly contain nodes that live in the sheet's own window. For the
+    // sheet-internal controls (sheet container, title/body fields, error/success
+    // surfaces, open-URL action) we therefore keep `assertIsDisplayed()`; the
+    // reachability-as-containment migration (issue #856) applies to the main
+    // scaffold nodes (GIT_NEW_ISSUE_TAG above, etc.), not the modal-window ones.
 
     @Test
     fun newIssueAffordanceShownWhenGhConfigured() {
         setState(configuredReady(issues = emptyList()))
         compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
-        compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_NEW_ISSUE_TAG)
     }
 
     @Test
@@ -306,7 +316,7 @@ class GitHistoryScaffoldTest {
         compose.onNodeWithTag(GIT_ISSUES_TAB_TAG).performClick()
         // Gated: no "New issue" row, only the configure-gh hint.
         compose.onNodeWithTag(GIT_NEW_ISSUE_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(GIT_ISSUES_HINT_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_ISSUES_HINT_TAG)
     }
 
     @Test
@@ -368,7 +378,7 @@ class GitHistoryScaffoldTest {
     @Test
     fun notARepoShowsGuidance() {
         setState(GitHistoryUiState.NotARepo("/home/u/notrepo"))
-        compose.onNodeWithTag(GIT_HISTORY_NOT_A_REPO_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_NOT_A_REPO_TAG)
         compose.onNodeWithText("Not a git repository").assertIsDisplayed()
     }
 
@@ -382,8 +392,9 @@ class GitHistoryScaffoldTest {
             ),
             onRetry = { retries++ },
         )
-        compose.onNodeWithTag(GIT_HISTORY_ERROR_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_ERROR_TAG)
         compose.onNodeWithText("Couldn't read git history: connection reset").assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(GIT_HISTORY_RETRY_TAG)
         compose.onNodeWithTag(GIT_HISTORY_RETRY_TAG).performClick()
         assertEquals(1, retries)
     }

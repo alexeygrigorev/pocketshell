@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -38,7 +39,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_LOADING_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_LOADING_TAG)
     }
 
     @Test
@@ -57,7 +58,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_TEXT_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_TEXT_TAG)
         compose.onNodeWithText("hello from issue 497").assertIsDisplayed()
     }
 
@@ -77,7 +78,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_CANNOT_PREVIEW_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_CANNOT_PREVIEW_TAG)
         compose.onNodeWithText("File is too large to preview (limit 20 MB).").assertIsDisplayed()
         compose.onNodeWithTag(FILE_VIEWER_RETRY_TAG).performClick()
         compose.waitForIdle()
@@ -107,8 +108,9 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_CANNOT_PREVIEW_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_CANNOT_PREVIEW_TAG)
         compose.onNodeWithText(candidate).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_LOCATE_CANDIDATE_TAG)
         compose.onNodeWithTag(FILE_VIEWER_LOCATE_CANDIDATE_TAG).performClick()
         compose.waitForIdle()
         assertEquals(candidate, opened)
@@ -139,8 +141,8 @@ class FileViewerScaffoldTest {
             }
         }
         compose.waitForIdle()
-        compose.onNodeWithTag(FILE_VIEWER_AUDIO_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_AUDIO_PLAY_PAUSE_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_AUDIO_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_AUDIO_PLAY_PAUSE_TAG)
         compose.onNodeWithTag(FILE_VIEWER_AUDIO_SEEKBAR_TAG).assertExists()
         audioFile.delete()
     }
@@ -163,7 +165,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_WRAP_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_WRAP_TAG)
         compose.onNodeWithTag(FILE_VIEWER_RENDER_MD_TAG).assertDoesNotExist()
     }
 
@@ -210,9 +212,9 @@ class FileViewerScaffoldTest {
             }
         }
         // Markdown toggle is offered for a .md file.
-        compose.onNodeWithTag(FILE_VIEWER_RENDER_MD_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_RENDER_MD_TAG)
         // The rendered Markdown surface is shown (heading text is present).
-        compose.onNodeWithTag(FILE_VIEWER_MARKDOWN_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_MARKDOWN_TAG)
         compose.onNodeWithText("Heading One").assertIsDisplayed()
     }
 
@@ -295,11 +297,11 @@ class FileViewerScaffoldTest {
             }
         }
         // Header Save + Share + Copy (file URI) actions are present for a previewable file.
-        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_SAVE_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_SHARE_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_COPY_TAG)
         // The text viewer exposes a one-tap "Copy all".
-        compose.onNodeWithTag(FILE_VIEWER_COPY_ALL_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_COPY_ALL_TAG)
         compose.onNodeWithText("selectable body for issue 559").assertIsDisplayed()
     }
 
@@ -357,7 +359,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOGGLE_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_TOGGLE_TAG)
         imageFile.delete()
     }
 
@@ -401,14 +403,14 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_UNDO_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_CANVAS_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_TOOL_PAN_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_TOOL_PEN_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_TOOL_ARROW_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_UNDO_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_CANVAS_TAG)
+        compose.assertNodeFullyWithinRoot(
             fileViewerAnnotateSwatchTag(ImageAnnotationState.DEFAULT_COLOR_ARGB),
-        ).assertIsDisplayed()
+        )
         compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_SUBMIT_TAG).performClick()
         compose.waitForIdle()
         assertEquals(1, submits)
@@ -479,7 +481,7 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG)
         compose.onNodeWithText(savedPath).assertIsDisplayed()
         // The path Text is inside a merged clickable row; click via the unmerged
         // tree so the tagged node is addressable.
@@ -513,9 +515,9 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_SAVE_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_SHARE_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_COPY_TAG)
         imageFile.delete()
     }
 
@@ -584,15 +586,15 @@ class FileViewerScaffoldTest {
             }
         }
         // Download-only panel is shown.
-        compose.onNodeWithTag(FILE_VIEWER_DOWNLOAD_ONLY_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_FILE_NAME_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_FILE_SIZE_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_DOWNLOAD_BUTTON_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_DOWNLOAD_ONLY_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_FILE_NAME_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_FILE_SIZE_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_DOWNLOAD_BUTTON_TAG)
         // Header Save action is visible (shareable with cached file).
-        compose.onNodeWithTag(FILE_VIEWER_SAVE_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_SAVE_TAG)
         // Share and Copy are also available since the file is cached locally.
-        compose.onNodeWithTag(FILE_VIEWER_SHARE_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_COPY_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_SHARE_TAG)
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_COPY_TAG)
         binaryFile.delete()
     }
 
@@ -681,9 +683,9 @@ class FileViewerScaffoldTest {
             }
         }
         compose.waitForIdle()
-        compose.onNodeWithTag(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG)
         compose.onNodeWithText(savedPath).assertIsDisplayed()
-        compose.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_REVIEW_ATTACH_TAG)
     }
 
     @Test

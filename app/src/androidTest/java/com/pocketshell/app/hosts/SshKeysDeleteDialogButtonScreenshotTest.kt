@@ -105,6 +105,27 @@ class SshKeysDeleteDialogButtonScreenshotTest {
         }
     }
 
+    @Test
+    fun sshKeysScreen_headerAndEmptyState_screenshot() {
+        // #864: the migrated ScreenHeader ("SSH keys" + count) over the shared
+        // EmptyState ("No keys yet"), captured on the emulator for the reviewer.
+        compose.setContent {
+            PocketShellTheme {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    SshKeysManagementPane(
+                        viewModel = viewModel,
+                        requiresUnlock = { false },
+                    )
+                }
+            }
+        }
+        compose.onNodeWithText("SSH keys").assertIsDisplayed()
+        compose.onNodeWithText("No keys yet").assertIsDisplayed()
+        compose.waitForIdle()
+        SystemClock.sleep(200)
+        capture("issue-864-sshkeys-empty-state.png")
+    }
+
     private fun capture(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)

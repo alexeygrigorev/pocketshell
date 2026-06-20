@@ -2,6 +2,7 @@ package com.pocketshell.uikit.components
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -109,6 +110,36 @@ class ConfirmDialogTest {
         }
         composeRule.onNodeWithText("Keep both").assertIsDisplayed()
         composeRule.onNodeWithText("Overwrite").assertIsDisplayed()
+    }
+
+    @Test
+    fun confirmAndDismissTestTags_routeTheirCallbacks() {
+        var confirmed = 0
+        var dismissed = 0
+        composeRule.setContent {
+            PocketShellTheme {
+                ConfirmDialog(
+                    title = "Stop this session?",
+                    message = "This ends the tmux session on the host.",
+                    confirmLabel = "Stop",
+                    onConfirm = { confirmed++ },
+                    onDismiss = { dismissed++ },
+                    destructive = true,
+                    confirmTestTag = "confirm-tag",
+                    dismissTestTag = "dismiss-tag",
+                )
+            }
+        }
+        composeRule.onNodeWithTag("confirm-tag").assertIsDisplayed()
+        composeRule.onNodeWithTag("dismiss-tag").assertIsDisplayed().performClick()
+        composeRule.runOnIdle {
+            assertEquals(0, confirmed)
+            assertEquals(1, dismissed)
+        }
+        composeRule.onNodeWithTag("confirm-tag").performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, confirmed)
+        }
     }
 
     @Test

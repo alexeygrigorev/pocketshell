@@ -53,7 +53,9 @@ import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.DisclosureIcon
+import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.HostCard
@@ -193,6 +195,66 @@ class DesignRenders {
             trailing = {
                 Badge(label = "7 active", role = BadgeRole.Active, mono = false)
             },
+        )
+    }
+
+    /**
+     * #864: the SshKeys management pane recomposed from the shared chrome —
+     * `ScreenHeader` ("SSH keys" + count subtitle) over the populated key list
+     * (`ListRow`s), the shape SshKeysScreen now uses after dropping its bespoke
+     * header. App-only `SshKeysManagementPane` (Hilt VM) can't render here, so
+     * this fixture mirrors its shared-component layout for the fast visual check.
+     */
+    @Test
+    fun sshKeysPopulated() = render("ssh-keys-populated") {
+        ScreenHeader(
+            title = "SSH keys",
+            subtitle = "2 keys",
+        )
+        ListRow(
+            title = "deploy-key",
+            subtitle = "/home/u/.ssh/deploy-key",
+            trailing = { Badge(label = "K", role = BadgeRole.Shell, mono = true) },
+        )
+        ListRow(
+            title = "id_ed25519",
+            subtitle = "/home/u/.ssh/id_ed25519  · passphrase not stored",
+            trailing = { Badge(label = "K", role = BadgeRole.Shell, mono = true) },
+        )
+    }
+
+    /**
+     * #864: the SshKeys empty state on the shared `EmptyState` — `ScreenHeader`
+     * over the centered "No keys yet" placeholder that replaced the bespoke
+     * `Box { Column { Text } }` empty block.
+     */
+    @Test
+    fun sshKeysEmpty() = render("ssh-keys-empty") {
+        ScreenHeader(
+            title = "SSH keys",
+            subtitle = "0 keys",
+        )
+        EmptyState(
+            title = "No keys yet",
+            description = "Import a key file or generate one on-device.",
+        )
+    }
+
+    /**
+     * #860: the canonical destructive `ConfirmDialog` the delete/stop/clear
+     * confirm sites converge onto (delete SSH key shown). Renders the shared
+     * surface so the red-text confirm + muted Cancel read consistently.
+     */
+    @Test
+    fun confirmDialogDestructive() = render("confirm-dialog-destructive") {
+        ConfirmDialog(
+            title = "Delete this key?",
+            message = "“deploy-key” will be removed. Any hosts that reference " +
+                "this key are deleted too (foreign-key cascade).",
+            confirmLabel = "Delete",
+            onConfirm = {},
+            onDismiss = {},
+            destructive = true,
         )
     }
 

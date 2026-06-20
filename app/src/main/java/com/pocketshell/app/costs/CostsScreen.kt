@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
@@ -128,42 +128,22 @@ fun CostsScreen(
     }
 
     if (showClearDialog) {
-        AlertDialog(
-            onDismissRequest = { showClearDialog = false },
-            title = { Text("Clear cost log?", color = PocketShellColors.Text) },
-            text = {
-                Text(
-                    text = "This permanently deletes every recorded API call. " +
-                        "Aggregates reset to zero. There is no undo.",
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.bodyDense,
-                )
+        // #756: "Clear" permanently deletes the cost log → the canonical shared
+        // destructive confirm (red text, NOT a filled red slab). The destructive
+        // intent now reads from ConfirmDialog's `destructive` flag instead of a
+        // per-call colour.
+        ConfirmDialog(
+            title = "Clear cost log?",
+            message = "This permanently deletes every recorded API call. " +
+                "Aggregates reset to zero. There is no undo.",
+            confirmLabel = "Clear",
+            onConfirm = {
+                viewModel.clearLog()
+                showClearDialog = false
             },
-            confirmButton = {
-                // #756: "Clear" permanently deletes the cost log → the canonical
-                // destructive confirm (red text, NOT a filled red slab). Replaces
-                // the ad-hoc accent-coloured TextButton; the destructive intent now
-                // reads from the shared variant instead of a per-call colour.
-                PocketShellButton(
-                    text = "Clear",
-                    onClick = {
-                        viewModel.clearLog()
-                        showClearDialog = false
-                    },
-                    variant = ButtonVariant.Destructive,
-                    modifier = Modifier.testTag(COSTS_CLEAR_CONFIRM_TAG),
-                )
-            },
-            dismissButton = {
-                PocketShellButton(
-                    text = "Cancel",
-                    onClick = { showClearDialog = false },
-                    variant = ButtonVariant.Text,
-                )
-            },
-            containerColor = PocketShellColors.Surface,
-            titleContentColor = PocketShellColors.Text,
-            textContentColor = PocketShellColors.TextSecondary,
+            onDismiss = { showClearDialog = false },
+            destructive = true,
+            confirmTestTag = COSTS_CLEAR_CONFIRM_TAG,
         )
     }
 }

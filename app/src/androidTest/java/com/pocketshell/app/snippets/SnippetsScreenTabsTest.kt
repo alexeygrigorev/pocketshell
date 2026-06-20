@@ -16,6 +16,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -204,6 +205,109 @@ class SnippetsScreenTabsTest {
             compose.onNodeWithTag(snippetActionsTestTag(snippetId)).performClick()
             compose.onNodeWithTag(snippetDeleteActionTestTag(snippetId)).assertIsDisplayed().performClick()
             compose.onNodeWithText("Delete this snippet?").assertIsDisplayed()
+        }
+    }
+
+    @Test
+    fun snippetDeleteDialog_showsSharedConfirmAndConfirmDeletes() {
+        runBlocking {
+            val snippetId = db.snippetDao().insert(
+                SnippetEntity(
+                    hostId = hostId,
+                    label = "Doomed prompt",
+                    body = "Body",
+                    kind = SnippetKind.Prompt.storageValue,
+                ),
+            )
+
+            compose.setContent {
+                PocketShellTheme {
+                    SnippetsScreen(
+                        hostId = hostId,
+                        onBack = {},
+                        viewModel = viewModel,
+                        commandTemplatesViewModel = commandTemplatesViewModel,
+                    )
+                }
+            }
+
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(snippetRowTestTag(snippetId))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+
+            compose.onNodeWithTag(snippetActionsTestTag(snippetId)).performClick()
+            compose.onNodeWithTag(snippetDeleteActionTestTag(snippetId)).performClick()
+
+            // Migrated shared ConfirmDialog: title + body + confirm + cancel.
+            compose.onNodeWithTag(SNIPPET_DELETE_DIALOG_TAG).assertIsDisplayed()
+            compose.onNodeWithText("Delete this snippet?").assertIsDisplayed()
+            compose.onNodeWithText("“Doomed prompt” will be removed permanently.")
+                .assertIsDisplayed()
+            compose.onNodeWithTag(SNIPPET_DELETE_CANCEL_TAG).assertIsDisplayed()
+
+            // Cancel dismisses without deleting.
+            compose.onNodeWithTag(SNIPPET_DELETE_CANCEL_TAG).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(SNIPPET_DELETE_DIALOG_TAG)
+                    .fetchSemanticsNodes().isEmpty()
+            }
+            compose.onNodeWithTag(snippetRowTestTag(snippetId)).assertIsDisplayed()
+
+            // Re-open and confirm → onConfirm fires and the row disappears.
+            compose.onNodeWithTag(snippetActionsTestTag(snippetId)).performClick()
+            compose.onNodeWithTag(snippetDeleteActionTestTag(snippetId)).performClick()
+            compose.onNodeWithTag(SNIPPET_DELETE_CONFIRM_TAG).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(snippetRowTestTag(snippetId))
+                    .fetchSemanticsNodes().isEmpty()
+            }
+        }
+    }
+
+    @Test
+    fun macroDeleteDialog_showsSharedConfirmAndConfirmDeletes() {
+        runBlocking {
+            val macroId = db.commandTemplateDao().insert(
+                CommandTemplateEntity(
+                    hostId = hostId,
+                    label = "Doomed macro",
+                    commands = "echo {{x}}",
+                ),
+            )
+
+            compose.setContent {
+                PocketShellTheme {
+                    SnippetsScreen(
+                        hostId = hostId,
+                        onBack = {},
+                        viewModel = viewModel,
+                        commandTemplatesViewModel = commandTemplatesViewModel,
+                    )
+                }
+            }
+
+            // Switch to the Macros tab.
+            compose.onNodeWithText("Macros").performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(commandTemplateRowTestTag(macroId))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+
+            compose.onNodeWithTag(commandTemplateActionsTestTag(macroId)).performClick()
+            compose.onNodeWithTag(commandTemplateDeleteActionTestTag(macroId)).performClick()
+
+            compose.onNodeWithTag(MACRO_DELETE_DIALOG_TAG).assertIsDisplayed()
+            compose.onNodeWithText("Delete this macro?").assertIsDisplayed()
+            compose.onNodeWithText("\"Doomed macro\" will be removed permanently.")
+                .assertIsDisplayed()
+            compose.onNodeWithTag(MACRO_DELETE_CANCEL_TAG).assertIsDisplayed()
+
+            compose.onNodeWithTag(MACRO_DELETE_CONFIRM_TAG).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(commandTemplateRowTestTag(macroId))
+                    .fetchSemanticsNodes().isEmpty()
+            }
         }
     }
 

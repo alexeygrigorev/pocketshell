@@ -90,6 +90,100 @@ class SshKeysManagementPaneActionsTest {
     }
 
     @Test
+    fun deleteKeyDialog_showsTitleBodyConfirmCancel_andCancelKeepsKey() {
+        runBlocking {
+            val keyId = db.sshKeyDao().insert(
+                SshKeyEntity(name = "keep-key", privateKeyPath = "/tmp/keep-key"),
+            )
+
+            renderPane()
+
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(sshKeyRowTestTag(keyId))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+
+            compose.onNodeWithTag(sshKeyActionsTestTag(keyId)).performClick()
+            compose.onNodeWithTag(sshKeyDeleteActionTestTag(keyId)).performClick()
+
+            // The migrated shared ConfirmDialog: title + body + confirm + cancel.
+            compose.onNodeWithTag(SSH_KEYS_DELETE_DIALOG_TAG).assertIsDisplayed()
+            compose.onNodeWithText("Delete this key?").assertIsDisplayed()
+            compose.onNodeWithText(
+                "“keep-key” will be removed. Any hosts that reference this key " +
+                    "are deleted too (foreign-key cascade).",
+            ).assertIsDisplayed()
+            compose.onNodeWithTag(SSH_KEYS_DELETE_CONFIRM_TAG).assertIsDisplayed()
+            compose.onNodeWithTag(SSH_KEYS_DELETE_CANCEL_TAG).assertIsDisplayed()
+
+            // Cancel dismisses without deleting (onDismiss callback wired).
+            compose.onNodeWithTag(SSH_KEYS_DELETE_CANCEL_TAG).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(SSH_KEYS_DELETE_DIALOG_TAG)
+                    .fetchSemanticsNodes().isEmpty()
+            }
+            compose.onNodeWithTag(sshKeyRowTestTag(keyId)).assertIsDisplayed()
+        }
+    }
+
+    @Test
+    fun deleteKeyDialog_confirmDeletesTheKey() {
+        runBlocking {
+            val keyId = db.sshKeyDao().insert(
+                SshKeyEntity(name = "doomed-key", privateKeyPath = "/tmp/doomed-key"),
+            )
+
+            renderPane()
+
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(sshKeyRowTestTag(keyId))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+
+            compose.onNodeWithTag(sshKeyActionsTestTag(keyId)).performClick()
+            compose.onNodeWithTag(sshKeyDeleteActionTestTag(keyId)).performClick()
+            compose.onNodeWithTag(SSH_KEYS_DELETE_DIALOG_TAG).assertIsDisplayed()
+
+            // Confirm fires onConfirm → deleteKey: the row disappears.
+            compose.onNodeWithTag(SSH_KEYS_DELETE_CONFIRM_TAG).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(sshKeyRowTestTag(keyId))
+                    .fetchSemanticsNodes().isEmpty()
+            }
+        }
+    }
+
+    @Test
+    fun screenHeaderAndEmptyState_render() {
+        // No keys inserted → the migrated shared EmptyState shows, and the
+        // shared ScreenHeader is present (#864).
+        renderPane()
+
+        compose.onNodeWithTag(SSH_KEYS_HEADER_TITLE_TAG).assertIsDisplayed()
+        compose.onNodeWithText("SSH keys").assertIsDisplayed()
+        compose.onNodeWithTag(SSH_KEYS_EMPTY_TAG).assertIsDisplayed()
+        compose.onNodeWithText("No keys yet").assertIsDisplayed()
+        compose.onNodeWithText("Import a key file or generate one on-device.")
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun screenHeaderSubtitle_countsKeys() {
+        runBlocking {
+            db.sshKeyDao().insert(SshKeyEntity(name = "k1", privateKeyPath = "/tmp/k1"))
+            db.sshKeyDao().insert(SshKeyEntity(name = "k2", privateKeyPath = "/tmp/k2"))
+
+            renderPane()
+
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(SSH_KEYS_HEADER_SUBTITLE_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("2 keys").assertIsDisplayed()
+        }
+    }
+
+    @Test
     fun longKeyNameAndPath_keepTrailingKebabUsable() {
         runBlocking {
             val keyId = db.sshKeyDao().insert(

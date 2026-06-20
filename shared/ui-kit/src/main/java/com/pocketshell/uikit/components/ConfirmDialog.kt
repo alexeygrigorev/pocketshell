@@ -4,6 +4,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellTypography
@@ -47,6 +48,11 @@ import com.pocketshell.uikit.theme.PocketShellTypography
  * @param destructive when true, the confirm action paints destructive (red
  *   text); when false it paints the affirmative filled-accent primary.
  * @param dismissLabel the dismiss button label (defaults to "Cancel").
+ * @param confirmTestTag optional `testTag` on the confirm button, so call sites
+ *   that previously hand-rolled the dialog keep their existing instrumentation
+ *   hooks after migrating onto [ConfirmDialog] (e.g. a "Stop"/"Clear" confirm).
+ * @param dismissTestTag optional `testTag` on the dismiss (Cancel) button, same
+ *   migration rationale as [confirmTestTag].
  */
 @Composable
 fun ConfirmDialog(
@@ -58,6 +64,8 @@ fun ConfirmDialog(
     modifier: Modifier = Modifier,
     destructive: Boolean = false,
     dismissLabel: String = "Cancel",
+    confirmTestTag: String? = null,
+    dismissTestTag: String? = null,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -81,6 +89,7 @@ fun ConfirmDialog(
                 text = confirmLabel,
                 onClick = onConfirm,
                 variant = if (destructive) ButtonVariant.Destructive else ButtonVariant.Primary,
+                modifier = if (confirmTestTag != null) Modifier.testTag(confirmTestTag) else Modifier,
             )
         },
         dismissButton = {
@@ -88,6 +97,7 @@ fun ConfirmDialog(
                 text = dismissLabel,
                 onClick = onDismiss,
                 variant = ButtonVariant.Text,
+                modifier = if (dismissTestTag != null) Modifier.testTag(dismissTestTag) else Modifier,
             )
         },
         containerColor = PocketShellColors.Surface,

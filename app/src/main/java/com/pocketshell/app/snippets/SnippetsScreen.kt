@@ -45,6 +45,7 @@ import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
@@ -356,67 +357,46 @@ public fun SnippetsScreen(
     }
 
     pendingDelete?.let { target ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("Delete this snippet?", color = PocketShellColors.Text) },
-            text = {
-                Text(
-                    text = "“${target.displayLabel()}” will be removed permanently.",
-                    color = PocketShellColors.TextSecondary,
-                )
+        ConfirmDialog(
+            title = "Delete this snippet?",
+            message = "“${target.displayLabel()}” will be removed permanently.",
+            confirmLabel = "Delete",
+            onConfirm = {
+                viewModel.deleteSnippet(target)
+                pendingDelete = null
             },
-            confirmButton = {
-                PocketShellButton(
-                    text = "Delete",
-                    onClick = {
-                        viewModel.deleteSnippet(target)
-                        pendingDelete = null
-                    },
-                    variant = ButtonVariant.Destructive,
-                )
-            },
-            dismissButton = {
-                PocketShellButton(
-                    text = "Cancel",
-                    onClick = { pendingDelete = null },
-                    variant = ButtonVariant.Text,
-                )
-            },
-            containerColor = PocketShellColors.Surface,
+            onDismiss = { pendingDelete = null },
+            destructive = true,
+            modifier = Modifier.testTag(SNIPPET_DELETE_DIALOG_TAG),
+            confirmTestTag = SNIPPET_DELETE_CONFIRM_TAG,
+            dismissTestTag = SNIPPET_DELETE_CANCEL_TAG,
         )
     }
 
     pendingTemplateDelete?.let { target ->
-        AlertDialog(
-            onDismissRequest = { pendingTemplateDelete = null },
-            title = { Text("Delete this macro?", color = PocketShellColors.Text) },
-            text = {
-                Text(
-                    text = "\"${target.label}\" will be removed permanently.",
-                    color = PocketShellColors.TextSecondary,
-                )
+        ConfirmDialog(
+            title = "Delete this macro?",
+            message = "\"${target.label}\" will be removed permanently.",
+            confirmLabel = "Delete",
+            onConfirm = {
+                commandTemplatesViewModel.deleteTemplate(target)
+                pendingTemplateDelete = null
             },
-            confirmButton = {
-                PocketShellButton(
-                    text = "Delete",
-                    onClick = {
-                        commandTemplatesViewModel.deleteTemplate(target)
-                        pendingTemplateDelete = null
-                    },
-                    variant = ButtonVariant.Destructive,
-                )
-            },
-            dismissButton = {
-                PocketShellButton(
-                    text = "Cancel",
-                    onClick = { pendingTemplateDelete = null },
-                    variant = ButtonVariant.Text,
-                )
-            },
-            containerColor = PocketShellColors.Surface,
+            onDismiss = { pendingTemplateDelete = null },
+            destructive = true,
+            modifier = Modifier.testTag(MACRO_DELETE_DIALOG_TAG),
+            confirmTestTag = MACRO_DELETE_CONFIRM_TAG,
+            dismissTestTag = MACRO_DELETE_CANCEL_TAG,
         )
     }
 }
+
+internal const val SNIPPET_DELETE_DIALOG_TAG = "snippets:delete:dialog"
+internal const val SNIPPET_DELETE_CONFIRM_TAG = "snippets:delete:confirm"
+internal const val SNIPPET_DELETE_CANCEL_TAG = "snippets:delete:cancel"
+internal const val MACRO_DELETE_DIALOG_TAG = "snippets:macro-delete:dialog"
+internal const val MACRO_DELETE_CONFIRM_TAG = "snippets:macro-delete:confirm"
+internal const val MACRO_DELETE_CANCEL_TAG = "snippets:macro-delete:cancel"
 
 internal enum class SnippetLibraryTab(val label: String) {
     Prompts("Prompts"),

@@ -82,6 +82,7 @@ import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -2639,40 +2640,16 @@ private fun StopSessionDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = PocketShellColors.Surface,
-        title = {
-            Text(
-                text = "Stop this session?",
-                color = PocketShellColors.Text,
-                fontWeight = FontWeight.SemiBold,
-            )
-        },
-        text = {
-            Text(
-                text = "This ends the tmux session “$sessionName” on the host.",
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyDense,
-            )
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Stop",
-                onClick = onConfirm,
-                variant = ButtonVariant.Destructive,
-                modifier = Modifier.testTag(STOP_SESSION_CONFIRM_TAG),
-            )
-        },
-        dismissButton = {
-            PocketShellButton(
-                text = "Cancel",
-                onClick = onDismiss,
-                variant = ButtonVariant.Text,
-                modifier = Modifier.testTag(STOP_SESSION_CANCEL_TAG),
-            )
-        },
+    ConfirmDialog(
+        title = "Stop this session?",
+        message = "This ends the tmux session “$sessionName” on the host.",
+        confirmLabel = "Stop",
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
+        destructive = true,
         modifier = Modifier.testTag(STOP_SESSION_DIALOG_TAG),
+        confirmTestTag = STOP_SESSION_CONFIRM_TAG,
+        dismissTestTag = STOP_SESSION_CANCEL_TAG,
     )
 }
 

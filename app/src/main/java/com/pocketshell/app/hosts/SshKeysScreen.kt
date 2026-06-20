@@ -22,8 +22,6 @@ import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -44,10 +42,13 @@ import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
+import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -129,6 +130,13 @@ fun SshKeysManagementPane(
                 return@Column
             }
 
+            ScreenHeader(
+                title = "SSH keys",
+                subtitle = sshKeysHeaderSubtitle(keys.size),
+                titleTestTag = SSH_KEYS_HEADER_TITLE_TAG,
+                subtitleTestTag = SSH_KEYS_HEADER_SUBTITLE_TAG,
+            )
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -177,26 +185,14 @@ fun SshKeysManagementPane(
             }
 
             if (keys.isEmpty()) {
-                Box(
+                EmptyState(
+                    title = "No keys yet",
+                    description = "Import a key file or generate one on-device.",
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "No keys yet",
-                            color = PocketShellColors.Text,
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Import a key file or generate one on-device.",
-                            color = PocketShellColors.TextSecondary,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                }
+                        .fillMaxWidth()
+                        .testTag(SSH_KEYS_EMPTY_TAG),
+                )
             } else {
                 LazyColumn(
                     modifier = Modifier.weight(1f),
@@ -215,37 +211,33 @@ fun SshKeysManagementPane(
     }
 
     pendingDelete?.let { target ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("Delete this key?", color = PocketShellColors.Text) },
-            text = {
-                Text(
-                    text = "“${target.name}” will be removed. Any hosts that " +
-                        "reference this key are deleted too (foreign-key cascade).",
-                    color = PocketShellColors.TextSecondary,
-                )
+        ConfirmDialog(
+            title = "Delete this key?",
+            message = "“${target.name}” will be removed. Any hosts that " +
+                "reference this key are deleted too (foreign-key cascade).",
+            confirmLabel = "Delete",
+            onConfirm = {
+                viewModel.deleteKey(target)
+                pendingDelete = null
             },
-            confirmButton = {
-                PocketShellButton(
-                    text = "Delete",
-                    onClick = {
-                        viewModel.deleteKey(target)
-                        pendingDelete = null
-                    },
-                    variant = ButtonVariant.Destructive,
-                )
-            },
-            dismissButton = {
-                PocketShellButton(
-                    text = "Cancel",
-                    onClick = { pendingDelete = null },
-                    variant = ButtonVariant.Text,
-                )
-            },
-            containerColor = PocketShellColors.Surface,
+            onDismiss = { pendingDelete = null },
+            destructive = true,
+            modifier = Modifier.testTag(SSH_KEYS_DELETE_DIALOG_TAG),
+            confirmTestTag = SSH_KEYS_DELETE_CONFIRM_TAG,
+            dismissTestTag = SSH_KEYS_DELETE_CANCEL_TAG,
         )
     }
 }
+
+internal const val SSH_KEYS_HEADER_TITLE_TAG = "ssh-keys:header:title"
+internal const val SSH_KEYS_HEADER_SUBTITLE_TAG = "ssh-keys:header:subtitle"
+internal const val SSH_KEYS_EMPTY_TAG = "ssh-keys:empty"
+internal const val SSH_KEYS_DELETE_DIALOG_TAG = "ssh-keys:delete:dialog"
+internal const val SSH_KEYS_DELETE_CONFIRM_TAG = "ssh-keys:delete:confirm"
+internal const val SSH_KEYS_DELETE_CANCEL_TAG = "ssh-keys:delete:cancel"
+
+internal fun sshKeysHeaderSubtitle(count: Int): String =
+    if (count == 1) "1 key" else "$count keys"
 
 @Composable
 private fun SshKeyActionButton(

@@ -57,6 +57,18 @@ jobs:
           chmod +x scripts/check-test-validity.sh
           scripts/check-test-validity.sh
 
+      # Issue #835: gate the emulator-journey suite's OWN budget/labelling logic
+      # so the #470-stall hardening cannot silently regress. This is a fast
+      # JVM-free shell test (stubbed gradle/adb, tiny budget) proving the suite
+      # bails CLEANLY at its deadline, ALWAYS writes summary.md, marks it with
+      # the distinct JOURNEY_STEP_TIMEOUT label, exits red, and that the workflow
+      # classifier grep ladder routes that summary to the timeout branch (NOT the
+      # #771 EMULATOR INFRA UNAVAILABLE branch). Cheap (< 15 s), no emulator.
+      - name: CI journey-suite budget guard (issue #835)
+        run: |
+          chmod +x scripts/test-ci-journey-budget.sh
+          scripts/test-ci-journey-budget.sh
+
       # Issue #760: the unit job occasionally failed with ALL visible tests
       # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
       # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out
@@ -593,10 +605,39 @@ jobs:
             [[ -n "$failed_classes" ]] && printf '%s\n' "$failed_classes"
             exit 1
           fi
-          # No suite summary (the script aborted before any class reached a
-          # verdict): the emulator never reached `device` / adb never came up, so
-          # gradle could not run. This is the EMULATOR INFRA UNAVAILABLE class that
-          # issue #771 targets.
+          # Issue #835: the suite ran (the emulator booted, classes ran to
+          # verdicts) but the suite-level time budget was exhausted — typically
+          # by the recurring #470 in-emulator tmux `list-sessions` enumeration
+          # stall consuming the session/reconnect journeys' retry windows. The
+          # suite now bails CLEANLY at its own deadline (below the 45-min step
+          # cap) and writes summary.md with the `JOURNEY_STEP_TIMEOUT` marker, so
+          # this is a distinct, correctly-attributed red — NOT a never-booted
+          # emulator (#771) and NOT a genuine test regression.
+          if [[ -f "$summary" ]] && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$summary"; then
+            timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
+            echo "::error title=Emulator journey TIMEOUT — #470 enumeration stall::The journey suite booted and ran, but the in-emulator tmux list-sessions enumeration stalled and exhausted the suite time budget before all load-bearing classes finished (issue #835 / #470). This is the recurring CI enumeration-stall infra class, NOT a never-booted emulator (#771) and NOT a genuine test regression. Re-run; if it persists the #470 stall is degrading. Class(es) cut short / not run:"
+            [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
+            exit 1
+          fi
+          # No suite summary at all. Distinguish two sub-cases by the journey
+          # step conclusions:
+          #   * a step was CANCELLED (conclusion `cancelled`): the 45-min
+          #     `timeout-minutes` cap SIGKILLed the suite mid-loop before it could
+          #     write summary.md. With the issue #835 suite-level deadline this
+          #     should be rare (the suite now bails CLEANLY at its own 38-min
+          #     budget and writes summary.md, so the step finishes `failure` with
+          #     the JOURNEY_STEP_TIMEOUT marker handled above) — but if the cap
+          #     still fires it is the #470 enumeration stall eating the budget,
+          #     NOT a never-booted emulator. Label it a journey timeout.
+          #   * otherwise the script aborted before any class reached a verdict:
+          #     the emulator never reached `device` / adb never came up, so gradle
+          #     could not run. This is the EMULATOR INFRA UNAVAILABLE class (#771).
+          first_concl="${{ steps.journey.conclusion }}"
+          retry_concl="${{ steps.journey_retry.conclusion }}"
+          if [[ "$first_concl" == "cancelled" || "$retry_concl" == "cancelled" ]]; then
+            echo "::error title=Emulator journey TIMEOUT — step cancelled (#470 stall)::A journey step was CANCELLED by the 45-min step cap before the suite could write a summary — the #470 in-emulator tmux list-sessions enumeration stall consumed the budget faster than the suite's own 38-min deadline could bail (issue #835). This is the recurring enumeration-stall infra class, NOT a never-booted emulator (#771). Re-run."
+            exit 1
+          fi
           echo "::error title=EMULATOR INFRA UNAVAILABLE::Both cold-boot attempts failed and the journey suite wrote NO summary (artifacts/ci-journey/summary.md missing), so no journey class ever ran to a verdict — the emulator never reached 'device' / adb never came up (boot/adb infra, issue #771). This is an infra abort, NOT a test regression."
           exit 1
 

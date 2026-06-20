@@ -523,15 +523,77 @@ echo "=========================================================="
 # above the generous `pocketshellCi=true` E2E ceilings, so it never trips a
 # legitimately slow CI test — it only catches a genuine deadlock.
 #
+# ---------------------------------------------------------------------------
+# Issue #835: SUITE-LEVEL time budget so the recurring #470 enumeration stall
+# can never burn the whole 45-min step to a `cancelled` (which writes NO
+# summary.md and mis-routes the workflow classifier to the #771
+# "EMULATOR INFRA UNAVAILABLE" branch).
+#
+# The per-test `timeout_msec` above bounds ONE @Test method, but a single
+# stalling CLASS still costs ~2 × 5 min (attempt + retry), and SIX such
+# session/reconnect classes stalling on #470 in one run (run 27845074217) added
+# up past the step cap → the step was SIGKILLed mid-loop before
+# `summary.md` was ever written. Without an artifact the classifier cannot tell a
+# #470 time-budget stall from a never-booted emulator.
+#
+# Fix: the suite owns its OWN deadline (JOURNEY_STEP_BUDGET_SECS, default 38 min)
+# which is comfortably BELOW the workflow's 45-min `timeout-minutes` step cap.
+# When the remaining budget is exhausted the suite STOPS launching new classes,
+# records the not-run classes as a distinct BUDGET-timeout bucket, ALWAYS writes
+# summary.md (with the greppable `JOURNEY_STEP_TIMEOUT` marker), and exits
+# non-zero. So a #470 stall now surfaces as a legible, correctly-labelled red
+# verdict WITH an artifact instead of a `cancelled` step with none. Each
+# individual class attempt is ALSO hard-capped (via `timeout`) at the smaller of
+# its own ceiling and the budget remaining, so one wedged class can never run
+# past the suite deadline.
+#
+# Override knobs (used by the suite's own unit test; CI uses the defaults):
+#   JOURNEY_STEP_BUDGET_SECS   — total wall-clock budget for the class loop.
+#   JOURNEY_CLASS_TIMEOUT_SECS — hard ceiling for ONE class attempt (default
+#                                420s = 7 min: above the 300s per-test
+#                                timeout_msec so the runner's own interrupt is
+#                                preferred, but a backstop if even that wedges).
+JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-2280}"
+JOURNEY_CLASS_TIMEOUT_SECS="${JOURNEY_CLASS_TIMEOUT_SECS:-420}"
+
+# budget_remaining — seconds left in the suite-level budget (never negative).
+budget_remaining() {
+  local elapsed=$((SECONDS - SUITE_START))
+  local remaining=$((JOURNEY_STEP_BUDGET_SECS - elapsed))
+  (( remaining < 0 )) && remaining=0
+  echo "$remaining"
+}
+
+# budget_exhausted — true (0) once the suite-level budget is spent. Checked
+# before launching each class so the loop stops cleanly instead of being
+# SIGKILLed by the workflow step cap mid-class (which writes no summary).
+budget_exhausted() {
+  (( $(budget_remaining) <= 0 ))
+}
+
 # run_class <FQCN> — runs ONE journey class as its own gradle connected-test
 # invocation and returns gradle's exit code (0 == that class passed). Running
 # one class per invocation (rather than all classes comma-joined into a single
 # invocation) is what makes the per-class retry below clean: the gradle exit
 # code IS the per-class verdict, with no XML parsing or fragile result-file
 # scraping required.
+#
+# Issue #835: wrap the gradle invocation in `timeout` capped at the SMALLER of
+# the per-class ceiling and the budget remaining, so a single #470-stalled class
+# can never run past the suite deadline and starve the rest of the suite of the
+# chance to write a summary. `timeout` exit 124 == this class hit its cap; the
+# caller treats that as a failed attempt (the retry/budget logic handles it).
 run_class() {
   local fqcn="$1"
-  "$GRADLEW" :app:connectedDebugAndroidTest \
+  local remaining cap
+  remaining="$(budget_remaining)"
+  cap="$JOURNEY_CLASS_TIMEOUT_SECS"
+  (( remaining < cap )) && cap="$remaining"
+  # Guard: if the budget is already spent, don't even start gradle — return the
+  # `timeout` 124 code so the caller records it as a (non-)attempt uniformly.
+  (( cap <= 0 )) && return 124
+  timeout --signal=TERM --kill-after=30 "${cap}s" \
+    "$GRADLEW" :app:connectedDebugAndroidTest \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
@@ -661,18 +723,53 @@ fi
 RECOVERED_CLASSES=()  # classes that failed first then PASSED on retry
 FAILED_CLASSES=()     # classes that failed BOTH attempts (real failures)
 PASSED_FIRST_TRY=()   # classes that passed on the first attempt
+BUDGET_TIMEOUT_CLASSES=()  # issue #835: classes not run / cut short because the
+                           # suite-level budget was exhausted (the #470 stall
+                           # ate the time). A DISTINCT bucket from a real failure
+                           # so the classifier labels it "journey timeout / #470
+                           # stall", NOT "EMULATOR INFRA UNAVAILABLE".
+STEP_TIMEOUT_HIT=0    # issue #835: set to 1 once the suite-level budget is spent.
 
 SUITE_START=$SECONDS
 
+echo ">>> Suite-level time budget (issue #835): ${JOURNEY_STEP_BUDGET_SECS}s"
+echo "    (per-class attempt cap: ${JOURNEY_CLASS_TIMEOUT_SECS}s; workflow step cap: 45 min)"
+
 for fqcn in "${JOURNEY_CLASSES[@]}"; do
+  # Issue #835: stop launching new classes once the suite-level budget is spent.
+  # A #470 enumeration stall earlier in the run can eat the budget; rather than
+  # let the workflow step SIGKILL us mid-class (which writes NO summary and
+  # mis-routes the classifier to the #771 infra branch), we bail cleanly here,
+  # bucket the remaining classes as BUDGET-timeouts, and fall through to ALWAYS
+  # write the summary below with the `JOURNEY_STEP_TIMEOUT` marker.
+  if budget_exhausted; then
+    STEP_TIMEOUT_HIT=1
+    echo "JOURNEY_STEP_TIMEOUT: suite budget (${JOURNEY_STEP_BUDGET_SECS}s) exhausted before $fqcn — not run (issue #835 / #470 stall)"
+    BUDGET_TIMEOUT_CLASSES+=("$fqcn")
+    continue
+  fi
+
   echo "=========================================================="
-  echo ">>> JOURNEY CLASS: $fqcn (attempt 1)"
+  echo ">>> JOURNEY CLASS: $fqcn (attempt 1) [budget remaining: $(budget_remaining)s]"
   echo "=========================================================="
   class_start=$SECONDS
 
-  if run_class "$fqcn"; then
+  run_class "$fqcn"
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
     echo "JOURNEY_PASS: $fqcn passed on attempt 1 (elapsed $((SECONDS - class_start))s)"
     PASSED_FIRST_TRY+=("$fqcn")
+    continue
+  fi
+
+  # Issue #835: if the budget is now spent (this attempt was cut by `timeout`, or
+  # an earlier attempt drained the clock), do NOT burn the remaining-class retry
+  # on a stalled AVD — bucket this class as a BUDGET-timeout and move on so the
+  # summary still gets written before the workflow step cap.
+  if budget_exhausted; then
+    STEP_TIMEOUT_HIT=1
+    echo "JOURNEY_STEP_TIMEOUT: $fqcn attempt 1 exhausted the suite budget (rc=$rc) — not retried (issue #835 / #470 stall)"
+    BUDGET_TIMEOUT_CLASSES+=("$fqcn")
     continue
   fi
 
@@ -680,15 +777,26 @@ for fqcn in "${JOURNEY_CLASSES[@]}"; do
   # (e.g. the #470 enumeration stall) typically clears on the next attempt;
   # a real regression fails again and keeps the job red.
   echo "=========================================================="
-  echo ">>> JOURNEY CLASS: $fqcn FAILED attempt 1 — retrying once (attempt 2)"
+  echo ">>> JOURNEY CLASS: $fqcn FAILED attempt 1 — retrying once (attempt 2) [budget remaining: $(budget_remaining)s]"
   echo "=========================================================="
   retry_start=$SECONDS
 
-  if run_class "$fqcn"; then
+  run_class "$fqcn"
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
     # Loud, greppable recovery marker so masked flakes stay visible and a
     # degrading trend is detectable in the CI logs.
     echo "JOURNEY_FLAKE_RECOVERED: $fqcn passed on retry (attempt 2) (retry elapsed $((SECONDS - retry_start))s)"
     RECOVERED_CLASSES+=("$fqcn")
+  elif [[ $rc -eq 124 ]] || budget_exhausted; then
+    # rc=124 == the `timeout` wrapper cut this attempt at the budget ceiling, OR
+    # the budget is otherwise spent: this is a TIME-budget casualty (the #470
+    # stall), not a clean twice-failed regression. Bucket it distinctly so the
+    # classifier labels the red as a journey timeout, not a real test failure
+    # and not an infra abort.
+    STEP_TIMEOUT_HIT=1
+    echo "JOURNEY_STEP_TIMEOUT: $fqcn retry was cut by the suite budget (rc=$rc) (issue #835 / #470 stall)"
+    BUDGET_TIMEOUT_CLASSES+=("$fqcn")
   else
     echo "JOURNEY_FAILED: $fqcn failed twice"
     FAILED_CLASSES+=("$fqcn")
@@ -719,19 +827,31 @@ run_core_terminal_append_burst() {
     --stacktrace
 }
 
-echo "=========================================================="
-echo ">>> CORE-TERMINAL #803 APPEND-BURST PROOF: $CORE_TERMINAL_APPEND_BURST_CLASS (attempt 1)"
-echo "=========================================================="
-append_burst_start=$SECONDS
-if run_core_terminal_append_burst; then
-  echo "APPEND_BURST_PASS: passed on attempt 1 (elapsed $((SECONDS - append_burst_start))s)"
+# Issue #835: if the suite budget was already spent by a #470 stall in the
+# journey loop above, SKIP the core-terminal proofs and go straight to writing
+# the summary — running another ~2 proofs would push us into the workflow step
+# cap and lose the artifact. A skipped proof is recorded as SKIPPED (not PASS,
+# not FAIL) so the summary is honest; the budget-timeout label below makes the
+# job red regardless.
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  APPEND_BURST_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #803 append-burst proof — suite budget exhausted (issue #835 / #470 stall)"
 else
-  echo ">>> APPEND-BURST PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #803 APPEND-BURST PROOF: $CORE_TERMINAL_APPEND_BURST_CLASS (attempt 1)"
+  echo "=========================================================="
+  append_burst_start=$SECONDS
   if run_core_terminal_append_burst; then
-    echo "APPEND_BURST_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    echo "APPEND_BURST_PASS: passed on attempt 1 (elapsed $((SECONDS - append_burst_start))s)"
   else
-    echo "APPEND_BURST_FAILED: #803 proof failed twice"
-    APPEND_BURST_STATUS="FAIL"
+    echo ">>> APPEND-BURST PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_append_burst; then
+      echo "APPEND_BURST_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "APPEND_BURST_FAILED: #803 proof failed twice"
+      APPEND_BURST_STATUS="FAIL"
+    fi
   fi
 fi
 
@@ -756,39 +876,58 @@ run_core_terminal_output_burst_ime() {
     --stacktrace
 }
 
-echo "=========================================================="
-echo ">>> CORE-TERMINAL #796 OUTPUT-BURST-IME PROOF: $CORE_TERMINAL_OUTPUT_BURST_IME_CLASS (attempt 1)"
-echo "=========================================================="
-output_burst_ime_start=$SECONDS
-if run_core_terminal_output_burst_ime; then
-  echo "OUTPUT_BURST_IME_PASS: passed on attempt 1 (elapsed $((SECONDS - output_burst_ime_start))s)"
+# Issue #835: same budget guard as the #803 proof above.
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  OUTPUT_BURST_IME_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #796 output-burst-IME proof — suite budget exhausted (issue #835 / #470 stall)"
 else
-  echo ">>> OUTPUT-BURST-IME PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #796 OUTPUT-BURST-IME PROOF: $CORE_TERMINAL_OUTPUT_BURST_IME_CLASS (attempt 1)"
+  echo "=========================================================="
+  output_burst_ime_start=$SECONDS
   if run_core_terminal_output_burst_ime; then
-    echo "OUTPUT_BURST_IME_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    echo "OUTPUT_BURST_IME_PASS: passed on attempt 1 (elapsed $((SECONDS - output_burst_ime_start))s)"
   else
-    echo "OUTPUT_BURST_IME_FAILED: #796 proof failed twice"
-    OUTPUT_BURST_IME_STATUS="FAIL"
+    echo ">>> OUTPUT-BURST-IME PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_output_burst_ime; then
+      echo "OUTPUT_BURST_IME_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "OUTPUT_BURST_IME_FAILED: #796 proof failed twice"
+      OUTPUT_BURST_IME_STATUS="FAIL"
+    fi
   fi
 fi
 
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
-# append-burst proof failed, OR the #796 output-burst-IME proof failed.
-if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" ]]; then
+# append-burst proof failed, OR the #796 output-burst-IME proof failed, OR the
+# suite-level budget was exhausted by a #470 stall (issue #835). A budget
+# timeout is NOT green — it still turns the job red — but it is labelled
+# distinctly below so the classifier reports "journey timeout / #470 stall"
+# instead of "EMULATOR INFRA UNAVAILABLE".
+if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
+      && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
+elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
+        && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" ]]; then
+  # Only the budget timeout fired (no class failed BOTH attempts on its own
+  # merits): a pure #470-stall time-budget casualty.
+  JOURNEY_EXIT=1
+  journey_status="STEP_TIMEOUT"
 else
   JOURNEY_EXIT=1
   journey_status="FAIL"
 fi
 
 echo "=========================================================="
-echo "Per-push CI journey suite — done (elapsed ${SUITE_ELAPSED}s, exit ${JOURNEY_EXIT})"
+echo "Per-push CI journey suite — done (elapsed ${SUITE_ELAPSED}s, exit ${JOURNEY_EXIT}, status ${journey_status})"
 echo "  passed first try: ${#PASSED_FIRST_TRY[@]}"
 echo "  recovered on retry: ${#RECOVERED_CLASSES[@]}"
 echo "  failed twice: ${#FAILED_CLASSES[@]}"
+echo "  budget-timeout (issue #835 / #470 stall): ${#BUDGET_TIMEOUT_CLASSES[@]}"
 echo "=========================================================="
 
 # Build the markdown summary. Quote arrays defensively — an empty array under
@@ -816,6 +955,29 @@ echo "=========================================================="
     for c in "${RECOVERED_CLASSES[@]}"; do
       echo "- \`$c\`"
     done
+  fi
+  # Issue #835: emit the `JOURNEY_STEP_TIMEOUT` section whenever the suite-level
+  # time budget was exhausted (typically by the recurring #470 in-emulator tmux
+  # `list-sessions` enumeration stall). The workflow's classify step greps this
+  # marker to label the red as a journey timeout / #470 stall — DISTINCT from a
+  # genuine `JOURNEY_FAILED` regression and from a "no summary at all" #771
+  # EMULATOR INFRA UNAVAILABLE abort. Writing this summary at all (instead of
+  # being SIGKILLed mid-loop by the 45-min step cap) is the whole point: an
+  # artifact exists, so the classifier can attribute the red correctly.
+  if [[ "$STEP_TIMEOUT_HIT" -eq 1 ]]; then
+    echo
+    echo "Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):"
+    echo "Budget: ${JOURNEY_STEP_BUDGET_SECS}s; elapsed: ${SUITE_ELAPSED}s. The in-emulator tmux"
+    echo "\`list-sessions\` enumeration (picker/tree) stalled and consumed the budget before all"
+    echo "load-bearing classes could run. This is the #470 enumeration stall, NOT a never-booted"
+    echo "emulator (#771) and NOT a genuine test regression. Classes cut short / not run:"
+    if [[ "${#BUDGET_TIMEOUT_CLASSES[@]}" -gt 0 ]]; then
+      for c in "${BUDGET_TIMEOUT_CLASSES[@]}"; do
+        echo "- \`$c\`"
+      done
+    else
+      echo "- (none individually bucketed — budget spent during summary/proof phase)"
+    fi
   fi
   # Emit the `JOURNEY_FAILED` / "Failed BOTH attempts" section whenever ANY
   # load-bearing check failed twice — the journey classes AND/OR the #803

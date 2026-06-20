@@ -242,6 +242,7 @@ def _merge_window(
     detail: Any,
     *,
     prefer_detail_percent: bool = False,
+    default_window: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Any:
     if not isinstance(current, dict):
@@ -259,6 +260,14 @@ def _merge_window(
             current["reset_at"] = detail_window.get("reset_at")
         if current.get("window") is None and detail_window.get("window") is not None:
             current["window"] = detail_window.get("window")
+
+    # Issue #800: providers with a genuinely fixed cadence (Claude Code 5h/7d,
+    # Copilot monthly) carry no `limit_window_seconds`, so the span never lands
+    # in `window`. Seed the canonical span here so the app renders the concrete
+    # label ("5h window" / "7d window" / "Monthly limit") rather than the
+    # generic "Short term" / "Long term". Only fills when nothing else set it.
+    if default_window is not None and current.get("window") is None:
+        current["window"] = default_window
 
     reset_after_seconds = current.get("reset_after_seconds")
     current["reset_at"] = _normalize_reset_at(current.get("reset_at")) or _reset_after_seconds_to_iso(
@@ -411,9 +420,13 @@ def normalize_usage_record(
         if long_term is not None:
             normalized["long_term"] = long_term
     elif provider == "claude":
+        # Issue #800: Claude Code's windows are the same concrete 5h / 7d spans
+        # as Codex; seed them so the app frames them as "5h window" / "7d window"
+        # rather than the generic "Short term" / "Long term".
         short_term = _merge_window(
             normalized.get("short_term"),
             detail_windows.get("five_hour"),
+            default_window="5h",
             now=now,
         )
         if short_term is not None:
@@ -421,6 +434,21 @@ def normalize_usage_record(
         long_term = _merge_window(
             normalized.get("long_term"),
             detail_windows.get("seven_day"),
+            default_window="7d",
+            now=now,
+        )
+        if long_term is not None:
+            normalized["long_term"] = long_term
+    elif provider == "copilot":
+        # Issue #800: Copilot's long-term quota is a monthly cycle — label it
+        # with its real cadence, NOT a 7d window. The short-term window is the
+        # fixed 100% bucket with no clean span, so leave it generic.
+        if isinstance(normalized.get("short_term"), dict):
+            normalized["short_term"] = _merge_window(normalized.get("short_term"), None, now=now)
+        long_term = _merge_window(
+            normalized.get("long_term"),
+            None,
+            default_window="monthly",
             now=now,
         )
         if long_term is not None:

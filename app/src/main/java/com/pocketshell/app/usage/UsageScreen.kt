@@ -726,10 +726,13 @@ private fun progressKind(percent: Double, blocked: Boolean): ProgressKind = when
     else -> ProgressKind.Default
 }
 
-private fun windowLabel(name: String): String = when (name.lowercase()) {
+internal fun windowLabel(name: String): String = when (name.lowercase()) {
     "5h" -> "5h window"
     "7d" -> "7d window"
     "weekly" -> "Weekly limit"
+    // #800: monthly-cadence providers (e.g. GitHub Copilot) keep their real
+    // cadence label rather than being framed as a 5h/7d window.
+    "monthly" -> "Monthly limit"
     // #522 item 4: humanize raw snake_case keys (e.g. `short_term` /
     // `long_term`) so the usage panel reads "Short term" / "Long term" rather
     // than carrying the underscore. Splits on `_`, sentence-cases the first

@@ -169,6 +169,95 @@ def test_usage_json_normalizes_codex_detail_windows_and_epoch_resets() -> None:
     assert "HTTP Error 401" not in lines[1]["error"]
 
 
+def test_normalize_claude_seeds_concrete_5h_and_7d_window_spans() -> None:
+    # #800: Claude Code's windows are the same concrete 5h/7d spans as Codex.
+    # quse emits them with no `window` span, so normalize seeds the canonical
+    # span so the app frames them as "5h window" / "7d window".
+    record = {
+        "provider": "claude",
+        "status": "ok",
+        "short_term": {"percent_remaining": 59.0, "reset_at": "2026-05-24T14:30:00Z"},
+        "long_term": {"percent_remaining": 15.0, "reset_at": "2026-05-28T14:59:59Z"},
+        "block_reason": None,
+        "error": None,
+        "details": {},
+    }
+
+    normalized = normalize_usage_record(record)
+
+    assert normalized["short_term"]["window"] == "5h"
+    assert normalized["long_term"]["window"] == "7d"
+    # The quota math is untouched.
+    assert normalized["short_term"]["percent_remaining"] == 59.0
+    assert normalized["long_term"]["percent_remaining"] == 15.0
+
+
+def test_normalize_copilot_long_term_is_monthly_not_7d() -> None:
+    # #800: Copilot's long-term quota is a monthly cycle — keep its real
+    # cadence, NOT a 7d window. Its short-term window stays generic.
+    record = {
+        "provider": "copilot",
+        "status": "ok",
+        "short_term": {"percent_remaining": 100.0, "reset_at": None},
+        "long_term": {"percent_remaining": 96.6, "reset_at": "2026-07-01T00:00:00Z"},
+        "block_reason": None,
+        "error": None,
+        "details": {},
+    }
+
+    normalized = normalize_usage_record(record)
+
+    assert normalized["long_term"]["window"] == "monthly"
+    assert normalized["long_term"]["window"] != "7d"
+    # Short-term keeps no forced span (renders the generic humanized label).
+    assert normalized["short_term"].get("window") is None
+
+
+def test_normalize_zai_keeps_generic_window_spans() -> None:
+    # #800 regression guard: providers with unknown spans must NOT be forced
+    # into 5h/7d/monthly — leave `window` unset so the app humanizes them.
+    record = {
+        "provider": "zai",
+        "status": "ok",
+        "short_term": {"percent_remaining": 100.0, "reset_at": "2026-05-27T10:31:58Z"},
+        "long_term": {"percent_remaining": 100.0, "reset_at": None},
+        "block_reason": None,
+        "error": None,
+        "details": {},
+    }
+
+    normalized = normalize_usage_record(record)
+
+    assert normalized["short_term"].get("window") is None
+    assert normalized["long_term"].get("window") is None
+
+
+def test_normalize_claude_keeps_detail_window_span_when_present() -> None:
+    # When quse DOES carry a concrete span via limit_window_seconds, the
+    # detail span wins over the default seed (still 5h/7d for Claude here).
+    record = {
+        "provider": "claude",
+        "status": "ok",
+        "short_term": {"percent_remaining": None, "reset_at": None},
+        "long_term": {"percent_remaining": None, "reset_at": None},
+        "block_reason": None,
+        "error": None,
+        "details": {
+            "windows": {
+                "five_hour": {"used_percent": 40, "limit_window_seconds": 18000},
+                "seven_day": {"used_percent": 10, "limit_window_seconds": 604800},
+            },
+        },
+    }
+
+    normalized = normalize_usage_record(record)
+
+    assert normalized["short_term"]["window"] == "5h"
+    assert normalized["long_term"]["window"] == "7d"
+    assert normalized["short_term"]["percent_remaining"] == 60.0
+    assert normalized["long_term"]["percent_remaining"] == 90.0
+
+
 def test_claude_stale_auth_telemetry_error_is_usage_unavailable() -> None:
     stale_error = (
         "Claude Code authentication "

@@ -336,6 +336,66 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
+    fun parse_claudeWindowsCarryConcrete5hAnd7dSpans() {
+        // #800: Claude Code's short/long windows are the same 5h/7d spans as
+        // Codex. The record carries the generic short_term/long_term keys with
+        // no explicit `window`, so the parser seeds the canonical span name so
+        // the UI's windowLabel renders "5h window" / "7d window" — data-driven,
+        // no provider check in the Compose layer.
+        val record = parser.parse(
+            """{"provider":"claude","status":"ok",
+              "short_term":{"percent_remaining":59.0,"reset_at":"2026-05-24T14:30:00Z","window":null},
+              "long_term":{"percent_remaining":15.0,"reset_at":"2026-05-28T14:59:59Z","window":null},
+              "block_reason":null,"error":null,"details":{}}""".trimIndent(),
+        ).single()
+
+        assertEquals("claude", record.provider)
+        assertEquals(2, record.windows.size)
+        assertEquals("5h", record.windows[0].name)
+        assertEquals(41.0, record.windows[0].percent, 0.001)
+        assertEquals("7d", record.windows[1].name)
+        assertEquals(85.0, record.windows[1].percent, 0.001)
+    }
+
+    @Test
+    fun parse_copilotLongTermIsMonthlyNot7d() {
+        // #800: Copilot's long-term quota is a monthly cycle. It must keep its
+        // real cadence label, NOT be framed as a 7d window. The short-term
+        // window stays generic (fixed 100% bucket with no clean span).
+        val record = parser.parse(
+            """{"provider":"copilot","status":"ok",
+              "short_term":{"percent_remaining":100.0,"reset_at":null},
+              "long_term":{"percent_remaining":96.6,"reset_at":"2026-07-01T00:00:00Z"},
+              "block_reason":null,"error":null,"details":{}}""".trimIndent(),
+        ).single()
+
+        assertEquals("copilot", record.provider)
+        assertEquals(2, record.windows.size)
+        assertEquals("short_term", record.windows[0].name)
+        assertEquals("monthly", record.windows[1].name)
+        assertTrue(
+            "copilot long-term must not be framed as a 7d window",
+            record.windows[1].name != "7d",
+        )
+    }
+
+    @Test
+    fun parse_zaiKeepsGenericWindowNames() {
+        // #800 regression guard: providers with unknown spans must NOT get
+        // forced into 5h/7d — they keep the generic names so windowLabel
+        // humanizes them (Short term / Long term), preserving #522.
+        val record = parser.parse(
+            """{"provider":"zai","status":"ok",
+              "short_term":{"percent_remaining":100.0,"reset_at":"2026-05-27T10:31:58Z"},
+              "long_term":{"percent_remaining":100.0,"reset_at":null},
+              "block_reason":null,"error":null,"details":{}}""".trimIndent(),
+        ).single()
+
+        assertEquals("short_term", record.windows[0].name)
+        assertEquals("long_term", record.windows[1].name)
+    }
+
+    @Test
     fun parse_claudeStaleAuthTelemetryMessageMapsToUsageDataUnavailable() {
         val staleError = "Claude Code authentication " + "failed on this host. Run `claude " +
             "/login` in the host shell, then refresh usage."

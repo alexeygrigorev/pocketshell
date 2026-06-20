@@ -99,7 +99,15 @@ public class PocketshellUsageJsonParser(
         parseWindow(
             record = obj,
             jsonKey = "short_term",
-            windowName = "short_term",
+            // Issue #800: Claude Code's short window is the same concrete 5h
+            // span Codex uses, so seed the span as the fallback window name
+            // when the record carries no explicit `window`. This makes the
+            // data-driven `windowLabel` mapping render "5h window" for Claude
+            // exactly like Codex, without any provider check in the UI layer.
+            // Codex itself still derives "5h"/"7d" from its detail-window
+            // `limit_window_seconds`; this fallback only fills providers whose
+            // span is genuinely fixed (Claude 5h/7d, Copilot monthly).
+            windowName = canonicalWindowName(provider, isShortTerm = true),
             provider = provider,
             detailWindow = detailWindows?.firstObject(
                 when {
@@ -114,7 +122,7 @@ public class PocketshellUsageJsonParser(
         parseWindow(
             record = obj,
             jsonKey = "long_term",
-            windowName = "long_term",
+            windowName = canonicalWindowName(provider, isShortTerm = false),
             provider = provider,
             detailWindow = detailWindows?.firstObject(
                 when {
@@ -234,6 +242,31 @@ private const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE =
 
 private fun String.isCodexCompatibleProvider(): Boolean =
     lowercase().replace(' ', '_') in CODEX_COMPATIBLE_PROVIDERS
+
+/**
+ * Issue #800: the fallback window name to use when a provider's record does
+ * not carry an explicit `window` span. This is the data-driven hook the UI's
+ * `windowLabel` mapping consumes, so providers with a genuinely fixed cadence
+ * render the concrete label without any provider check in the Compose layer:
+ *
+ * - **Claude Code** — both windows are the same 5h / 7d spans as Codex, so
+ *   surface them as "5h" / "7d" (renders "5h window" / "7d window").
+ * - **GitHub Copilot** — the long-term quota is a monthly cycle, so surface
+ *   "monthly" (renders "Monthly limit"), NOT 7d. Its short-term window is the
+ *   fixed 100% bucket with no clean span, so it keeps the generic name.
+ * - **Everything else** (Codex, Z.AI, unknown spans) keeps the generic
+ *   `short_term` / `long_term` name. Codex still upgrades to "5h"/"7d" from its
+ *   detail-window `limit_window_seconds`; the generic name only shows when no
+ *   span is known, preserving the #522 humanizer fallback.
+ */
+private fun canonicalWindowName(provider: String, isShortTerm: Boolean): String {
+    val normalized = provider.lowercase().replace(' ', '_')
+    return when {
+        normalized == "claude" -> if (isShortTerm) "5h" else "7d"
+        normalized == "copilot" && !isShortTerm -> "monthly"
+        else -> if (isShortTerm) "short_term" else "long_term"
+    }
+}
 
 private fun actionableProviderError(provider: String, error: String?): String? {
     val text = error?.trim()?.takeIf { it.isNotEmpty() } ?: return null

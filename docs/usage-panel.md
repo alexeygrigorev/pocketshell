@@ -41,6 +41,31 @@ Per provider, one card with:
 - Reset time (countdown if soon, absolute date if days away)
 - Last error if status is `error`
 
+### Window labels are data-driven, by genuine span (issue #800)
+
+The card frames each window by the **concrete span the provider's quota
+actually uses**, never by a hardcoded provider check in the UI. The window
+NAME each record carries drives the label:
+
+| Carried span | Rendered label |
+|---|---|
+| `5h` | `5h window` |
+| `7d` | `7d window` |
+| `weekly` | `Weekly limit` |
+| `monthly` | `Monthly limit` |
+| anything else (`short_term` / `long_term` / unknown) | humanized (`Short term` / `Long term`, #522) |
+
+The two main coding-agent providers — **Codex and Claude Code** — both use the
+same 5h + 7d windows, so both render the identical concrete `5h window` /
+`7d window` labels. Codex derives the span from its detail-window
+`limit_window_seconds`; Claude Code's quota is the same fixed 5h/7d so the
+span is seeded canonically (server-side in `pocketshell usage`, and as a
+parser fallback so older hosts still render it). **Monthly-cadence providers
+keep their real cadence**: GitHub Copilot's long-term quota renders
+`Monthly limit`, NOT a 7d window. Providers whose span is genuinely unknown
+fall back to the humanized `Short term` / `Long term` label so nothing is
+mislabeled.
+
 ## Surfaces
 
 | Where | What |

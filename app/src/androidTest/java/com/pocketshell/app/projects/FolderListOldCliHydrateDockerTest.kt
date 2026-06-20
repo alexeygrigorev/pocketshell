@@ -78,6 +78,10 @@ class FolderListOldCliHydrateDockerTest {
     fun setUp(): Unit = runBlocking {
         // The old-CLI fixture (port 2238) is not part of the default CI
         // emulator-journey workflow; the JVM test is the CI backstop.
+        // JUSTIFIED: genuine opt-in Docker-fixture skip — this connect-hang
+        // repro needs the agents-old-cli fixture (no `tree` command) on 2238,
+        // which CI does not start; FolderListViewModelOldCliHydrateTest (JVM,
+        // per-push) is the gated backstop. (#850 C1 escape hatch.)
         assumeFalse(
             "agents-old-cli fixture (port $OLD_CLI_PORT) is not started by the default CI workflow",
             com.pocketshell.app.proof.TerminalTestTimeouts.isRunningOnCi(),

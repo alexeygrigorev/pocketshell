@@ -1,6 +1,7 @@
 package com.pocketshell.app.conversation
 
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -73,6 +74,23 @@ class ConversationTimelineSupportTest {
         )
 
         assertFalse(message.isHiddenConversationTimelineRow())
+    }
+
+    @Test
+    fun codexAgentsInstructionsNoteIsVisibleMutedAndCollapsible() {
+        // Issue #838: the Codex AGENTS.md / <INSTRUCTIONS> injection renders as
+        // a muted CODEX row with a fixed "AGENTS.md instructions" one-liner
+        // preview (collapsed by default), and is NOT hidden — it stays in the
+        // transcript, expandable on tap.
+        val note = systemNote(
+            tag = CodexParser.AGENTS_INSTRUCTIONS_TAG,
+            content = "AGENTS.md instructions for /home/alexey/git/ai-shipping-labs\n" +
+                "<INSTRUCTIONS>\nAgent Notes\nProduction Data Access\n</INSTRUCTIONS>",
+        )
+
+        assertFalse(note.isHiddenConversationTimelineRow())
+        assertEquals("CODEX", note.timelineActorLabel())
+        assertEquals("AGENTS.md instructions", note.timelinePreview())
     }
 
     private fun systemNote(tag: String, content: String): ConversationEvent.SystemNote =

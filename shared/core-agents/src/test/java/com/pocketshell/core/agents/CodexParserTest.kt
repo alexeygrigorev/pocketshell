@@ -1,6 +1,7 @@
 package com.pocketshell.core.agents
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CodexParserTest {
@@ -91,4 +92,109 @@ class CodexParserTest {
         assertEquals("reasoning", reasoning.tag)
         assertEquals("Checked the fixture schema.", reasoning.content)
     }
+
+    // ---------------------------------------------------------------------
+    // Issue #838: the Codex AGENTS.md / <INSTRUCTIONS> first user turn must be
+    // emitted as a collapsed-by-default SystemNote, NOT a full-weight user
+    // Message. The full text is preserved in the note (collapse, not remove).
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun collapsesAgentsMdInstructionsUserMessageToSystemNote() {
+        val raw =
+            "AGENTS.md instructions for /home/alexey/git/ai-shipping-labs\n" +
+                "<INSTRUCTIONS>\n" +
+                "# Agent Notes\n" +
+                "## Development Process\n" +
+                "- Before continuing development work, read _docs/PROCESS.md.\n" +
+                "## Production Data Access\n" +
+                "- Production URL: https://aishippinglabs.com.\n" +
+                "</INSTRUCTIONS>"
+        val note = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"user_message","message":${raw.toJsonString()}}}""",
+        ).single() as ConversationEvent.SystemNote
+
+        assertEquals(CodexParser.AGENTS_INSTRUCTIONS_TAG, note.tag)
+        // Collapse, NOT remove: the full instruction wall stays in the note.
+        assertEquals(raw, note.content)
+        assertTrue(note.content.contains("Production Data Access"))
+    }
+
+    @Test
+    fun collapsesAgentsMdInstructionsResponseItemUserMessage() {
+        // The screenshot shape: a `type:"message"` item with role "user".
+        val raw =
+            "AGENTS.md instructions for /home/alexey/git/ai-shipping-labs\n" +
+                "<INSTRUCTIONS>\nAgent Notes ...\n</INSTRUCTIONS>"
+        val note = parser.parseLine(
+            """{"type":"response_item","item":{"type":"message","id":"u1","role":"user","content":${
+                "[{\"type\":\"input_text\",\"text\":${raw.toJsonString()}}]"
+            }}}""",
+        ).single() as ConversationEvent.SystemNote
+
+        assertEquals("u1", note.id)
+        assertEquals(CodexParser.AGENTS_INSTRUCTIONS_TAG, note.tag)
+        assertEquals(raw, note.content)
+    }
+
+    @Test
+    fun genuineFirstUserPromptIsNotCollapsed() {
+        // A real user prompt that merely mentions AGENTS.md must render normally.
+        val message = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"user_message","message":"please update AGENTS.md to mention the new test"}}""",
+        ).single() as ConversationEvent.Message
+        assertEquals(ConversationRole.User, message.role)
+        assertEquals("please update AGENTS.md to mention the new test", message.text)
+    }
+
+    @Test
+    fun genuineUserInstructionsPasteIsNotCollapsed() {
+        // Detection requires BOTH the preamble AND the <INSTRUCTIONS> wrapper.
+        // A genuine user turn that legitimately pastes an <INSTRUCTIONS> block
+        // (without the synthetic Codex preamble) must render as a normal
+        // Message — never swallowed/mislabeled as the AGENTS.md injection.
+        val raw = "rewrite this xml please: <INSTRUCTIONS>do X then Y</INSTRUCTIONS>"
+        val message = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"user_message","message":${raw.toJsonString()}}}""",
+        ).single() as ConversationEvent.Message
+        assertEquals(ConversationRole.User, message.role)
+        assertEquals(raw, message.text)
+    }
+
+    @Test
+    fun userMessageStartingWithInstructionsTagIsNotCollapsed() {
+        // A user turn that *opens* with <INSTRUCTIONS> but lacks the preamble
+        // is still a real message, not the injection.
+        val raw = "<INSTRUCTIONS>\nuse high-capability model settings\n</INSTRUCTIONS>"
+        val message = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"user_message","message":${raw.toJsonString()}}}""",
+        ).single() as ConversationEvent.Message
+        assertEquals(ConversationRole.User, message.role)
+        assertEquals(raw, message.text)
+    }
+
+    @Test
+    fun preambleWithoutInstructionsBlockIsNotCollapsed() {
+        // The preamble alone (no <INSTRUCTIONS> wrapper) does not match — both
+        // markers are required, so a user prompt that happens to start with the
+        // preamble text but is otherwise prose renders normally.
+        val raw = "AGENTS.md instructions for the new repo are missing — can you draft them?"
+        val message = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"user_message","message":${raw.toJsonString()}}}""",
+        ).single() as ConversationEvent.Message
+        assertEquals(ConversationRole.User, message.role)
+        assertEquals(raw, message.text)
+    }
+
+    @Test
+    fun assistantInstructionsMessageIsNotCollapsed() {
+        // Only the synthetic USER injection is collapsed; an assistant turn
+        // that happens to echo <INSTRUCTIONS> stays a normal Message.
+        val message = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"agent_message","message":"Here is the block: <INSTRUCTIONS> ... </INSTRUCTIONS>"}}""",
+        ).single() as ConversationEvent.Message
+        assertEquals(ConversationRole.Assistant, message.role)
+    }
 }
+
+private fun String.toJsonString(): String = org.json.JSONObject.quote(this)

@@ -1,5 +1,6 @@
 package com.pocketshell.app.conversation
 
+import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationTextFormatting
 
@@ -23,6 +24,10 @@ internal fun ConversationEvent.timelineTimestamp(): String? =
 
 internal fun ConversationEvent.SystemNote.timelineActorLabel(): String =
     when (tag) {
+        // Issue #838: the Codex AGENTS.md / <INSTRUCTIONS> injection arrives as
+        // a synthetic user turn; label it CODEX so it reads as agent context,
+        // not the maintainer's prose.
+        CodexParser.AGENTS_INSTRUCTIONS_TAG -> "CODEX"
         "scheduled_task_fire",
         "task-notification",
         "compact_boundary",
@@ -49,6 +54,10 @@ internal fun ConversationEvent.SystemNote.timelinePreview(): String {
     val cleaned = ConversationTextFormatting.stripInternalProtocolNoise(content)
     val firstLine = cleaned.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
     return when (tag) {
+        // Issue #838: collapsed one-liner for the AGENTS.md injection. A fixed
+        // label (not the raw first line, which is the noisy "AGENTS.md
+        // instructions for <path>" preamble) keeps the collapsed row tidy.
+        CodexParser.AGENTS_INSTRUCTIONS_TAG -> "AGENTS.md instructions"
         "scheduled_task_fire" -> firstLine.ifBlank { "Task notification" }
         "task-notification" -> firstLine.ifBlank { "Task notification" }
         "compact_boundary" -> firstLine.ifBlank { "Conversation compacted" }

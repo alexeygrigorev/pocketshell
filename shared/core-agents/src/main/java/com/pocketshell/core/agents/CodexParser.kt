@@ -65,10 +65,11 @@ public class CodexParser : ConversationParser {
         role: ConversationRole,
     ): List<ConversationEvent> {
         val text = messageText(item)
-        return if (text.isBlank()) {
-            emptyList()
-        } else {
-            listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text))
+        return when {
+            text.isBlank() -> emptyList()
+            role == ConversationRole.User && isAgentsInstructionsInjection(text) ->
+                listOf(agentsInstructionsNote(baseId, agent, atMillis, text))
+            else -> listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text))
         }
     }
 
@@ -98,10 +99,71 @@ public class CodexParser : ConversationParser {
             else -> return emptyList()
         }
         val text = messageText(item)
-        return if (text.isBlank()) {
-            emptyList()
-        } else {
-            listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text))
+        return when {
+            text.isBlank() -> emptyList()
+            role == ConversationRole.User && isAgentsInstructionsInjection(text) ->
+                listOf(agentsInstructionsNote(baseId, agent, atMillis, text))
+            else -> listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text))
         }
+    }
+
+    /**
+     * Issue #838: Codex prepends a synthetic first **user** turn carrying the
+     * repo's `AGENTS.md` as a wall of instructions — an "AGENTS.md instructions
+     * for <path>" preamble followed by a `<INSTRUCTIONS>…</INSTRUCTIONS>` block
+     * (Agent Notes / Development Process / Production Data Access / …). It is
+     * not something the maintainer typed; it dominates the transcript and
+     * buries the real conversation. We recognise it and emit it as a muted,
+     * collapsed-by-default [ConversationEvent.SystemNote] (the same #176
+     * treatment Claude Code's XML-tagged system blocks get) instead of a
+     * full-weight user [ConversationEvent.Message] — collapsed, NOT removed:
+     * the full text stays in [SystemNote.content] and the renderer expands it
+     * on tap.
+     *
+     * The detection is deliberately tight to never swallow a genuine user
+     * turn: it requires the message to **begin** with the distinctive
+     * "AGENTS.md instructions for" preamble AND to wrap the body in an
+     * `<INSTRUCTIONS>` block — the exact shape Codex injects (visible in the
+     * issue screenshot). A real prompt that merely mentions AGENTS.md, or one
+     * that legitimately pastes an `<INSTRUCTIONS>` snippet, matches neither
+     * condition and renders as a normal [ConversationEvent.Message].
+     */
+    private fun isAgentsInstructionsInjection(text: String): Boolean {
+        val head = text.trimStart()
+        return head.startsWith(AGENTS_INSTRUCTIONS_PREAMBLE, ignoreCase = true) &&
+            INSTRUCTIONS_TAG.containsMatchIn(text)
+    }
+
+    private fun agentsInstructionsNote(
+        baseId: String,
+        agent: AgentKind,
+        atMillis: Long?,
+        text: String,
+    ): ConversationEvent.SystemNote =
+        ConversationEvent.SystemNote(
+            id = baseId,
+            agent = agent,
+            atMillis = atMillis,
+            tag = AGENTS_INSTRUCTIONS_TAG,
+            content = text,
+        )
+
+    public companion object {
+        /**
+         * Issue #838: [ConversationEvent.SystemNote.tag] used for the Codex
+         * AGENTS.md / `<INSTRUCTIONS>` injection so the timeline can give it a
+         * dedicated muted label/preview ("AGENTS.md instructions").
+         */
+        public const val AGENTS_INSTRUCTIONS_TAG: String = "agents-instructions"
+
+        private const val AGENTS_INSTRUCTIONS_PREAMBLE: String = "AGENTS.md instructions for"
+
+        // The injection wraps its body in an `<INSTRUCTIONS>` block. This is
+        // the SECONDARY marker — required in conjunction with the preamble
+        // (not on its own), so a genuine user turn that merely pastes
+        // `<INSTRUCTIONS>` is never collapsed. Tolerate attributes; only the
+        // opening tag needs to be present.
+        private val INSTRUCTIONS_TAG: Regex =
+            Regex("<INSTRUCTIONS\\b", RegexOption.IGNORE_CASE)
     }
 }

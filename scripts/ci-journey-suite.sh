@@ -555,6 +555,16 @@ JOURNEY_CLASSES=(
   # fixture is started by the workflow. It lives under
   # com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.FolderListBootstrapSkipTreeLoadsDockerTest"
+  # ADDED (#867): the stale-while-revalidate INSTANT-RENDER journey. A cold
+  # connect must paint the LAST-KNOWN tree instantly from the per-host CLIENT
+  # cache (Ready, NOT the empty 'No folders yet / 0 projects' rebuild flash the
+  # maintainer hit), and the silent reconcile must then confirm it against the
+  # LIVE host. Drives the production FolderListViewModel + SshFolderListGateway
+  # + a pre-seeded TreeClientCache against the standard `agents` fixture (port
+  # 2222 — already started by emulator-journey, no new service). RED before the
+  # cache seed (first state is Loading); GREEN after. Lives under
+  # com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"
 )
 
 echo "=========================================================="

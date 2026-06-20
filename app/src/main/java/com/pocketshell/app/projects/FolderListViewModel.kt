@@ -362,6 +362,17 @@ class FolderListViewModel internal constructor(
     // it RECONCILEs gone/added as deltas. Null in unit tests that don't exercise
     // durability (the tree then behaves exactly as before — empty-until-probe).
     private val treeRemoteSource: TreeRemoteSource? = null,
+    // Issue #867 (stale-while-revalidate): the per-host CLIENT-SIDE cold cache
+    // of the last-rendered tree. On a fresh connect / cold app start the held
+    // tree is empty (process death wiped [HostTreeModel]) and the durable #837
+    // registry is HOST-side (reading it needs the warm SSH session — the very
+    // round-trip whose gap produces the empty rebuild flash). This local cache
+    // is read the instant [bind] runs (no SSH) and hydrated into the held tree
+    // so the last-known tree paints INSTANTLY; the silent reconcile then stays
+    // authoritative (advisory cache, D22). Null in unit tests that don't
+    // exercise the instant cold render (the tree then shows the brief Loading
+    // until the first reconcile, exactly as before).
+    private val treeClientCache: TreeClientCache? = null,
     // Issue #430: when true the view model attaches a
     // [ProcessLifecycleOwner] observer in [init] so the session-discovery
     // poll loop is gated on the whole-process foreground signal. Always
@@ -434,6 +445,8 @@ class FolderListViewModel internal constructor(
         profilesGateway: ProfilesGateway,
         // Epic #821 slice C (issue #837): the durable tree registry seam.
         treeRemoteSource: TreeRemoteSource,
+        // Issue #867: the per-host client-side cold cache for instant cold render.
+        treeClientCache: TreeClientCache,
     ) : this(
         gateway = gateway,
         hostDao = hostDao,
@@ -447,6 +460,7 @@ class FolderListViewModel internal constructor(
         activeTmuxClients = activeTmuxClients,
         profilesGateway = profilesGateway,
         treeRemoteSource = treeRemoteSource,
+        treeClientCache = treeClientCache,
         attachLifecycle = true,
         periodicReconcileEnabled = true,
     )
@@ -841,14 +855,30 @@ class FolderListViewModel internal constructor(
         lastWatchedFolders = emptyList()
         sessionRefreshInFlight = false
         transientRefreshRetries = 0
-        _state.value = loadingState()
-        // EPIC #679 Slice 5 (D22 hard-cut): the SharedPreferences cold-render
-        // cache (`HostSessionListCache`) is removed. The maintained in-memory
-        // tree is the source of truth — it is held across opens of the SAME host
-        // (so a re-open renders instantly), and a NEW/changed host shows a brief
-        // Loading until the first authoritative reconcile seeds it (then the
-        // staleness gate / pull-to-refresh keep it current). `project_roots`
-        // (Room, D22-protected) still supplies the watched-root overlay.
+        // Issue #867 (stale-while-revalidate): paint the last-known tree
+        // INSTANTLY from the per-host CLIENT cache before any SSH, so a fresh
+        // connect / cold app start no longer flashes the empty rebuild ("No
+        // folders yet / 0 projects", everything in "Other folders", a spinner)
+        // during the daemon round-trip + first probe. This is a LOCAL read (no
+        // network) keyed off the host store, so it is available the instant
+        // bind() runs. The cache is ADVISORY: the silent reconcile below stays
+        // authoritative and overwrites the seeded placeholders in place (keyed
+        // diff, no rebuild), and [HostTreeModel.hydrate] skips clobbering an
+        // already-populated tree — so a stale cache entry can never survive past
+        // the first refresh (#679 stale-type guard, D22).
+        val seeded = hydrateFromClientCache(params)
+        if (!seeded) {
+            // No client cache yet (a genuinely new host / first-ever open): the
+            // brief Loading until the first authoritative reconcile seeds it,
+            // exactly as before — then the cache write below means the NEXT cold
+            // start renders instantly.
+            _state.value = loadingState()
+        }
+        // The maintained in-memory tree is held across opens of the SAME host
+        // (so a re-open renders instantly), the daemon registry (#837) makes the
+        // presentation state durable host-side, and this client cache makes the
+        // FIRST cold render instant. `project_roots` (Room, D22-protected) still
+        // supplies the watched-root overlay.
 
         // Issue #718: fetch the host-DISCOVERED agent profiles over the warm
         // SSH lease (was the #627/#631 client-stored JSON, hard-cut per D22).
@@ -1221,6 +1251,9 @@ class FolderListViewModel internal constructor(
         // folder the user collapsed stays collapsed across an app kill +
         // relaunch. Fire-and-forget over the warm session.
         bound?.let { persistTree(it) }
+        // Issue #867: mirror the collapse into the CLIENT cache so the next cold
+        // start renders the collapsed folder collapsed without waiting on SSH.
+        bound?.let { persistClientCache(it) }
     }
 
     @androidx.annotation.VisibleForTesting
@@ -1415,6 +1448,8 @@ class FolderListViewModel internal constructor(
             if (tree.applyReconcileGoneDelta(delta.gone)) {
                 emitReady()
                 persistTree(params)
+                // Issue #867: keep the client cache in step with the pruned tree.
+                persistClientCache(params)
             }
         }
     }
@@ -1514,6 +1549,52 @@ class FolderListViewModel internal constructor(
                 // hydrate/reconcile) or this job was cancelled.
                 if (!hostChanged && bound == params) maybeReconcileOnOpen(params)
             }
+        }
+    }
+
+    /**
+     * Issue #867 (stale-while-revalidate): seed the held tree from the per-host
+     * CLIENT cache the instant [bind] runs — a LOCAL read (no SSH), so the
+     * last-known tree paints INSTANTLY and the empty rebuild flash never shows.
+     *
+     * Runs in [bind]'s cold-start path BEFORE the Loading state is set and
+     * before the daemon hydrate / first reconcile. [HostTreeModel.hydrate] is a
+     * no-op once the tree already has a snapshot, so a probe that somehow beat
+     * this never gets clobbered by the (older) cache seed. Returns `true` when
+     * the cache seeded ≥1 node (so the caller skips the Loading flash and emits
+     * the held shape immediately), `false` when there is no cache yet.
+     *
+     * The seed is ADVISORY: the silent reconcile stays authoritative and
+     * overwrites these placeholders in place (keyed diff). A cache entry the
+     * probe no longer reports is pruned by the first reconcile, so a stale entry
+     * never survives past the first refresh (#679 stale-type guard, D22).
+     */
+    private fun hydrateFromClientCache(params: BoundParams): Boolean {
+        val cache = treeClientCache ?: return false
+        val nodes = runCatching { cache.read(params.hostName) }.getOrDefault(emptyList())
+        if (nodes.isEmpty()) return false
+        tree.hydrate(nodes.map { it.toHydratedNode() })
+        if (!tree.hasSnapshot) return false
+        // Render the seeded order / placement / collapse immediately — instant
+        // held shape, no Loading flash. The watched-root overlay (Room) and the
+        // confirmed kinds arrive with the watched-folder snapshot + first
+        // reconcile and update in place.
+        emitReady()
+        return true
+    }
+
+    /**
+     * Issue #867: persist the current tree state to the per-host CLIENT cache so
+     * the NEXT cold start renders instantly. Fire-and-forget on a background
+     * dispatcher; mirrors [persistTree]'s host-side upsert but to the local
+     * advisory cache. A no-op without a [treeClientCache]; an empty tree deletes
+     * the cache file.
+     */
+    private fun persistClientCache(params: BoundParams) {
+        val cache = treeClientCache ?: return
+        val nodes = tree.exportNodes().map { it.toTreeNode() }
+        viewModelScope.launch(ioDispatcher) {
+            runCatching { cache.write(params.hostName, nodes) }
         }
     }
 
@@ -1965,6 +2046,10 @@ class FolderListViewModel internal constructor(
                 // the next cold start hydrates the just-reconciled order /
                 // expand-collapse / foreign-guess. Fire-and-forget.
                 persistTree(params)
+                // Issue #867: mirror the freshened tree into the CLIENT cache so
+                // the NEXT cold start paints THIS (settled) tree instantly — the
+                // local-first half of stale-while-revalidate. Fire-and-forget.
+                persistClientCache(params)
                 if (refreshSessionsRequested) {
                     completeManualRefresh()
                 } else {

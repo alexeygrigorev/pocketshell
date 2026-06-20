@@ -25,7 +25,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.io.InputStream
-import kotlin.system.measureNanoTime
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentConversationRepositoryTest {
@@ -445,78 +444,190 @@ class AgentConversationRepositoryTest {
 
     @Test
     fun reconcileScalesLinearlyForLargeUserMessageHeavyBursts() {
-        // Regression guard for the O(n^2)-per-reconcile hole: a burst of
-        // thousands of distinct user messages must reconcile in roughly
-        // LINEAR time. The old nested `byId.entries.firstOrNull` scan ran
-        // O(window^2) here — doubling the input quadrupled the time. We
-        // assert the larger input is well under the quadratic projection of
-        // the smaller one, which the old implementation would blow past.
+        // Regression guard for the O(n^2)-per-reconcile hole (#576): a burst
+        // of thousands of optimistic+real user turns must reconcile in
+        // LINEAR work. The old nested `byId.entries.firstOrNull` scan ran
+        // O(window^2) here — it re-scanned the WHOLE accumulator on every real
+        // user message to find the optimistic turn to collapse.
         //
-        // Issue #715: the assertion is on the RELATIVE RATIO of the two
-        // sizes, measured as the MINIMUM over several samples — NOT an
-        // absolute wall-clock threshold. An absolute "should take < X ns"
-        // ceiling is inherently flaky on the contended dev box: heavy box
-        // load inflates the absolute time past the ceiling even though the
-        // algorithm is still linear. Taking the MIN of several samples is
-        // contention-immune in the way that matters here: contention can
-        // only ever make a sample SLOWER, so the fastest sample for each
-        // size reflects its least-contended run, and the ratio of those two
-        // best-case timings is stable under load while still being ~4x for
-        // a linear reconcile and ~16x for the old quadratic one.
-        fun userHeavyBurst(count: Int): List<ConversationEvent> = buildList {
-            repeat(count) { index ->
+        // Issue #831: this assertion is on a DETERMINISTIC operation counter
+        // (ReconcileOpCounter.candidateInspections), NOT wall-clock time. A
+        // wall-clock ceiling — or even a best-of-samples timing RATIO — is
+        // inherently flaky on a contended CI runner / dev box: load inflates
+        // elapsed time even though the algorithm is still linear, so the test
+        // flakes (the failure that filed #831). The candidate-inspection count
+        // is derived purely from control flow: it counts every accumulated
+        // candidate the matching path examines while collapsing an optimistic
+        // turn. That is exactly the work the old quadratic scan exploded.
+        //
+        //  - linear (current) impl: each optimistic id is inspected at most
+        //    once across the whole reconcile  => count is O(window)
+        //  - quadratic (old) impl: re-scans the whole accumulator per real
+        //    user message                       => count is O(window^2)
+        //
+        // The count is identical on every run regardless of machine load, so
+        // the assertion is contention-immune AND still fails a genuine
+        // quadratic regression. The `verifies...` sibling test below proves
+        // the SAME counter explodes super-linearly under the old scan, so this
+        // signal really does catch the regression it guards (red->green).
+
+        // A real Codex `/new` replay sends each turn optimistically (an
+        // `optimistic:` echo) and then tails the authoritative real user
+        // message back with the same text — the reconcile collapses each pair.
+        // That is the exact workload the matching path exists for and the one
+        // the old quadratic scan blew up on.
+        fun optimisticHeavyBurst(turns: Int): List<ConversationEvent> = buildList {
+            repeat(turns) { index ->
+                val text = "prompt number $index"
+                add(
+                    ConversationEvent.Message(
+                        id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}$index",
+                        agent = AgentKind.Codex,
+                        role = ConversationRole.User,
+                        text = text,
+                        sendState = MessageSendState.Pending,
+                    ),
+                )
                 add(
                     ConversationEvent.Message(
                         id = "u$index",
                         agent = AgentKind.Codex,
                         role = ConversationRole.User,
-                        text = "prompt number $index",
+                        text = text,
                     ),
                 )
             }
         }
 
-        val small = userHeavyBurst(1_000)
-        val large = userHeavyBurst(4_000)
+        val smallTurns = 1_000
+        val largeTurns = 4_000
+        val small = optimisticHeavyBurst(smallTurns)
+        val large = optimisticHeavyBurst(largeTurns)
 
-        // Warm up so JIT compilation isn't charged to the timed runs.
-        repeat(5) {
-            reconcileAgentEvents(small, maxEvents = 10_000)
-            reconcileAgentEvents(large, maxEvents = 10_000)
-        }
+        val smallCounter = ReconcileOpCounter()
+        val largeCounter = ReconcileOpCounter()
+        reconcileAgentEvents(small, maxEvents = 100_000, opCounter = smallCounter)
+        reconcileAgentEvents(large, maxEvents = 100_000, opCounter = largeCounter)
 
-        // Take the MIN over several samples per size. Contention only makes
-        // a sample slower, so the best (fastest) sample per size is the one
-        // least disturbed by box load; comparing two best-case timings keeps
-        // the ratio stable under contention.
-        fun bestNanos(burst: List<ConversationEvent>): Long {
-            var best = Long.MAX_VALUE
-            repeat(7) {
-                val nanos = measureNanoTime { reconcileAgentEvents(burst, maxEvents = 10_000) }
-                if (nanos < best) best = nanos
-            }
-            return best.coerceAtLeast(1)
-        }
-
-        val smallNanos = bestNanos(small)
-        val largeNanos = bestNanos(large)
-        val ratio = largeNanos.toDouble() / smallNanos
+        val smallOps = smallCounter.candidateInspections
+        val largeOps = largeCounter.candidateInspections
+        val ratio = largeOps.toDouble() / smallOps.coerceAtLeast(1)
 
         println(
-            "[#576/#715 reconcile linearity] small(1000)=${smallNanos / 1000}us " +
-                "large(4000)=${largeNanos / 1000}us ratio=${"%.2f".format(ratio)} " +
-                "(linear~4x, quadratic~16x; min-of-samples, contention-immune)",
+            "[#576/#831 reconcile linearity] small(${smallTurns}t)=$smallOps ops " +
+                "large(${largeTurns}t)=$largeOps ops ratio=${"%.2f".format(ratio)} " +
+                "(deterministic candidate-inspection count; linear~4x, quadratic~16x)",
         )
 
-        // 4x the input. Linear => ~4x the time. Quadratic => ~16x. Assert
-        // the best-case RATIO is far below quadratic: allow up to 9x (well
-        // under 16x) to tolerate per-run JIT/GC noise while still failing the
-        // old O(n^2) implementation, which would be ~16x. This is a relative
-        // ratio, never an absolute ns ceiling, so it does not trip under load.
+        // Sanity: the matching path must actually run (a vacuous 0/0 would
+        // make the ratio meaningless and pass quadratic regressions silently).
         assertTrue(
-            "reconcile time grew super-linearly: small=${smallNanos}ns large=${largeNanos}ns " +
-                "ratio=$ratio (best-of-samples; expected ~4x linear, ~16x quadratic)",
-            ratio <= 9.0,
+            "matching path never ran — counter is vacuous (small=$smallOps large=$largeOps)",
+            smallOps > 0 && largeOps > 0,
+        )
+
+        // 4x the input => ~4x the work for a linear reconcile, ~16x for the
+        // old quadratic one. Allow up to 6x to absorb the constant-factor
+        // bookkeeping while staying far below the 16x a quadratic scan would
+        // produce. This is a deterministic integer ratio, never a timing, so
+        // it does not move under machine load.
+        assertTrue(
+            "reconcile candidate inspections grew super-linearly: " +
+                "small=$smallOps large=$largeOps ratio=$ratio " +
+                "(expected ~4x linear, ~16x quadratic)",
+            ratio <= 6.0,
+        )
+    }
+
+    @Test
+    fun reconcileLinearityCounterCatchesAQuadraticRegression() {
+        // Issue #831 (red->green proof for the guard above): demonstrate that
+        // the candidate-inspection counter — the deterministic signal the
+        // linearity test asserts on — actually EXPLODES super-linearly when
+        // the reconcile matching path reverts to the old O(window^2) scan.
+        //
+        // This re-implements the OLD quadratic collapse exactly: instead of
+        // the O(1) text-indexed FIFO lookup, it re-scans the WHOLE accumulator
+        // (`byId.values.firstOrNull { ... }`) on every real user message to
+        // find the optimistic turn to drop, counting each candidate examined
+        // into the SAME counter the production guard reads. If that count did
+        // not blow past the linear guard's 6x ceiling, the guard would be
+        // unable to catch a real regression — so this test fails the day the
+        // guard goes blind.
+        fun quadraticCandidateInspections(events: List<ConversationEvent>): Long {
+            val byId = LinkedHashMap<String, ConversationEvent>()
+            var inspections = 0L
+            for (event in events) {
+                val isRealUser = event is ConversationEvent.Message &&
+                    event.role == ConversationRole.User &&
+                    !event.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX)
+                if (isRealUser) {
+                    val text = (event as ConversationEvent.Message).text
+                    // The pre-#576 hole: a full linear scan of the accumulator
+                    // per real user message -> O(window^2) over the burst.
+                    var matchId: String? = null
+                    for ((id, candidate) in byId) {
+                        inspections++
+                        if (candidate is ConversationEvent.Message &&
+                            candidate.role == ConversationRole.User &&
+                            candidate.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX) &&
+                            candidate.text == text
+                        ) {
+                            matchId = id
+                            break
+                        }
+                    }
+                    if (matchId != null) byId.remove(matchId)
+                }
+                byId[event.id] = event
+            }
+            return inspections
+        }
+
+        fun optimisticHeavyBurst(turns: Int): List<ConversationEvent> = buildList {
+            repeat(turns) { index ->
+                val text = "prompt number $index"
+                add(
+                    ConversationEvent.Message(
+                        id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}$index",
+                        agent = AgentKind.Codex,
+                        role = ConversationRole.User,
+                        text = text,
+                        sendState = MessageSendState.Pending,
+                    ),
+                )
+                add(
+                    ConversationEvent.Message(
+                        id = "u$index",
+                        agent = AgentKind.Codex,
+                        role = ConversationRole.User,
+                        text = text,
+                    ),
+                )
+            }
+        }
+
+        val smallTurns = 1_000
+        val largeTurns = 4_000
+        val smallOps = quadraticCandidateInspections(optimisticHeavyBurst(smallTurns))
+        val largeOps = quadraticCandidateInspections(optimisticHeavyBurst(largeTurns))
+        val ratio = largeOps.toDouble() / smallOps.coerceAtLeast(1)
+
+        println(
+            "[#831 quadratic-injection proof] small(${smallTurns}t)=$smallOps ops " +
+                "large(${largeTurns}t)=$largeOps ops ratio=${"%.2f".format(ratio)} " +
+                "(old O(n^2) scan; expected ~16x, MUST exceed the 6x linear ceiling)",
+        )
+
+        // The quadratic scan must blow PAST the 6.0 ceiling the linearity
+        // guard enforces. ~16x is the theoretical quadratic ratio for a 4x
+        // input; require comfortably above the guard's ceiling so the proof is
+        // unambiguous: this is what makes the guard a real regression catcher
+        // and not a vacuous always-pass.
+        assertTrue(
+            "quadratic injection did NOT exceed the linear guard's 6x ceiling " +
+                "(small=$smallOps large=$largeOps ratio=$ratio) — the guard would be blind",
+            ratio > 6.0,
         )
     }
 

@@ -86,9 +86,43 @@ internal const val OPTIMISTIC_USER_MESSAGE_ID_PREFIX: String = "optimistic:"
  * correct and simpler than chasing wall-clock skew between the Android
  * device and the remote.
  */
+/**
+ * Issue #831: a deterministic complexity probe for [reconcileAgentEvents].
+ *
+ * The reconcile linearity guard must NOT be a wall-clock assertion — raw
+ * elapsed time inflates under load on the shared CI runner (and the dev box),
+ * so a time-based ceiling flakes even though the algorithm is still linear.
+ *
+ * Instead the matching path increments [candidateInspections] every time it
+ * examines one accumulated candidate while trying to collapse an optimistic
+ * turn into its real counterpart. This is exactly the work that the old
+ * `byId.entries.firstOrNull` nested scan blew up: that scan inspected the
+ * whole accumulator on every real user message, so the count was O(window^2).
+ * The current FIFO-queue index inspects each optimistic id at most once across
+ * the entire reconcile, so the count is O(window).
+ *
+ * Asserting `candidateInspections` (a deterministic integer derived purely
+ * from control flow, never from elapsed time) is therefore a sound,
+ * contention-immune signal for "linear vs quadratic shape": doubling the input
+ * roughly doubles a linear count and roughly quadruples a quadratic one,
+ * regardless of how loaded the machine is.
+ *
+ * Pass an instance to capture the count; production callers pass `null` and pay
+ * nothing.
+ */
+internal class ReconcileOpCounter {
+    var candidateInspections: Long = 0L
+        private set
+
+    fun recordCandidateInspection() {
+        candidateInspections++
+    }
+}
+
 internal fun reconcileAgentEvents(
     events: List<ConversationEvent>,
     maxEvents: Int = DEFAULT_MAX_AGENT_EVENTS,
+    opCounter: ReconcileOpCounter? = null,
 ): List<ConversationEvent> {
     if (events.isEmpty()) return events
     val byId = LinkedHashMap<String, ConversationEvent>()
@@ -157,6 +191,7 @@ internal fun reconcileAgentEvents(
             val queue = optimisticIdsByText[event.text]
             if (queue != null) {
                 while (queue.isNotEmpty()) {
+                    opCounter?.recordCandidateInspection()
                     val candidateId = queue.removeFirst()
                     val candidate = byId[candidateId]
                     if (candidate is ConversationEvent.Message &&

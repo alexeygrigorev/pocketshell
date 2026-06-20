@@ -109,6 +109,7 @@ import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
 import com.pocketshell.app.conversation.ToolResultPairing
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
+import com.pocketshell.app.conversation.ConversationToolArgsSection
 import com.pocketshell.app.conversation.ConversationToolCardExpansion
 import com.pocketshell.app.conversation.filterConversationRows
 import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
@@ -163,6 +164,7 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ToolArgsView
 import com.pocketshell.core.agents.ToolCallSummary
 import com.pocketshell.core.agents.ToolPayloadFormatter
 import com.pocketshell.core.terminal.selection.ConversationLink
@@ -5045,12 +5047,12 @@ private fun ConversationToolCallChatCard(
                     .padding(top = 4.dp, start = 0.dp, end = 0.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                ToolCallSection(
-                    label = "input",
-                    body = remember(toolCall.id, toolCall.input) {
-                        ToolPayloadFormatter.formatInput(toolCall.input)
+                ConversationToolArgsSection(
+                    view = remember(toolCall.id, toolCall.name, toolCall.input) {
+                        ToolArgsView.forInput(toolCall.name, toolCall.input)
                     },
                     copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + toolCall.id + ":input",
+                    rawCopyText = toolCall.input,
                 )
                 if (result != null) {
                     ToolCallSection(

@@ -162,6 +162,7 @@ import com.pocketshell.app.voice.HotkeysChipIcon
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolArgsView
@@ -5015,11 +5016,9 @@ private fun ConversationToolCallChatCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(ToolCallCardItemGap),
         ) {
-            Text(
-                text = if (expanded) "v" else "›",
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-                fontSize = 14.sp,
+            DisclosureIcon(
+                expanded = expanded,
+                tint = PocketShellColors.TextMuted,
             )
             Text(
                 text = toolCall.name,

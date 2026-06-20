@@ -52,6 +52,7 @@ import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.HostCard
@@ -2292,6 +2293,61 @@ class DesignRenders {
         }
     }
 
+    // Issue #840: the canonical shared disclosure affordance. Top block shows
+    // the bare DisclosureIcon collapsed vs expanded (it is the SAME triangle
+    // rotated, never two glyphs). Below it the same icon as used on TWO real
+    // surfaces — the conversation tool-call row (muted tint) and the composer
+    // pending-queue toggle (accent tint) — each collapsed AND expanded, so one
+    // PNG proves the unified icon across surfaces.
+    @Test
+    fun disclosureIcon() = render("disclosure-icon") {
+        Column(modifier = Modifier.padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Bare DisclosureIcon", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    DisclosureIcon(expanded = false)
+                    Text("collapsed", color = PocketShellColors.TextMuted, fontSize = 11.sp)
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    DisclosureIcon(expanded = true)
+                    Text("expanded", color = PocketShellColors.TextMuted, fontSize = 11.sp)
+                }
+            }
+
+            Text("Surface 1 — conversation tool row", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+            CompactToolRow("Bash", "cd /home/alexey/git/pocketshell ec…", expanded = false)
+            CompactToolRow("Read", "shot.png", expanded = true, input = "{ }", output = "ok")
+
+            Text("Surface 2 — composer pending queue", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+            ComposerQueueToggleMirror(expanded = false)
+            ComposerQueueToggleMirror(expanded = true)
+        }
+    }
+
+    // Issue #840: mirrors the composer pending-transcription queue toggle row
+    // (PromptComposerSheet) using the same shared DisclosureIcon with the accent
+    // tint, so the render proves the second surface uses the identical icon.
+    @Composable
+    private fun ComposerQueueToggleMirror(expanded: Boolean) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Accent.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "2 transcriptions pending",
+                color = PocketShellColors.Accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            DisclosureIcon(expanded = expanded, tint = PocketShellColors.Accent)
+        }
+    }
+
     // Issue #791: a single mirror row of the redesigned `/`-autocomplete
     // dropdown — the command token leads (mono + agent-accent), an inline
     // `<arg>` hint follows for argument-taking commands, and a short wrapping
@@ -2374,7 +2430,7 @@ class DesignRenders {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(if (expanded) "v" else "›", color = PocketShellColors.TextMuted, style = PocketShellType.labelMono, fontSize = 14.sp)
+                DisclosureIcon(expanded = expanded, tint = PocketShellColors.TextMuted)
                 Text(tool, color = PocketShellColors.Accent, style = PocketShellType.bodyDense, fontWeight = FontWeight.SemiBold)
                 Text(
                     summary,

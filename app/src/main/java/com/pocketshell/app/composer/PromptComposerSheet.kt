@@ -122,6 +122,7 @@ import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
+import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -2432,11 +2433,9 @@ private fun PendingTranscriptionsBanner(
                     )
                 }
             }
-            Text(
-                text = if (expanded) "v" else ">",
-                color = PocketShellColors.Accent,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
+            DisclosureIcon(
+                expanded = expanded,
+                tint = PocketShellColors.Accent,
             )
         }
 

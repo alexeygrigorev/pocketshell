@@ -391,6 +391,29 @@ Don't:
 - Use ASCII tree glyphs in row titles.
 - Put per-folder "E / ..." action clutter in the main scan path.
 
+### Disclosure (expand/collapse) — the canonical `DisclosureIcon` (#840)
+
+Every expand/collapse row uses the ONE shared `DisclosureIcon`
+(`shared/ui-kit/.../components/DisclosureIcon.kt`): a single filled triangle
+drawn once and **rotated** 90° (▶ collapsed → ▼ expanded), animated ~120ms.
+Collapsed and expanded are provably the same shape turning, never a glyph swap.
+
+Do:
+
+- Use `DisclosureIcon(expanded = …)` for any inline expand/collapse toggle
+  (conversation tool-call card, composer pending-queue, folder/session tree,
+  system-note rows).
+- Pass `tint` to match the surface (muted-secondary by default; accent where the
+  row is accent-coloured).
+
+Don't:
+
+- Hand-roll a `Text("›")` / `Text("v")` glyph pair, or draw two separate
+  triangle `Path`s for the two states — that is the #840 "two different icons"
+  bug. Hard-cut (D22): there is no second disclosure affordance.
+- Confuse it with the navigation drill-in chevron (`›` on nav `ListRow`s) or the
+  dropdown trigger (`▾`) — those are different, deliberate affordances.
+
 ### Empty, Loading, And Error States
 
 States should occupy the same structural area as the eventual content.

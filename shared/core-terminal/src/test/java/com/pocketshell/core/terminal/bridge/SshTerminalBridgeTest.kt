@@ -16,6 +16,7 @@ import org.robolectric.Shadows.shadowOf
 import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 @RunWith(RobolectricTestRunner::class)
 @LooperMode(LooperMode.Mode.PAUSED)
@@ -109,6 +110,101 @@ class SshTerminalBridgeTest {
                 it.bytes in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
             },
         )
+    }
+
+    /**
+     * Issue #829: the on-main seed drain ([dispatchMainLooperDrains]) must be
+     * TIME-BOUNDED so a large seed cannot pin the main thread in one unbounded
+     * inline run. With an injected clock that advances per slice, the inline drain
+     * must STOP after the budget trips and hand the remainder — still in FIFO order
+     * — to the frame-budgeted scheduler, which paints it across frames. The full
+     * payload must still render with no loss.
+     *
+     * Red→green: before #829 the seed drained ALL slices inline regardless of
+     * elapsed time (`directDrains` == total slices), so this asserts the inline
+     * count is BOUNDED well below the total and the rest drains via the scheduler.
+     */
+    @Test(timeout = 5_000)
+    fun onMainSeedDrainStopsAtTimeBudgetAndHandsRemainderToScheduler() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val trace = RecordingTraceSink()
+        // Clock advances SEED_CLOCK_STEP_MS on EVERY read. The first read is the
+        // feed start; each post-slice read then accrues elapsed time, so the budget
+        // (SEED_DRAIN_MAX_MILLIS) trips after a small, deterministic slice count.
+        val clock = AtomicLong(0L)
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 1_000,
+            traceSink = trace,
+            nowMillis = { clock.getAndAdd(SEED_CLOCK_STEP_MS) },
+        )
+        // A single-chunk seed (<= one queue) so it is the FINAL chunk and handoff is
+        // allowed, but spanning MANY drain slices so the budget can cut it short.
+        val payload = singleChunkMultiSlicePayload()
+        val totalSlices = expectedDrainSlices(payload.bytes.size)
+        assertTrue(
+            "fixture must span well more slices than the budget allows inline",
+            totalSlices > EXPECTED_INLINE_SLICES * 2,
+        )
+
+        bridge.feedBytes(payload.bytes)
+
+        // The inline seed drain must have STOPPED at the time budget — far fewer
+        // direct dispatches than the total slice count (the pre-#829 unbounded run
+        // would have dispatched ALL of them inline).
+        val inlineSlices = trace.directDrains.size
+        // elapsed after slice N = N * SEED_CLOCK_STEP_MS; trips when >= budget.
+        val expectedInline =
+            ((SshTerminalBridge.SEED_DRAIN_MAX_MILLIS + SEED_CLOCK_STEP_MS - 1) / SEED_CLOCK_STEP_MS).toInt()
+        assertEquals(
+            "the seed drain must stop at the time budget, not run all slices inline; trace=$trace",
+            expectedInline,
+            inlineSlices,
+        )
+        assertTrue(
+            "the time-bounded seed drain must leave queued bytes for the scheduler; trace=$trace",
+            inlineSlices < totalSlices,
+        )
+
+        // The handed-off remainder drains via the frame-budgeted scheduler once the
+        // looper advances — the FULL payload must render with no lost bytes.
+        drainMainLooperUntil { trace.outputDrainSnapshot().sum() >= payload.bytes.size }
+        assertEquals(payload.transcriptText, bridge.emulator.screen.transcriptText)
+        assertEquals(payload.bytes.size, trace.outputDrainSnapshot().sum())
+    }
+
+    /**
+     * Issue #829 control: the COMMON small seed must still drain fully inline (the
+     * budget only bounds the pathological case). With a stable clock the budget
+     * never trips, so the whole seed paints synchronously before the call returns
+     * (the seed-before-live ordering #468/#803 depends on is preserved).
+     */
+    @Test(timeout = 5_000)
+    fun onMainSmallSeedDrainsFullyInlineWithinBudget() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val trace = RecordingTraceSink()
+        // Stable clock: elapsed time never grows, so the budget never trips.
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 1_000,
+            traceSink = trace,
+            nowMillis = { 0L },
+        )
+        val seed = "seed-line-1\r\nseed-line-2\r\nseed-line-3".toByteArray(Charsets.US_ASCII)
+
+        bridge.feedBytes(seed)
+
+        // Drained fully inline before returning — the transcript is already painted
+        // with NO scheduler frame advance needed.
+        assertEquals(
+            "small seed must render fully inline within the time budget",
+            "seed-line-1\nseed-line-2\nseed-line-3",
+            bridge.emulator.screen.transcriptText,
+        )
+        assertEquals(seed.size, trace.outputDrainSnapshot().sum())
+        assertEquals(1, trace.directDrains.size)
     }
 
     @Test
@@ -506,6 +602,30 @@ class SshTerminalBridgeTest {
         return Payload(payload, payloadText)
     }
 
+    /**
+     * Issue #829: a seed that fits in ONE process-to-terminal queue write (so it is
+     * the final/only chunk and on-main handoff is allowed) but spans MANY drain
+     * slices, so a time budget can cut the inline drain short with bytes left over
+     * for the scheduler.
+     */
+    private fun singleChunkMultiSlicePayload(): Payload {
+        val payloadLines = List(SINGLE_CHUNK_SEED_LINES) { line ->
+            ('a'.code + (line % 26)).toChar().toString().repeat(LINE_LENGTH - 1)
+        }
+        val payloadText = payloadLines.joinToString(separator = "\n")
+        val payloadWireText = payloadLines.joinToString(separator = "\r\n")
+        val payload = payloadWireText.toByteArray(Charsets.US_ASCII)
+        assertTrue(
+            "fixture must fit one queue write (single/final chunk) so handoff is allowed",
+            payload.size <= SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES,
+        )
+        assertTrue(
+            "fixture must span several drain slices",
+            payload.size > SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES * 8,
+        )
+        return Payload(payload, payloadText)
+    }
+
     private fun rawSshStyleBurstPayload(): Payload {
         val payloadLines = List(RAW_BURST_LINES) { line ->
             "ssh-burst-%04d ".format(line) +
@@ -656,5 +776,15 @@ class SshTerminalBridgeTest {
         // that the buffered live burst spans many process-to-terminal queue
         // drains while gated, so a reorder/drop would show up.
         private const val SEED_BURST_LINES = 2_000
+
+        // Issue #829: on-main seed time-budget fixture. ~300 * 101 B ≈ 30 KB — one
+        // queue write (single/final chunk, handoff allowed) spanning ~15 drain
+        // slices, so the time budget can cut the inline drain short.
+        private const val SINGLE_CHUNK_SEED_LINES = 300
+
+        // Injected clock step per nowMillis() read; with SEED_DRAIN_MAX_MILLIS=24
+        // the budget trips after ceil(24/4)=6 inline slices.
+        private const val SEED_CLOCK_STEP_MS = 4L
+        private const val EXPECTED_INLINE_SLICES = 6
     }
 }

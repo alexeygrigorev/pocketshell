@@ -39,8 +39,8 @@ package com.pocketshell.core.terminal.bridge
  *
  * @property drainSliceBytes one drain slice — must match the vendored
  *   `TerminalSession.MainThreadHandler.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES`
- *   (16 KB), the size of `mReceiveBuffer` that one `MSG_NEW_INPUT` dispatch
- *   parses.
+ *   (2 KB after #796), the size of `mReceiveBuffer` that one `MSG_NEW_INPUT`
+ *   dispatch parses.
  * @property bytesPerFrame the per-main-thread-turn parse budget. After this many
  *   bytes have been parsed in one turn the scheduler yields to the next frame.
  *   Chosen so a single turn's `append` cost stays well under one display frame

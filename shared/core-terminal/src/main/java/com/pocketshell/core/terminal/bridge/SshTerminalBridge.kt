@@ -3,6 +3,7 @@ package com.pocketshell.core.terminal.bridge
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.os.SystemClock
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
@@ -83,6 +84,7 @@ public class SshTerminalBridge(
     transcriptRows: Int = DEFAULT_TRANSCRIPT_ROWS,
     client: TerminalSessionClient = NoOpTerminalSessionClient(),
     traceSink: TraceSink? = null,
+    private val nowMillis: () -> Long = { SystemClock.uptimeMillis() },
 ) {
     private val traceState = traceSink?.let { TraceState(it) }
     private val terminalSessionClient: TerminalSessionClient =
@@ -266,6 +268,12 @@ public class SshTerminalBridge(
     private fun feedBytesUntraced(data: ByteArray, offset: Int, count: Int) {
         val handler = SessionReflection.getMainThreadHandler(session)
         val isHandlerLooper = Looper.myLooper() == handler.looper
+        val seedDrainStartedAtMillis = nowMillis()
+        // #829: when the FINAL chunk's on-main seed drain exceeds the time budget we
+        // hand its already-queued tail to the frame-budgeted scheduler so the rest
+        // paints across frames instead of pinning the main thread inline. Only the
+        // final chunk may hand off (deadlock-safety, see dispatchMainLooperDrains).
+        var seedDrainHandedOff = false
         synchronized(feedLock) {
             var remaining = count
             var chunkOffset = offset
@@ -278,11 +286,28 @@ public class SshTerminalBridge(
                     length = chunkLength,
                 )
                 if (!written) return
-                if (isHandlerLooper) {
-                    // On-main seed/reattach feed: drain it fully + synchronously
-                    // (the `capture-pane` snapshot must paint before live `%output`
-                    // flows). This is a one-shot, not the burst path.
-                    dispatchMainLooperDrains(handler = handler, queuedBytes = chunkLength)
+                val isLastChunk = remaining - chunkLength <= 0
+                if (isHandlerLooper && !seedDrainHandedOff) {
+                    // On-main seed/reattach feed: drain it synchronously so the
+                    // `capture-pane` snapshot paints before live `%output` flows.
+                    // Time-bounded (#829): on the final chunk, if this on-main drain
+                    // exceeds SEED_DRAIN_MAX_MILLIS it stops and hands the rest to the
+                    // frame-budgeted scheduler rather than running unbounded. Earlier
+                    // chunks must drain fully (allowHandoff=false) so the next write
+                    // doesn't block on a full queue (see dispatchMainLooperDrains).
+                    val budgetExhausted = dispatchMainLooperDrains(
+                        handler = handler,
+                        queuedBytes = chunkLength,
+                        startedAtMillis = seedDrainStartedAtMillis,
+                        allowHandoff = isLastChunk,
+                    )
+                    if (budgetExhausted) {
+                        seedDrainHandedOff = true
+                        drainScheduler.requestDrain()
+                    }
+                } else if (isHandlerLooper) {
+                    // Budget already exhausted earlier in this feed: queue + yield.
+                    drainScheduler.requestDrain()
                 } else {
                     // Off-main live `%output`: hand continuation to the #803
                     // frame-budgeted scheduler. requestDrain() is idempotent across
@@ -303,6 +328,8 @@ public class SshTerminalBridge(
         val traceSink = traceState.traceSink
         val pendingDrainMessages = traceState.pendingDrainMessages
         val feedStartedAtNanos = System.nanoTime()
+        val seedDrainStartedAtMillis = nowMillis()
+        var seedDrainHandedOff = false
         var chunks = 0
         traceSink.onFeedStarted(count)
         synchronized(feedLock) {
@@ -335,10 +362,27 @@ public class SshTerminalBridge(
                     pendingMessages = pendingDrainMessages.size,
                     directDispatch = isHandlerLooper,
                 )
-                if (isHandlerLooper) {
-                    dispatchMainLooperDrains(handler = handler, queuedBytes = chunkLength) { bytes, durationNanos ->
+                val isLastChunk = remaining - chunkLength <= 0
+                if (isHandlerLooper && !seedDrainHandedOff) {
+                    // On-main seed drain, time-bounded (#829): on the final chunk it
+                    // stops and hands the remainder to the frame-budgeted scheduler
+                    // past the budget. Earlier chunks drain fully (allowHandoff=false)
+                    // so the next write doesn't block on a full queue.
+                    val budgetExhausted = dispatchMainLooperDrains(
+                        handler = handler,
+                        queuedBytes = chunkLength,
+                        startedAtMillis = seedDrainStartedAtMillis,
+                        allowHandoff = isLastChunk,
+                    ) { bytes, durationNanos ->
                         traceSink.onDirectDrainDispatched(bytes = bytes, durationNanos = durationNanos)
                     }
+                    if (budgetExhausted) {
+                        seedDrainHandedOff = true
+                        drainScheduler.requestDrain()
+                    }
+                } else if (isHandlerLooper) {
+                    // Budget already exhausted earlier in this feed: queue + yield.
+                    drainScheduler.requestDrain()
                 } else {
                     // Off-main live `%output`: #803 frame-budgeted scheduler owns
                     // continuation (see [feedBytesUntraced]). The per-slice trace
@@ -357,11 +401,45 @@ public class SshTerminalBridge(
         )
     }
 
+    /**
+     * Synchronously drain up to [queuedBytes] of the just-written on-main seed
+     * chunk, one [PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES] slice per
+     * `dispatchMessage`. The seed path is NOT the live-`%output` ANR path (it runs
+     * one-shot before live bytes flow), so it deliberately drains inline so the
+     * `capture-pane` snapshot paints before the live stream starts.
+     *
+     * Issue #829: the seed drain is now TIME-BOUNDED for symmetry with the live
+     * [MainThreadDrainScheduler] turn budget. The budget is measured from
+     * [startedAtMillis] (the start of the WHOLE on-main feed, shared across its
+     * chunks), so a pathologically large seed cannot pin the main thread in one
+     * unbounded inline run. After at least one slice (forward progress), if the
+     * feed has spent more than [SEED_DRAIN_MAX_MILLIS] of main-thread wall time
+     * this stops early and returns `true`; the caller then hands the remainder —
+     * already FIFO-queued — to the frame-budgeted scheduler, which paces the rest
+     * across frames. The granularity floor is one slice, so the worst-case inline
+     * cost is [SEED_DRAIN_MAX_MILLIS] plus one 2 KB slice's parse.
+     *
+     * Deadlock-safety: handoff is only honored when [allowHandoff] is `true` (the
+     * caller passes it ONLY for the final chunk of the feed). The bridge runs the
+     * on-main feed synchronously while holding the looper, so a later chunk's
+     * `writeProcessToTerminalQueue` would BLOCK forever on a full 64 KB queue with
+     * no async drainer able to run (the scheduler's posted runnable can't execute
+     * while this synchronous feed owns the looper). For non-final chunks we
+     * therefore drain the chunk FULLY (ignoring the budget for handoff) so the next
+     * write has room; only the final chunk — after which the feed returns and frees
+     * the looper — may hand its tail to the scheduler.
+     *
+     * @return `true` if the time budget was exhausted AND [allowHandoff] is set, so
+     *   the caller should hand continuation to the frame-budgeted scheduler;
+     *   `false` if this chunk fully drained (within budget, or handoff disallowed).
+     */
     private inline fun dispatchMainLooperDrains(
         handler: Handler,
         queuedBytes: Int,
+        startedAtMillis: Long,
+        allowHandoff: Boolean,
         onDispatched: (bytes: Int, durationNanos: Long) -> Unit = { _, _ -> },
-    ) {
+    ): Boolean {
         var remaining = queuedBytes
         while (remaining > 0) {
             val drainBudget = minOf(remaining, PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES)
@@ -369,7 +447,16 @@ public class SshTerminalBridge(
             handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
             onDispatched(drainBudget, System.nanoTime() - dispatchStartedAtNanos)
             remaining -= drainBudget
+            // Time budget (#829): checked AFTER at least one slice so the seed always
+            // makes forward progress. Stop inline draining once the on-main feed has
+            // exceeded its wall-time budget — but ONLY on the final chunk, where the
+            // feed is about to return and the scheduler can safely drain the tail
+            // (see deadlock-safety above).
+            if (allowHandoff && nowMillis() - startedAtMillis >= SEED_DRAIN_MAX_MILLIS) {
+                return true
+            }
         }
+        return false
     }
 
     /**
@@ -595,6 +682,22 @@ public class SshTerminalBridge(
          */
         internal const val PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES: Int = 2 * 1024
         public const val MAX_SEED_GATE_LIVE_BUFFER_BYTES: Int = 2 * 1024 * 1024
+
+        /**
+         * Issue #829: time budget for the on-main, synchronous seed drain
+         * ([dispatchMainLooperDrains]). The seed path is NOT the live-`%output`
+         * ANR path — it runs one-shot before live bytes flow — so it drains inline
+         * to paint the `capture-pane` snapshot first. But an inline drain with no
+         * ceiling could still pin the main thread on a pathologically large seed,
+         * so it is bounded: once the on-main feed has spent this much main-thread
+         * wall time, the seed drain stops and hands the remainder to the
+         * frame-budgeted [MainThreadDrainScheduler]. Set GENEROUSLY relative to the
+         * live per-turn budget ([MainThreadDrainScheduler.DEFAULT_MAX_TURN_MILLIS],
+         * ~8 ms) because the seed is a one-shot paint, not a sustained per-frame
+         * cost — the common small seed always drains fully within budget; the cap
+         * only bounds the pathological case.
+         */
+        internal const val SEED_DRAIN_MAX_MILLIS: Long = 24L
 
         private const val TRACE_WAIT_THRESHOLD_NANOS: Long = 1_000_000
     }

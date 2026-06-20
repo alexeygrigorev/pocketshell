@@ -374,8 +374,9 @@ public final class TerminalSession extends TerminalOutput {
         @Override
         public void handleMessage(Message msg) {
             if (msg.what == MSG_NEW_INPUT) {
-                // PocketShell #803: one MSG_NEW_INPUT dispatch drains exactly ONE
-                // 16 KB slice and does NOT self-re-post. Continuation across the
+                // PocketShell #803/#796: one MSG_NEW_INPUT dispatch drains exactly
+                // ONE 2 KB slice (PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES; #796 shrank
+                // it from 16 KB) and does NOT self-re-post. Continuation across the
                 // rest of the queue is owned by the PocketShell
                 // MainThreadDrainScheduler, which applies a per-frame byte budget
                 // and yields the main looper between budgeted turns so a dense

@@ -39,7 +39,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -90,6 +89,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.fileIconClassForName
@@ -1141,7 +1141,7 @@ private fun LoadingPanel() {
             .testTag(FILE_VIEWER_LOADING_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        CircularProgressIndicator(color = PocketShellColors.Accent)
+        LoadingIndicator.Spinner()
     }
 }
 
@@ -1883,7 +1883,7 @@ private fun PdfPanel(cacheFile: File) {
                     color = PocketShellColors.TextSecondary,
                     fontSize = 14.sp,
                 )
-                rendering -> CircularProgressIndicator(color = PocketShellColors.Accent)
+                rendering -> LoadingIndicator.Spinner()
             }
         }
         PdfPagerBar(
@@ -2052,7 +2052,7 @@ private fun AudioPanel(cacheFile: File) {
             contentAlignment = Alignment.Center,
         ) {
             if (!ready) {
-                CircularProgressIndicator(color = PocketShellColors.Accent)
+                LoadingIndicator.Spinner()
             } else {
                 Text(
                     text = if (isPlaying) "❚❚" else "▶",

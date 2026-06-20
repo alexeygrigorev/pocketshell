@@ -5578,13 +5578,27 @@ internal fun ConsolidatedTopChrome(
             modifier = sessionLabelModifier,
         )
 
-        // Issue #637: the trailing control cluster. Grouping these into one
-        // non-shrinking [Row] (with an 8dp gap between siblings) keeps the
-        // toggle uncrowded and gives the kebab a stable, comfortable position
-        // in both states — the breadcrumb (just the kebab) and the
-        // agent-toggle layout (toggle + kebab) line the kebab up at the same
-        // right edge.
+        // Issue #637 / #747: the trailing controls. The SHRINKABLE middle group
+        // (connection-status pill + Terminal/Conversation toggle) sits in its
+        // OWN weighted slot — `weight(1f, fill = false)` — so it yields width
+        // before anything else, while the kebab is a FIXED 48dp sibling of the
+        // outer row that is laid out AFTER the weighted slots and so can never
+        // be displaced.
+        //
+        // Why this matters (#747): previously the whole trailing cluster was a
+        // single non-shrinking [Row]. When that cluster was wide (forwarding
+        // active -> agent present -> the wide "Terminal Conversation" toggle, a
+        // non-live "Disconnected"/"Reconnecting" pill, and a project crumb all
+        // competing for width), the cluster overflowed the 56dp row and Compose
+        // shoved its LAST child — the kebab — past the right edge. The
+        // maintainer saw the kebab "can't be selected" because it was
+        // off-screen. Putting the kebab outside the weighted slot reserves its
+        // 48dp unconditionally; the toggle's segment labels ellipsise (they are
+        // `maxLines = 1`) instead of pushing the kebab off-screen.
         Row(
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .padding(end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -5600,16 +5614,18 @@ internal fun ConsolidatedTopChrome(
                     )
                 }
             }
+        }
 
-            Box(modifier = Modifier.size(48.dp)) {
-                KebabTrigger(
-                    contentDescription = "More session actions",
-                    onClick = onMore,
-                    triggerTestTag = TMUX_FULL_CHROME_MORE_BUTTON_TAG,
-                    triggerSize = 48.dp,
-                )
-                moreMenu()
-            }
+        // The kebab — fixed 48dp, OUTSIDE every weighted slot, so it is always
+        // reserved its full width at the right edge (#747).
+        Box(modifier = Modifier.size(48.dp)) {
+            KebabTrigger(
+                contentDescription = "More session actions",
+                onClick = onMore,
+                triggerTestTag = TMUX_FULL_CHROME_MORE_BUTTON_TAG,
+                triggerSize = 48.dp,
+            )
+            moreMenu()
         }
     }
 }

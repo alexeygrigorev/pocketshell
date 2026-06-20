@@ -284,7 +284,12 @@ class TmuxSessionScreenImeChromeTest {
             }
         compose.waitForIdle()
 
-        compose.onNodeWithText("In this session").assertIsDisplayed()
+        // #782 hard-cut the "In this session" window group; the kebab menu now
+        // opens to the "On this host" section (matching the sibling
+        // compactChromeRightEdgeTapOpensMoreMenu assertion below, which #782
+        // updated — this one was missed and had been asserting a section header
+        // that no longer renders).
+        compose.onNodeWithText("On this host").assertIsDisplayed()
     }
 
     @Test

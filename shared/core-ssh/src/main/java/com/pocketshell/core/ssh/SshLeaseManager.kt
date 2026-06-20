@@ -79,6 +79,15 @@ public class SshLeaseManager(
         extraBufferCapacity = STATE_EVENT_BUFFER_CAPACITY,
     )
 
+    // Issue #845: the last transport state PUBLISHED on [stateEvents] per key, so
+    // [emitStateLocked] can keep [stateEvents] a true transport-state EDGE stream
+    // and not re-announce a transport that was already up. Only mutated under
+    // [mutex] (every [emitStateLocked] call site holds it), so no extra
+    // synchronisation is needed. A key drops out of the map only on a `Closed`
+    // edge (transport gone), so a fresh dial after a close re-emits `Connected`.
+    private val lastPublishedState: MutableMap<SshLeaseKey, SshLeaseConnectionState> =
+        hashMapOf()
+
     public val stateEvents: SharedFlow<SshLeaseStateEvent> = _stateEvents.asSharedFlow()
 
     init {
@@ -560,6 +569,36 @@ public class SshLeaseManager(
         state: SshLeaseConnectionState,
         closeReason: SshLeaseCloseReason? = null,
     ) {
+        // Issue #845 — keep [stateEvents] a true transport up/down EDGE stream.
+        // `Connected` maps to the controller's `transport.up` heal edge
+        // ([SshLeaseTransportPort.transportEvents]). A REUSE-acquire of a
+        // transport that is already up (last published `Connected`, or `Idle` —
+        // both mean the SSH session is still alive) is NOT a transport-up edge:
+        // the transport never went down. Re-announcing it stormed ~9
+        // `transport.up` per connection (the maintainer's #794 flap / 46-at-scale
+        // churn) because many subsystems each reuse the SAME warm host. Suppress
+        // the re-emit so one real connect ⇒ exactly one logical `Connected`.
+        // A genuine reconnect re-emits, because a real drop publishes `Closed`
+        // first (dropping the key from [lastPublishedState]), so the next
+        // `Connected` is a transition from a not-live state and is emitted.
+        if (state == SshLeaseConnectionState.Connected) {
+            val prior = lastPublishedState[key]
+            if (prior == SshLeaseConnectionState.Connected ||
+                prior == SshLeaseConnectionState.Idle
+            ) {
+                // Transport was already up; this acquire merely reused it. No
+                // edge — but keep the published state pinned at `Connected`.
+                lastPublishedState[key] = SshLeaseConnectionState.Connected
+                return
+            }
+        }
+        if (state == SshLeaseConnectionState.Closed) {
+            // Transport gone: forget the key so a future reconnect counts as a
+            // genuine transition back into `Connected`.
+            lastPublishedState.remove(key)
+        } else {
+            lastPublishedState[key] = state
+        }
         _stateEvents.tryEmit(
             SshLeaseStateEvent(
                 key = key,

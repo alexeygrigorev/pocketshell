@@ -682,6 +682,161 @@ class SshLeaseManagerTest {
         )
     }
 
+    // ----------------------------------------------------------------------
+    // Issue #845 (G10 / D31) — the transport-up STORM.
+    //
+    // ROOT CAUSE: `stateEvents` is the SOURCE of the controller's transport
+    // up/down edges (`SshLeaseTransportPort.transportEvents` maps `Connected`→
+    // `TransportUpDown.Up`). Before the fix, `acquire()` re-emitted `Connected`
+    // on EVERY reuse of an already-live lease (the `Reuse`/`raced`/`shared`
+    // paths), even though the SSH transport never went down and back up. Because
+    // many independent subsystems (session gateway, file explorer, git history,
+    // folder list, conversation detection execs, recurring jobs, host list…)
+    // each `acquire()` the SAME warm host, ONE connection emitted a STORM of
+    // `Connected` events (the maintainer's ~9-up/1-down, 46/7 at scale) → a
+    // storm of spurious `transport.up` edges → the #794 flap / re-projection
+    // churn. A reuse of a still-up transport is NOT a transport-up edge.
+    //
+    // FIX: `stateEvents` is now a true transport-state EDGE stream — `Connected`
+    // is emitted only when the key transitions INTO a live transport from a
+    // not-live published state (`{null, Connecting, Closed}`), never on a reuse
+    // of a transport that was already up (`{Connected, Idle}`). One real connect
+    // ⇒ exactly one logical `Connected`/`transport.up`.
+
+    @Test
+    fun `reusing one live lease many times emits exactly one Connected edge (no transport-up storm) - #845`() =
+        runTest {
+            val session = FakeSshSession()
+            // ONE queued session: if any reuse re-dialled we'd run out / count >1.
+            val connector = QueueLeaseConnector(session)
+            // 60s TTL so nothing idle-closes between reuses (the transport stays up).
+            val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+            val connectedEvents = mutableListOf<SshLeaseStateEvent>()
+            val collectJob = backgroundScope.launch {
+                manager.stateEvents.collect { event ->
+                    if (event.state == SshLeaseConnectionState.Connected &&
+                        event.key == TARGET.leaseKey
+                    ) {
+                        connectedEvents.add(event)
+                    }
+                }
+            }
+            runCurrent()
+
+            // Simulate the many independent subsystems each acquiring the SAME warm
+            // host while the transport stays up (overlapping holders — refCount never
+            // drops to 0, so the entry is reused in place every time).
+            val held = mutableListOf<SshLease>()
+            repeat(9) {
+                held.add(manager.acquire(TARGET).getOrThrow())
+                runCurrent()
+            }
+
+            assertEquals(
+                "ONE real connect must dial exactly once (every reuse rode the warm transport)",
+                1,
+                connector.connectCount,
+            )
+            // RED on current code: 9 reuse-acquires emit 9 Connected events (the storm).
+            // GREEN after the fix: a reuse of a still-up transport is not an up-edge.
+            assertEquals(
+                "one live transport must emit exactly ONE logical transport.up — got the storm: " +
+                    "${connectedEvents.size} Connected edges for one connection (#845)",
+                1,
+                connectedEvents.size,
+            )
+
+            held.forEach { it.release() }
+            collectJob.cancel()
+        }
+
+    @Test
+    fun `release to idle then reacquire of the still-up transport emits no extra Connected edge - #845`() =
+        runTest {
+            // The other half of the class: a release drops refCount to 0 → the entry
+            // is published `Idle` (transport still alive, warm). A reacquire BEFORE
+            // the idle TTL reuses that warm transport — it is NOT a transport re-up,
+            // so it must not emit another `Connected`/`transport.up`.
+            val session = FakeSshSession()
+            val connector = QueueLeaseConnector(session)
+            val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+            val connectedEvents = mutableListOf<SshLeaseStateEvent>()
+            val collectJob = backgroundScope.launch {
+                manager.stateEvents.collect { event ->
+                    if (event.state == SshLeaseConnectionState.Connected &&
+                        event.key == TARGET.leaseKey
+                    ) {
+                        connectedEvents.add(event)
+                    }
+                }
+            }
+            runCurrent()
+
+            // First connect → one Connected. Release → Idle (transport stays up).
+            manager.acquire(TARGET).getOrThrow().release()
+            runCurrent()
+            // Reacquire the warm/idle transport: no fresh dial, no new up-edge.
+            val reacquired = manager.acquire(TARGET).getOrThrow()
+            runCurrent()
+
+            assertEquals("the warm transport was reused, never re-dialled", 1, connector.connectCount)
+            assertSame(session, reacquired.session)
+            assertEquals(
+                "an Idle→reacquire of a still-up transport must NOT emit another transport.up (#845)",
+                1,
+                connectedEvents.size,
+            )
+
+            reacquired.release()
+            collectJob.cancel()
+        }
+
+    @Test
+    fun `a real reconnect after a Closed drop re-emits Connected (the heal up-edge survives dedupe) - #845`() =
+        runTest {
+            // The dedupe must NOT swallow the genuine heal up-edge: after the
+            // transport actually closes (Down), the next connect IS a real
+            // transport-up the controller's reconnect ladder needs.
+            val first = FakeSshSession()
+            val second = FakeSshSession()
+            val connector = QueueLeaseConnector(first, second)
+            val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+            val connectedEvents = mutableListOf<SshLeaseStateEvent>()
+            val collectJob = backgroundScope.launch {
+                manager.stateEvents.collect { event ->
+                    if (event.state == SshLeaseConnectionState.Connected &&
+                        event.key == TARGET.leaseKey
+                    ) {
+                        connectedEvents.add(event)
+                    }
+                }
+            }
+            runCurrent()
+
+            // First connect → one Connected (one up-edge).
+            manager.acquire(TARGET).getOrThrow().release()
+            runCurrent()
+            // The transport genuinely drops (the entry becomes disconnected): the
+            // next acquire must dial a FRESH transport and re-emit Connected.
+            first.connected = false
+            val reconnected = manager.acquire(TARGET).getOrThrow()
+            runCurrent()
+
+            assertEquals("the dead transport forced a fresh dial", 2, connector.connectCount)
+            assertSame(second, reconnected.session)
+            assertEquals(
+                "a real reconnect after a transport drop must re-emit Connected (the heal up-edge)",
+                2,
+                connectedEvents.size,
+            )
+
+            reconnected.release()
+            collectJob.cancel()
+        }
+
     @Test
     fun `disconnected idle entry is replaced on next acquire`() = runTest {
         val first = FakeSshSession()

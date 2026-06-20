@@ -138,11 +138,28 @@ release-gate call: ship on non-journey evidence + #846 as a known infra
 limitation, vs block the release on #846. **#846 is the top hardening priority —
 without a runnable journey gate, every on-device claim is unverified.**
 
-## Lane L6 — multi-session / reconnect-storm e2e (results pending / contention-affected)
+## Lane L6 — multi-session / reconnect-storm e2e ([#843] comment)
 
-Ran concurrently with L5 and was affected by the F3 contention (shared
-emulator + hardcoded toxiproxy ports). Treat L6 evidence as suspect until re-run
-solo after #846 unblocks the gate. Results appended when validated.
+- **Scenario 2 (reconnect storm) — PASS (real signal):** `DisconnectFlapSoakE2eTest`
+  (repeated toxiproxy-blackhole flapping) converges back to Connected, no stale
+  clients, no unbounded heap. Confirmed twice. **Flap recovery on `main` works.**
+- **Scenarios 1/3/4/5 — BLOCKED by the dev-box #470 stall** (same as L5 F1), NOT
+  a main regression.
+- **Decisive cross-check:** the SAME journey tests **passed on GitHub CI's
+  emulator yesterday** (Tests run `27839936660`, on main). So the #846 stall is
+  **dev-box-AVD-specific**, the CI journey gate is functional, and D31 is
+  enforceable via CI. No new connection-core product failure was observed (but
+  multi-session-switch / heavy-output / switch-during-reconnect were not cleanly
+  verifiable locally — need a healthy AVD or CI re-run).
+
+### Revised release + testing implication (supersedes L5's grimmer read)
+The journey gate is NOT universally broken — it passes on CI. #846 is a dev-box
+AVD problem (local reviewer gate dark; #844 thoroughness gap). Therefore the
+**v0.4.10 release validation should run on GitHub Actions (healthy AVD), where it
+can actually pass** — not locally. Reconnect-storm recovery passing (L6 S2) is
+positive evidence for shipping. Net: `main` is shippable; run release validation
+via Actions; #846 (local gate) + #845 (transport storm) + #766 (seam) are the
+hardening queue.
 
 ## Review-rigor meta-audit ([#844]) → locked decision D32
 

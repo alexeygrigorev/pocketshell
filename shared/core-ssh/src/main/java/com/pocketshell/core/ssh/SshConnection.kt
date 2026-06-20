@@ -7,8 +7,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import net.schmizz.keepalive.KeepAliveProvider
-import net.schmizz.keepalive.KeepAliveRunner
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
@@ -35,30 +33,6 @@ public object SshConnection {
     /** Default TCP + auth timeouts, in milliseconds. */
     internal const val DEFAULT_TIMEOUT_MS: Int = 30_000
 
-    /** Default keep-alive interval in seconds. */
-    internal const val DEFAULT_KEEP_ALIVE_SECONDS: Int = 15
-
-    /**
-     * Number of consecutive unanswered keep-alive requests sshj tolerates
-     * before it declares the peer lost and tears the transport down with
-     * `CONNECTION_LOST`.
-     *
-     * With the [KeepAliveProvider.KEEP_ALIVE] provider ([KeepAliveRunner])
-     * every interval sends a `keepalive@openssh.com` global request and
-     * expects a reply; an unanswered request increments the miss counter,
-     * and any reply resets it. The session is only dropped after this many
-     * *consecutive* misses.
-     *
-     * Tolerance window = [DEFAULT_KEEP_ALIVE_SECONDS] x this count.
-     * At 15s x 4 = 60s: a brief blip (metro tunnel / dead spot / quick
-     * wifi<->cellular gap) of up to ~60s of no replies is ridden through
-     * (the session freezes, then resumes when connectivity returns) instead
-     * of dropping on the first missed packet. Only a sustained outage past
-     * the window counts as a real disconnect. This mirrors the existing
-     * 60s background-grace window (#450) so the two tolerances agree.
-     */
-    internal const val DEFAULT_MAX_ALIVE_COUNT: Int = 4
-
     /**
      * Connect to `[host]:[port]` as [user] and authenticate with [key]
      * (optionally encrypted with [passphrase]).
@@ -83,7 +57,6 @@ public object SshConnection {
         passphrase: CharArray? = null,
         knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
-        keepAliveSeconds: Int = DEFAULT_KEEP_ALIVE_SECONDS,
     ): Result<SshSession> = connect(
         host = host,
         port = port,
@@ -92,7 +65,6 @@ public object SshConnection {
         passphrase = passphrase,
         knownHosts = knownHosts,
         timeoutMs = timeoutMs,
-        keepAliveSeconds = keepAliveSeconds,
         connector = RealSshConnector,
     )
 
@@ -104,14 +76,14 @@ public object SshConnection {
         passphrase: CharArray? = null,
         knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
-        keepAliveSeconds: Int = DEFAULT_KEEP_ALIVE_SECONDS,
         connector: SshConnector<C>,
     ): Result<SshSession> = coroutineScope {
         // Issue #173 round-2: install the process-wide
         // UncaughtExceptionHandler guard BEFORE we spawn any sshj
         // background threads. sshj's `SSHClient.connect` starts the
-        // `sshj-Reader` JVM thread (and `KeepAlive` once auth lands);
-        // if those threads die with a transport-level exception (the
+        // `sshj-Reader` JVM thread (the keepalive thread is no longer
+        // started — issue #847 removed the racing background writer);
+        // if that thread dies with a transport-level exception (the
         // CI-reproducible "Broken transport; encountered EOF" path
         // triggered when the OS tears the TCP socket down underneath
         // a backgrounded app) the JVM default handler would terminate
@@ -146,8 +118,6 @@ public object SshConnection {
                         host,
                         port,
                         timeoutMs,
-                        keepAliveSeconds,
-                        DEFAULT_MAX_ALIVE_COUNT,
                     )
                     connector.authenticate(client, user, key, passphrase)
 
@@ -189,21 +159,34 @@ public object SshConnection {
 
     private fun createSshConfig(): DefaultConfig {
         ensureBouncyCastleProvider()
-        return DefaultConfig().apply {
-            // sshj's DefaultConfig ships KeepAliveProvider.HEARTBEAT, which
-            // only *writes* SSH_MSG_IGNORE packets and never waits for a
-            // reply — so it keeps a NAT mapping warm but can never detect a
-            // dead peer. Switch to KeepAliveProvider.KEEP_ALIVE
-            // (KeepAliveRunner): it sends keepalive@openssh.com global
-            // requests, counts unanswered ones, and tears the transport down
-            // with CONNECTION_LOST after `maxAliveCount` consecutive misses.
-            //
-            // This MUST be set on the Config before the SSHClient is
-            // constructed: SSHClient's constructor builds its ConnectionImpl
-            // using Config.getKeepAliveProvider(), so the KeepAlive instance
-            // is fixed at construction time and can't be swapped afterwards.
-            keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
-        }
+        // Issue #847 / #766 slice 1 — NO background keepalive writer.
+        //
+        // PocketShell used to switch the provider to
+        // `KeepAliveProvider.KEEP_ALIVE` (#548) so a `sshj-KeepAliveRunner`
+        // thread sent `keepalive@openssh.com` every 15s for dead-peer
+        // detection. That background thread is a SECOND writer on the live
+        // transport: its periodic global-request could land in a KEX/rekey
+        // window and desync the encoder sequence counter, so the server logged
+        // `ssh_dispatch_run_fatal: ... Connection corrupted` ~one keepalive
+        // interval after the handshake — the real cause of the v0.4.10/v0.4.11
+        // "loading tree" connect hang (upstream sshj #910). The
+        // single-transport-writer rule (see [TransportDispatcher]) cannot
+        // tolerate an un-ownable background writer, so the keepalive is removed
+        // entirely (D22 hard-cut).
+        //
+        // Dead-peer detection is preserved by the FOREGROUND single-writer
+        // `LivenessProbe` (core-connection, #792 slice D), which pings the live
+        // `-CC` control channel through the same serialised dispatch path and
+        // drives the existing reconnect machinery — no second transport writer.
+        // NAT warmth is moot under D21 (no background work: the app backgrounds
+        // and tmux holds state remotely, reconnecting on next foreground).
+        //
+        // We leave sshj's DefaultConfig keepalive provider untouched and simply
+        // never enable an interval: `KeepAlive.isEnabled()` is
+        // `keepAliveInterval > 0`, and `SSHClient.onConnect()` only `start()`s
+        // the thread when enabled — so with no interval set, no keepalive thread
+        // is ever started.
+        return DefaultConfig()
     }
 
     private fun ensureBouncyCastleProvider() {
@@ -284,8 +267,6 @@ public object SshConnection {
             host: String,
             port: Int,
             timeoutMs: Int,
-            keepAliveSeconds: Int,
-            maxAliveCount: Int,
         )
         suspend fun authenticate(client: C, user: String, key: SshKey, passphrase: CharArray?)
         fun toSession(client: C): SshSession
@@ -304,36 +285,17 @@ public object SshConnection {
             host: String,
             port: Int,
             timeoutMs: Int,
-            keepAliveSeconds: Int,
-            maxAliveCount: Int,
         ) {
             client.connectTimeout = timeoutMs
             client.timeout = timeoutMs
 
-            // Configure keep-alive BEFORE connect(). sshj starts its
-            // KeepAlive thread inside SSHClient.onConnect() — which runs
-            // synchronously *during* client.connect() — and only if
-            // KeepAlive.isEnabled() is already true at that moment.
-            // isEnabled() returns (keepAliveInterval > 0), so the interval
-            // has to be set before connect() runs. The previous code set it
-            // *after* connect() returned, which meant onConnect() saw
-            // interval == 0, isEnabled() == false, and the keep-alive thread
-            // was NEVER started for the whole session. With no SSH-level
-            // keep-alives, an idle NAT/server reaped the TCP and the
-            // connection silently died (issue #548). The KeepAlive instance
-            // already exists here: SSHClient's constructor built the
-            // ConnectionImpl (and its KeepAlive) from the config provider, so
-            // client.connection.keepAlive is reachable pre-connect.
-            val keepAlive = client.connection.keepAlive
-            keepAlive.keepAliveInterval = keepAliveSeconds
-            // KeepAliveRunner adds maxAliveCount: how many consecutive
-            // unanswered keepalive@openssh.com requests to tolerate before
-            // declaring CONNECTION_LOST. The default provider (HEARTBEAT)
-            // ignores this; KEEP_ALIVE (set in createSshConfig) honours it.
-            if (keepAlive is KeepAliveRunner) {
-                keepAlive.maxAliveCount = maxAliveCount
-            }
-
+            // Issue #847: NO keepalive interval is set — the background
+            // `sshj-KeepAliveRunner` writer is removed (see [createSshConfig]).
+            // `SSHClient.onConnect()` (run synchronously inside `connect()`)
+            // only starts the keepalive thread when `KeepAlive.isEnabled()` is
+            // true, i.e. `keepAliveInterval > 0`; leaving it at the default 0
+            // means no second transport writer is ever spawned. Dead-peer
+            // detection is the foreground single-writer `LivenessProbe`'s job.
             client.connect(host, port)
         }
 

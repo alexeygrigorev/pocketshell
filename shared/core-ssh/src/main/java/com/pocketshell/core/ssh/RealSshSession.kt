@@ -44,8 +44,27 @@ internal class RealSshSession(
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Single-writer dispatch owner for this connection's transport (issue
+     * #847 / #766 slice 1). EVERY transport-touching write + channel-lifecycle
+     * operation — exec channel open/command/close, the `-CC` shell's stdin
+     * write / resize / close, tail channel open/close, upload/download channel
+     * open/close, and the final `disconnect()` — funnels through here so it
+     * runs strictly one-at-a-time on one thread, in submission order, with no
+     * op dispatched once teardown is enqueued.
+     *
+     * This kills the `Connection corrupted` desync (a channel open or command
+     * write racing a KEX/rekey boundary or `die()` while another owner churns
+     * exec channels on the SAME transport). Long-lived READS (the `-CC` reader
+     * loop, `tail -F` line reads, `cat` download streaming) run OUTSIDE the
+     * dispatcher — only the open/write/close packets that advance the encoder
+     * sequence counter are serialised — so concurrent reads don't regress
+     * connect/enumeration latency.
+     */
+    private val dispatcher = TransportDispatcher()
+
     override val isConnected: Boolean
-        get() = client.isConnected && client.isAuthenticated
+        get() = !dispatcher.isClosed && client.isConnected && client.isAuthenticated
 
     @OptIn(InternalCoroutinesApi::class)
     override suspend fun exec(command: String): ExecResult {
@@ -54,57 +73,54 @@ internal class RealSshSession(
         val cmdRef = AtomicReference<Command?>()
         val cancelHandle = callerJob?.invokeOnCompletion(onCancelling = true) { cause ->
             if (cause != null) {
-                runCatching { cmdRef.get()?.close() }
-                runCatching { sessionChannelRef.get()?.close() }
+                // Channel close is itself a transport write — serialise it
+                // through the dispatcher rather than racing the wire from the
+                // cancellation thread.
+                scope.launch {
+                    runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
+                    runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+                }
             }
         }
         return try {
-            withContext(Dispatchers.IO) {
-                execBlocking(command) { openedSession, openedCommand ->
-                    sessionChannelRef.set(openedSession)
-                    cmdRef.set(openedCommand)
+            // Phase 1 — open the channel + send the command, serialised against
+            // every other transport op (the corruption-prone packets).
+            val liveCommand = dispatcher.run {
+                ensureConnected()
+                val sessionChannel = try {
+                    client.startSession()
+                } catch (t: Throwable) {
+                    throw SshException("Failed to open exec channel for `$command`: ${t.message}", t)
                 }
+                sessionChannelRef.set(sessionChannel)
+                val cmd = try {
+                    sessionChannel.exec(command)
+                } catch (t: Throwable) {
+                    runCatching { sessionChannel.close() }
+                    sessionChannelRef.set(null)
+                    throw SshException("Failed to start exec channel for `$command`: ${t.message}", t)
+                }
+                cmdRef.set(cmd)
+                cmd
+            }
+            // Phase 2 — read stdout/stderr to EOF OUTSIDE the dispatcher so a
+            // slow command never wedges the `-CC` write or other execs.
+            withContext(Dispatchers.IO) {
+                val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
+                val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
+                liveCommand.join()
+                // sshj returns null exitStatus when the server didn't send one
+                // (e.g. signal-killed). Map to -1 so the caller can still tell
+                // it wasn't a clean 0.
+                val exitCode = liveCommand.exitStatus ?: -1
+                ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
             }
         } finally {
             cancelHandle?.dispose()
-            runCatching { cmdRef.get()?.close() }
-            runCatching { sessionChannelRef.get()?.close() }
-        }
-    }
-
-    private fun execBlocking(
-        command: String,
-        onChannelOpened: (Session, Command?) -> Unit,
-    ): ExecResult {
-        ensureConnected()
-        val sessionChannel = try {
-            client.startSession()
-        } catch (t: Throwable) {
-            throw SshException("Failed to open exec channel for `$command`: ${t.message}", t)
-        }
-        onChannelOpened(sessionChannel, null)
-        var cmd: Command? = null
-        return try {
-            cmd = try {
-                sessionChannel.exec(command)
-            } catch (t: Throwable) {
-                throw SshException("Failed to start exec channel for `$command`: ${t.message}", t)
-            }
-            onChannelOpened(sessionChannel, cmd)
-            val liveCommand = cmd!!
-            // Read both streams to EOF before joining. sshj sets exitStatus
-            // only after the remote side has closed its end of the channel.
-            val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
-            val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
-            liveCommand.join()
-            // sshj returns null exitStatus when the server didn't send one
-            // (e.g. signal-killed). Map to -1 so the caller can still tell
-            // it wasn't a clean 0.
-            val exitCode = liveCommand.exitStatus ?: -1
-            ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
-        } finally {
-            runCatching { cmd?.close() }
-            runCatching { sessionChannel.close() }
+            // Phase 3 — close the channel, serialised through the dispatcher
+            // (channel close writes SSH_MSG_CHANNEL_CLOSE on the transport).
+            runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
+            runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
         }
     }
 
@@ -176,21 +192,18 @@ internal class RealSshSession(
             //  - Genuine programming errors (NPE, IAE, ...) still
             //    propagate to the supervisor scope so they aren't
             //    silently swallowed.
-            val sessionChannel = try {
-                client.startSession()
-            } catch (e: SshException) {
-                logTailRecoverableFailure(path, e)
-                return@launch
-            } catch (e: IOException) {
-                logTailRecoverableFailure(path, e)
-                return@launch
-            } catch (t: Throwable) {
-                throw SshException("Failed to start tail session for `$path`: ${t.message}", t)
-            }
+            // Channel open + the `tail -F` exec write are transport-mutating
+            // packets — serialise them through the dispatcher (issue #847). The
+            // long-lived line READ below runs OUTSIDE the dispatcher so the
+            // follow loop never wedges the `-CC` write or other ops.
+            val sessionChannelRef = AtomicReference<Session?>()
             var cmd: Command? = null
             val cancelHandle = coroutineJob?.invokeOnCompletion {
-                runCatching { cmd?.close() }
-                runCatching { sessionChannel.close() }
+                // Close is a transport write — funnel through the dispatcher.
+                scope.launch {
+                    runCatching { dispatcher.run { runCatching { cmd?.close() } } }
+                    runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+                }
             }
             try {
                 // -F follows by name, surviving rotation. Quote the path so
@@ -202,13 +215,22 @@ internal class RealSshSession(
                     "-n 0"
                 }
                 cmd = try {
-                    sessionChannel.exec("tail -F $lineArg $quoted")
+                    dispatcher.run {
+                        val channel = client.startSession()
+                        sessionChannelRef.set(channel)
+                        channel.exec("tail -F $lineArg $quoted")
+                    }
+                } catch (e: SshException) {
+                    logTailRecoverableFailure(path, e)
+                    return@launch
                 } catch (e: IOException) {
                     // Channel-open / exec race against transport drop —
                     // same recoverable-disconnect story as the
                     // startSession() catch above.
                     logTailRecoverableFailure(path, e)
                     return@launch
+                } catch (t: Throwable) {
+                    throw SshException("Failed to start tail session for `$path`: ${t.message}", t)
                 }
                 BufferedReader(InputStreamReader(cmd!!.inputStream, Charsets.UTF_8)).use { reader ->
                     while (isActive) {
@@ -230,8 +252,10 @@ internal class RealSshSession(
                 }
             } finally {
                 cancelHandle?.dispose()
-                runCatching { cmd?.close() }
-                runCatching { sessionChannel.close() }
+                val closeCmd = cmd
+                val closeChannel = sessionChannelRef.get()
+                runCatching { dispatcher.run { runCatching { closeCmd?.close() } } }
+                runCatching { dispatcher.run { runCatching { closeChannel?.close() } } }
             }
         }
     }
@@ -299,25 +323,35 @@ internal class RealSshSession(
         // so callers don't have to know about sshj's exception hierarchy.
         // If `startShell` itself fails we close the half-opened session
         // channel before propagating, so we never leak a channel on error.
-        val sessionChannel = try {
-            client.startSession()
-        } catch (t: Throwable) {
-            throw SshException("Failed to open SSH session channel for shell: ${t.message}", t)
-        }
-        try {
-            sessionChannel.allocatePTY(
-                /* term = */ INTERACTIVE_PTY_TERM,
-                /* cols = */ INTERACTIVE_PTY_INITIAL_COLUMNS,
-                /* rows = */ INTERACTIVE_PTY_INITIAL_ROWS,
-                /* widthPx = */ 0,
-                /* heightPx = */ 0,
-                /* modes = */ emptyMap(),
-            )
-            val shell = sessionChannel.startShell()
-            return RealSshShell(sessionChannel = sessionChannel, shell = shell)
-        } catch (t: Throwable) {
-            runCatching { sessionChannel.close() }
-            throw SshException("Failed to start remote shell: ${t.message}", t)
+        // Channel open + PTY alloc + shell start are all transport-mutating
+        // packets — serialise the whole open through the dispatcher (issue
+        // #847) so it can't race an exec channel open / the liveness probe / a
+        // KEX boundary on the same transport.
+        return dispatcher.runBlockingDispatch {
+            val sessionChannel = try {
+                client.startSession()
+            } catch (t: Throwable) {
+                throw SshException("Failed to open SSH session channel for shell: ${t.message}", t)
+            }
+            try {
+                sessionChannel.allocatePTY(
+                    /* term = */ INTERACTIVE_PTY_TERM,
+                    /* cols = */ INTERACTIVE_PTY_INITIAL_COLUMNS,
+                    /* rows = */ INTERACTIVE_PTY_INITIAL_ROWS,
+                    /* widthPx = */ 0,
+                    /* heightPx = */ 0,
+                    /* modes = */ emptyMap(),
+                )
+                val shell = sessionChannel.startShell()
+                RealSshShell(
+                    sessionChannel = sessionChannel,
+                    shell = shell,
+                    dispatcher = dispatcher,
+                )
+            } catch (t: Throwable) {
+                runCatching { sessionChannel.close() }
+                throw SshException("Failed to start remote shell: ${t.message}", t)
+            }
         }
     }
 
@@ -402,21 +436,26 @@ internal class RealSshSession(
      * charset round-trip.
      */
     private fun readRemoteBytesCapped(remotePath: String, maxBytes: Long): ByteArray {
-        val sessionChannel = try {
-            client.startSession()
-        } catch (t: Throwable) {
-            throw SshException("Could not open session channel to read $remotePath: ${t.message}", t)
-        }
-        try {
-            // Quote via [quoteRemotePathForShell] so a leading `~`/`~/` expands
-            // to the remote `$HOME` (issue #558 bug 3) while the rest stays
-            // quote-safe.
-            val quoted = quoteRemotePathForShell(remotePath)
-            val command: Command = try {
-                sessionChannel.exec("cat $quoted")
+        // Channel open + `cat` exec are transport-mutating packets — serialise
+        // through the dispatcher (issue #847). The capped streaming read below
+        // runs OUTSIDE the dispatcher so a large file never wedges the `-CC`
+        // write or other ops.
+        val quoted = quoteRemotePathForShell(remotePath)
+        val (sessionChannel, command) = dispatcher.runBlockingDispatch {
+            val channel = try {
+                client.startSession()
             } catch (t: Throwable) {
+                throw SshException("Could not open session channel to read $remotePath: ${t.message}", t)
+            }
+            val cmd: Command = try {
+                channel.exec("cat $quoted")
+            } catch (t: Throwable) {
+                runCatching { channel.close() }
                 throw SshException("Could not start remote `cat` for $remotePath: ${t.message}", t)
             }
+            channel to cmd
+        }
+        try {
             try {
                 val buffer = java.io.ByteArrayOutputStream()
                 val chunk = ByteArray(64 * 1024)
@@ -447,14 +486,14 @@ internal class RealSshSession(
                 }
                 return buffer.toByteArray()
             } finally {
-                runCatching { command.close() }
+                runCatching { dispatcher.runBlockingDispatch { runCatching { command.close() } } }
             }
         } catch (e: SshException) {
             throw e
         } catch (t: Throwable) {
             throw SshException("Reading $remotePath failed: ${t.message}", t)
         } finally {
-            runCatching { sessionChannel.close() }
+            runCatching { dispatcher.runBlockingDispatch { runCatching { sessionChannel.close() } } }
         }
     }
 
@@ -485,32 +524,41 @@ internal class RealSshSession(
         remotePath: String,
     ) {
         val coroutineJob = currentCoroutineContext()[Job]
-        val sessionChannel = try {
-            client.startSession()
-        } catch (t: Throwable) {
-            throw SshException(
-                "Could not open session channel for upload of $name to $remotePath: ${t.message}",
-                t,
-            )
-        }
+        // Channel open + `cat >` exec are transport-mutating packets — serialise
+        // through the dispatcher (issue #847). The byte copy below runs OUTSIDE
+        // the dispatcher so a large upload never wedges the `-CC` write.
+        val quoted = shellSingleQuote(remotePath)
         var command: Command? = null
-        val cancelHandle = coroutineJob?.invokeOnCompletion { cause ->
-            if (cause != null) {
-                runCatching { input.close() }
-                runCatching { command?.close() }
-                runCatching { sessionChannel.close() }
-            }
-        }
-        try {
-            val quoted = shellSingleQuote(remotePath)
-            command = try {
-                sessionChannel.exec("cat > $quoted")
+        val sessionChannel = dispatcher.run {
+            val channel = try {
+                client.startSession()
             } catch (t: Throwable) {
+                throw SshException(
+                    "Could not open session channel for upload of $name to $remotePath: ${t.message}",
+                    t,
+                )
+            }
+            command = try {
+                channel.exec("cat > $quoted")
+            } catch (t: Throwable) {
+                runCatching { channel.close() }
                 throw SshException(
                     "Could not start remote `cat` for upload of $name to $remotePath: ${t.message}",
                     t,
                 )
             }
+            channel
+        }
+        val cancelHandle = coroutineJob?.invokeOnCompletion { cause ->
+            if (cause != null) {
+                runCatching { input.close() }
+                scope.launch {
+                    runCatching { dispatcher.run { runCatching { command?.close() } } }
+                    runCatching { dispatcher.run { runCatching { sessionChannel.close() } } }
+                }
+            }
+        }
+        try {
             try {
                 command!!.outputStream.use { output ->
                     copyToRemoteCancellable(input, output)
@@ -530,7 +578,7 @@ internal class RealSshSession(
                     )
                 }
             } finally {
-                runCatching { command.close() }
+                runCatching { dispatcher.run { runCatching { command?.close() } } }
             }
         } catch (e: SshException) {
             throw e
@@ -543,8 +591,8 @@ internal class RealSshSession(
             )
         } finally {
             cancelHandle?.dispose()
-            runCatching { command?.close() }
-            runCatching { sessionChannel.close() }
+            runCatching { dispatcher.run { runCatching { command?.close() } } }
+            runCatching { dispatcher.run { runCatching { sessionChannel.close() } } }
         }
     }
 
@@ -635,8 +683,19 @@ internal class RealSshSession(
         // every caller; the AutoCloseable-preserving thread hop is the
         // surgical fix called for by the issue.
         try {
-            runBlocking(Dispatchers.IO) {
-                client.disconnect()
+            // Issue #847: drain the dispatcher and run `disconnect()` as the
+            // FINAL serialised operation. `closeAndAwaitDrain` (a) queues the
+            // disconnect BEHIND any in-flight write/channel op so we never tear
+            // the transport down underneath one (which is exactly the
+            // write-racing-`die()` desync the actor exists to prevent), and (b)
+            // marks the dispatcher closed under its lock so any later op is
+            // rejected before it can touch the dead transport. The disconnect
+            // socket write still happens on the dispatch (IO) thread, so the
+            // StrictMode `NetworkOnMainThreadException` guard (issue #166) holds.
+            runBlocking {
+                dispatcher.closeAndAwaitDrain {
+                    client.disconnect()
+                }
             }
         } catch (e: TransportException) {
             // Issue #239: close() is idempotent and silent by contract.

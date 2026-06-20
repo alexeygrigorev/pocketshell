@@ -75,10 +75,16 @@ class RealSshSessionCloseIdempotencyTest {
     @Test
     fun `close is idempotent under repeated invocation`() {
         // Mirrors the double-close path the ViewModel could trigger if a
-        // teardown races between `onCleared()` and a subsequent
-        // `connect()`. The first call observes the throw; the second
-        // observes the same already-disconnected throw. Neither should
-        // propagate.
+        // teardown races between `onCleared()` and a subsequent `connect()`.
+        // Neither call should propagate.
+        //
+        // Issue #847: `close()` now drains the [TransportDispatcher] and runs
+        // `disconnect()` as the FINAL serialised op exactly ONCE
+        // (`closeAndAwaitDrain` is idempotent — the second close sees the
+        // dispatcher already closed and no-ops). This is strictly better than
+        // the pre-#847 behaviour of firing a redundant second
+        // `SSHClient.disconnect()` on an already-dead transport. The contract
+        // that matters — repeated `close()` never throws — is unchanged.
         val client = ThrowingDisconnectClient(
             toThrow = TransportException(
                 DisconnectReason.BY_APPLICATION,
@@ -91,8 +97,9 @@ class RealSshSessionCloseIdempotencyTest {
         session.close()
 
         assertEquals(
-            "expected SSHClient.disconnect() to have been invoked twice (idempotent close)",
-            2,
+            "expected SSHClient.disconnect() to run exactly once across repeated " +
+                "close() (idempotent drain-then-disconnect, #847)",
+            1,
             client.disconnectCallCount,
         )
     }

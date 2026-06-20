@@ -1,8 +1,18 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.runTest
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -14,6 +24,7 @@ import java.io.File
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * End-to-end integration tests for [SshConnection] / [SshSession] driven by
@@ -69,6 +80,19 @@ class SshIntegrationTest {
             container?.stop()
             container = null
         }
+
+        /**
+         * Server-side signatures of the #847 client encoder sequence-number /
+         * cipher desync. OpenSSH emits these on an INPUT packet it cannot
+         * decrypt/authenticate — i.e. the client send-stream desynced.
+         */
+        private val CORRUPTION_SIGNATURES = listOf(
+            "Connection corrupted",
+            "Bad packet length",
+            "ssh_dispatch_run_fatal",
+            "message authentication code incorrect",
+            "padding error",
+        )
 
         private fun findProjectRoot(): Path {
             var dir: Path? = Paths.get(System.getProperty("user.dir")).toAbsolutePath()
@@ -397,19 +421,23 @@ class SshIntegrationTest {
     }
 
     @Test
-    fun keepAliveThreadIsRunningAfterConnect() = runTest {
-        // Issue #548 regression guard. The keep-alive interval must be set
-        // BEFORE client.connect() so sshj's onConnect() (which runs inside
-        // connect()) sees isEnabled() == true and actually starts the
-        // KeepAlive thread. With the KEEP_ALIVE provider that thread is a
-        // KeepAliveRunner named "sshj-KeepAliveRunner". The old code set the
-        // interval AFTER connect(), so this thread was never started and an
-        // idle NAT/server silently reaped the connection.
+    fun noKeepAliveBackgroundWriterThreadAfterConnect() = runTest {
+        // Issue #847 / #766-slice-1 — DETERMINISTIC RED->GREEN gate.
         //
-        // We assert the thread exists, is alive, and belongs to the right
-        // provider. This is the core proof of the fix — the previous
-        // long-running stability test could pass even with keep-alive dead
-        // because tmux tick traffic kept the LAN socket warm.
+        // The corruption-source was a LIVE `sshj-KeepAliveRunner` background
+        // thread (issue #548) writing `keepalive@openssh.com` every 15s on the
+        // SAME transport the foreground used — a second writer that could land
+        // mid-rekey and desync the encoder sequence counter, so the server
+        // logged `Connection corrupted` ~15s after the handshake. The fix
+        // removes that background writer entirely (the single-transport-writer
+        // rule cannot tolerate an un-ownable thread).
+        //
+        // RED on base (KEEP_ALIVE provider + interval set pre-connect): a live
+        // `sshj-KeepAliveRunner` thread IS present, so this assertFalse FAILS.
+        // GREEN with the fix: no keepalive thread exists. This is the
+        // always-Docker-runnable deterministic proof (the >90s behavioural hold
+        // below is the WAN-sensitive backstop the orchestrator re-runs against
+        // the real host).
         val session = SshConnection.connect(
             host = container!!.host,
             port = sshPort,
@@ -420,19 +448,167 @@ class SshIntegrationTest {
         ).getOrThrow()
 
         session.use {
-            // The KeepAlive thread is started synchronously inside connect(),
-            // so it must already be present here. sshj names it
-            // "sshj-KeepAliveRunner-<remote>-<n>", so match by prefix.
+            // Drive a little traffic so any lazily-started keepalive would be
+            // up by now.
+            assertEquals(0, it.exec("true").exitCode)
             val keepAliveThreads = Thread.getAllStackTraces().keys
-                .filter { t -> t.name.startsWith("sshj-KeepAliveRunner") && t.isAlive }
+                .filter { t -> t.name.contains("KeepAlive") && t.isAlive }
             assertTrue(
-                "expected a live sshj-KeepAliveRunner thread after connect " +
-                    "(keep-alive must start, issue #548); live thread names were: " +
+                "no live sshj-KeepAliveRunner background writer thread should " +
+                    "exist after connect (#847: the racing writer is removed); " +
+                    "live sshj thread names were: " +
                     Thread.getAllStackTraces().keys
                         .filter { t -> t.name.startsWith("sshj-") }
                         .map { t -> t.name },
-                keepAliveThreads.isNotEmpty(),
+                keepAliveThreads.isEmpty(),
             )
+        }
+    }
+
+    @Test
+    fun heldSessionWithConcurrentLoadDoesNotCorruptTheTransportOver90s() {
+        // Issue #847 / #766-slice-1 — the load-bearing >90s behavioural proof.
+        //
+        // The maintainer's real host logged `ssh_dispatch_run_fatal: ...
+        // Connection corrupted` ~60-76s after a successful handshake on a SINGLE
+        // live connection, while plain OpenSSH held 90s+ clean. Root cause: the
+        // app churned short-lived `exec` channels + the liveness probe's
+        // `refresh-client` + PTY resize concurrently with the `-CC` shell on one
+        // transport, so a channel open / write could land mid-rekey or against a
+        // teardown and desync the encoder sequence counter -> server MAC failure.
+        //
+        // This test mirrors that exact concurrent-load shape against the real
+        // sshd fixture for >90s, all on ONE [SshSession], and asserts the sshd
+        // log NEVER shows `Connection corrupted` / `Bad packet length` /
+        // `ssh_dispatch_run_fatal` and the session stays alive. With the
+        // single-writer [TransportDispatcher] + the keepalive removed, every
+        // channel open/write is serialised and no second writer exists, so the
+        // race window is closed.
+        //
+        // NOTE on determinism: against a low-RTT localhost Docker sshd the
+        // timing-sensitive rekey overlap fires far less reliably than on the
+        // real WAN host, so the STRUCTURAL no-second-writer test above is the
+        // deterministic RED gate; this is the behavioural e2e backstop and the
+        // orchestrator re-validates the >90s hold against the real hetzner host
+        // before release (per the #847 brief).
+        runBlocking {
+            val session = SshConnection.connect(
+                host = container!!.host,
+                port = sshPort,
+                user = "testuser",
+                key = SshKey.Path(privateKeyFile),
+                passphrase = null,
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow()
+
+            val logMarkStartLen = container!!.logs.length
+            val execCount = AtomicInteger(0)
+            session.use { s ->
+                s.startShell().use { shell ->
+                    coroutineScope {
+                        val holdMs = 95_000L
+                        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(holdMs)
+
+                        // (1) `-CC`-shell-style stdin writes — the foreground
+                        // command writer.
+                        val shellWriter = launch(Dispatchers.IO) {
+                            while (isActive && System.nanoTime() < deadline) {
+                                runCatching {
+                                    shell.stdin.write("echo tick\n".toByteArray(Charsets.UTF_8))
+                                    shell.stdin.flush()
+                                }
+                                delay(250)
+                            }
+                        }
+                        // Drain the shell stdout so the channel window keeps
+                        // advancing (and the read side stays alive).
+                        val shellReader = launch(Dispatchers.IO) {
+                            val buf = ByteArray(4096)
+                            while (isActive && System.nanoTime() < deadline) {
+                                if (shell.stdout.available() > 0) {
+                                    if (shell.stdout.read(buf) < 0) break
+                                } else {
+                                    delay(50)
+                                }
+                            }
+                        }
+                        // (2) Tight short-lived exec churn — the corruption
+                        // amplifier (TreeRemoteSource / AgentKindRemoteSource /
+                        // enumeration). Several in parallel maximise the
+                        // channel-open overlap window.
+                        val execChurn = (0 until 4).map {
+                            async(Dispatchers.IO) {
+                                while (isActive && System.nanoTime() < deadline) {
+                                    runCatching {
+                                        s.exec("true")
+                                        execCount.incrementAndGet()
+                                    }
+                                    delay(20)
+                                }
+                            }
+                        }
+                        // (3) Liveness-probe-style `refresh-client`-equivalent —
+                        // a periodic exec on the shared transport (the probe
+                        // path is single-writer in production; here a short exec
+                        // stands in for the wire round-trip).
+                        val probe = launch(Dispatchers.IO) {
+                            while (isActive && System.nanoTime() < deadline) {
+                                runCatching { s.exec("printf alive") }
+                                delay(1_000)
+                            }
+                        }
+                        // (4) Periodic PTY resize (window-change writer #5).
+                        val resizer = launch(Dispatchers.IO) {
+                            var cols = 80
+                            while (isActive && System.nanoTime() < deadline) {
+                                runCatching { shell.resizePty(cols, 24) }
+                                cols = if (cols == 80) 120 else 80
+                                delay(2_000)
+                            }
+                        }
+
+                        // Wait out the full hold.
+                        while (System.nanoTime() < deadline) {
+                            assertTrue(
+                                "session must stay connected across the >90s " +
+                                    "concurrent hold (no mid-session drop) — #847",
+                                s.isConnected,
+                            )
+                            delay(2_000)
+                        }
+                        shellWriter.cancel()
+                        shellReader.cancel()
+                        execChurn.forEach { it.cancel() }
+                        probe.cancel()
+                        resizer.cancel()
+                    }
+
+                    // Final round-trip must still succeed — the transport is
+                    // genuinely usable, not just nominally `isConnected`.
+                    assertEquals(
+                        "a final exec must round-trip after the >90s hold (#847)",
+                        0,
+                        s.exec("true").exitCode,
+                    )
+                }
+            }
+
+            // Authoritative server-side assertion: scan the NEW sshd log lines
+            // produced during this hold for the corruption signatures. The
+            // fixture runs `sshd -D -e`, so per-connection faults land in the
+            // container log.
+            val newLogs = container!!.logs.substring(
+                minOf(logMarkStartLen, container!!.logs.length),
+            )
+            for (signature in CORRUPTION_SIGNATURES) {
+                assertFalse(
+                    "sshd log must NOT contain `$signature` after a >90s " +
+                        "concurrent-load hold (#847 transport corruption); " +
+                        "exec round-trips completed=${execCount.get()}; " +
+                        "offending sshd log:\n$newLogs",
+                    newLogs.contains(signature, ignoreCase = true),
+                )
+            }
         }
     }
 

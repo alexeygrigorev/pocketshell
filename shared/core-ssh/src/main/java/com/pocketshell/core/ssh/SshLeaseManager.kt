@@ -685,7 +685,6 @@ public data class SshLeaseTarget(
     val passphrase: CharArray? = null,
     val knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
     val timeoutMs: Int = SshConnection.DEFAULT_TIMEOUT_MS,
-    val keepAliveSeconds: Int = SshConnection.DEFAULT_KEEP_ALIVE_SECONDS,
 )
 
 public fun interface SshLeaseConnector {
@@ -702,7 +701,6 @@ public class DefaultSshLeaseConnector : SshLeaseConnector {
             passphrase = target.passphrase?.copyOf(),
             knownHosts = target.knownHosts,
             timeoutMs = target.timeoutMs,
-            keepAliveSeconds = target.keepAliveSeconds,
         )
 }
 

@@ -113,6 +113,15 @@ services:
       dockerfile: tests/docker/Dockerfile.agents-old-cli
     image: pocketshell-test:agents-old-cli
     container_name: pocketshell-test-agents-old-cli
+    # Issue #847: the image reports an OLDER `pocketshell --version` (0.4.9, baked
+    # into /opt/pocketshell-agent-fixture-version via the OLD_CLI_FIXTURE_VERSION
+    # build arg) than the app, so the bootstrap "Host setup needed" sheet appears
+    # on connect — the maintainer's 0.4.9-host scenario. Tapping Skip on that
+    # sheet RELEASES the warm `warm-host-connect` lease, the #847 timeout-
+    # inversion trigger the connected journey test
+    # (FolderListBootstrapSkipTreeLoadsDockerTest) exercises. The `tree` /
+    # `agents kind` commands are still rejected (old CLI), so the existing
+    # FolderListOldCliHydrateDockerTest is unaffected.
     ports:
       - "2238:22"
     healthcheck: *ssh-healthcheck

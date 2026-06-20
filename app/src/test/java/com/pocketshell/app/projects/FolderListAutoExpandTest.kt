@@ -214,6 +214,10 @@ class FolderListAutoExpandTest {
                 },
                 scope = this,
                 idleTtlMillis = 0L,
+                // Issue #708/#847: warm connect on the virtual clock so the #847
+                // connect-await settles deterministically under runCurrent.
+                connectTimeoutContext = dispatcher,
+                nowMillis = { testScheduler.currentTime },
             ),
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
             sessionLifecycleSignals = SessionLifecycleSignals(),

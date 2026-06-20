@@ -9,6 +9,14 @@
 # connects + renders the LIVE tree on a CLI mismatch instead of hanging.
 FROM alpine:latest
 
+# Issue #847: this fixture deliberately reports an OLDER `pocketshell --version`
+# than the app (default 0.4.9) so the bootstrap "Host setup needed" sheet appears
+# on connect — the maintainer's 0.4.9-host scenario. Tapping Skip on that sheet
+# releases the warm `warm-host-connect` lease, the #847 timeout-inversion
+# trigger the connected journey test exercises. The version is read over SSH
+# from /opt/pocketshell-agent-fixture-version (env does not survive sshd exec).
+ARG OLD_CLI_FIXTURE_VERSION=0.4.9
+
 RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
@@ -46,9 +54,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-agent-entrypoint \
-    && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
-    && test -n "$version" \
-    && printf '%s\n' "$version" > /opt/pocketshell-agent-fixture-version \
+    && printf '%s\n' "$OLD_CLI_FIXTURE_VERSION" > /opt/pocketshell-agent-fixture-version \
     && chown -R testuser:testuser /home/testuser/.ssh
 
 EXPOSE 22

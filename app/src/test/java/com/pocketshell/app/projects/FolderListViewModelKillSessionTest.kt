@@ -365,6 +365,12 @@ class FolderListViewModelKillSessionTest {
                 },
                 scope = this,
                 idleTtlMillis = 0L,
+                // Issue #708/#847: run the warm connect on the SAME virtual clock
+                // as `runTest` so the cold-start reconcile's #847 connect-await
+                // ([FolderListViewModel.ensureWarmConnectForReconcile]) settles
+                // deterministically under `runCurrent`, not on a real IO thread.
+                connectTimeoutContext = dispatcher,
+                nowMillis = { testScheduler.currentTime },
             ),
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
             sessionLifecycleSignals = signals,

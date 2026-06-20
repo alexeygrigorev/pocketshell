@@ -76,8 +76,7 @@ public class TreeRemoteSource @Inject constructor() {
     public suspend fun getTree(session: SshSession, host: String): List<TreeNode> {
         return try {
             val request = JSONObject().put("host", host).toString()
-            val command =
-                "printf %s ${shellQuote(request)} | " + PocketshellCommand.wrap("tree get")
+            val command = pipeJsonToWrapped(request, "tree get")
             val result = session.exec(command)
             if (result.exitCode != 0) return emptyList()
             parseNodes(result.stdout)
@@ -101,8 +100,7 @@ public class TreeRemoteSource @Inject constructor() {
     ): Boolean {
         return try {
             val request = buildUpsertRequest(host, nodes)
-            val command =
-                "printf %s ${shellQuote(request)} | " + PocketshellCommand.wrap("tree upsert")
+            val command = pipeJsonToWrapped(request, "tree upsert")
             val result = session.exec(command)
             if (result.exitCode != 0) return false
             val root = runCatching { JSONObject(result.stdout.trim()) }.getOrNull() ?: return false
@@ -123,8 +121,7 @@ public class TreeRemoteSource @Inject constructor() {
     public suspend fun reconcileTree(session: SshSession, host: String): ReconcileDelta? {
         return try {
             val request = JSONObject().put("host", host).toString()
-            val command =
-                "printf %s ${shellQuote(request)} | " + PocketshellCommand.wrap("tree reconcile")
+            val command = pipeJsonToWrapped(request, "tree reconcile")
             val result = session.exec(command)
             if (result.exitCode != 0) return null
             parseReconcile(result.stdout)
@@ -195,4 +192,23 @@ public class TreeRemoteSource @Inject constructor() {
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
+
+    /**
+     * Build `printf %s '<json>' | { <wrapped pocketshell <args>> ; }`.
+     *
+     * Issue #847: [PocketshellCommand.wrap] returns a MULTI-statement shell
+     * sequence (`export PATH=...; __ps_bin=...; "$__ps_bin" <args>`). A bare
+     * `printf … | <wrap>` binds the pipe ONLY to the FIRST statement
+     * (`export PATH=…`), so the discovered `pocketshell <args>` inherits the SSH
+     * exec channel's stdin instead of the JSON pipe — and since the app never
+     * writes/closes that channel stdin, the CLI blocks on `read(stdin)` FOREVER.
+     * For `tree get` (the cold-start HYDRATE read added in #837) this wedges the
+     * connect-critical path: the enumeration never returns and the tree never
+     * loads. Group the wrapper in `{ …; }` so the pipe reaches the real
+     * `pocketshell <args>` invocation; it then receives the JSON + EOF and
+     * returns promptly. Mirrors the same fix in
+     * [com.pocketshell.app.agents.AgentKindRemoteSource].
+     */
+    private fun pipeJsonToWrapped(json: String, args: String): String =
+        "printf %s ${shellQuote(json)} | { " + PocketshellCommand.wrap(args) + " ; }"
 }

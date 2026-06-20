@@ -72,9 +72,21 @@ public class AgentKindRemoteSource @Inject constructor() {
             // so a pane id containing odd characters never has to be shell-escaped
             // into an argv. `printf %s` avoids the trailing newline `echo` adds and
             // the backslash interpretation some `echo` builtins apply.
+            // Issue #847: [PocketshellCommand.wrap] returns a MULTI-statement
+            // shell sequence (`export PATH=...; __ps_bin=...; "$__ps_bin" agents
+            // kind`). A bare `printf … | <wrap>` binds the pipe ONLY to the FIRST
+            // statement (`export PATH=…`), so the discovered `pocketshell agents
+            // kind` inherits the SSH exec channel's stdin instead of the JSON
+            // pipe — and since the app never writes/closes that channel stdin, the
+            // CLI blocks on `read(stdin)` FOREVER, wedging the whole folder
+            // enumeration until the 12s reconcile bound trips ("Session list
+            // didn't load within 12000ms") and the tree never loads. Group the
+            // wrapper in `{ …; }` so the pipe reaches the actual `agents kind`
+            // invocation; it then gets the JSON + EOF and returns promptly.
             val command =
-                "printf %s ${shellQuote(requestJson)} | " +
-                    PocketshellCommand.wrap("agents kind")
+                "printf %s ${shellQuote(requestJson)} | { " +
+                    PocketshellCommand.wrap("agents kind") +
+                    " ; }"
             val result = session.exec(command)
             if (result.exitCode != 0) return emptyMap()
             parseEnvelope(result.stdout)

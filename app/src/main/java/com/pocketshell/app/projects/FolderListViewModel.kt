@@ -1554,6 +1554,66 @@ class FolderListViewModel internal constructor(
         return if (ready == true) warmLease?.session else null
     }
 
+    /**
+     * Issue #847: establish the warm SSH connection BEFORE the bounded
+     * enumeration in [runReconcile], so the cold sshj dial (≤ the lease
+     * manager's ~35s connect timeout) is NOT charged against the 12s
+     * enumeration budget. This is the structural fix for the v0.4.10/v0.4.11
+     * "Session list didn't load within 12000ms" connect break: when the
+     * bootstrap "Host setup needed" sheet is dismissed via Skip its warm
+     * `warm-host-connect` lease is released, so the first reconcile would need a
+     * FRESH cold dial — and that dial, wrapped by the 12s enumeration bound,
+     * blew the budget on a real/slow network and surfaced the spurious error
+     * even though the host was connectable.
+     *
+     * Fast paths (no behaviour change for the healthy / warm-reuse case):
+     * - a still-connected warm lease is reused immediately;
+     * - a live `-CC` control client makes the enumeration leaseless, so we do
+     *   not block on a lease the gateway won't open.
+     *
+     * Otherwise we drive [replaceWarmLease] (re-using the in-flight bind-time
+     * [warmJob] when present) and await its completion. The acquire's own
+     * connect timeout bounds it — a slow-but-valid connect succeeds and the
+     * gateway acquire inside the enumeration window is then a fast REUSE of the
+     * live transport. A genuine connect failure completes [warmJob] promptly
+     * (no warm lease), and the bounded enumeration below opens its own lease and
+     * surfaces an honest retryable connect error — never a spurious 12s timeout
+     * on a connectable host.
+     */
+    private suspend fun ensureWarmConnectForReconcile(params: BoundParams) {
+        if (warmLease?.session?.isConnected == true) return
+        // A live `-CC` client serves the enumeration without a lease (the
+        // gateway's [listSessionRowsFromLiveClient] fast path), so there is
+        // nothing to pre-connect — don't block the leaseless path.
+        val liveClient = activeTmuxClients?.clients?.value?.get(params.hostId)
+            ?.takeIf { it.matches(params) }
+            ?.takeUnless { it.client.disconnected.value }
+        if (liveClient != null) return
+        val existing = warmJob
+        if (existing != null && existing.isActive) {
+            // Re-use the bind-time connect already in flight (the dominant case
+            // on a fresh open / after a bootstrap-Skip re-bind, which launches a
+            // fresh [warmJob] before this reconcile runs). Its acquire is bounded
+            // by the lease manager's OWN connect timeout (~35s), NOT the 12s
+            // enumeration budget — so a slow-but-valid cold dial completes here,
+            // OUTSIDE the window, and the gateway acquire below is then a fast
+            // REUSE. A connect failure also completes the job promptly (no warm
+            // lease), and the bounded enumeration surfaces the honest error.
+            existing.join()
+        } else if (warmLease == null && (existing == null || existing.isCancelled)) {
+            // No warm lease, and the bind-time connect is absent or was CANCELLED
+            // (not merely failed): drive ONE fresh acquire OUTSIDE the
+            // enumeration window so a slow cold dial isn't charged to the 12s
+            // budget. A connect that already RAN and failed is NOT retried here —
+            // the bounded enumeration's own gateway acquire surfaces the honest
+            // retryable connect error, and re-dialing would just waste a handshake
+            // and (worse) consume virtual time before the window opens.
+            val job = viewModelScope.launch { replaceWarmLease(params) }
+            warmJob = job
+            job.join()
+        }
+    }
+
     private fun TreeRemoteSource.TreeNode.toHydratedNode(): HostTreeModel.HydratedNode =
         HostTreeModel.HydratedNode(
             sessionName = session,
@@ -1837,11 +1897,28 @@ class FolderListViewModel internal constructor(
             _state.value = FolderListUiState.Failed("Host not found.")
             return
         }
-        // Issue #702: bound the whole reconcile. The gateway already self-bounds
-        // its live `-CC` enumeration and SSH-lease reads, but a `withTimeout`
-        // here guarantees that NO gateway path can ever pin the picker in
-        // `Loading` indefinitely — on expiry we surface a retryable error panel
-        // instead of an endless spinner.
+        // Issue #847: establish the SSH connection OUTSIDE the enumeration window
+        // below. The cold sshj dial is bounded by the lease manager's connect
+        // timeout (~35s), which is LONGER than the 12s reconcile bound — wrapping
+        // the dial in the 12s window (as before) meant a slow-but-valid connect
+        // (e.g. the FRESH cold dial needed after the bootstrap "Host setup
+        // needed" sheet is dismissed via Skip, which releases the warm
+        // `warm-host-connect` lease) blew the budget and surfaced the spurious
+        // "Session list didn't load within 12000ms" error even though the host
+        // was connectable. Pre-establishing the warm lease here (its OWN connect
+        // bound, decoupled from the enumeration timer) makes the gateway acquire
+        // inside the bounded enumeration a fast REUSE of the live transport, and
+        // the picker shows Loading ("Connecting…") while the connect is in
+        // flight — never a hard 12s error on a connectable host.
+        ensureWarmConnectForReconcile(params)
+        if (bound != params) return
+        // Issue #702: bound the ENUMERATION (not the connect). The gateway already
+        // self-bounds its live `-CC` enumeration and SSH-lease reads, but a
+        // `withTimeout` here guarantees that NO gateway path can ever pin the
+        // picker in `Loading` indefinitely — on expiry we surface a retryable
+        // error panel instead of an endless spinner. With the warm lease already
+        // established above, this window now covers only the enumeration round
+        // trip(s), never a cold dial (issue #847).
         val result = withTimeoutOrNull(reconcileTimeoutMs) {
             gateway.listSessionsWithFolder(
                 host = host,

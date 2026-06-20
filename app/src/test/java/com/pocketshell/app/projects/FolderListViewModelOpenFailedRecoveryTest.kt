@@ -368,6 +368,11 @@ class FolderListViewModelOpenFailedRecoveryTest {
                 },
                 scope = this,
                 idleTtlMillis = 0L,
+                // Issue #708/#847: run the warm connect on the SAME virtual clock
+                // as `runTest` so the cold-start reconcile's #847 connect-await
+                // settles deterministically under `runCurrent`.
+                connectTimeoutContext = dispatcher,
+                nowMillis = { testScheduler.currentTime },
             ),
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
             sessionLifecycleSignals = SessionLifecycleSignals(),

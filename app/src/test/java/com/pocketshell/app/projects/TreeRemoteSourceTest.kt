@@ -53,6 +53,15 @@ class TreeRemoteSourceTest {
         val sent = session.recorded.single()
         assertTrue(sent, sent.contains("tree get"))
         assertTrue(sent, sent.contains("hetzner"))
+        // Issue #847: the pipe MUST be grouped (`| { … ; }`) so it reaches the
+        // real `pocketshell tree get` inside wrap()'s multi-statement sequence,
+        // not just the leading `export PATH=…`. The non-grouped form starved the
+        // cold-start hydrate CLI of stdin → it blocked on `read(stdin)` forever
+        // and the tree never loaded (the v0.4.10 connect hang). The real-shell
+        // proof is AgentKindRemoteSourceRealShellPipeTest; this string check is
+        // the fast guard that the tree path keeps the grouping.
+        assertTrue("tree get pipe must be grouped: $sent", sent.contains("| { "))
+        assertTrue("tree get group must be closed: $sent", sent.contains(" ; }"))
     }
 
     @Test

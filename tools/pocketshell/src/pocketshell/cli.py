@@ -23,6 +23,7 @@ import click
 
 from pocketshell import __version__
 from pocketshell.agent_log import agent_log_command
+from pocketshell.cards import register_push_card_commands
 from pocketshell.agents import agent_group
 from pocketshell.agents_kind import agents_group
 from pocketshell.env import env_group
@@ -70,6 +71,10 @@ cli.add_command(hooks_group, name="hooks")
 cli.add_command(logs_group, name="logs")
 cli.add_command(prune_attachments_command, name="prune-attachments")
 cli.add_command(push_group, name="push")
+# Generic typed-card feed verbs (epic #859) extend the same `push` group:
+# `push checklist|get|status|check`. Additive — the FCM `push` group stays the
+# single owner of the group object (see pocketshell.cards).
+register_push_card_commands(push_group)
 cli.add_command(qr_share_command, name="qr-share")
 
 

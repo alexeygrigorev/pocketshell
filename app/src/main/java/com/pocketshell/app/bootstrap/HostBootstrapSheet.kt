@@ -367,20 +367,20 @@ private fun SuccessContent(
                 horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
             ) {
                 PocketShellButton(
-                    text = "Continue",
-                    onClick = onContinue,
+                    text = "Open Usage",
+                    onClick = onOpenUsage,
                     variant = ButtonVariant.Secondary,
                     modifier = Modifier
                         .weight(1f)
-                        .testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
+                        .testTag(HOST_BOOTSTRAP_OPEN_USAGE_TAG),
                 )
                 PocketShellButton(
-                    text = "Open Usage",
-                    onClick = onOpenUsage,
+                    text = "Continue",
+                    onClick = onContinue,
                     variant = ButtonVariant.Primary,
                     modifier = Modifier
                         .weight(1f)
-                        .testTag(HOST_BOOTSTRAP_OPEN_USAGE_TAG),
+                        .testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
                 )
             }
         } else {

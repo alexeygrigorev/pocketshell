@@ -3133,6 +3133,55 @@ class DesignRenders {
         }
     }
 
+    /**
+     * Issue #836 — the "Host ready" bottom-sheet success row. After a host
+     * becomes ready the PROMINENT (filled, primary) action must be **Continue**
+     * (go to the host's sessions), and **Open Usage** must be the secondary
+     * (outline) affordance — NOT the other way round.
+     *
+     * ui-kit cannot import the app-level `HostBootstrapSheet`, so this mirrors
+     * its success two-button row with the SAME `PocketShellButton` variants the
+     * sheet uses, for a fast visual check that Continue is the filled CTA before
+     * the emulator run. The app-level emulator screenshot is the acceptance.
+     */
+    @Test
+    fun hostReadySheetActions() = render("host-ready-sheet-actions") {
+        Surface(color = PocketShellColors.Surface) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text(
+                    text = "Host ready",
+                    color = PocketShellColors.Text,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "hetzner · tmux and the pocketshell CLI are ready.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 14.sp,
+                )
+                Spacer(Modifier.height(20.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    PocketShellButton(
+                        text = "Open Usage",
+                        onClick = {},
+                        variant = ButtonVariant.Secondary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    PocketShellButton(
+                        text = "Continue",
+                        onClick = {},
+                        variant = ButtonVariant.Primary,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+
     private fun render(name: String, content: @Composable () -> Unit) {
         captureRoboImage("build/renders/$name.png") {
             PocketShellTheme {

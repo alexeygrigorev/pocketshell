@@ -45,7 +45,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderColors
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -2261,8 +2260,9 @@ private fun CannotPreviewPanel(
         if (locateCandidates.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
             locateCandidates.forEach { candidate ->
-                TextButton(
+                PocketShellButton(
                     onClick = { onOpenLocated(candidate) },
+                    variant = ButtonVariant.Text,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag(FILE_VIEWER_LOCATE_CANDIDATE_TAG),
@@ -2278,7 +2278,11 @@ private fun CannotPreviewPanel(
         }
         if (showRetry) {
             Spacer(Modifier.height(4.dp))
-            TextButton(onClick = onRetry, modifier = Modifier.testTag(FILE_VIEWER_RETRY_TAG)) {
+            PocketShellButton(
+                onClick = onRetry,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.testTag(FILE_VIEWER_RETRY_TAG),
+            ) {
                 Text("Retry", color = PocketShellColors.Accent)
             }
         }

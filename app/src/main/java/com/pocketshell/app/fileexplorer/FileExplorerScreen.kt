@@ -25,7 +25,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -45,10 +44,12 @@ import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.core.ssh.SortField
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SpinnerSize
@@ -288,18 +289,24 @@ internal fun FileExplorerScaffold(
                 }
             },
             confirmButton = {
-                TextButton(
+                PocketShellButton(
+                    text = "Go",
                     enabled = goToText.isNotBlank(),
                     onClick = {
                         val target = goToText.trim()
                         showGoTo = false
                         if (target.isNotEmpty()) onGoToPath(target)
                     },
+                    variant = ButtonVariant.Text,
                     modifier = Modifier.testTag(FILE_EXPLORER_GOTO_CONFIRM_TAG),
-                ) { Text("Go") }
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showGoTo = false }) { Text("Cancel") }
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = { showGoTo = false },
+                    variant = ButtonVariant.Text,
+                )
             },
         )
     }
@@ -535,8 +542,10 @@ private fun TransferBanner(
             modifier = Modifier.weight(1f),
         )
         if (dismissible) {
-            TextButton(
+            PocketShellButton(
                 onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
                 modifier = Modifier.testTag(FILE_EXPLORER_TRANSFER_DISMISS_TAG),
             ) {
                 Text("Dismiss", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
@@ -741,14 +750,20 @@ private fun ErrorPanel(
                 horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
             ) {
                 if (canRetry) {
-                    TextButton(
+                    PocketShellButton(
                         onClick = onRetry,
+                        variant = ButtonVariant.Text,
+                        compact = true,
                         modifier = Modifier.testTag(FILE_EXPLORER_RETRY_TAG),
                     ) {
                         Text("Retry", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
                     }
                 }
-                TextButton(onClick = onUp) {
+                PocketShellButton(
+                    onClick = onUp,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                ) {
                     Text("Go up", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
                 }
             }

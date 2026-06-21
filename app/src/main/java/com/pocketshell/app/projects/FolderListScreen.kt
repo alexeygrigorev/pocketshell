@@ -43,7 +43,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -899,7 +898,7 @@ private fun HostDetailAssistantPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(
+                PocketShellButton(
                     onClick = {
                         val text = prompt.trim()
                         if (text.isNotEmpty()) {
@@ -907,6 +906,7 @@ private fun HostDetailAssistantPanel(
                             onSubmit(text)
                         }
                     },
+                    variant = ButtonVariant.Text,
                     modifier = Modifier.testTag(FOLDER_LIST_ASSISTANT_SUBMIT_TAG),
                 ) {
                     Text("Ask", color = PocketShellColors.Accent, fontWeight = FontWeight.SemiBold)

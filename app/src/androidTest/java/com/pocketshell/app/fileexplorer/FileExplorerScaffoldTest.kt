@@ -6,6 +6,8 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextClearance
+import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.core.ssh.SortField
@@ -41,6 +43,7 @@ class FileExplorerScaffoldTest {
         onDismissTransfer: () -> Unit = {},
         onUp: () -> Unit = {},
         onCrumb: (String) -> Unit = {},
+        onGoToPath: (String) -> Unit = {},
     ) {
         compose.setContent {
             PocketShellTheme {
@@ -56,7 +59,7 @@ class FileExplorerScaffoldTest {
                     onUpload = onUpload,
                     onDismissTransfer = onDismissTransfer,
                     onCrumb = onCrumb,
-                    onGoToPath = {},
+                    onGoToPath = onGoToPath,
                     onRetry = {},
                 )
             }
@@ -174,6 +177,39 @@ class FileExplorerScaffoldTest {
         compose.onNodeWithText("Permission denied: you can't read /root.").assertIsDisplayed()
         compose.onNodeWithTag(FILE_EXPLORER_RETRY_TAG).performClick()
         assertEquals(1, retries)
+    }
+
+    // Issue #863: the Go-To dialog's Go (confirm) and Cancel (dismiss) actions
+    // were migrated from raw Material TextButtons to PocketShellButton(variant =
+    // Text). These two cases guard the migrated buttons keep firing: Go (with a
+    // non-blank path) dispatches onGoToPath, and Cancel dismisses without it.
+    @Test
+    fun goToDialogGoButtonDispatchesPath() {
+        var gone: String? = null
+        setReady(listOf(dir("sub")), onGoToPath = { gone = it })
+
+        compose.onNodeWithTag(FILE_EXPLORER_GOTO_TAG).performClick()
+        // The dialog pre-seeds the field with the current path; clear it first to
+        // simulate the user replacing it, then type the target.
+        compose.onNodeWithTag(FILE_EXPLORER_GOTO_FIELD_TAG).performTextClearance()
+        compose.onNodeWithTag(FILE_EXPLORER_GOTO_FIELD_TAG).performTextInput("/var/log")
+        compose.onNodeWithTag(FILE_EXPLORER_GOTO_CONFIRM_TAG).performClick()
+
+        assertEquals("/var/log", gone)
+    }
+
+    @Test
+    fun goToDialogCancelDismissesWithoutNavigating() {
+        var gone: String? = null
+        setReady(listOf(dir("sub")), onGoToPath = { gone = it })
+
+        compose.onNodeWithTag(FILE_EXPLORER_GOTO_TAG).performClick()
+        compose.onNodeWithTag(FILE_EXPLORER_GOTO_FIELD_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Cancel").performClick()
+
+        // Dialog is gone (the field no longer exists) and no navigation fired.
+        compose.onNodeWithTag(FILE_EXPLORER_GOTO_FIELD_TAG).assertDoesNotExist()
+        assertEquals(null, gone)
     }
 
     @Test

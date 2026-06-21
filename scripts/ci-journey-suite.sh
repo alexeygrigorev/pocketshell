@@ -640,6 +640,38 @@ JOURNEY_CLASSES=(
   # so they carry their fully-qualified names directly.
   "com.pocketshell.app.projects.FolderListScreenE2eTest#profiledSessionsShowProfileChipDefaultSessionsDoNot"
   "com.pocketshell.app.projects.SessionKindPickerUiTest"
+  # ADDED (#863, D32 G9): per-criterion gate for the residual-TextButton sweep.
+  # #863 migrated raw Material TextButtons (+ a private AppBarTextButton wrapper)
+  # in FileExplorerScreen, FileViewerScreen, SnippetPickerSheet, FolderListScreen
+  # (the ~:901 "Ask" submit), and CrashReportsScreen to the shared
+  # PocketShellButton(variant = Text). Each migrated site must keep firing its
+  # onClick / enabled gating — so these PURE-Compose UI tests (createComposeRule /
+  # createAndroidComposeRule<ComponentActivity>, in-memory state — NO Docker,
+  # NO SSH/tmux, NO toxiproxy, NO port; none self-skip on CI) performClick the
+  # migrated buttons by test tag:
+  #   * SnippetTemplateDialogButtonsTest — the template-param dialog Send (enabled
+  #     gating + expanded-body dispatch) and Cancel (NEW; the site had no test).
+  #   * ConfirmDeleteAllDialogButtonsTest — the delete-all confirm dialog Cancel
+  #     (migrated off AppBarTextButton) dispatches dismiss-not-confirm, and the
+  #     sibling confirm still fires (NEW; the site had no test).
+  #   * FileExplorerScaffoldTest — the migrated Go-To dialog Go/Cancel (NEW
+  #     cases; the site had no test), Retry, and transfer Dismiss methods.
+  #   * FileViewerScaffoldTest — the migrated Retry + locate-candidate methods.
+  # The FileExplorer/FileViewer classes are targeted by FQCN#method (their many
+  # unrelated render cases — including two pre-existing ModalBottomSheet
+  # multi-root sheet cases in FileViewerScaffoldTest that are #863-unrelated —
+  # stay out of this fast subset). FolderListScreen's migrated "Ask" submit is
+  # already gated above by FolderListScreenE2eTest
+  # (FOLDER_LIST_ASSISTANT_SUBMIT_TAG.performClick()). All carry their
+  # fully-qualified names directly (not under the proof prefix).
+  "com.pocketshell.app.snippets.SnippetTemplateDialogButtonsTest"
+  "com.pocketshell.app.crash.ConfirmDeleteAllDialogButtonsTest"
+  "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#goToDialogGoButtonDispatchesPath"
+  "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#goToDialogCancelDismissesWithoutNavigating"
+  "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#failedStateShowsMessageAndRetry"
+  "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#successTransferShowsDismissibleBanner"
+  "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewStateShowsMessageAndRetry"
+  "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
 )
 
 echo "=========================================================="

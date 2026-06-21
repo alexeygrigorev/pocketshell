@@ -27,7 +27,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,7 +53,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -513,7 +514,7 @@ internal fun snippetSendChipTag(snippetId: Long, withEnter: Boolean): String =
     if (withEnter) "snippet-send-with-enter-$snippetId" else "snippet-send-$snippetId"
 
 @Composable
-private fun SnippetTemplateDialog(
+internal fun SnippetTemplateDialog(
     snippet: SnippetEntity,
     onDismiss: () -> Unit,
     onSend: (expandedBody: String) -> Unit,
@@ -546,13 +547,15 @@ private fun SnippetTemplateDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            PocketShellButton(
                 enabled = ready,
                 onClick = {
                     if (ready) {
                         onSend(expandSnippetTemplate(snippet.body, values))
                     }
                 },
+                variant = ButtonVariant.Text,
+                modifier = Modifier.testTag(SNIPPET_TEMPLATE_SEND_TAG),
             ) {
                 Text(
                     text = "Send",
@@ -561,9 +564,12 @@ private fun SnippetTemplateDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = PocketShellColors.TextSecondary)
-            }
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.testTag(SNIPPET_TEMPLATE_CANCEL_TAG),
+            )
         },
         containerColor = PocketShellColors.Surface,
         titleContentColor = PocketShellColors.Text,
@@ -573,6 +579,12 @@ private fun SnippetTemplateDialog(
 
 internal fun snippetTemplateParameterTag(name: String): String =
     "snippet-template-param-$name"
+
+/** Test tag for the snippet template dialog's Send (confirm) button (#863). */
+internal const val SNIPPET_TEMPLATE_SEND_TAG = "snippet-template-send"
+
+/** Test tag for the snippet template dialog's Cancel (dismiss) button (#863). */
+internal const val SNIPPET_TEMPLATE_CANCEL_TAG = "snippet-template-cancel"
 
 private fun parameterLabel(name: String): String =
     name.replace('-', ' ').replace('_', ' ')

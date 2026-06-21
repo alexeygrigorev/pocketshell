@@ -42,7 +42,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -58,6 +60,7 @@ private val DialogScrimColor = Color(0xCC000000)
 internal const val CRASH_REPORTS_SHARE_ALL_TAG = "crash:shareAll"
 internal const val CRASH_REPORTS_DELETE_ALL_TAG = "crash:deleteAll"
 internal const val CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG = "crash:deleteAll:confirm"
+internal const val CRASH_REPORTS_DELETE_ALL_CANCEL_TAG = "crash:deleteAll:cancel"
 
 @Composable
 fun CrashReportsScreen(
@@ -254,7 +257,7 @@ private fun ShareAllResultDialog(
 }
 
 @Composable
-private fun ConfirmDeleteAllDialog(
+internal fun ConfirmDeleteAllDialog(
     count: Int,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
@@ -275,7 +278,19 @@ private fun ConfirmDeleteAllDialog(
         )
         Spacer(modifier = Modifier.height(14.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            AppBarTextButton(label = "Cancel", onClick = onDismiss)
+            PocketShellButton(
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_CANCEL_TAG),
+            ) {
+                Text(
+                    text = "Cancel",
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             Spacer(modifier = Modifier.width(8.dp))
             ActionButton(
                 label = "Delete all",
@@ -448,24 +463,6 @@ private fun EmptyCrashReports(modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-    }
-}
-
-@Composable
-private fun AppBarTextButton(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .height(40.dp)
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
     }
 }
 

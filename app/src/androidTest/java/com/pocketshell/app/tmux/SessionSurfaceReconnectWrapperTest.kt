@@ -39,20 +39,27 @@ import org.junit.runner.RunWith
  *     the supplied `onReconnect` callback — i.e. a discoverable manual reconnect
  *     trigger exists over the existing entrypoint. (The wrapped content is still
  *     shown beneath it.)
- *  2. In a NON-Connected state a VISIBLE, tappable "Reconnect" button is shown
- *     (the maintainer's "there's not even a button to reconnect" ask) AND a tap
- *     fires the SAME `onReconnect` entrypoint — even while the surface shows the
- *     centered "Attaching…" hold (`surfaceShowsCenteredLoader = true`), since that
- *     hold is exactly when the user wants to force a retry.
- *  3. In a Connected state (`pullToReconnectActive = false`) BOTH the pull wrapper
+ *  2. In a SETTLED failed/dropped state (`showReconnectButton = true`) a VISIBLE,
+ *     tappable "Reconnect" button is shown (the maintainer's "there's not even a
+ *     button to reconnect" ask) AND a tap fires the SAME `onReconnect` entrypoint.
+ *  3. Issue #890 — WHILE a connect/reconnect/attach is actively IN PROGRESS
+ *     (`showReconnectButton = false`, i.e. the surface shows the progress bar +
+ *     "Attaching…/Reconnecting…" hold), the visible Reconnect button is HIDDEN:
+ *     offering "Reconnect" while the system is already trying is nonsensical. The
+ *     pull GESTURE stays mounted throughout the non-Connected window (it is an
+ *     explicit user action), so the manual-recovery affordance is never fully
+ *     lost — only the redundant button chrome disappears during the in-progress
+ *     hold.
+ *  4. In a Connected state (`pullToReconnectActive = false`) BOTH the pull wrapper
  *     and the Reconnect button are ABSENT, so neither competes with the live
  *     terminal's scroll / selection / horizontal-paging gestures and the surface
  *     content renders bare.
  *
- * This proof certifies the affordances (gesture + button) are present in the
- * dropped/reconnecting state ONLY and both call `reconnect()`. It deliberately
- * does NOT assert the #822 wedge is broken: that is connection-core logic owned
- * by epic #792 (a separate slice).
+ * This proof certifies the affordances: the pull gesture is present whenever the
+ * session is non-Connected; the VISIBLE button is present ONLY on a settled
+ * failed/dropped state and HIDDEN during the in-progress connect/attach/reconnect
+ * (#890). It deliberately does NOT assert the #822 wedge is broken: that is
+ * connection-core logic owned by epic #792 (a separate slice).
  */
 @RunWith(AndroidJUnit4::class)
 class SessionSurfaceReconnectWrapperTest {
@@ -98,13 +105,18 @@ class SessionSurfaceReconnectWrapperTest {
     }
 
     @Test
-    fun visibleReconnectButtonInNonConnectedStateFiresReconnect() {
+    fun visibleReconnectButtonInSettledFailedStateFiresReconnect() {
+        // Issue #890: on a SETTLED failed/dropped state (`showReconnectButton =
+        // true`, the connect/attach has stopped trying) a VISIBLE, tappable
+        // Reconnect button is present (the maintainer's "there's not even a
+        // button" ask) and tapping it fires the existing reconnect entrypoint.
         var reconnectCount = 0
         compose.setContent {
             PocketShellTheme {
                 SessionSurfaceReconnectWrapper(
                     pullToReconnectActive = true,
                     isReconnecting = false,
+                    showReconnectButton = true,
                     onReconnect = { reconnectCount++ },
                 ) {
                     Box(modifier = Modifier.fillMaxSize().testTag(contentTag)) {
@@ -114,9 +126,6 @@ class SessionSurfaceReconnectWrapperTest {
             }
         }
 
-        // A VISIBLE, tappable Reconnect button is present in the non-Connected
-        // state (not gesture-only — the maintainer's "there's not even a button"
-        // ask), and tapping it fires the existing reconnect entrypoint.
         compose.onNodeWithTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG, useUnmergedTree = true)
             .assertIsDisplayed()
             .assertHasClickAction()
@@ -131,19 +140,23 @@ class SessionSurfaceReconnectWrapperTest {
     }
 
     @Test
-    fun reconnectButtonStaysVisibleDuringTheAttachingHold() {
-        // Issue #750 suppresses the box's own spinner while the surface shows the
-        // centered "Attaching…" hold (`surfaceShowsCenteredLoader = true`). The
-        // VISIBLE Reconnect button must NOT be suppressed too — the attach hold is
-        // exactly when the user wants a discoverable force-retry control.
-        var reconnectCount = 0
+    fun reconnectButtonIsHiddenDuringTheInProgressAttachingHold() {
+        // Issue #890 (RED→GREEN; reverses #823's "stays visible during the attach
+        // hold"). While a connect/reconnect/attach is actively IN PROGRESS — the
+        // surface shows the progress bar + centered "Attaching…/Reconnecting…"
+        // hold (`isReconnecting = true`, `surfaceShowsCenteredLoader = true`,
+        // `showReconnectButton = false`) — offering "Reconnect" is nonsensical
+        // (the system is already trying), so the VISIBLE Reconnect button MUST be
+        // hidden. The maintainer's dogfood report: "no need for a reconnect button
+        // when I am connecting."
         compose.setContent {
             PocketShellTheme {
                 SessionSurfaceReconnectWrapper(
                     pullToReconnectActive = true,
                     isReconnecting = true,
                     surfaceShowsCenteredLoader = true,
-                    onReconnect = { reconnectCount++ },
+                    showReconnectButton = false,
+                    onReconnect = { error("reconnect button must not exist mid-attach") },
                 ) {
                     Box(modifier = Modifier.fillMaxSize().testTag(contentTag)) {
                         Text("Attaching…")
@@ -152,16 +165,15 @@ class SessionSurfaceReconnectWrapperTest {
             }
         }
 
-        compose.onNodeWithTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG, useUnmergedTree = true)
+        // The button is ABSENT during the in-progress attach/connect/reconnect.
+        compose.onAllNodesWithTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        // The pull GESTURE stays mounted (it is an explicit user action, not chrome
+        // that competes with anything) — manual recovery is never fully lost.
+        compose.onNodeWithTag(TMUX_PULL_TO_RECONNECT_TAG, useUnmergedTree = true)
             .assertIsDisplayed()
-            .performClick()
-        compose.waitForIdle()
-
-        assertTrue(
-            "the Reconnect button must stay tappable during the Attaching hold " +
-                "(observed reconnectCount=$reconnectCount)",
-            reconnectCount >= 1,
-        )
+        // The surface content (the "Attaching…" placeholder) still renders.
+        compose.onNodeWithTag(contentTag, useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test

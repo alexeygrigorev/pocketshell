@@ -148,6 +148,9 @@ class TmuxConnectingStatesScreenshotTest {
                             isReconnecting = true,
                             onReconnect = {},
                             surfaceShowsCenteredLoader = true,
+                            // Issue #890: mid-attach the visible Reconnect button is
+                            // hidden (the system is already trying), matching prod.
+                            showReconnectButton = false,
                         ) {
                             // The centered "Attaching…" hold
                             // (SwitchingLoadingPlaceholder body) — the SOLE
@@ -241,6 +244,9 @@ class TmuxConnectingStatesScreenshotTest {
                             pullToReconnectActive = true,
                             isReconnecting = true,
                             onReconnect = {},
+                            // Issue #890: a steady Reconnecting state is still an
+                            // in-progress reconnect, so the visible button is hidden.
+                            showReconnectButton = false,
                         ) {
                             Box(
                                 modifier = Modifier

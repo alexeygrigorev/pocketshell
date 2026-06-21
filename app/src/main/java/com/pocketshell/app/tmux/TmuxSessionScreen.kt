@@ -1879,6 +1879,22 @@ public fun TmuxSessionScreen(
                     // Issue #750: suppress the box's own spinner while the surface
                     // already shows the centered "Attaching…" hold — one indicator.
                     surfaceShowsCenteredLoader = surfaceShowsCenteredLoader,
+                    // Issue #890: the visible "Reconnect" button shows ONLY once the
+                    // connect/attach has SETTLED into a failed/dropped/stuck state —
+                    // never WHILE a connect/reconnect/attach is in progress (the
+                    // maintainer's "no reconnect button while I'm connecting"). The
+                    // in-progress states (`Connecting` / `Switching`(=Attaching) /
+                    // `Reconnecting`) already drive the progress bar + "Attaching…/
+                    // Reconnecting…" indicator, so the system is plainly already
+                    // trying; the button would be redundant chrome. We show it on
+                    // the remaining non-Connected states — `Failed` (honest error)
+                    // and `Idle` (dropped/never-attached, with a `canReconnect`
+                    // target) — exactly where a manual retry is meaningful. (This
+                    // stays compatible with #886's planned `RevealState.Error`
+                    // stuck-attach band, which projects to `Failed` here.)
+                    showReconnectButton = status !is ConnectionStatus.Connecting &&
+                        status !is ConnectionStatus.Switching &&
+                        status !is ConnectionStatus.Reconnecting,
                     content = surfaceContent,
                 )
             }
@@ -3745,6 +3761,16 @@ internal fun SessionSurfaceReconnectWrapper(
     isReconnecting: Boolean,
     onReconnect: () -> Unit,
     surfaceShowsCenteredLoader: Boolean = false,
+    // Issue #890: gate the VISIBLE "Reconnect" button on a SETTLED failed/dropped
+    // state. While a connect/attach/reconnect is actively IN PROGRESS (progress
+    // bar + "Connecting…/Attaching…/Reconnecting…" showing) offering "Reconnect"
+    // is nonsensical — the system is already trying — so the button is hidden.
+    // It reappears only once the attach/connect has FAILED or is STUCK (an honest
+    // error/dropped state where retrying makes sense). The pull GESTURE stays
+    // mounted for the whole non-Connected window (it is an explicit user action,
+    // not chrome that competes with anything) — only the discoverable button is
+    // gated, matching the maintainer's "no button while I'm connecting" ask.
+    showReconnectButton: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     if (pullToReconnectActive) {
@@ -3791,24 +3817,32 @@ internal fun SessionSurfaceReconnectWrapper(
                 // pull gesture. The maintainer's "there's not even a button to
                 // reconnect" ask needs a discoverable control: the pull-down is
                 // easy to miss (it has no chrome until you drag), so a labelled
-                // button is overlaid on the surface whenever the session is dropped
-                // / Reconnecting. It is anchored bottom-centre of the surface (clear
-                // of the centered "Attaching…" placeholder) and stays visible even
-                // during the attach hold (`surfaceShowsCenteredLoader`), since that
-                // hold is exactly when the user wants to force a retry. Both the
-                // button and the pull route to the SAME existing [onReconnect]
+                // button is overlaid on the surface.
+                //
+                // Issue #890 (reverses #823's "stays visible during the attach
+                // hold"): the button is shown ONLY when the connect/attach has
+                // SETTLED into a failed/dropped/stuck state — NOT while a
+                // connect/reconnect/attach is actively in progress. Offering
+                // "Reconnect" while the progress bar + "Attaching…/Reconnecting…"
+                // is showing is nonsensical (the system is already trying); the
+                // maintainer reported it as confusing chrome. `showReconnectButton`
+                // is false during Connecting/Switching/Reconnecting and true on the
+                // settled Failed/dropped (Idle) state where retrying makes sense.
+                // The button routes to the SAME existing [onReconnect]
                 // ([TmuxSessionViewModel.reconnect]) — no new connection logic, no
                 // second writer on the reconnect path (D28).
-                PocketShellButton(
-                    text = "Reconnect",
-                    onClick = onReconnect,
-                    variant = ButtonVariant.Secondary,
-                    compact = true,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 24.dp)
-                        .testTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG),
-                )
+                if (showReconnectButton) {
+                    PocketShellButton(
+                        text = "Reconnect",
+                        onClick = onReconnect,
+                        variant = ButtonVariant.Secondary,
+                        compact = true,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 24.dp)
+                            .testTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG),
+                    )
+                }
             }
         }
     } else {

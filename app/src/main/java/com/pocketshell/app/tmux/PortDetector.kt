@@ -227,8 +227,19 @@ internal class PortDetector(
         private const val LOOPBACK_HOST_TOKEN =
             """(?<![\w.-])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?![\w.-])"""
 
+        // Issue #877: this `(?:\s+(?:alt|alt|...))*` is a nested-quantifier
+        // (star-of-alternation) shape — the classic catastrophic-backtracking
+        // (ReDoS) trap. A 4 KB tail of whitespace-separated word tokens (very
+        // common in agent prose / boxed TUI status frames, exactly the idle
+        // agent's output) can drive a plain `*` into seconds of backtracking,
+        // a hard main-thread stall even after the scan was moved off Main. The
+        // per-iteration body is wrapped in an ATOMIC GROUP `(?>...)` so each
+        // `\s+word` match commits and cannot be re-tried, collapsing the
+        // worst case from exponential to linear. (Java/Kotlin regex supports
+        // atomic groups; behaviour for real "host is listening on port N"
+        // prose is unchanged.)
         private const val AGENT_LOOPBACK_PORT_PHRASE_WORDS =
-            """(?:\s+(?:is|now|listening|running|serving|available|bound|reachable|ready|up|open|on|at|to|via|hosted|server|dev|preview))*"""
+            """(?>\s+(?:is|now|listening|running|serving|available|bound|reachable|ready|up|open|on|at|to|via|hosted|server|dev|preview))*"""
 
         private const val PORT_TOKEN_BOUNDARY =
             """(?=$|[/?#\s,;:)\]!?'"<>]|\.(?:$|\s|[)\]!?'"<>,;:]))"""

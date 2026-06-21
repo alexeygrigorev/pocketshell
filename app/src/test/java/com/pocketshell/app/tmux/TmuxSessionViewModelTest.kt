@@ -39,6 +39,7 @@ import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableJob
@@ -86,7 +87,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Unit tests for [TmuxSessionViewModel] that exercise the per-pane
@@ -182,6 +185,14 @@ class TmuxSessionViewModelTest {
             // dispatcher to a separate off-Main one to exercise the hop.)
             it.setReconcileDispatcherForTest(testMainDispatcher)
             it.setReconcileApplyDispatcherForTest(testMainDispatcher)
+            // Issue #877: pin the port-detection decode/scan dispatcher to the
+            // shared virtual-clock Main so `withContext(portDetectionDispatcher)`
+            // runs the scan inline on the test scheduler (no real background
+            // thread racing `advanceUntilIdle`). The production default is
+            // Dispatchers.Default.limitedParallelism(1) — a real off-Main thread;
+            // the dedicated #877 regression tests override this with a tracking
+            // StandardTestDispatcher to assert the hop actually happens.
+            it.setPortDetectionDispatcherForTest(testMainDispatcher)
             createdViewModels += it
         }
 
@@ -11687,6 +11698,124 @@ class TmuxSessionViewModelTest {
         )
         advanceUntilIdle()
         assertNull("forwarded port must not re-prompt", vm.detectedPort.value)
+    }
+
+    // ---- Issue #877: per-%output port-detection decode + scan runs OFF Main ----
+
+    /**
+     * Issue #877 (idle-session ANR): a [CoroutineDispatcher] that delegates to
+     * the shared virtual-clock test dispatcher but flips [usedForScan] true the
+     * first time it is asked to [dispatch] a block. Injected as the VM's
+     * `portDetectionDispatcher` so the test can assert the per-`%output`
+     * decode + `PortDetector.scan` was hopped off the main/immediate dispatcher
+     * (it goes THROUGH this tracking dispatcher) rather than running inline on
+     * the bridge scope (Main) the way the unfixed code did.
+     */
+    private inner class ScanDispatchTracker(
+        // A real-dispatch delegate (a StandardTestDispatcher on the shared
+        // scheduler), NOT the Unconfined Main dispatcher — wrapping Unconfined
+        // and forcing dispatch violates its "yield-only" contract. A
+        // StandardTestDispatcher genuinely needs dispatch and is driven by
+        // advanceUntilIdle, so a `withContext(this)` from a bridgeScope (Main)
+        // coroutine is a real, observable hop OFF Main.
+        private val delegate: CoroutineDispatcher,
+    ) : CoroutineDispatcher() {
+        val usedForScan = AtomicBoolean(false)
+        val dispatchCount = AtomicInteger(0)
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            usedForScan.set(true)
+            dispatchCount.incrementAndGet()
+            delegate.dispatch(context, block)
+        }
+    }
+
+    /**
+     * Issue #877 regression (red→green, load-bearing): the per-`%output`
+     * decode + 7-regex [PortDetector.scan] — the work that froze an idle agent
+     * session because it ran on the UI thread for every output chunk — must run
+     * on the injected off-main `portDetectionDispatcher`, NOT inline on the
+     * bridge scope (Main). RED on base: `startPortDetectionForPane` ran the
+     * scan inline so the tracking dispatcher is never used. GREEN with the fix:
+     * `scanOutputEventForPorts` hops to `portDetectionDispatcher`, so the
+     * tracker records the dispatch. The port is still detected (behaviour
+     * preserved — only the thread changed).
+     */
+    @Test
+    fun portDetectionDecodeAndScanRunsOffMainNotOnBridgeScope() = runTest(scheduler) {
+        val vm = newVm()
+        val tracker = ScanDispatchTracker(StandardTestDispatcher(scheduler))
+        vm.setPortDetectionDispatcherForTest(tracker)
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(5173))
+        vm.attachForPortDetection(client, session)
+        advanceUntilIdle()
+        val dispatchesBeforeOutput = tracker.dispatchCount.get()
+
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Local:   http://localhost:5173/\n".toByteArray()),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "the %output chunk must produce a NEW off-main scan dispatch, proving " +
+                "the decode + scan was hopped off the bridge scope (Main)",
+            tracker.dispatchCount.get() > dispatchesBeforeOutput,
+        )
+        assertTrue(
+            "the per-%output decode + PortDetector.scan must run on the off-main " +
+                "portDetectionDispatcher, not inline on the bridge scope (Main)",
+            tracker.usedForScan.get(),
+        )
+        assertEquals(
+            "the port must still be detected after the scan moved off Main",
+            5173,
+            vm.detectedPort.value,
+        )
+    }
+
+    /**
+     * Issue #877 class coverage: an idle agent pane keeps emitting low-rate
+     * spinner/status `%output` frames; EVERY such frame's decode + scan must
+     * hop off Main, never accumulating main-thread work. Feed a burst of idle
+     * spinner frames carrying NO port and assert the scan ran off-main for each
+     * one (the tracker is dispatched once per frame) while no overlay is
+     * surfaced. This is the steady-idle-on-Main pattern the maintainer hit.
+     */
+    @Test
+    fun idleSpinnerOutputScansOffMainEveryFrameWithoutSurfacingOverlay() = runTest(scheduler) {
+        val vm = newVm()
+        val tracker = ScanDispatchTracker(StandardTestDispatcher(scheduler))
+        vm.setPortDetectionDispatcherForTest(tracker)
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = emptySet())
+        vm.attachForPortDetection(client, session)
+        advanceUntilIdle()
+        val dispatchesBeforeFrames = tracker.dispatchCount.get()
+
+        val frames = 40
+        val spinner = "⠋⠙⠹⠸"
+        repeat(frames) { i ->
+            // A typical idle-agent spinner/status repaint: cursor moves + a
+            // braille spinner glyph, no listening-port signal.
+            client.emittedEvents.emit(
+                ControlEvent.Output(
+                    "%0",
+                    "[2K\rThinking ${spinner[i % spinner.length]} (esc to interrupt)".toByteArray(),
+                ),
+            )
+        }
+        advanceUntilIdle()
+
+        assertTrue(
+            "every idle %output frame's scan must run off-main (one new off-main " +
+                "dispatch per emitted frame)",
+            tracker.dispatchCount.get() - dispatchesBeforeFrames >= frames,
+        )
+        assertNull(
+            "idle spinner output carries no port, so no overlay must surface",
+            vm.detectedPort.value,
+        )
     }
 
     private fun cachedRuntimeForTest(

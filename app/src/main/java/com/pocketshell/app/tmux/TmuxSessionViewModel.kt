@@ -248,6 +248,33 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #877: the dispatcher the per-`%output` new-port detector
+     * ([startPortDetectionForPane] → [PortDetector.scan]) runs its decode +
+     * regex scan on. Defaults to a single-threaded view of [Dispatchers.Default]
+     * (`limitedParallelism(1)`) so the UTF-8 decode
+     * and the 7-regex `PortDetector.scan` pass over a 4 KB tail no longer
+     * execute on the UI thread for every output chunk. An idle agent pane
+     * still emits low-rate spinner/status frames, so this collector fired
+     * continuously on Main and accumulated into a multi-frame stall (the
+     * reported idle-session freeze). The scan is now hopped off-Main; only
+     * the small state update for an actually-found port hops back to the
+     * [bridgeScope] (Main) via [confirmAndSurfaceDetectedPort]. The detector
+     * keeps mutable session state and is "single-threaded by contract", so a
+     * SINGLE-threaded background dispatcher preserves that invariant — the
+     * one collector serialises its scans on one background thread. NOT a
+     * constructor parameter, for the same Hilt-graph reason as
+     * [reconcileDispatcher]; a unit test pins it to a tracking/virtual-clock
+     * dispatcher via [setPortDetectionDispatcherForTest].
+     */
+    private var portDetectionDispatcher: CoroutineDispatcher =
+        Dispatchers.Default.limitedParallelism(1)
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setPortDetectionDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        portDetectionDispatcher = dispatcher
+    }
+
+    /**
      * Issue #793: how long the Conversation tab stays in the
      * [ConversationLoadState.Loading] ("Loading conversation…") state before
      * the load watchdog flips it to [ConversationLoadState.Failed]. Bounds the
@@ -7774,14 +7801,35 @@ public class TmuxSessionViewModel @Inject constructor(
         panePortDetectorJobs[paneId] = bridgeScope.launch {
             client.outputFor(paneId).collect { event ->
                 if (!appActive) return@collect
-                val text = runCatching { String(event.data, Charsets.UTF_8) }.getOrNull()
-                    ?: return@collect
-                val candidates = portDetector.scan(text)
+                // Issue #877: the UTF-8 decode + 7-regex PortDetector.scan over
+                // the 4 KB tail is the per-`%output` main-thread work that froze
+                // an idle agent session. Run it on [portDetectionDispatcher]
+                // (single-threaded background); only the small per-found-port
+                // overlay confirm hops back to the bridge scope (Main).
+                val candidates = scanOutputEventForPorts(event)
                 for (candidate in candidates) {
                     confirmAndSurfaceDetectedPort(candidate.port)
                 }
             }
         }
+    }
+
+    /**
+     * Issue #877: decode one `%output` chunk and run [PortDetector.scan] over
+     * it OFF the main thread, on [portDetectionDispatcher]. Returns the new
+     * port candidates worth confirming (empty if the app is backgrounded, the
+     * decode failed, or no new candidate matched). The detector's mutable
+     * session state stays confined to the one single-threaded background
+     * dispatcher, preserving its "single-threaded by contract" invariant.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun scanOutputEventForPorts(
+        event: ControlEvent.Output,
+    ): List<PortDetector.Candidate> = withContext(portDetectionDispatcher) {
+        if (!appActive) return@withContext emptyList<PortDetector.Candidate>()
+        val text = runCatching { String(event.data, Charsets.UTF_8) }.getOrNull()
+            ?: return@withContext emptyList<PortDetector.Candidate>()
+        portDetector.scan(text)
     }
 
     /**

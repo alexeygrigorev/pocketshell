@@ -266,4 +266,55 @@ class PortDetectorTest {
         )
         assertEquals(setOf(5173, 8000), found.toSet())
     }
+
+    // --- issue #877: catastrophic-backtracking (ReDoS) hardening ---
+
+    @Test
+    fun `loopback phrase prose still detects the port after atomic-group hardening`() {
+        // Real "host is listening on port N" prose must keep matching — the
+        // atomic-group change (issue #877) must not alter real-world behaviour.
+        assertEquals(
+            listOf(3000),
+            ports(PortDetector(), "127.0.0.1 is now listening on port 3000.\n"),
+        )
+        assertEquals(
+            listOf(5173),
+            ports(PortDetector(), "port 5173 is ready at localhost\n"),
+        )
+    }
+
+    @Test(timeout = 2000)
+    fun `pathological loopback whitespace-token tail scans in bounded time`() {
+        // Issue #877 hardening guard: the AGENT_LOOPBACK_PORT_PHRASE_WORDS
+        // regex is a `(?>\s+(?:alt|...))*` star-of-alternation. With the input
+        // bounded to the 4 KB rolling tail AND the per-iteration body wrapped in
+        // an atomic group, a worst-case 4 KB tail of whitespace-separated phrase
+        // tokens anchored to a loopback host (an idle agent's boxed status
+        // prose) must scan in bounded time. The hard JUnit `timeout` is the
+        // load-bearing assertion: it fails if a future regex edit reintroduces a
+        // backtracking blow-up. (Note: in the current Java engine the plain `*`
+        // form is also bounded for this token set, so this is defense-in-depth
+        // against a regression, not a strict red→green of the shipped fix — the
+        // shipped behaviour fix is the off-main dispatch in the VM test.)
+        val phraseWords = listOf(
+            "is", "now", "listening", "running", "serving", "available",
+            "bound", "reachable", "ready", "up", "open", "on", "at", "to",
+            "via", "hosted", "server", "dev", "preview",
+        )
+        val sb = StringBuilder("localhost")
+        var idx = 0
+        // Fill close to the 4 KB rolling-tail cap with phrase tokens, ending in
+        // a non-port, non-matching word so no match short-circuits the search.
+        while (sb.length < 4000) {
+            sb.append(' ').append(phraseWords[idx % phraseWords.size])
+            idx++
+        }
+        sb.append(" port nope\n")
+
+        val detector = PortDetector()
+        // Must return promptly (no port present), not hang in backtracking.
+        // The @Test(timeout) is the load-bearing assertion; this also asserts
+        // no false-positive port is produced from the pathological tail.
+        assertTrue(detector.scan(sb.toString()).isEmpty())
+    }
 }

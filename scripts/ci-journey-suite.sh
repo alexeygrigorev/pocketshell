@@ -434,9 +434,13 @@ JOURNEY_CLASSES=(
   # and does NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.ComposerAlwaysPresentSwitchJourneyE2eTest"
-  # ADDED (#818/#815): an agent pane must OPEN on the user's configured default
-  # view (Conversation by default; opt-out to Terminal honoured), and detection
-  # must NOT YANK the tab mid-session — the auto-switch-to-Conversation behaviour
+  # ADDED (#818/#815/#878): an agent pane must OPEN on the user's configured
+  # default view (Conversation by default; opt-out to Terminal honoured), and
+  # detection must NOT YANK the tab mid-session. #878 extends this case with the
+  # PRE-DETECTION assertion: the Conversation placeholder row is seeded at
+  # pane-add (before the detection round-trip), so the user sees the detecting
+  # placeholder, NOT the black raw Terminal, for the whole detection window.
+  # The auto-switch-to-Conversation behaviour
   # (af32522b, #807) was reverted as jarring; only the open-time initial
   # selection is governed by the setting. This connected case
   # (AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow)

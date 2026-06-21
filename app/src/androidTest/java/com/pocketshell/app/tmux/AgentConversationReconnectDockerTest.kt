@@ -9,6 +9,7 @@ import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.session.ConversationLoadState
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.agents.AgentKind
@@ -579,6 +580,16 @@ class AgentConversationReconnectDockerTest {
                     "tmux new-session -d -x 80 -y 24 -s ${shellQuote(agentSessionName)} " +
                         "-c ${shellQuote(agentCwd)} ${shellQuote(wrapperPath)}",
                 )
+                // Record the agent kind on the session (the #825 launch wrapper
+                // does this for PocketShell-launched sessions), so detection
+                // resolves via the deterministic RECORDED-identity path
+                // (readRecordedAgentKind → recorded source) rather than the
+                // cgroup/proc daemon kind-guess. Without it this fixture's
+                // claude-named sleep process is NOT in a pocketshell agent
+                // cgroup scope (`/proc/<pid>/cgroup` is `0::/`), so the daemon
+                // returns `unknown` and detection never lands — the recorded
+                // option is how a real PocketShell-launched agent is identified.
+                appendLine("tmux set-option -t ${shellQuote(agentSessionName)} @ps_agent_kind claude")
                 // Seed the SHELL session: a plain shell pane, no agent.
                 appendLine("tmux kill-session -t ${shellQuote(shellSessionName)} 2>/dev/null || true")
                 appendLine(
@@ -615,6 +626,67 @@ class AgentConversationReconnectDockerTest {
             val agentWindowId = agentPanes.first().windowId
             val agentPaneId = agentPanes.first { it.windowId == agentWindowId }.paneId
             stamp("issue807_agent_attached window=$agentWindowId pane=$agentPaneId")
+
+            // PRE-DETECTION PLACEHOLDER ASSERTION (#878): the moment the pane is
+            // added — BEFORE the detection SSH round-trip lands — the open-time
+            // default (Conversation) placeholder row is seeded, so the user sees
+            // the detecting placeholder, NOT the black raw Terminal, for the
+            // whole detection window.
+            //
+            // The user-visible property is: throughout the detection window the
+            // surface is the Conversation tab (placeholder while detection is in
+            // flight, then the real transcript), NEVER the raw Terminal. We poll
+            // for the Conversation row to appear (the seed runs as the pane is
+            // published; on a real attach the StateFlow may publish the pane a
+            // beat before the seed lands) and require that whenever a row exists
+            // it is a Conversation row — there is never a Terminal-default row at
+            // open. While detection is pending the row is the detection-less
+            // Loading placeholder; once detection lands it carries the agent.
+            var sawPlaceholder = false
+            waitForCondition(
+                label = "issue878 pre-detection Conversation placeholder",
+                timeoutMs = 10_000,
+                describe = {
+                    val r = agentVm.agentConversations.value[agentPaneId]
+                    "row=$r conversations=${agentVm.agentConversations.value.keys}"
+                },
+                predicate = {
+                    val r = agentVm.agentConversations.value[agentPaneId]
+                    // The Conversation surface (placeholder OR loaded transcript)
+                    // is up. A detection-less Loading placeholder is the #878
+                    // pre-detection state we want to witness; a row that already
+                    // carries detection means detection landed (also Conversation,
+                    // never Terminal).
+                    if (r != null) {
+                        // The open-time row must NEVER be a raw Terminal row — that
+                        // is the black-screen path #878 cures. Fail loudly if it is.
+                        assertEquals(
+                            "#878: the open-time row must be on the Conversation tab, " +
+                                "never the raw Terminal (the black-screen path); pane=$agentPaneId",
+                            SessionTab.Conversation,
+                            r.selectedTab,
+                        )
+                        if (r.detection == null) {
+                            assertEquals(
+                                "#878: the pre-detection placeholder is in the Loading (detecting) " +
+                                    "state; pane=$agentPaneId",
+                                ConversationLoadState.Loading,
+                                r.loadState,
+                            )
+                            assertTrue(
+                                "#878: the pre-detection row is the auto-seeded placeholder",
+                                r.autoSeededPlaceholder,
+                            )
+                            sawPlaceholder = true
+                        }
+                    }
+                    r != null
+                },
+            )
+            stamp(
+                "issue878_predetection_conversation pane=$agentPaneId " +
+                    "sawDetectionlessPlaceholder=$sawPlaceholder",
+            )
 
             // Live detection lands → the Conversation tab is available.
             waitForAgentForWindow(agentVm, agentWindowId, "issue807 agent detection")

@@ -7767,6 +7767,15 @@ public class TmuxSessionViewModel @Inject constructor(
             // freshly-built `row` directly, so it does not depend on
             // paneRows being repopulated yet.
             seedAgentConversationFromMemory(row)
+            // Issue #878: if seed-from-memory did NOT create a row (a fresh
+            // pane with no remembered status), seed the #818 open-time default
+            // tab NOW — at pane-add, BEFORE the detection SSH round-trip — so a
+            // presumed-agent pane shows the Conversation "Loading…" placeholder
+            // for the whole detection window instead of the black raw Terminal.
+            // Gated on `current == null` inside, so a remembered/explicit
+            // status (user opted into Terminal, or a prior Conversation row) is
+            // NEVER overwritten (no #815 mid-session yank).
+            seedPresumedAgentPlaceholder(row)
             startAgentDetectionForPane(row, refreshGuard)
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return emptyList()
@@ -8926,6 +8935,68 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #878: seed the #818 open-time default tab placeholder for a
+     * FRESHLY-ADDED presumed-agent pane, BEFORE the detection SSH round-trip
+     * lands. This closes the residual black-screen window: the #818
+     * Conversation-default was previously applied only in
+     * [markAgentTailLive]'s `current == null` branch, which runs only AFTER
+     * detection (~0.3s cache-hit, ~0.95s+ cold/foreign). Meanwhile the raw
+     * `TmuxTerminalPager` is always mounted, so a fresh agent open with no
+     * remembered status showed the BLACK Terminal for the whole detection
+     * latency. Seeding the detection-less Conversation placeholder row here
+     * makes the screen paint [ConversationDetectingPlaceholder] (the "Loading
+     * conversation…" placeholder + its watchdog) instead, for Codex, Claude,
+     * AND a foreign/no-guess pane.
+     *
+     * Strictly gated on `current == null` (no existing row): a real,
+     * REMEMBERED status — a user who opted into Terminal, or a prior
+     * Conversation row — is NEVER overwritten (no #815 mid-session yank).
+     * [seedAgentConversationFromMemory] runs first, so a remembered window
+     * already created the row by the time we get here and we no-op.
+     *
+     * When the open-time default is Terminal (the user opted out of the
+     * Conversation default), there is nothing to seed: the raw Terminal IS the
+     * intended pre-detection view, so we leave the row absent and the pager
+     * shows the Terminal as before.
+     *
+     * The placeholder carries [AgentConversationUiState.autoSeededPlaceholder]
+     * so [clearAgentDetectionForPane] can drop it if the pane turns out to be a
+     * genuine shell (null detection) — a row the user never deliberately opened
+     * must not linger on "Loading…"/"Failed". A real detection lands through
+     * [markAgentTailLive]'s `current != null` path, which preserves this seeded
+     * tab and clears the flag.
+     */
+    private fun seedPresumedAgentPlaceholder(pane: TmuxPaneState) {
+        if (pane.windowId.isBlank()) return
+        // Only the open-time Conversation default needs the placeholder; the
+        // Terminal default's pre-detection view IS the raw Terminal.
+        if (openTimeDefaultSessionTab() != SessionTab.Conversation) return
+        var seeded = false
+        _agentConversations.update { conversations ->
+            // current == null: never overwrite a remembered/explicit status
+            // (the #815 no-yank line). A row already exists for any remembered
+            // window (seed-from-memory) or a prior in-session choice.
+            if (conversations.containsKey(pane.paneId)) return@update conversations
+            seeded = true
+            conversations + (pane.paneId to AgentConversationUiState(
+                detection = null,
+                events = emptyList(),
+                selectedTab = SessionTab.Conversation,
+                syncStatus = AgentConversationSyncStatus.Live,
+                // Issue #793: the detecting placeholder is "Loading
+                // conversation…" + an armed watchdog so a never-arriving
+                // detection/read resolves to a clear Failed state, not an
+                // infinite spinner.
+                loadState = ConversationLoadState.Loading,
+                // Issue #878: this is an AUTO-seed, not a user tap — drop it on
+                // a confirmed-shell (null) detection.
+                autoSeededPlaceholder = true,
+            ))
+        }
+        if (seeded) armConversationLoadWatchdog(pane.paneId)
+    }
+
+    /**
      * Issue #828 (perf): box for the per-session recorded-kind cache so an
      * ABSENT map entry means "not yet read" and a PRESENT entry whose [kind] is
      * null means "read = foreign session (no `@ps_agent_kind`)". Without the box
@@ -9230,6 +9301,23 @@ public class TmuxSessionViewModel @Inject constructor(
                 return false
             }
         }
+        // Issue #878: while an AUTO-seeded detecting placeholder is up (the #818
+        // black-screen cure painted at pane-add, before detection landed), a
+        // FIRST transient null is almost always the detection-not-yet-warm race
+        // — the agent's JSONL log / process is not observable on the fresh
+        // attach for a beat. Dropping the placeholder on that first null would
+        // FLASH the black raw Terminal during the very detection window #878
+        // exists to bridge. So we hold the placeholder and re-confirm, exactly
+        // like a remembered agent, and only tear it down after
+        // [AGENT_EXIT_CONFIRMATIONS] consecutive nulls (a genuine shell pane).
+        if (isAutoSeededPlaceholderUp(paneId)) {
+            val nulls = (paneAgentNullDetections[paneId] ?: 0) + 1
+            paneAgentNullDetections[paneId] = nulls
+            if (nulls < AGENT_EXIT_CONFIRMATIONS) {
+                scheduleAgentDetectionRecheck(pane, guard)
+                return false
+            }
+        }
         // Issue #186: when a pane that previously had a detection no longer
         // does (the user exited Claude / Codex / OpenCode, or the agent
         // process died), clear the per-pane conversation state so the
@@ -9261,6 +9349,20 @@ public class TmuxSessionViewModel @Inject constructor(
         // detection has confirmed an exit and the row is gone, there is
         // nothing to protect.
         return _agentConversations.value[paneId]?.detection != null
+    }
+
+    /**
+     * Issue #878: true when an AUTO-seeded detecting placeholder is currently up
+     * for [paneId] — a detection-less Conversation row seeded at pane-add (the
+     * #818 black-screen cure) whose live detection has not yet landed. While
+     * this is up, a transient null verdict must be re-confirmed (not acted on)
+     * so the placeholder does not flash the black raw Terminal mid-detection.
+     * False once a real detection lands (the flag is cleared) or the row is
+     * gone.
+     */
+    private fun isAutoSeededPlaceholderUp(paneId: String): Boolean {
+        val row = _agentConversations.value[paneId] ?: return false
+        return row.autoSeededPlaceholder && row.detection == null
     }
 
     /**
@@ -9301,18 +9403,34 @@ public class TmuxSessionViewModel @Inject constructor(
         forgetAgentStatusForPane(paneId)
         var rowDropped = false
         updateAgentConversation(paneId) { current ->
-            if (current.detection == null) {
-                current
-            } else {
-                rowDropped = true
-                null
+            when {
+                // A row that carries a real detection: the agent exited — drop
+                // it so the Conversation tab disappears for this window.
+                current.detection != null -> {
+                    rowDropped = true
+                    null
+                }
+                // Issue #878: an AUTO-seeded detection-less placeholder (the
+                // #818 black-screen cure seeded at pane-add) whose detection
+                // came back null is a genuine SHELL pane the user never
+                // deliberately opened — drop it so it does not linger on
+                // "Loading conversation…" → "Failed". This is the auto-seed's
+                // own teardown; it is NOT a #815 yank (no user-chosen tab is
+                // being changed — the user never picked this view).
+                current.autoSeededPlaceholder -> {
+                    rowDropped = true
+                    null
+                }
+                // A USER-tapped detection-less placeholder (#778): the user
+                // deliberately opened the Conversation surface, so KEEP it and
+                // let its watchdog resolve "Loading…" to a clear Failed state.
+                else -> current
             }
         }
         // Issue #793: a removed row has no surface to load into — stop its
-        // watchdog. A KEPT detection-less placeholder row (a presumed-agent
-        // pane the user is on whose detection never landed) intentionally
-        // retains its watchdog so the "Loading conversation…" state still
-        // resolves to a clear Failed terminal state.
+        // watchdog. A KEPT (user-tapped #778) detection-less placeholder row
+        // intentionally retains its watchdog so the "Loading conversation…"
+        // state still resolves to a clear Failed terminal state.
         if (rowDropped) cancelConversationLoadWatchdog(paneId)
     }
 

@@ -6408,6 +6408,13 @@ class TmuxSessionViewModelTest {
         // surface (placeholder) instead of staying stuck on Terminal. The real
         // transcript replaces this when detection lands.
         val vm = newVm()
+        // Issue #878: pin the open-time default to Terminal so the pane-add
+        // auto-seed no-ops and this test isolates the #778 TAP-to-seed path
+        // (with the Conversation default the row would already exist from the
+        // #878 auto-seed, which a separate test covers).
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
         assertNull(vm.agentConversations.value["%0"])
@@ -6664,10 +6671,22 @@ class TmuxSessionViewModelTest {
         // Issue #818: the DEFAULT open-time view is Conversation — the
         // black-screen cure. With no override (= production default) a fresh
         // agent detection opens directly on the readable Conversation view.
+        //
+        // Issue #878: with the default = Conversation, the pre-detection
+        // placeholder row is now seeded at pane-add (so the user sees the
+        // detecting placeholder, NOT the black Terminal, during the detection
+        // window). The detection-less seed already lands on Conversation; the
+        // detection then fills in the real agent while PRESERVING that tab.
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
-        assertNull("precondition: no conversation row before detection", vm.agentConversations.value["%0"])
+        val seeded = vm.agentConversations.value["%0"]!!
+        assertEquals(
+            "precondition (#878): the pre-detection placeholder lands on Conversation",
+            SessionTab.Conversation,
+            seeded.selectedTab,
+        )
+        assertNull("precondition (#878): the seed has no detection yet", seeded.detection)
 
         vm.markAgentTailLiveForTest("%0", newClaudeDetection())
         runCurrent()
@@ -6679,6 +6698,10 @@ class TmuxSessionViewModelTest {
             state.selectedTab,
         )
         assertEquals(AgentKind.ClaudeCode, state.detection?.agent)
+        assertFalse(
+            "the autoSeededPlaceholder flag clears once a real detection lands",
+            state.autoSeededPlaceholder,
+        )
     }
 
     @Test
@@ -6706,6 +6729,237 @@ class TmuxSessionViewModelTest {
             "the end-to-end detect+load path honours the Terminal open-time default",
             SessionTab.Terminal,
             vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+    }
+
+    // ─── Issue #878: pre-detection placeholder seeded at pane-add ─────────
+    //
+    // The #818 Conversation-default was applied only AFTER the detection SSH
+    // round-trip (markAgentTailLive's current == null branch). Meanwhile the raw
+    // TmuxTerminalPager is always mounted, so a fresh presumed-agent pane with
+    // NO remembered status showed the BLACK Terminal for the whole detection
+    // window (~0.3s cache-hit, ~0.95s+ cold/foreign). #878 closes that gap by
+    // seeding the detection-less Conversation placeholder row at PANE-ADD so the
+    // screen paints ConversationDetectingPlaceholder (the "Loading…" state),
+    // NOT the Terminal void, during detection.
+    //
+    // G10 reproduce-first: on base (no fix) `connectWithPaneForTest` leaves NO
+    // conversation row, so `agentConversations.value[pane]` is null and the
+    // screen's `showConversationPlaceholder` (requires a Conversation-tab,
+    // detection-less row) is false → the black Terminal shows. These tests
+    // assert the row EXISTS with `selectedTab == Conversation`, detection ==
+    // null, loadState == Loading — i.e. the placeholder is up. RED on base,
+    // GREEN with the seed.
+
+    @Test
+    fun freshPresumedAgentPaneSeedsConversationPlaceholderBeforeDetection() = runTest(scheduler) {
+        // AC1 (class: the generic fresh-open path; Claude detection lands later).
+        // The DEFAULT open-time view is Conversation, so a freshly-added pane
+        // shows the detecting placeholder for the WHOLE detection window.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        val placeholder = vm.agentConversations.value["%0"]
+        assertNotNull(
+            "#878: a fresh presumed-agent pane gets a pre-detection placeholder row",
+            placeholder,
+        )
+        assertEquals(
+            "#878: the placeholder is on the Conversation tab (so the screen paints" +
+                " the detecting placeholder, not the black Terminal)",
+            SessionTab.Conversation,
+            placeholder!!.selectedTab,
+        )
+        assertNull("#878: the placeholder has no detection yet", placeholder.detection)
+        assertEquals(
+            "#878: the placeholder is in the Loading state (the detecting placeholder)",
+            ConversationLoadState.Loading,
+            placeholder.loadState,
+        )
+        assertTrue(
+            "#878: the row is flagged as an auto-seed so a shell can drop it",
+            placeholder.autoSeededPlaceholder,
+        )
+
+        // Detection lands (Claude): the placeholder becomes the real agent row,
+        // STILL on Conversation, and the auto-seed flag clears.
+        vm.markAgentTailLiveForTest("%0", newClaudeDetection())
+        runCurrent()
+        val live = vm.agentConversations.value["%0"]!!
+        assertEquals(AgentKind.ClaudeCode, live.detection?.agent)
+        assertEquals(
+            "#878: the user stays on Conversation once detection lands",
+            SessionTab.Conversation,
+            live.selectedTab,
+        )
+        assertFalse(
+            "#878: a real detection clears the auto-seed flag",
+            live.autoSeededPlaceholder,
+        )
+    }
+
+    @Test
+    fun freshPaneWherePlaceholderResolvesToCodexStaysOnConversation() = runTest(scheduler) {
+        // AC1 (class: Codex). The pre-detection placeholder is the same for any
+        // agent kind; here a Codex detection resolves it. The user is on the
+        // Conversation surface for the whole window and after Codex lands.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        assertEquals(
+            "#878: placeholder up (Conversation) before Codex is detected",
+            SessionTab.Conversation,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+        assertNull(vm.agentConversations.value["%0"]!!.detection)
+
+        vm.markAgentTailLiveForTest("%0", newCodexDetection())
+        runCurrent()
+        val live = vm.agentConversations.value["%0"]!!
+        assertEquals(AgentKind.Codex, live.detection?.agent)
+        assertEquals(
+            "#878: Codex pane stays on Conversation once detection lands",
+            SessionTab.Conversation,
+            live.selectedTab,
+        )
+    }
+
+    @Test
+    fun freshForeignNoGuessPaneShowsPlaceholderThenDropsOnNullDetection() = runTest(scheduler) {
+        // AC1 (class: a FOREIGN / no-guess pane — the daemon does NOT classify
+        // it as an agent, so detection comes back NULL). The user STILL sees the
+        // detecting placeholder during the detection window (not the black
+        // Terminal); when the null verdict lands, the auto-seeded placeholder is
+        // dropped so a genuine shell does not linger on "Loading…" → "Failed".
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        val placeholder = vm.agentConversations.value["%0"]
+        assertNotNull(
+            "#878: even a foreign/no-guess pane shows the detecting placeholder" +
+                " during the detection window (not the black Terminal)",
+            placeholder,
+        )
+        assertEquals(SessionTab.Conversation, placeholder!!.selectedTab)
+        assertNull(placeholder.detection)
+        assertTrue(placeholder.autoSeededPlaceholder)
+
+        // The daemon returns no agent kind → null detection for this pane. The
+        // FIRST null is DEFERRED (#878): a transient null mid-detection must not
+        // flash the black Terminal, so the placeholder is held and re-confirmed.
+        val firstNull = vm.handleNullAgentDetectionForTest("%0")
+        runCurrent()
+        assertFalse(
+            "#878: the FIRST null defers (holds the placeholder, does not flash black Terminal)",
+            firstNull,
+        )
+        assertNotNull(
+            "#878: the auto-seeded placeholder survives the first transient null",
+            vm.agentConversations.value["%0"],
+        )
+        assertEquals(
+            "#878: the held row is still the detecting placeholder",
+            SessionTab.Conversation,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+
+        // A SECOND consecutive null (AGENT_EXIT_CONFIRMATIONS = 2) confirms the
+        // pane is a genuine shell/foreign → the placeholder is DROPPED so it does
+        // not linger on "Loading…" → "Failed".
+        val secondNull = vm.handleNullAgentDetectionForTest("%0")
+        runCurrent()
+        assertTrue(
+            "#878: the second confirming null downgrades a genuine shell/foreign pane",
+            secondNull,
+        )
+        assertNull(
+            "#878: the auto-seeded placeholder is DROPPED once the shell/foreign verdict is confirmed",
+            vm.agentConversations.value["%0"],
+        )
+    }
+
+    @Test
+    fun autoSeedDoesNotOverwriteRememberedTerminalChoiceNoYank() = runTest(scheduler) {
+        // AC2 (#815 no-yank): a window whose user previously opted into Terminal
+        // must reattach on Terminal — the #878 auto-seed must NOT overwrite the
+        // remembered status with the Conversation default.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        // The user saw the agent but stayed on Terminal — remember Terminal.
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+        runCurrent()
+
+        // Reattach: a new pane id under the SAME window. seed-from-memory runs
+        // FIRST and restores the remembered Terminal row; the #878 auto-seed
+        // then no-ops because a row already exists (current != null).
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+
+        val restored = vm.agentConversations.value["%7"]!!
+        assertEquals(
+            "#878/#815: the remembered Terminal choice is NOT overwritten by the auto-seed",
+            SessionTab.Terminal,
+            restored.selectedTab,
+        )
+        assertFalse(
+            "#878: a remembered/explicit row is never an auto-seeded placeholder",
+            restored.autoSeededPlaceholder,
+        )
+    }
+
+    @Test
+    fun autoSeedDoesNotOverwriteRememberedConversationRowNoYank() = runTest(scheduler) {
+        // AC2 (#815 no-yank): a window whose user previously had a Conversation
+        // row must reattach with the live agent detection restored, NOT replaced
+        // by a fresh detection-less auto-seed placeholder. seed-from-memory wins.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+
+        val restored = vm.agentConversations.value["%7"]!!
+        assertEquals(
+            "#878/#815: the remembered Conversation choice survives the auto-seed",
+            SessionTab.Conversation,
+            restored.selectedTab,
+        )
+        assertEquals(
+            "#878: seed-from-memory restored the live detection, not a detection-less placeholder",
+            AgentKind.ClaudeCode,
+            restored.detection?.agent,
+        )
+        assertFalse(
+            "#878: a restored remembered row is never an auto-seeded placeholder",
+            restored.autoSeededPlaceholder,
+        )
+    }
+
+    @Test
+    fun autoSeedSuppressedWhenOpenTimeDefaultIsTerminal() = runTest(scheduler) {
+        // AC (opt-out): when the user opted the open-time default to Terminal,
+        // the raw Terminal IS the intended pre-detection view, so #878 seeds
+        // NOTHING — the pager shows the Terminal as before (no placeholder).
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        assertNull(
+            "#878: with the Terminal open-time default, no pre-detection placeholder is seeded",
+            vm.agentConversations.value["%0"],
         )
     }
 
@@ -6795,6 +7049,15 @@ class TmuxSessionViewModelTest {
         // agent is detected — so it stays on the raw Terminal. This proves
         // detection-driven row creation can NEVER touch a non-agent/shell pane.
         val vm = newVm()
+        // Issue #878: pin the open-time default to Terminal so the pane-add
+        // auto-seed no-ops and this test keeps its original "never-agent window
+        // has NO seed, so the first null downgrades immediately" semantics. The
+        // #878 auto-seed + transient-null-defer behaviour for a shell under the
+        // Conversation default is covered by
+        // freshForeignNoGuessPaneShowsPlaceholderThenDropsOnNullDetection.
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         // The pane is a plain "shell" (see connectWithPaneForTest's ParsedPane).
         runCurrent()
@@ -6864,15 +7127,48 @@ class TmuxSessionViewModelTest {
         vm.clearAgentDetectionForPaneForTest("%0")
         runCurrent()
 
-        // Reconnect: the same window must NOT light up a phantom
-        // Conversation tab.
+        // Reconnect: the same window must NOT resurrect the EXITED agent. The
+        // remembered status was forgotten on exit, so seed-from-memory restores
+        // nothing.
+        //
+        // Issue #878: the pane-add auto-seed DOES paint a transient detecting
+        // placeholder during the (now-pending) re-detection — this is the
+        // black-screen cure, identical to a fresh open: we don't know yet that
+        // the window is now a shell. Crucially the placeholder carries NO
+        // detection (autoSeededPlaceholder=true), so the EXITED agent is NOT
+        // resurrected — agentForWindow stays null — and the null re-detection
+        // verdict drops the placeholder (asserted below).
         vm.applyParsedPanesForTest(
             listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
         )
         runCurrent()
 
+        val transient = vm.agentConversations.value["%7"]
+        if (transient != null) {
+            assertTrue(
+                "#878: any row on the reconnected window is only the detection-less" +
+                    " auto-seed placeholder, never the resurrected agent",
+                transient.autoSeededPlaceholder && transient.detection == null,
+            )
+        }
         assertNull(
-            "an exited agent must not be restored on reconnect",
+            "the EXITED agent is never resurrected on reconnect (no detection lights up)",
+            vm.agentForWindow("@0"),
+        )
+
+        // The null re-detection verdict lands. If an auto-seeded placeholder is
+        // up (#878), the first null is DEFERRED (held + re-confirmed) so the
+        // detecting placeholder does not flash the black Terminal; the SECOND
+        // confirming null drops it. Drive consecutive nulls until the window
+        // settles with no conversation row.
+        var attempts = 0
+        while (vm.agentConversations.value["%7"] != null && attempts < AGENT_EXIT_CONFIRMATIONS + 1) {
+            vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            attempts++
+        }
+        assertNull(
+            "an exited agent's window settles with no conversation row after the null verdict",
             vm.agentConversations.value["%7"],
         )
         assertNull("no Conversation tab for the exited agent's window", vm.agentForWindow("@0"))
@@ -6963,12 +7259,21 @@ class TmuxSessionViewModelTest {
     /**
      * Issue #554: a null detection for a window that was NEVER an agent (no
      * remembered status, no seeded UI) downgrades immediately — the
-     * confirmation window is only for protecting a remembered agent seed, not
-     * for delaying the normal plain-shell verdict.
+     * confirmation window is only for protecting a remembered agent seed (or,
+     * per #878, an auto-seeded detecting placeholder), not for delaying the
+     * normal plain-shell verdict when there is nothing to protect.
      */
     @Test
     fun nullDetectionDowngradesImmediatelyWhenWindowWasNeverAnAgent() = runTest(scheduler) {
         val vm = newVm()
+        // Issue #878: pin the open-time default to Terminal so there is no
+        // auto-seeded placeholder to protect — this isolates the original #554
+        // "nothing to protect → downgrade immediately" path. (The #878
+        // placeholder-defer behaviour under the Conversation default is covered
+        // by freshForeignNoGuessPaneShowsPlaceholderThenDropsOnNullDetection.)
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
 

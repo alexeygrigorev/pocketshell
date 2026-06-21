@@ -97,6 +97,22 @@ public data class AgentConversationUiState(
      * requests for the same scroll.
      */
     val isPagingOlder: Boolean = false,
+    /**
+     * Issue #878: true when this detection-less placeholder row was seeded
+     * AUTOMATICALLY at pane-add for a presumed-agent pane (the #818
+     * black-screen cure: show the Conversation "Loading…" placeholder during
+     * the detection window instead of the black Terminal), as opposed to a
+     * user DELIBERATELY tapping the Conversation tab (#778).
+     *
+     * The distinction matters when live detection comes back NULL (the pane is
+     * a genuine shell, not an agent): a user-tapped placeholder is RETAINED
+     * (the user explicitly asked for the Conversation surface, so its watchdog
+     * resolves it to a clear Failed state), but an auto-seeded placeholder must
+     * be DROPPED so a shell pane the user never opted into does not linger on
+     * "Loading conversation…" → "Failed". Cleared (to false) the moment a real
+     * detection lands, since the row is then a genuine agent row.
+     */
+    val autoSeededPlaceholder: Boolean = false,
 )
 
 /**

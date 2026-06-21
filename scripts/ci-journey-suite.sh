@@ -528,6 +528,16 @@ JOURNEY_CLASSES=(
   # per-push so the toggle's removal is durably guarded. It lives under
   # com.pocketshell.app.tmux, so it carries its fully-qualified name directly.
   "com.pocketshell.app.tmux.TmuxConversationBottomComposerScreenshotTest"
+  # ADDED (#842 — surface transcript images): rendered-UI proof that an image
+  # referenced by a transcript (an image content block / tool-result image /
+  # pasted-image-by-path) is SURFACED inline — the bug was it being dropped or
+  # shown as a raw path. The loader is injected via LocalConversationImageLoader
+  # so it is a PURE Compose render proof (NO Docker fixture, NO SSH/tmux, NO
+  # port) — no tests.yml service change needed — and it does NOT self-skip on CI
+  # (no assumeTrue / assumeFalse(isRunningOnCi())). Per G9 it must run per-push so
+  # the inline-image render + the path-text FALLBACK on a failed fetch stay
+  # durably guarded. It lives under com.pocketshell.app.conversation.
+  "com.pocketshell.app.conversation.ConversationImageContentRenderTest"
   # ADDED (epic #792 Slice D, #822/V7a + #823 — D31 durable-fix gate): the
   # PROACTIVE silent mid-session drop detection + auto-recovery journey. The
   # maintainer's headline #822 bug: SSH silently drops on stable Wi-Fi while the

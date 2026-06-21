@@ -112,10 +112,19 @@ internal fun ConversationMessageTurn(
             )
         }
 
-        // Message body — full content rendered inline
-        MessageBody(
-            text = event.text,
-            onLinkTap = onLinkTap,
+        // Message body — full content rendered inline. Skip an empty body so an
+        // image-only turn (#842) doesn't render a blank text block.
+        if (event.text.isNotBlank()) {
+            MessageBody(
+                text = event.text,
+                onLinkTap = onLinkTap,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        // Issue #842: image content blocks / pasted images attached to this turn.
+        ConversationImages(
+            images = event.images,
             modifier = Modifier.fillMaxWidth(),
         )
     }

@@ -145,6 +145,24 @@ public class OpenCodeReader {
                 json.stringOrNull("text")?.let { listOf(messageEvent(message, part, role, it)) }
                     ?: emptyList()
 
+            // Issue #842: OpenCode surfaces an attached/pasted image as a
+            // dedicated `image`/`file` part. Emit an image-carrying Message so
+            // the screenshot is shown inline instead of dropped. A `file` part
+            // that isn't an image (no image mime / image block) yields nothing.
+            "image", "input_image", "file" ->
+                json.imageBlockOrNull()?.let { image ->
+                    listOf(
+                        ConversationEvent.Message(
+                            id = part.id,
+                            agent = AgentKind.OpenCode,
+                            atMillis = part.createdAtMillis ?: message.createdAtMillis,
+                            role = role,
+                            text = "",
+                            images = listOf(image),
+                        ),
+                    )
+                } ?: emptyList()
+
             "reasoning" ->
                 json.stringOrNull("text")?.let { text ->
                     listOf(
@@ -192,10 +210,12 @@ public class OpenCodeReader {
         part: OpenCodeSqlitePart,
         json: JSONObject,
     ): List<ConversationEvent> {
+        // Issue #842: image(s) returned by an OpenCode tool result.
+        val images = json.opt("content").imageBlocks() + json.opt("output").imageBlocks()
         val text = json.opt("content").extractText()
             ?: json.opt("output").extractText()
             ?: json.stringOrNull("output")
-            ?: return emptyList()
+            ?: if (images.isNotEmpty()) "" else return emptyList()
         return listOf(
             ConversationEvent.ToolResult(
                 id = part.id,
@@ -206,6 +226,7 @@ public class OpenCodeReader {
                     ?: json.stringOrNull("toolCallId"),
                 output = text,
                 isError = json.optBoolean("is_error", false) || json.optBoolean("error", false),
+                images = images,
             ),
         )
     }

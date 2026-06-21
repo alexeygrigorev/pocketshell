@@ -26,6 +26,43 @@ public enum class ConversationRole {
  * Parsed transcript events are always [Confirmed] — they came from the
  * authoritative agent log.
  */
+/**
+ * Issue #842: an image referenced by a transcript event.
+ *
+ * Agent transcripts surface an image in a few shapes:
+ *  - an `image` content block carrying a host file PATH (a screenshot the agent
+ *    saved, e.g. `/home/me/shot.png`), and/or
+ *  - an `image` content block carrying a content-block id / `source` URL (an
+ *    `https://…` URL or a Claude `file_id`), and/or
+ *  - inline base64 in a `source.data` block.
+ *
+ * The renderer prefers [path] (loaded over the warm SSH session — D21, the same
+ * file-viewer load path) and falls back to [url] (an `http(s)` URL opened/loaded
+ * directly). When neither can be fetched, the renderer shows the [path] or [url]
+ * as plain text so the reference is never silently dropped. Exactly one of
+ * [path]/[url]/[base64Data] is normally populated; [path] wins when several are.
+ */
+public data class ConversationImage(
+    /** An absolute (or `~`-relative) host file path to load over SSH, when present. */
+    val path: String? = null,
+    /** An `http(s)://` URL (or opaque source ref) to load/open directly, when present. */
+    val url: String? = null,
+    /** Inline base64-encoded image bytes (no data-URI prefix), when the block carried them. */
+    val base64Data: String? = null,
+    /** The image MIME type when the transcript declared it (e.g. `image/png`). */
+    val mediaType: String? = null,
+) {
+    /** The best single text reference for the fallback/path-text rendering. */
+    public val displayReference: String
+        get() = path ?: url ?: (mediaType?.let { "[$it image]" }) ?: "[image]"
+
+    public companion object {
+        /** True when this image carries at least one fetchable/representable reference. */
+        public fun ConversationImage.hasReference(): Boolean =
+            !path.isNullOrBlank() || !url.isNullOrBlank() || !base64Data.isNullOrBlank()
+    }
+}
+
 public enum class MessageSendState {
     /** Confirmed by the agent's transcript (the authoritative record). */
     Confirmed,
@@ -54,6 +91,11 @@ public sealed interface ConversationEvent {
         // an optimistic echo is inserted as [MessageSendState.Pending] and
         // flips to [MessageSendState.Failed] when its send fails.
         val sendState: MessageSendState = MessageSendState.Confirmed,
+        // Issue #842: image content blocks / pasted-image-by-path references
+        // carried by this message turn. Empty for the common text-only turn;
+        // populated when the parser saw an `image` content block or a
+        // pasted-image path. The renderer shows each inline under the text.
+        val images: List<ConversationImage> = emptyList(),
     ) : ConversationEvent
 
     public data class ToolCall(
@@ -71,6 +113,10 @@ public sealed interface ConversationEvent {
         val toolCallId: String? = null,
         val output: String,
         val isError: Boolean = false,
+        // Issue #842: image(s) returned in a tool result (e.g. a screenshot
+        // tool whose result content is an `image` block). Empty for the common
+        // text result; populated when the result content carried an image.
+        val images: List<ConversationImage> = emptyList(),
     ) : ConversationEvent
 
     /**

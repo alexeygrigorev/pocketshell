@@ -102,7 +102,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
+import com.pocketshell.app.conversation.ConversationImageViewModel
+import com.pocketshell.app.conversation.ConversationImages
 import com.pocketshell.app.conversation.ConversationInteractionCleanupEffect
+import com.pocketshell.app.conversation.LocalConversationImageLoader
 import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
 import com.pocketshell.app.conversation.ToolResultPairing
 import com.pocketshell.app.conversation.ConversationMessageTurn
@@ -253,6 +256,11 @@ public fun TmuxSessionScreen(
     // notes" toggle to take effect inside the conversation pane without
     // restarting the session.
     settingsViewModel: SettingsViewModel = hiltViewModel(),
+    // Issue #842: loads transcript-referenced images (host-path over the warm
+    // SSH lease, base64 inline, or an http(s) URL) for inline display in the
+    // Conversation view. Defaulted via hiltViewModel() so direct callers / unit
+    // tests are unchanged.
+    conversationImageViewModel: ConversationImageViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
     // Issue #666: the (re)attached session no longer exists on the server (it
     // was killed elsewhere while the app was backgrounded). On a cold-restore
@@ -1741,6 +1749,26 @@ public fun TmuxSessionScreen(
                     )
                 } else if (showConversation) {
                     val paneIdForSend = currentPane!!.paneId
+                    // Issue #842: bind the image loader to THIS host + the active
+                    // pane cwd (a relative pasted path resolves where the agent
+                    // worked). Built off the same credentials the screen holds so
+                    // the borrow reuses the warm lease (D21, no new connection).
+                    val conversationPaneCwd = currentPane!!.cwd.takeIf { it.isNotBlank() }
+                    val conversationImageLoader = remember(
+                        hostId, host, port, user, keyPath, conversationPaneCwd,
+                    ) {
+                        conversationImageViewModel.loaderFor(
+                            target = com.pocketshell.app.sessions.LeaseSessionTarget(
+                                hostId = hostId,
+                                hostname = host,
+                                port = port,
+                                username = user,
+                                keyPath = keyPath,
+                                passphrase = passphrase,
+                            ),
+                            cwd = conversationPaneCwd,
+                        )
+                    }
                     // Issue #459: the Conversation pane is now read-only
                     // chrome — search field + conversation feed. Sending is
                     // owned by the shared unified composer band below (the
@@ -1749,6 +1777,9 @@ public fun TmuxSessionScreen(
                     // composer's mic FAB opens the sheet; its Send routes to
                     // the focused agent pane via the screen's `onSend`
                     // wiring (see the [PromptComposerSheet] call below).
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        LocalConversationImageLoader provides conversationImageLoader,
+                    ) {
                     TmuxConversationPane(
                         events = visibleConversation.events,
                         modifier = Modifier
@@ -1811,6 +1842,7 @@ public fun TmuxSessionScreen(
                             }
                         },
                     )
+                    }
                 } else if (showConversationPlaceholder) {
                     // Issue #778: the user tapped Conversation on a presumed-agent
                     // pane before live detection landed. Render a lightweight
@@ -5099,12 +5131,20 @@ private fun ConversationToolCallChatCard(
                     rawCopyText = toolCall.input,
                 )
                 if (result != null) {
-                    ToolCallSection(
-                        label = if (result.isError) "output (error)" else "output",
-                        body = remember(result.id, result.output) {
-                            ToolPayloadFormatter.formatOutput(result.output)
-                        },
-                        copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + toolCall.id + ":output",
+                    if (result.output.isNotEmpty()) {
+                        ToolCallSection(
+                            label = if (result.isError) "output (error)" else "output",
+                            body = remember(result.id, result.output) {
+                                ToolPayloadFormatter.formatOutput(result.output)
+                            },
+                            copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + toolCall.id + ":output",
+                        )
+                    }
+                    // Issue #842: image(s) returned by the tool result (e.g. a
+                    // screenshot tool) render inline under the text output.
+                    ConversationImages(
+                        images = result.images,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }
@@ -5242,6 +5282,11 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
                 copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + result.id + ":output",
             )
         }
+        // Issue #842: image(s) on a standalone (unpaired) tool result.
+        ConversationImages(
+            images = result.images,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

@@ -127,6 +127,9 @@ public class ClaudeCodeParser : ConversationParser {
             }
             is org.json.JSONArray -> {
                 var textIndex = 0
+                // Issue #842: collect any image content blocks in this turn so
+                // they are surfaced even when the same array also carries text.
+                val turnImages = content.objects().mapNotNull { it.imageBlockOrNull() }.toList()
                 content.objects().forEachIndexed { index, part ->
                     when (part.stringOrNull("type")) {
                         "text" -> part.stringOrNull("text")?.takeIf { it.isNotBlank() }?.let { text ->
@@ -165,6 +168,30 @@ public class ClaudeCodeParser : ConversationParser {
                             toolCallId = part.stringOrNull("tool_use_id"),
                             output = part.opt("content").stringValue(),
                             isError = part.optBoolean("is_error", false),
+                            // Issue #842: a tool result whose content is (or
+                            // contains) an `image` block — e.g. a screenshot
+                            // tool — surfaces the image inline on the result.
+                            images = part.opt("content").imageBlocks(),
+                        )
+                    }
+                }
+                // Issue #842: attach the turn's image blocks. Prefer the first
+                // text Message in this turn; if the turn was image-only (no
+                // text/tool rows), emit a standalone image-carrying Message so
+                // the image is never dropped.
+                if (turnImages.isNotEmpty()) {
+                    val firstMessageIndex = events.indexOfFirst { it is ConversationEvent.Message }
+                    if (firstMessageIndex >= 0) {
+                        val msg = events[firstMessageIndex] as ConversationEvent.Message
+                        events[firstMessageIndex] = msg.copy(images = msg.images + turnImages)
+                    } else {
+                        events += ConversationEvent.Message(
+                            id = "$baseId:image",
+                            agent = agent,
+                            atMillis = atMillis,
+                            role = role,
+                            text = "",
+                            images = turnImages,
                         )
                     }
                 }

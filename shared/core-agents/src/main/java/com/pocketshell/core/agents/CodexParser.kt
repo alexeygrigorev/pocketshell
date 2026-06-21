@@ -39,6 +39,9 @@ public class CodexParser : ConversationParser {
                         atMillis = atMillis,
                         toolCallId = item.stringOrNull("call_id"),
                         output = item.opt("output").stringValue(),
+                        // Issue #842: a Codex function-call output whose payload
+                        // is (or contains) an image block surfaces it inline.
+                        images = item.opt("output").imageBlocks() + item.opt("content").imageBlocks(),
                     ),
                 )
             }
@@ -65,11 +68,12 @@ public class CodexParser : ConversationParser {
         role: ConversationRole,
     ): List<ConversationEvent> {
         val text = messageText(item)
+        val images = messageImages(item)
         return when {
-            text.isBlank() -> emptyList()
-            role == ConversationRole.User && isAgentsInstructionsInjection(text) ->
+            text.isBlank() && images.isEmpty() -> emptyList()
+            role == ConversationRole.User && text.isNotBlank() && isAgentsInstructionsInjection(text) ->
                 listOf(agentsInstructionsNote(baseId, agent, atMillis, text))
-            else -> listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text))
+            else -> listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text, images = images))
         }
     }
 
@@ -80,6 +84,11 @@ public class CodexParser : ConversationParser {
                 is org.json.JSONArray -> content.textParts()
                 else -> content.stringValue()
             }
+
+    // Issue #842: image blocks carried by a Codex message's `content` array
+    // (e.g. a pasted screenshot the user attached, or an `input_image` block).
+    private fun messageImages(item: org.json.JSONObject): List<ConversationImage> =
+        item.opt("content").imageBlocks()
 
     private fun reasoningText(item: org.json.JSONObject): String =
         item.stringOrNull("text")
@@ -99,11 +108,12 @@ public class CodexParser : ConversationParser {
             else -> return emptyList()
         }
         val text = messageText(item)
+        val images = messageImages(item)
         return when {
-            text.isBlank() -> emptyList()
-            role == ConversationRole.User && isAgentsInstructionsInjection(text) ->
+            text.isBlank() && images.isEmpty() -> emptyList()
+            role == ConversationRole.User && text.isNotBlank() && isAgentsInstructionsInjection(text) ->
                 listOf(agentsInstructionsNote(baseId, agent, atMillis, text))
-            else -> listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text))
+            else -> listOf(ConversationEvent.Message(baseId, agent, atMillis, role, text, images = images))
         }
     }
 

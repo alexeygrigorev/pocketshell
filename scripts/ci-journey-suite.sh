@@ -619,6 +619,27 @@ JOURNEY_CLASSES=(
   # self-skip on CI (no assumeFalse(isRunningOnCi()) on the load-bearing
   # assertion). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.AgentSubmitAckJourneyE2eTest"
+  # ADDED (#881, follow-up to #858 — D32 G9): the agent-PROFILE on-device
+  # journeys. The #858 feature visibly distinguishes a z.ai-profile Claude from a
+  # default Claude — the session tree shows a compressed provider chip (e.g.
+  # "Z.AI"/"Work") on profiled rows and NONE on default/no-profile rows, and the
+  # "What is this session?" picker surfaces the recorded provider/profile line.
+  # Those journeys shipped with #858 but ran in NO suite, so the visible chip +
+  # provider line had no per-push gate (the data path is Unit/Python-gated; this
+  # is the UI-render coverage gap). Target the SINGLE profile @Test method of
+  # FolderListScreenE2eTest by FQCN#method (its many unrelated layout/overflow
+  # cases stay out of this fast subset), and the whole SessionKindPickerUiTest
+  # (its AC3 recordedProfileShowsProviderProfileLine + the negative
+  # noRecordedProfileOmitsProviderProfileLine prove the picker provider line;
+  # the sibling kind-picker cases are cheap pure-Compose tests). Both are PURE
+  # Compose-rule UI tests (in-memory DAO + fake gateway for the tree case,
+  # plain ComponentActivity for the picker) — NO Docker fixture, NO SSH/tmux, NO
+  # toxiproxy, NO port — so they need no tests.yml service change and run on the
+  # already-booted AVD, and NEITHER self-skips on CI (no assumeTrue /
+  # assumeFalse(isRunningOnCi())). Both live under com.pocketshell.app.projects,
+  # so they carry their fully-qualified names directly.
+  "com.pocketshell.app.projects.FolderListScreenE2eTest#profiledSessionsShowProfileChipDefaultSessionsDoNot"
+  "com.pocketshell.app.projects.SessionKindPickerUiTest"
 )
 
 echo "=========================================================="

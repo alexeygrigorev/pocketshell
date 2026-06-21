@@ -37,10 +37,12 @@ class TreeRemoteSourceTest {
                     .put(node("a", order = 0, folder = "/p/a", collapsed = true, foreign = "codex")),
             )
             .put("version", 3)
+            .put("cli_version", "0.4.12")
             .toString()
         val session = treeSession(getStdout = json)
 
-        val nodes = source.getTree(session, host = "hetzner")
+        val result = source.getTree(session, host = "hetzner")
+        val nodes = result.nodes
 
         // Sorted by persisted order, not arrival order.
         assertEquals(listOf("a", "b"), nodes.map { it.session })
@@ -49,6 +51,9 @@ class TreeRemoteSourceTest {
         assertEquals("/p/a", nodes[0].folderPath)
         assertEquals("codex", nodes[0].foreignKind)
         assertNull(nodes[1].foreignKind)
+        // Issue #885: the payload's `cli_version` is parsed for the passive
+        // version-mismatch check.
+        assertEquals("0.4.12", result.cliVersion)
         // The request carried the host and was piped to `pocketshell tree get`.
         val sent = session.recorded.single()
         assertTrue(sent, sent.contains("tree get"))
@@ -66,20 +71,36 @@ class TreeRemoteSourceTest {
 
     @Test
     fun getTree_emptyRegistryYieldsEmptyList() = runTest {
+        val session = treeSession(getStdout = """{"nodes":[],"version":0,"cli_version":"0.4.12"}""")
+        val result = source.getTree(session, host = "h")
+        assertTrue(result.nodes.isEmpty())
+        // Issue #885: an empty registry still carries the CLI version (so the
+        // passive check works even on a fresh host with no persisted tree).
+        assertEquals("0.4.12", result.cliVersion)
+    }
+
+    @Test
+    fun getTree_omittedCliVersionIsNullNoSignal() = runTest {
+        // Issue #885: an OLD CLI that predates the `cli_version` field omits it.
+        // The client treats that as "no signal" (null), never a false mismatch.
         val session = treeSession(getStdout = """{"nodes":[],"version":0}""")
-        assertTrue(source.getTree(session, host = "h").isEmpty())
+        assertNull(source.getTree(session, host = "h").cliVersion)
     }
 
     @Test
     fun getTree_nonZeroExitDegradesToEmpty() = runTest {
         val session = treeSession(getResult = ExecResult("", "boom", 127))
-        assertTrue(source.getTree(session, host = "h").isEmpty())
+        val result = source.getTree(session, host = "h")
+        assertTrue(result.nodes.isEmpty())
+        assertNull(result.cliVersion)
     }
 
     @Test
     fun getTree_garbageStdoutDegradesToEmpty() = runTest {
         val session = treeSession(getStdout = "not json at all")
-        assertTrue(source.getTree(session, host = "h").isEmpty())
+        val result = source.getTree(session, host = "h")
+        assertTrue(result.nodes.isEmpty())
+        assertNull(result.cliVersion)
     }
 
     @Test
@@ -115,7 +136,8 @@ class TreeRemoteSourceTest {
     @Test
     fun reconcileTree_parsesDeltas() = runTest {
         val session = treeSession(
-            reconcileStdout = """{"alive":["a"],"gone":["dead"],"added":["fresh"]}""",
+            reconcileStdout =
+                """{"alive":["a"],"gone":["dead"],"added":["fresh"],"cli_version":"0.4.12"}""",
         )
 
         val delta = source.reconcileTree(session, host = "h")
@@ -123,7 +145,18 @@ class TreeRemoteSourceTest {
         assertEquals(listOf("a"), delta!!.alive)
         assertEquals(listOf("dead"), delta.gone)
         assertEquals(listOf("fresh"), delta.added)
+        // Issue #885: the reconcile payload also carries the CLI version.
+        assertEquals("0.4.12", delta.cliVersion)
         assertTrue(session.recorded.single().contains("tree reconcile"))
+    }
+
+    @Test
+    fun reconcileTree_omittedCliVersionIsNull() = runTest {
+        // Old CLI omits cli_version → null (no signal).
+        val session = treeSession(
+            reconcileStdout = """{"alive":["a"],"gone":[],"added":[]}""",
+        )
+        assertNull(source.reconcileTree(session, host = "h")!!.cliVersion)
     }
 
     @Test

@@ -54,7 +54,37 @@ def test_resolve_paths_falls_back_to_local_state_without_xdg() -> None:
 def test_get_empty_registry_is_valid_seed(tmp_path: Path) -> None:
     """No registry yet → empty nodes + version 0 (client seeds fresh)."""
     result = tree_mod.get_tree({"host": "hetzner"}, paths=_paths(tmp_path))
-    assert result == {"nodes": [], "version": 0}
+    assert result["nodes"] == []
+    assert result["version"] == 0
+
+
+def test_get_envelope_carries_cli_version(tmp_path: Path) -> None:
+    """Issue #885: `tree.get` stamps the installed CLI version into the
+    envelope so the client can detect a version mismatch PASSIVELY on every
+    normal open (no separate blocking `--version` exec)."""
+    from pocketshell import __version__
+
+    result = tree_mod.get_tree({"host": "hetzner"}, paths=_paths(tmp_path))
+    assert result["cli_version"] == str(__version__)
+    assert result["cli_version"]  # non-empty
+
+
+def test_reconcile_envelope_carries_cli_version(tmp_path: Path, monkeypatch) -> None:
+    """Issue #885: `tree.reconcile` also stamps the CLI version — it is the
+    most-frequent regular payload (fired on every open + resume)."""
+    from pocketshell import __version__
+
+    paths = _paths(tmp_path)
+    tree_mod.upsert_tree({"host": "h1", "nodes": [{"session": "a"}]}, paths=paths)
+    # With a live enumeration containing the session, it reports alive + version.
+    result = tree_mod.reconcile_tree(
+        {"host": "h1"}, paths=paths, live_names={"a"}
+    )
+    assert result["cli_version"] == str(__version__)
+    # And on the no-enumeration branch (tmuxctl missing) it still stamps it.
+    monkeypatch.setattr(tree_mod, "_live_session_names", lambda env=None: None)
+    result_no_enum = tree_mod.reconcile_tree({"host": "h1"}, paths=paths)
+    assert result_no_enum["cli_version"] == str(__version__)
 
 
 def test_get_requires_host(tmp_path: Path) -> None:

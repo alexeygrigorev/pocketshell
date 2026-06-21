@@ -76,7 +76,6 @@ public const val HOST_BOOTSTRAP_CONTINUE_TAG: String = "host-bootstrap-continue"
 public const val HOST_BOOTSTRAP_CLOSE_TAG: String = "host-bootstrap-close"
 public const val HOST_BOOTSTRAP_INSTALLING_TAG: String = "host-bootstrap-installing"
 public const val HOST_BOOTSTRAP_ROW_TAG_PREFIX: String = "host-bootstrap-row-"
-public const val HOST_BOOTSTRAP_OPEN_USAGE_TAG: String = "host-bootstrap-open-usage"
 
 /**
  * Compose modal that surfaces on host connect when `tmux` is missing.
@@ -108,7 +107,6 @@ public fun HostBootstrapSheet(
     onInstallTool: (BootstrapTool) -> Unit = { onInstall() },
     onSkip: () -> Unit,
     onDismiss: () -> Unit,
-    onOpenUsage: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
@@ -134,7 +132,6 @@ public fun HostBootstrapSheet(
             HostBootstrapSheetState.Success -> SuccessContent(
                 hostName = hostName,
                 onContinue = onDismiss,
-                onOpenUsage = onOpenUsage,
             )
 
             is HostBootstrapSheetState.Failed -> FailedContent(
@@ -350,49 +347,25 @@ private fun InstallingContent(hostName: String) {
 private fun SuccessContent(
     hostName: String,
     onContinue: () -> Unit,
-    onOpenUsage: (() -> Unit)? = null,
 ) {
     SheetColumn {
         SheetTitle(text = "Host ready")
         SheetSubtitle(text = hostBootstrapSuccessSubtitle(hostName))
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
-        // Issue #117 (usage Fix C): when pocketshell was just installed by
-        // the bootstrap flow, surface a direct route to the usage panel. The
-        // callback is supplied by the caller — when it is `null` the sheet
-        // falls back to a Continue-only row so older call sites keep
-        // working unchanged.
-        if (onOpenUsage != null) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
-            ) {
-                PocketShellButton(
-                    text = "Open Usage",
-                    onClick = onOpenUsage,
-                    variant = ButtonVariant.Secondary,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag(HOST_BOOTSTRAP_OPEN_USAGE_TAG),
-                )
-                PocketShellButton(
-                    text = "Continue",
-                    onClick = onContinue,
-                    variant = ButtonVariant.Primary,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
-                )
-            }
-        } else {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Spacer(modifier = Modifier.weight(1f))
-                PocketShellButton(
-                    text = "Continue",
-                    onClick = onContinue,
-                    variant = ButtonVariant.Primary,
-                    modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
-                )
-            }
+        // Issue #885 (hard cut, D22): after a successful install/update the
+        // sheet just acknowledges "Host ready" and offers a single Continue —
+        // tapping it proceeds to whatever the user was opening (the
+        // session/folder list). The earlier "Open Usage" CTA (#117) was
+        // removed: opening the usage panel after a host update was never what
+        // the user wanted.
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Spacer(modifier = Modifier.weight(1f))
+            PocketShellButton(
+                text = "Continue",
+                onClick = onContinue,
+                variant = ButtonVariant.Primary,
+                modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
+            )
         }
     }
 }

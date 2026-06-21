@@ -672,6 +672,14 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#successTransferShowsDismissibleBanner"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewStateShowsMessageAndRetry"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
+  # ADDED (#885, D32 G9): the post-update "Host ready" success sheet must show
+  # ONLY Continue — the "Open Usage" CTA (#117) was removed (hard cut, D22).
+  # This connected test drives the REAL HostBootstrapSheet in its Success state
+  # and HARD-asserts the open-usage button does NOT exist + Continue is the
+  # accent-filled primary action. PURE Compose (createComposeRule, no Docker /
+  # SSH / tmux / port — runs on the already-booted AVD), no self-skip. Carries
+  # its fully-qualified name directly (not under the proof prefix).
+  "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"
 )
 
 echo "=========================================================="

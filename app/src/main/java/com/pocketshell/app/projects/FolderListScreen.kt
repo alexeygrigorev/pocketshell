@@ -215,6 +215,10 @@ fun FolderListScreen(
     }
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
+    // Issue #885: passive host-CLI-version mismatch, detected from the regular
+    // `pocketshell tree` payload on every host open — surfaced as a dismissible
+    // update prompt (NOT a slow blocking on-open `--version` wait).
+    val cliVersionMismatch by viewModel.cliVersionMismatch.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
     val claudeProfiles by viewModel.claudeProfiles.collectAsState()
     val codexProfiles by viewModel.codexProfiles.collectAsState()
@@ -412,6 +416,20 @@ fun FolderListScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(start = 12.dp, end = 12.dp, bottom = 88.dp),
+            )
+        }
+
+        // Issue #885: the passive host-CLI-version update prompt. Non-displacing
+        // overlay pinned to the bottom edge (mirrors the failure banner) so it
+        // never pushes a session row down; appears on any open where the regular
+        // `tree` payload reports a host CLI older than this app build expects.
+        cliVersionMismatch?.let { mismatch ->
+            CliVersionMismatchBanner(
+                message = PayloadVersionCheck.outdatedHostPrompt(mismatch),
+                onDismiss = viewModel::dismissCliVersionMismatch,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
             )
         }
     }
@@ -1330,6 +1348,48 @@ private fun FolderActionFailureBanner(
             text = "Dismiss",
             onClick = onDismiss,
             modifier = Modifier.testTag(FOLDER_LIST_ACTION_STATUS_DISMISS_TAG),
+            variant = ButtonVariant.Text,
+            compact = true,
+        )
+    }
+}
+
+/**
+ * Issue #885: the passive host-CLI-version update prompt. Like
+ * [FolderActionFailureBanner] it is a non-displacing bottom-edge overlay (zero
+ * layout slot in the list), so it never pushes a session row down. It appears on
+ * ANY host open — warm/direct included — where the regular `pocketshell tree`
+ * payload reports a host CLI older than this app build expects (no slow blocking
+ * on-open `--version` exec). The [message] carries the version delta + the
+ * copy-paste update command.
+ */
+@Composable
+private fun CliVersionMismatchBanner(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val color = PocketShellColors.Accent
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .testTag(FOLDER_LIST_CLI_VERSION_BANNER_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyDense,
+            modifier = Modifier.weight(1f),
+        )
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_DISMISS_TAG),
             variant = ButtonVariant.Text,
             compact = true,
         )
@@ -2739,6 +2799,10 @@ const val FOLDER_LIST_FLAT_HEADER_DOT_TAG: String = "folder-list:flat:header:dot
 const val FOLDER_LIST_FLAT_HEADER_COUNTS_TAG: String = "folder-list:flat:header:counts"
 const val FOLDER_LIST_FLAT_ACTIVE_SECTION_TAG: String = "folder-list:flat:section:active"
 const val FOLDER_LIST_FLAT_IDLE_SECTION_TAG: String = "folder-list:flat:section:idle"
+
+// Issue #885: the passive host-CLI-version update prompt banner + its dismiss.
+const val FOLDER_LIST_CLI_VERSION_BANNER_TAG: String = "folder-list:cli-version-banner"
+const val FOLDER_LIST_CLI_VERSION_DISMISS_TAG: String = "folder-list:cli-version-dismiss"
 
 // Stable LazyColumn item keys for the flat-view section rows (#489). The host
 // header band moved into the app bar (#522 item 1), so there is no in-list

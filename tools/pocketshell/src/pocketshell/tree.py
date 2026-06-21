@@ -264,6 +264,24 @@ def _require_host(params: Mapping[str, Any]) -> str:
     return host
 
 
+def _cli_version() -> str:
+    """The installed ``pocketshell`` version, for the passive client check.
+
+    Issue #885: the PocketShell client execs ``tree get`` / ``tree reconcile``
+    on EVERY host open (warm/direct included), so stamping the server CLI
+    version into those envelopes lets the client detect a version mismatch
+    PASSIVELY during normal use — no separate slow blocking ``--version`` exec,
+    and consistently regardless of how the host was opened. A read failure
+    degrades to an empty string (the client treats "unknown" as "no signal").
+    """
+    try:
+        from pocketshell import __version__
+
+        return str(__version__)
+    except Exception:  # pragma: no cover - defensive; never wedge the payload
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Live-session enumeration (for reconcile)
 # ---------------------------------------------------------------------------
@@ -350,6 +368,9 @@ def get_tree(
     return {
         "nodes": _host_nodes(doc, host),
         "version": _host_version(doc, host),
+        # Issue #885: passive payload-version detection — the client compares
+        # this against its expected version on every normal open.
+        "cli_version": _cli_version(),
     }
 
 
@@ -437,6 +458,7 @@ def reconcile_tree(
             "alive": list(registry_names),
             "gone": [],
             "added": [],
+            "cli_version": _cli_version(),
         }
 
     alive: list[str] = []
@@ -477,6 +499,7 @@ def reconcile_tree(
         "alive": alive,
         "gone": gone,
         "added": added,
+        "cli_version": _cli_version(),
     }
 
 

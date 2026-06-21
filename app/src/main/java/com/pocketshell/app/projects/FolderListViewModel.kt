@@ -381,6 +381,23 @@ class FolderListViewModel internal constructor(
     // exercise the instant cold render (the tree then shows the brief Loading
     // until the first reconcile, exactly as before).
     private val treeClientCache: TreeClientCache? = null,
+    // Issue #885: the `pocketshell` version this app build expects on the host,
+    // for the passive payload-version mismatch check. Defaults to reading the
+    // installed app `versionName` (app + CLI ship in lockstep on every release
+    // tag — `tools/pocketshell/pyproject.toml`). Injectable so unit tests can
+    // pin it deterministically without a real PackageManager.
+    private val expectedPocketshellVersionProvider: () -> String = expectedPocketshellVersionProvider@{
+        val context = applicationContext ?: return@expectedPocketshellVersionProvider ""
+        try {
+            context.packageManager
+                .getPackageInfo(context.packageName, 0)
+                .versionName
+                ?.trim()
+                .orEmpty()
+        } catch (_: Throwable) {
+            ""
+        }
+    },
     // Issue #430: when true the view model attaches a
     // [ProcessLifecycleOwner] observer in [init] so the session-discovery
     // poll loop is gated on the whole-process foreground signal. Always
@@ -480,6 +497,53 @@ class FolderListViewModel internal constructor(
     private val _actionStatus: MutableStateFlow<FolderActionStatus> =
         MutableStateFlow(FolderActionStatus.Idle)
     val actionStatus: StateFlow<FolderActionStatus> = _actionStatus.asStateFlow()
+
+    /**
+     * Issue #885: passive host-CLI-version mismatch, detected from the
+     * `pocketshell tree` payload's `cli_version` on every host open (warm/direct
+     * included) — NOT a separate slow blocking `--version` exec. Non-null when
+     * the host's `pocketshell` is OLDER than this app build expects; the
+     * FolderList surfaces it as a small dismissible update prompt. Stays `null`
+     * when the versions match, when the payload carries no version (old CLI), or
+     * when the host is NEWER than the app (that is the app-behind case, not a
+     * host-update prompt — see [PayloadVersionCheck.Verdict.AppOutdated]).
+     */
+    private val _cliVersionMismatch: MutableStateFlow<PayloadVersionCheck.Verdict.HostOutdated?> =
+        MutableStateFlow(null)
+    val cliVersionMismatch: StateFlow<PayloadVersionCheck.Verdict.HostOutdated?> =
+        _cliVersionMismatch.asStateFlow()
+
+    /** Dismiss the passive CLI-version update prompt (issue #885). */
+    fun dismissCliVersionMismatch() {
+        _cliVersionMismatch.value = null
+    }
+
+    /**
+     * Issue #885: feed a payload-carried [hostCliVersion] (from `tree get` /
+     * `tree reconcile`) through [PayloadVersionCheck] and raise the passive
+     * update prompt when the host CLI is older than this app build. Visible for
+     * test. A `null`/blank/unparseable version is "no signal" and never raises a
+     * false prompt; a NEWER host CLI does not raise the prompt either.
+     */
+    internal fun observePayloadCliVersion(hostCliVersion: String?) {
+        if (hostCliVersion.isNullOrBlank()) return
+        when (val verdict = PayloadVersionCheck.evaluate(hostCliVersion, expectedPocketshellVersion())) {
+            is PayloadVersionCheck.Verdict.HostOutdated -> _cliVersionMismatch.value = verdict
+            else -> {
+                // Match / AppOutdated: clear any stale prompt (e.g. the host was
+                // updated since the last open).
+                _cliVersionMismatch.value = null
+            }
+        }
+    }
+
+    /**
+     * The `pocketshell` version this app build expects on the host. Resolved via
+     * [expectedPocketshellVersionProvider] (the installed app `versionName` on
+     * the production path; injectable in tests). Blank when the read fails, which
+     * [PayloadVersionCheck.evaluate] treats as "no signal".
+     */
+    private fun expectedPocketshellVersion(): String = expectedPocketshellVersionProvider()
 
     /**
      * Issue #718: Claude Code profiles for this host, DISCOVERED on the host
@@ -1447,6 +1511,10 @@ class FolderListViewModel internal constructor(
             if (bound != params) return@launch
             val delta = source.reconcileTree(session, params.hostName)
             if (bound != params) return@launch
+            // Issue #885: the reconcile payload also carries the host CLI
+            // version (it fires on every open + resume), so the passive check
+            // stays live even when `tree get` returned an empty seed.
+            observePayloadCliVersion(delta?.cliVersion)
             if (delta == null || delta.added.isNotEmpty()) {
                 // Unavailable or new sessions appeared → full probe.
                 launchReconcile(params)
@@ -1537,11 +1605,17 @@ class FolderListViewModel internal constructor(
                     // is the virtual test dispatcher, so a fast `getTree` resolves
                     // synchronously and the hydrate-before-reconcile ordering is
                     // preserved (the #837 durability contract).
-                    val nodes = async(ioDispatcher) { source.getTree(session, params.hostName) }.await()
+                    val treeResult = async(ioDispatcher) { source.getTree(session, params.hostName) }.await()
                     if (bound != params) {
                         hostChanged = true
                         return@withTimeoutOrNull
                     }
+                    // Issue #885: passive host-CLI-version check from the SAME
+                    // payload the client already round-trips on every open — no
+                    // separate blocking `--version` exec, and consistent because
+                    // this fires on warm/direct opens too (not only home→open).
+                    observePayloadCliVersion(treeResult.cliVersion)
+                    val nodes = treeResult.nodes
                     if (nodes.isNotEmpty()) {
                         tree.hydrate(nodes.map { it.toHydratedNode() })
                         // Render the seeded order/collapse immediately — instant

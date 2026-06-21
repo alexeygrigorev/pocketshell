@@ -725,12 +725,6 @@ fun HostListScreen(
                 onInstallTool = { tool -> viewModel.installBootstrapTool(tool) },
                 onSkip = { viewModel.dismissBootstrapAndOpen() },
                 onDismiss = { viewModel.dismissBootstrapAndOpen() },
-                onOpenUsage = onOpenUsage?.let { route ->
-                    {
-                        viewModel.dismissBootstrapAndOpen()
-                        route()
-                    }
-                },
             )
         }
 

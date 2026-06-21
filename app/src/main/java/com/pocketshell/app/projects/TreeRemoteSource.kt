@@ -66,24 +66,46 @@ public class TreeRemoteSource @Inject constructor() {
         val alive: List<String>,
         val gone: List<String>,
         val added: List<String>,
+        /**
+         * Issue #885: the server-side `pocketshell` CLI version stamped into the
+         * `tree.reconcile` envelope (`cli_version`), for the passive
+         * version-mismatch check. `null` when an OLD CLI omits the field — that
+         * is "no signal", never a false mismatch.
+         */
+        val cliVersion: String? = null,
     )
 
     /**
-     * Fetch the persisted node list for [host] (the cold-start HYDRATE read).
-     * An empty list (no registry yet) is a valid fresh-seed state. Returns an
-     * empty list on any failure.
+     * The `tree.get` result: the persisted node list plus the server CLI version
+     * the payload carries (issue #885). [cliVersion] is `null` when an old CLI
+     * omits it (no passive signal).
      */
-    public suspend fun getTree(session: SshSession, host: String): List<TreeNode> {
+    public data class TreeResult(
+        val nodes: List<TreeNode>,
+        val cliVersion: String? = null,
+    ) {
+        public companion object {
+            public val Empty: TreeResult = TreeResult(nodes = emptyList(), cliVersion = null)
+        }
+    }
+
+    /**
+     * Fetch the persisted node list for [host] (the cold-start HYDRATE read),
+     * plus the server CLI version stamped into the payload (issue #885 — the
+     * passive version-mismatch signal). An empty node list (no registry yet) is
+     * a valid fresh-seed state. Returns [TreeResult.Empty] on any failure.
+     */
+    public suspend fun getTree(session: SshSession, host: String): TreeResult {
         return try {
             val request = JSONObject().put("host", host).toString()
             val command = pipeJsonToWrapped(request, "tree get")
             val result = session.exec(command)
-            if (result.exitCode != 0) return emptyList()
-            parseNodes(result.stdout)
+            if (result.exitCode != 0) return TreeResult.Empty
+            parseTreeResult(result.stdout)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
-            emptyList()
+            TreeResult.Empty
         }
     }
 
@@ -148,10 +170,12 @@ public class TreeRemoteSource @Inject constructor() {
         return JSONObject().put("host", host).put("nodes", nodesArray).toString()
     }
 
-    private fun parseNodes(stdout: String): List<TreeNode> {
-        val trimmed = stdout.trim().ifBlank { return emptyList() }
-        val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return emptyList()
-        val nodes = root.optJSONArray("nodes") ?: return emptyList()
+    private fun parseTreeResult(stdout: String): TreeResult {
+        val trimmed = stdout.trim().ifBlank { return TreeResult.Empty }
+        val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return TreeResult.Empty
+        val cliVersion = root.optString("cli_version", "").takeIf { it.isNotBlank() }
+        val nodes = root.optJSONArray("nodes")
+            ?: return TreeResult(nodes = emptyList(), cliVersion = cliVersion)
         val out = ArrayList<TreeNode>(nodes.length())
         for (i in 0 until nodes.length()) {
             val row = nodes.optJSONObject(i) ?: continue
@@ -167,7 +191,7 @@ public class TreeRemoteSource @Inject constructor() {
             )
         }
         // Stable display order: honour the persisted `order` field.
-        return out.sortedBy { it.order }
+        return TreeResult(nodes = out.sortedBy { it.order }, cliVersion = cliVersion)
     }
 
     private fun parseReconcile(stdout: String): ReconcileDelta? {
@@ -177,6 +201,7 @@ public class TreeRemoteSource @Inject constructor() {
             alive = root.optJSONArray("alive").toStringList(),
             gone = root.optJSONArray("gone").toStringList(),
             added = root.optJSONArray("added").toStringList(),
+            cliVersion = root.optString("cli_version", "").takeIf { it.isNotBlank() },
         )
     }
 

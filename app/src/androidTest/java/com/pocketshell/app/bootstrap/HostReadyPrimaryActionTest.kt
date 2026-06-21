@@ -23,30 +23,24 @@ import java.io.FileOutputStream
 import kotlin.math.abs
 
 /**
- * Issue #836 — on the "Host ready" sheet (the [HostBootstrapSheetState.Success]
- * state) the PROMINENT, filled, primary call-to-action must be **Continue**
- * (go to the host's sessions / folder list), NOT "Open Usage".
+ * Issue #885 (supersedes #836) — on the "Host ready" sheet (the
+ * [HostBootstrapSheetState.Success] state) the ONLY action after a successful
+ * install/update is **Continue** (go to the host's sessions / folder list).
+ * The "Open Usage" CTA has been removed (hard cut, D22).
  *
- * The maintainer's dogfood: *"after I update the CLI on the host, why exactly
- * Open Usage — it doesn't make sense."* Jumping to the quota panel is not the
- * natural next step after a host becomes ready; continuing to the sessions is.
- * This is the recurring "Usage shouldn't be the post-host-ready destination"
- * class (sibling of #427).
+ * The maintainer's dogfood: *"after it updates it says Open Usage — that makes
+ * no sense, why would I open usage? Just acknowledge and continue to whatever I
+ * was doing."* Jumping to the quota panel was never the natural next step after
+ * a host becomes ready; continuing to the sessions is. This is the recurring
+ * "Usage shouldn't be the post-host-ready destination" class (sibling of #427).
  *
- * This drives the REAL [HostBootstrapSheet] in its `Success` state with a
- * non-null `onOpenUsage` (the two-button row) on the emulator, and proves:
+ * This drives the REAL [HostBootstrapSheet] in its `Success` state on the
+ * emulator, and proves:
  *
- *  - Tapping **Continue** invokes `onContinue` (and NOT `onOpenUsage`) — the
- *    post-host-ready destination is the host's sessions, not Usage.
+ *  - There is NO "Open Usage" button on the success sheet.
  *  - **Continue** is the filled PRIMARY button: its interior samples to the
  *    accent fill (`PocketShellColors.Accent`).
- *  - **Open Usage** is the SECONDARY outline button: its interior does NOT
- *    sample to the accent fill (transparent container over the dark sheet).
- *
- * The pixel-fill assertions are the load-bearing regression guard: if the
- * `ButtonVariant`s are ever inverted again (Continue=Secondary,
- * Open Usage=Primary), the Continue interior stops being accent-filled and the
- * Open Usage interior becomes accent-filled — and this test goes red.
+ *  - Tapping **Continue** invokes `onDismiss` (the continue/sessions path).
  *
  * Direct-Compose (no `ActivityScenario.launch`) so it does not depend on the
  * full host-connect journey; the live Docker bootstrap journey is exercised
@@ -59,12 +53,11 @@ class HostReadyPrimaryActionTest {
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Test
-    fun hostReadySheet_continueIsPrimary_openUsageIsSecondary() {
+    fun hostReadySheet_continueIsTheOnlyAction_noOpenUsage() {
         // In the Success state the sheet wires the Continue button's onClick to
         // `onDismiss` (Continue == leave the sheet and land on the host's
-        // sessions / folder list). Open Usage is wired to `onOpenUsage`.
+        // sessions / folder list).
         var continueClicks = 0
-        var openUsageClicks = 0
 
         compose.setContent {
             PocketShellTheme {
@@ -80,7 +73,6 @@ class HostReadyPrimaryActionTest {
                         onInstallTool = {},
                         onSkip = {},
                         onDismiss = { continueClicks++ },
-                        onOpenUsage = { openUsageClicks++ },
                     )
                 }
             }
@@ -89,42 +81,28 @@ class HostReadyPrimaryActionTest {
         compose.waitForIdle()
         SystemClock.sleep(250)
 
-        // Both actions are present (the affordance is preserved — #483).
+        // Continue is present.
         compose.onNodeWithTag(HOST_BOOTSTRAP_CONTINUE_TAG).assertExists()
-        compose.onNodeWithTag(HOST_BOOTSTRAP_OPEN_USAGE_TAG).assertExists()
+        // Issue #885: the "Open Usage" CTA must NOT exist on the success sheet.
+        compose.onNodeWithTag("host-bootstrap-open-usage").assertDoesNotExist()
 
-        capture("issue-836-host-ready.png")
+        capture("issue-885-host-ready.png")
 
-        // The PRIMARY (filled) treatment must be on Continue, NOT Open Usage.
+        // Continue must be the filled PRIMARY action.
         val continueIsAccentFilled = nodeInteriorIsAccent(HOST_BOOTSTRAP_CONTINUE_TAG)
-        val openUsageIsAccentFilled = nodeInteriorIsAccent(HOST_BOOTSTRAP_OPEN_USAGE_TAG)
-
         assertTrue(
-            "Continue must be the filled PRIMARY action (accent-filled interior); " +
-                "if this fails the host-ready button variants are inverted (#836).",
+            "Continue must be the filled PRIMARY action (accent-filled interior).",
             continueIsAccentFilled,
         )
-        assertTrue(
-            "Open Usage must be the SECONDARY (outline) action — its interior must " +
-                "NOT be accent-filled; if this fails Open Usage is the primary CTA again (#836).",
-            !openUsageIsAccentFilled,
-        )
 
-        // Tapping the primary Continue button must route to Continue (the
-        // host's sessions), NOT open Usage (the #836/#427-class guard).
+        // Tapping Continue must route to the continue/sessions path (onDismiss).
         continueClicks = 0
-        openUsageClicks = 0
         compose.onNodeWithTag(HOST_BOOTSTRAP_CONTINUE_TAG).performClick()
         compose.waitForIdle()
         assertTrue(
             "Tapping the primary Continue button must invoke the continue/sessions " +
                 "path (onDismiss), got continueClicks=$continueClicks.",
             continueClicks == 1,
-        )
-        assertTrue(
-            "Tapping the primary Continue button must NOT open Usage (#836/#427 class), " +
-                "got openUsageClicks=$openUsageClicks.",
-            openUsageClicks == 0,
         )
     }
 

@@ -29,6 +29,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -57,6 +58,27 @@ class PromptComposerViewModelTest {
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
+
+    /**
+     * Issue #882: every VM built by [newVm] is tracked here and torn down in
+     * [tearDownViewModels] so no recording ticker / sampler loop outlives its
+     * test. The #880 recording-elapsed ticker is an infinite
+     * `while { delay() }` loop that only breaks when recording leaves
+     * [RecordingState.Recording]. A test that starts recording (e.g.
+     * [androidSpeechProviderStartsWithoutOpenAiKey]) and ends its `runTest`
+     * body without stopping would leave that loop alive; `runTest`'s final
+     * `advanceUntilIdle` then advances virtual time through the infinite
+     * `delay` forever and the whole JVM unit suite hangs (35-min CI timeout).
+     * Clearing the VM cancels its `viewModelScope`, terminating any lingering
+     * loop regardless of recording state.
+     */
+    private val createdViewModels = mutableListOf<PromptComposerViewModel>()
+
+    @After
+    fun tearDownViewModels() {
+        createdViewModels.forEach { it.clearForTest() }
+        createdViewModels.clear()
+    }
 
     /**
      * In-memory [ApiKeyVault] for the unit tests — avoids the
@@ -199,6 +221,11 @@ class PromptComposerViewModelTest {
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
         vm.clock = clock
+        // Issue #882: track for teardown so a test that leaves recording active
+        // doesn't leak the #880 ticker loop into `runTest`'s final
+        // `advanceUntilIdle` (which would hang the suite). See
+        // [tearDownViewModels].
+        createdViewModels += vm
         return vm
     }
 
@@ -1161,6 +1188,18 @@ class PromptComposerViewModelTest {
         assertEquals(0, mic.startCount)
         assertEquals(0, whisperCalls)
         assertNull(vm.uiState.value.error)
+
+        // Issue #882: this assertion-only test left recording active. The
+        // #880 ticker (`viewModelScope.launch(samplerDispatcher) { while {
+        // delay() } }`) runs on the `runTest` scheduler, so `runTest`'s final
+        // `advanceUntilIdle` would advance virtual time through the infinite
+        // `delay` forever and hang the whole JVM unit suite (the 35-min CI
+        // timeout). Drive recording back to Idle so the ticker breaks before
+        // the body ends. (The `@After` teardown is the broader net for any
+        // ticker that ran on the rule's Main dispatcher instead.)
+        vm.cancelRecording()
+        advanceUntilIdle()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
     }
 
     @Test
@@ -1270,6 +1309,45 @@ class PromptComposerViewModelTest {
         advanceTimeBy(10L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
         runCurrent()
         assertEquals(frozen, vm.uiState.value.recordingElapsedMs)
+    }
+
+    /**
+     * Issue #882 regression: the #880 recording-elapsed ticker is an infinite
+     * `while (isActive) { if (!Recording) break; …; delay() }` loop. If a test
+     * starts recording on the `runTest` scheduler and leaves it active, the
+     * end-of-body `advanceUntilIdle` advances virtual time through that `delay`
+     * forever — hanging the JVM unit suite until the 35-min CI timeout. This
+     * test reproduces that exact condition (recording left active) and proves
+     * the lifecycle teardown ([clearForTest] / [onCleared] cancelling the
+     * ticker) makes `advanceUntilIdle` terminate. The hard `timeout` turns any
+     * regression into a fast deterministic failure instead of a suite hang.
+     */
+    @Test(timeout = 30_000L)
+    fun recordingTickerTerminatesOnVmClearSoSuiteCannotHang() = runTest {
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            storage = newStorage(),
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        // Start recording and let the ticker loop arm its `delay`.
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        // Tear the VM down WITHOUT first stopping recording — the real
+        // lifecycle clear. Before the #882 fix this left the ticker looping;
+        // after it, `onCleared` cancels the ticker job.
+        vm.clearForTest()
+
+        // The load-bearing assertion: with the ticker cancelled, the scheduler
+        // idles and `advanceUntilIdle` returns. On the unfixed code this line
+        // never returns (infinite virtual-time loop) and the `@Test(timeout)`
+        // fires — proving the regression is caught.
+        advanceUntilIdle()
     }
 
     @Test
@@ -2122,6 +2200,11 @@ class PromptComposerViewModelTest {
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
         vm.clock = clock
+        // Issue #882: track for teardown so a test that leaves recording active
+        // doesn't leak the #880 ticker loop into `runTest`'s final
+        // `advanceUntilIdle` (which would hang the suite). See
+        // [tearDownViewModels]. Mirrors [newVm].
+        createdViewModels += vm
         return vm to queue
     }
 

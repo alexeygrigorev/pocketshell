@@ -2308,6 +2308,12 @@ public class PromptComposerViewModel @Inject constructor(
         recordingJob?.cancel()
         transcribeJob?.cancel()
         attachmentJob?.cancel()
+        // Issue #882: the #880 recording-elapsed ticker is an infinite
+        // `while { delay() }` loop that only breaks when recording leaves
+        // [RecordingState.Recording]. Cancel it explicitly on clear so it
+        // never outlives the ViewModel (e.g. cleared mid-recording) — the
+        // same robustness guarantee the other jobs above already have.
+        stopRecordingTimerTicker()
         // If we were mid-recording, best-effort drop the mic. We swallow
         // any AudioRecorderException because there's no UI to surface it
         // to at this point in the lifecycle.
@@ -2320,6 +2326,21 @@ public class PromptComposerViewModel @Inject constructor(
         }
         runCatching { speechRecognitionSession?.cancel() }
         super.onCleared()
+    }
+
+    /**
+     * Issue #882 test seam: drive the real [onCleared] teardown from unit
+     * tests (which never trigger the Android `ViewModelStore` clear). A unit
+     * test that starts recording and ends its `runTest` body without stopping
+     * would otherwise leave the #880 recording ticker's infinite
+     * `while { delay() }` loop alive, so `runTest`'s final `advanceUntilIdle`
+     * spins virtual time forever and the whole suite hangs (the 35-min CI
+     * timeout). Tearing the VM down in `@After` cancels the ticker and any
+     * other lingering loop, mirroring the production lifecycle.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clearForTest() {
+        onCleared()
     }
 
     /** Coarse-grained recording state — drives both the mic FAB and the waveform. */

@@ -9681,21 +9681,84 @@ public class TmuxSessionViewModel @Inject constructor(
             is ConnectionStatus.Switching,
             -> Unit
             else -> {
-                // EPIC #792 Slice C: route through the single [TransportEffects] reconnect
-                // owner — the inline direct call is deleted (D22 hard-cut, one entrypoint).
-                val reconnectJob = transportEffects.onManualReconnect().job
-                    ?: return liveTmuxClientForSendOrNull()
-                reconnectJob.join()
+                // ISSUE #872 / #785 twin: TRUST THE WARM LEASE ON SEND, DON'T REDIAL.
+                //
+                // This is the un-applied twin of the #785 attachment fix
+                // ([awaitLiveSessionForAttachment] above). The maintainer reported that
+                // tapping Send on a STABLE wifi connection flashed "Reconnecting" for ~1s
+                // and then "Retry" — and the staged attachment was gone. Root cause: this
+                // wait read a SYNCHRONOUS "Connected right now?" snapshot
+                // ([liveTmuxClientForSendOrNull] gates on [inlineConnectionStatus] +
+                // [clientRef]) and, finding it TRANSIENTLY not-Connected (a within-grace
+                // heal mid-flight, or the status momentarily off after a quick bg/fg
+                // round-trip), UNCONDITIONALLY fired a fresh-lease `onManualReconnect()` —
+                // a LOUD `connect(trigger = Reconnect)` that tore the transport (the
+                // spurious flap) AND wiped the staged attachment.
+                //
+                // The fix mirrors slice-3: when the active target's SSH lease is still
+                // WARM ([liveLeaseKeys] membership — the single grace owner is holding the
+                // `-CC` connection and a silent heal is already re-promoting it), do NOT
+                // redial. POLL for the live client to land instead (the loop below), so a
+                // Send on a stable/warm connection reuses the live lease with no flap. We
+                // only fall back to the connect-on-action reconnect when the lease is
+                // genuinely COLD (grace elapsed / socket truly dead), where a redial is the
+                // correct recovery.
+                if (isSendLeaseWarm()) {
+                    // Warm lease: POLL the silent heal (fall through to the wait below);
+                    // do NOT fire a reconnect on a stable connection.
+                } else {
+                    // EPIC #792 Slice C: route through the single [TransportEffects] reconnect
+                    // owner — the inline direct call is deleted (D22 hard-cut, one entrypoint).
+                    val reconnectJob = transportEffects.onManualReconnect().job
+                        ?: return liveTmuxClientForSendOrNull()
+                    reconnectJob.join()
+                }
             }
         }
         return withTimeoutOrNull(SEND_SESSION_WAIT_TIMEOUT_MS) {
             while (currentCoroutineContext().isActive) {
                 liveTmuxClientForSendOrNull()?.let { return@withTimeoutOrNull it }
+                // Re-check the lease each poll: a within-grace heal may complete OR the
+                // grace window may elapse (lease goes cold) while we wait. If it goes cold
+                // and no connect is in flight, kick the connect-on-action recovery so a
+                // genuinely-dead link still resolves within the bound (mirrors the
+                // attachment wait's cold-lease fallback).
+                if (!isSendLeaseWarm() && !isConnectInFlight()) {
+                    transportEffects.onManualReconnect()
+                }
                 delay(SEND_SESSION_WAIT_POLL_MS)
             }
             null
         }
     }
+
+    /**
+     * ISSUE #872 / #785 twin: is the active target's SSH lease still WARM on the Send
+     * path — i.e. the within-grace owner is holding the connection and a silent heal
+     * will bring the session back without a redial? Identical predicate to the
+     * attachment path's [isAttachmentLeaseWarm] (the [liveLeaseKeys] warm snapshot the
+     * single grace owner maintains), deliberately NOT requiring a non-null
+     * `clientRef`/`sessionRef`: those are exactly what go transiently null while the
+     * within-grace heal re-opens the `-CC` channel, and gating on them would defeat the
+     * "trust the warm lease" fix.
+     */
+    private fun isSendLeaseWarm(): Boolean {
+        val target = activeTarget ?: connectingTarget ?: return false
+        return liveLeaseKeys.contains(target.toSshLeaseTarget().leaseKey)
+    }
+
+    /**
+     * ISSUE #872 (deterministic test seam): would the Send wait REDIAL (a fresh-lease
+     * `onManualReconnect()`) for the current state, or POLL the warm lease? This is the
+     * exact gate `awaitLiveTmuxClientForSend` consults. On the OLD (base) code the Send
+     * wait redialed UNCONDITIONALLY whenever the status was not already
+     * Connecting/Reconnecting/Switching — the #872 spurious-flap bug. A JVM unit test
+     * drives the VM into a warm-lease + transiently-not-Connected state and asserts this
+     * returns `false` (poll, do not redial), the red→green discriminator for the fix.
+     * The on-device journey is `SendNoReconnectE2eTest`.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun sendWaitWouldRedialForTest(): Boolean = !isSendLeaseWarm()
 
     private fun liveTmuxClientForSendOrNull(): TmuxClient? {
         if (inlineConnectionStatus !is ConnectionStatus.Connected) return null

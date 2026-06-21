@@ -379,6 +379,16 @@ JOURNEY_CLASSES=(
   # ONLY the deterministic agents:2222 fixture (no toxiproxy) that `tests.yml` already
   # brings up — no workflow change needed — and does NOT self-skip on CI.
   "$FQCN_PREFIX.AttachmentNoReconnectE2eTest"
+  # ADDED (#872): the send-path sibling of AttachmentNoReconnectE2eTest. AC1's
+  # only on-device regression net for "send must not fire a spurious reconnect /
+  # send-flap". Opens a real `tmux -CC` session, drives the production send path,
+  # and asserts ZERO reconnect/EOF diagnostics + NO Connecting/Reconnecting/
+  # Disconnected/Tap-Reconnect surface + the seeded viewport marker is never
+  # blanked. RED on base (the send path's unconditional reconnect); GREEN after
+  # the warm-lease-trust fix. Uses ONLY the deterministic agents:2222 fixture
+  # that `tests.yml` already brings up (no toxiproxy, no workflow change) and
+  # does NOT self-skip on CI.
+  "$FQCN_PREFIX.SendNoReconnectE2eTest"
   # ADDED (#796 H3): the composer-open -> terminal-relayout collision regression
   # catcher. The maintainer's exact v0.4.6 Codex freeze: a bursting Codex pane +
   # OPENING the Prompt Composer (showMicSheet toggles in the body root group)

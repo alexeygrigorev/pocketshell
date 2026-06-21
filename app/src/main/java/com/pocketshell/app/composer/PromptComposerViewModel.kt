@@ -723,7 +723,17 @@ public class PromptComposerViewModel @Inject constructor(
         // collector consumes it, so a send dispatched while the sheet's
         // collector is mid-recreate (dismiss → re-open) is delivered to
         // the next collector instead of being dropped.
-        _sendRequests.trySend(SendRequest(text = text, withEnter = withEnter))
+        _sendRequests.trySend(
+            SendRequest(
+                text = text,
+                withEnter = withEnter,
+                // Issue #872: carry the clean draft + staged tiles so a failed
+                // send restores the original text + the actual attachment tiles,
+                // not the paths-folded-into-text proxy.
+                cleanDraft = draft,
+                attachments = attachments,
+            ),
+        )
     }
 
     /**
@@ -743,6 +753,10 @@ public class PromptComposerViewModel @Inject constructor(
                 attachmentUpload = AttachmentUploadState.Idle,
             )
         }
+        // Issue #872: a delivered send must also drop the durable per-session
+        // attachment refs (the sibling of clearing the draft text below) so a
+        // later switch back does not resurrect already-sent tiles.
+        composerTarget?.let { composerDraftStore.clearAttachments(it) }
         onDraftChange("")
     }
 
@@ -754,35 +768,54 @@ public class PromptComposerViewModel @Inject constructor(
      * user can retry after reconnecting or discard it intentionally. Because
      * [dispatchSendNow] no longer clears the draft optimistically, the field
      * never visibly emptied — this just stamps the "Not sent" banner and
-     * folds the attachment paths into the restored text.
+     * restores the original draft + attachment tiles.
+     *
+     * Issue #872 — close the #832 AC2 gap: a failed send no longer collapses
+     * the staged attachment into a paths-folded-into-text proxy. We restore the
+     * CLEAN draft ([SendRequest.cleanDraft]) and re-show the actual attachment
+     * TILES ([SendRequest.attachments]), and persist BOTH durably per-session,
+     * so Retry re-sends the original text + attachment (the send path re-appends
+     * the paths from the live tiles at send time) and a switch A→B→A reloads
+     * them instead of finding them gone.
      */
     public fun restoreFailedSend(
         request: SendRequest,
         message: String = "Not sent. Reconnect, then send again or discard the draft.",
     ) {
         if (request.text.isEmpty()) return
-        savedStateHandle[KEY_DRAFT] = request.text
+        // Issue #872: restore the CLEAN draft (no appended "Attached files:"
+        // block) so the editable text is not polluted with raw remote paths and
+        // the tiles are NOT double-appended on Retry. Fall back to the composed
+        // text only for legacy callers that constructed a bare SendRequest.
+        val restoredDraft = request.cleanDraft.ifEmpty {
+            if (request.attachments.isEmpty()) request.text else ""
+        }
+        val restoredAttachments = request.attachments
+        savedStateHandle[KEY_DRAFT] = restoredDraft
         // Issue #746: a restored "Not sent" draft belongs to the session it
         // was sent from. Stamp the owner so switching away discards it rather
         // than carrying the banner into an unrelated session.
         savedStateHandle[KEY_DRAFT_OWNER] = composerTarget
-        // Issue #832: the failed-send draft is the EXACT case the maintainer
-        // reported losing. Persist it to the durable per-session store so
-        // switching away and back reloads it (the "Your draft was kept"
-        // promise becomes recoverable, not just true for an instant).
-        composerTarget?.let { composerDraftStore.save(it, request.text) }
+        // Issue #832 / #872: the failed-send draft + staged attachments are the
+        // EXACT case the maintainer reported losing. Persist BOTH to the durable
+        // per-session store so switching away and back reloads them (the "Your
+        // draft was kept" promise becomes recoverable, not just true for an
+        // instant — and now covers the attachment, not just the text).
+        composerTarget?.let { target ->
+            composerDraftStore.save(target, restoredDraft)
+            composerDraftStore.saveAttachments(target, restoredAttachments.toDurableRefs())
+        }
         _uiState.update { current ->
             current.copy(
-                draft = request.text,
+                draft = restoredDraft,
                 error = message,
                 recording = RecordingState.Idle,
                 amplitude = 0f,
                 recordingLocked = false,
                 sendInFlight = false,
-                // The attachment paths are now folded into the restored draft
-                // text, so drop the duplicate tiles to avoid double-appending
-                // them on the resend.
-                attachments = emptyList(),
+                // Issue #872: re-show the actual attachment tiles so Retry
+                // re-sends the original attachment, not just the text.
+                attachments = restoredAttachments,
                 attachmentUpload = AttachmentUploadState.Idle,
             )
         }
@@ -805,10 +838,14 @@ public class PromptComposerViewModel @Inject constructor(
         attachmentJob = null
         savedStateHandle[KEY_DRAFT] = ""
         savedStateHandle[KEY_DRAFT_OWNER] = null
-        // Issue #832: discard is the explicit "throw it away" control, so it
-        // must also drop the durable per-session slot — otherwise the next
-        // switch back would reload the draft the user just discarded.
-        composerTarget?.let { composerDraftStore.clear(it) }
+        // Issue #832 / #872: discard is the explicit "throw it away" control, so
+        // it must also drop the durable per-session draft AND attachment slots —
+        // otherwise the next switch back would reload what the user just
+        // discarded.
+        composerTarget?.let {
+            composerDraftStore.clear(it)
+            composerDraftStore.clearAttachments(it)
+        }
         _uiState.update { current ->
             current.copy(
                 draft = "",
@@ -860,40 +897,57 @@ public class PromptComposerViewModel @Inject constructor(
         if (hasDraft && draftOwner == null) {
             savedStateHandle[KEY_DRAFT_OWNER] = targetKey
             composerDraftStore.save(targetKey, _uiState.value.draft)
+            // Issue #872: the orphan draft may carry staged attachment tiles
+            // (e.g. a restored failed send); adopt those under the new owner too
+            // so they are recoverable on a later switch.
+            composerDraftStore.saveAttachments(
+                targetKey,
+                _uiState.value.attachments.toDurableRefs(),
+            )
             return
         }
 
-        // Persist the outgoing session's draft under its owner so a return
-        // switch can reload it. (Live writes already do this; this covers any
-        // gap, e.g. a draft set without going through [onDraftChange].)
+        // Persist the outgoing session's draft + attachments under its owner so a
+        // return switch can reload them. (Live writes already do this for text;
+        // this covers any gap, e.g. a draft set without going through
+        // [onDraftChange], and the staged-tile state #872 makes durable.)
         if (hasDraft && draftOwner != null && draftOwner != targetKey) {
             composerDraftStore.save(draftOwner, _uiState.value.draft)
+            composerDraftStore.saveAttachments(
+                draftOwner,
+                _uiState.value.attachments.toDurableRefs(),
+            )
             DiagnosticEvents.record("action", "composer_persist_on_session_switch")
         }
 
-        // Load the incoming session's durable draft (empty when none) so the
-        // in-memory state shows ONLY this session's draft — no bleed, but also
-        // no loss of the other session's draft.
+        // Load the incoming session's durable draft + attachments (empty when
+        // none) so the in-memory state shows ONLY this session's draft/tiles —
+        // no bleed, but also no loss of the other session's draft (#832/#872).
         val incoming = composerDraftStore.load(targetKey).orEmpty()
+        val incomingAttachments = composerDraftStore.loadAttachments(targetKey)
+            .toStagedAttachments()
         if (incoming == _uiState.value.draft &&
-            _uiState.value.attachments.isEmpty() &&
+            incomingAttachments == _uiState.value.attachments &&
             _uiState.value.error == null
         ) {
-            // Already showing exactly this session's draft (e.g. same text, no
-            // banner) — only (re)stamp the owner, no visual churn.
+            // Already showing exactly this session's draft + tiles (no banner) —
+            // only (re)stamp the owner, no visual churn.
             savedStateHandle[KEY_DRAFT] = incoming
-            savedStateHandle[KEY_DRAFT_OWNER] = if (incoming.isEmpty()) null else targetKey
+            savedStateHandle[KEY_DRAFT_OWNER] =
+                if (incoming.isEmpty() && incomingAttachments.isEmpty()) null else targetKey
             return
         }
         savedStateHandle[KEY_DRAFT] = incoming
-        savedStateHandle[KEY_DRAFT_OWNER] = if (incoming.isEmpty()) null else targetKey
+        savedStateHandle[KEY_DRAFT_OWNER] =
+            if (incoming.isEmpty() && incomingAttachments.isEmpty()) null else targetKey
         _uiState.update { current ->
             current.copy(
                 draft = incoming,
-                // The incoming session's restored draft has no in-flight
-                // attachment tiles or stale banner — those are session-local
-                // transient state that does not survive the switch.
-                attachments = emptyList(),
+                // Issue #872: restore the incoming session's durable attachment
+                // tiles (not unconditionally dropped to empty). A session with
+                // no stored tiles still shows none — but a failed-send session's
+                // staged attachment survives the A→B→A round-trip now.
+                attachments = incomingAttachments,
                 attachmentUpload = AttachmentUploadState.Idle,
                 error = null,
             )
@@ -2250,6 +2304,21 @@ public class PromptComposerViewModel @Inject constructor(
     )
 
     /**
+     * Issue #872: map live attachment tiles to their durable refs (drops the
+     * session-transient [StagedAttachment.previewUri]).
+     */
+    private fun List<StagedAttachment>.toDurableRefs(): List<DurableAttachmentRef> =
+        map { DurableAttachmentRef(it.remotePath, it.displayName, it.mimeType) }
+
+    /**
+     * Issue #872: rehydrate durable refs into live tiles. The local preview Uri
+     * is gone (session-transient), so the tile renders from the remote path +
+     * display name; the remote path is what the resend actually re-appends.
+     */
+    private fun List<DurableAttachmentRef>.toStagedAttachments(): List<StagedAttachment> =
+        map { StagedAttachment(it.remotePath, it.displayName, previewUri = null, mimeType = it.mimeType) }
+
+    /**
      * UI state surfaced to [PromptComposerSheet].
      *
      * @param draft the editable text-area contents.
@@ -2360,6 +2429,17 @@ public class PromptComposerViewModel @Inject constructor(
     public data class SendRequest(
         val text: String,
         val withEnter: Boolean,
+        /**
+         * Issue #872: the CLEAN draft (without the appended "Attached files:"
+         * path block) and the staged attachment tiles at send time. On a
+         * failed send ([restoreFailedSend]) these restore the original draft +
+         * the actual attachment TILES — closing the #832 AC2 gap where only the
+         * paths-folded-into-text survived. Defaulted so existing call sites /
+         * tests that construct a bare [SendRequest] keep compiling; the real
+         * dispatch path ([dispatchSendNow]) always populates them.
+         */
+        val cleanDraft: String = text,
+        val attachments: List<StagedAttachment> = emptyList(),
     )
 
     /**

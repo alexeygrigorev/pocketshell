@@ -71,7 +71,40 @@ public interface ComposerDraftStore {
 
     /** Drop the stored draft for [sessionKey] (discard / delivered). */
     public fun clear(sessionKey: String)
+
+    /**
+     * Issue #872: the persisted staged-attachment refs for [sessionKey], or
+     * an empty list when none. This closes the #832 AC2 gap — a failed send
+     * + reconnect (or a session switch A→B→A) must restore the actual
+     * attachment TILES, not just the text. The refs are stored as durable
+     * `remotePath\tdisplayName\tmimeType` rows (the local preview `Uri` is
+     * session-transient and intentionally not persisted; the tile still
+     * renders from the remote path + display name).
+     */
+    public fun loadAttachments(sessionKey: String): List<DurableAttachmentRef>
+
+    /**
+     * Issue #872: persist [attachments] as the staged-attachment refs for
+     * [sessionKey]. An empty list is stored as a [clearAttachments] so the
+     * slot does not linger.
+     */
+    public fun saveAttachments(sessionKey: String, attachments: List<DurableAttachmentRef>)
+
+    /** Issue #872: drop the stored attachment refs for [sessionKey]. */
+    public fun clearAttachments(sessionKey: String)
 }
+
+/**
+ * Issue #872: durable, process-death-survivable representation of a staged
+ * attachment tile. The live UI model is
+ * [PromptComposerViewModel.StagedAttachment]; this is its serialisable subset
+ * (the local preview [android.net.Uri] is session-transient and not stored).
+ */
+public data class DurableAttachmentRef(
+    val remotePath: String,
+    val displayName: String,
+    val mimeType: String? = null,
+)
 
 /**
  * Issue #832: no-op [ComposerDraftStore] used when the ViewModel is
@@ -86,6 +119,9 @@ public object DisabledComposerDraftStore : ComposerDraftStore {
     override fun load(sessionKey: String): String? = null
     override fun save(sessionKey: String, draft: String) = Unit
     override fun clear(sessionKey: String) = Unit
+    override fun loadAttachments(sessionKey: String): List<DurableAttachmentRef> = emptyList()
+    override fun saveAttachments(sessionKey: String, attachments: List<DurableAttachmentRef>) = Unit
+    override fun clearAttachments(sessionKey: String) = Unit
 }
 
 /**
@@ -98,6 +134,7 @@ public object DisabledComposerDraftStore : ComposerDraftStore {
  */
 public class InMemoryComposerDraftStore : ComposerDraftStore {
     private val drafts: MutableMap<String, String> = mutableMapOf()
+    private val attachments: MutableMap<String, List<DurableAttachmentRef>> = mutableMapOf()
 
     override fun load(sessionKey: String): String? = drafts[sessionKey]
 
@@ -111,6 +148,21 @@ public class InMemoryComposerDraftStore : ComposerDraftStore {
 
     override fun clear(sessionKey: String) {
         drafts.remove(sessionKey)
+    }
+
+    override fun loadAttachments(sessionKey: String): List<DurableAttachmentRef> =
+        attachments[sessionKey].orEmpty()
+
+    override fun saveAttachments(sessionKey: String, attachments: List<DurableAttachmentRef>) {
+        if (attachments.isEmpty()) {
+            this.attachments.remove(sessionKey)
+        } else {
+            this.attachments[sessionKey] = attachments
+        }
+    }
+
+    override fun clearAttachments(sessionKey: String) {
+        attachments.remove(sessionKey)
     }
 }
 
@@ -149,7 +201,84 @@ public class SharedPrefsComposerDraftStore @Inject constructor(
         prefs.edit().remove(sessionKey).apply()
     }
 
+    override fun loadAttachments(sessionKey: String): List<DurableAttachmentRef> {
+        if (sessionKey.isEmpty()) return emptyList()
+        val raw = runCatching { prefs.getString(attachmentKey(sessionKey), null) }.getOrNull()
+            ?: return emptyList()
+        return decodeAttachments(raw)
+    }
+
+    override fun saveAttachments(sessionKey: String, attachments: List<DurableAttachmentRef>) {
+        if (sessionKey.isEmpty()) return
+        if (attachments.isEmpty()) {
+            clearAttachments(sessionKey)
+            return
+        }
+        prefs.edit().putString(attachmentKey(sessionKey), encodeAttachments(attachments)).apply()
+    }
+
+    override fun clearAttachments(sessionKey: String) {
+        if (sessionKey.isEmpty()) return
+        prefs.edit().remove(attachmentKey(sessionKey)).apply()
+    }
+
     private companion object {
         const val PREFS_NAME = "composer_drafts"
     }
+}
+
+/**
+ * Issue #872: prefs key for the attachment-ref slot of [sessionKey]. Kept in a
+ * distinct namespace (`@att/`) so it never collides with the plain text-draft
+ * slot keyed by the bare session id.
+ */
+internal fun attachmentKey(sessionKey: String): String = "@att/$sessionKey"
+
+/**
+ * Issue #872: encode attachment refs as newline-separated `path\tname\tmime`
+ * rows. Tabs/newlines inside fields are escaped so the round-trip is lossless;
+ * a missing mime is the empty 3rd field.
+ */
+internal fun encodeAttachments(attachments: List<DurableAttachmentRef>): String =
+    attachments.joinToString(separator = "\n") { ref ->
+        listOf(ref.remotePath, ref.displayName, ref.mimeType.orEmpty())
+            .joinToString(separator = "\t") { field ->
+                field.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+            }
+    }
+
+/** Issue #872: inverse of [encodeAttachments]. Drops malformed rows defensively. */
+internal fun decodeAttachments(raw: String): List<DurableAttachmentRef> {
+    if (raw.isEmpty()) return emptyList()
+    return raw.split('\n').mapNotNull { row ->
+        if (row.isEmpty()) return@mapNotNull null
+        val fields = row.split('\t').map { field -> unescapeField(field) }
+        val remotePath = fields.getOrNull(0).orEmpty()
+        if (remotePath.isEmpty()) return@mapNotNull null
+        DurableAttachmentRef(
+            remotePath = remotePath,
+            displayName = fields.getOrNull(1).orEmpty().ifEmpty { remotePath.substringAfterLast('/') },
+            mimeType = fields.getOrNull(2).orEmpty().ifEmpty { null },
+        )
+    }
+}
+
+private fun unescapeField(field: String): String {
+    val out = StringBuilder(field.length)
+    var i = 0
+    while (i < field.length) {
+        val c = field[i]
+        if (c == '\\' && i + 1 < field.length) {
+            when (field[i + 1]) {
+                't' -> { out.append('\t'); i += 2 }
+                'n' -> { out.append('\n'); i += 2 }
+                '\\' -> { out.append('\\'); i += 2 }
+                else -> { out.append(c); i += 1 }
+            }
+        } else {
+            out.append(c)
+            i += 1
+        }
+    }
+    return out.toString()
 }

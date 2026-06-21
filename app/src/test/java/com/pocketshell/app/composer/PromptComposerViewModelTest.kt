@@ -3117,10 +3117,10 @@ class PromptComposerViewModelTest {
         // The draft + attachment chip are staged before the failed send.
         assertTrue(vm.uiState.value.draft.isNotEmpty())
         assertTrue(vm.uiState.value.attachments.isNotEmpty())
-        // Simulate the degraded-send "Not sent" banner. Issue #745's
-        // restoreFailedSend folds the attachment paths into the draft text and
-        // clears the chips, so the "Not sent" state is a draft + banner the
-        // user must be able to discard.
+        // Simulate the degraded-send "Not sent" banner. The "Not sent" state is a
+        // draft (+ since #872, the restored attachment tiles) + banner the user
+        // must be able to discard. Here we pass a bare SendRequest (clean draft
+        // defaults to text, no tiles) so the assertions below focus on discard.
         vm.restoreFailedSend(
             PromptComposerViewModel.SendRequest(text = "ничего не происходит", withEnter = true),
         )
@@ -3407,25 +3407,35 @@ class PromptComposerViewModelTest {
         assertTrue(vm.uiState.value.sendInFlight)
 
         // The host reports the write failed (degraded connection). The sheet
-        // routes the exact request back into [restoreFailedSend], which folds
-        // the attachment paths into the restored draft and clears in-flight.
+        // routes the exact request back into [restoreFailedSend].
+        //
+        // Issue #872 — close the #832 AC2 gap: restoreFailedSend now restores the
+        // CLEAN draft + the actual attachment TILES (not the paths folded into
+        // text). The user sees their prompt and the file tiles again — exactly
+        // what they had before tapping Send.
         vm.restoreFailedSend(composed)
         assertFalse(vm.uiState.value.sendInFlight)
 
-        // The restored draft carries the attachment paths verbatim, so the
-        // user sees their prompt + files and can retry after reconnect.
-        assertEquals(composed.text, vm.uiState.value.draft)
-        assertTrue(vm.uiState.value.draft.contains("20260611-120000-01-report.txt"))
-        assertTrue(vm.uiState.value.draft.contains("20260611-120000-02-data.csv"))
+        // The restored draft is the clean text — NOT polluted with raw remote
+        // paths — and the two attachment tiles are back on screen.
+        assertEquals("Review these", vm.uiState.value.draft)
+        assertEquals(2, vm.uiState.value.attachments.size)
+        assertEquals(
+            listOf(
+                "~/.pocketshell/attachments/host-1/20260611-120000-01-report.txt",
+                "~/.pocketshell/attachments/host-1/20260611-120000-02-data.csv",
+            ),
+            vm.uiState.value.attachments.map { it.remotePath },
+        )
         assertEquals(
             "Not sent. Reconnect, then send again or discard the draft.",
             vm.uiState.value.error,
         )
 
-        // Resend after reconnect: the FSM is Idle and the chips are gone, but
-        // the paths live in the restored draft. [appendAttachmentPaths] with
-        // an empty chip list leaves the draft untouched, so the resend STILL
-        // includes both attachments — never a silent drop.
+        // Resend after reconnect: the tiles are still present, so
+        // [dispatchSendNow] re-appends both attachment paths from the live tiles
+        // at send time — the resend STILL includes both attachments, never a
+        // silent drop, and the agent receives the exact same composed prompt.
         val resent = mutableListOf<PromptComposerViewModel.SendRequest>()
         val resendJob: Job = launch { vm.sendRequests.collect { resent += it } }
         vm.requestSend(withEnter = true)
@@ -3436,6 +3446,151 @@ class PromptComposerViewModelTest {
         assertEquals(composed.text, resent[0].text)
         assertTrue(resent[0].text.contains("20260611-120000-01-report.txt"))
         assertTrue(resent[0].text.contains("20260611-120000-02-data.csv"))
+        assertEquals(2, resent[0].attachments.size)
+    }
+
+    // -- Issue #872: durable per-session STAGED ATTACHMENT refs ----------------
+
+    @Test
+    fun failedSendAttachmentSurvivesSwitchAwayAndBack() = runTest {
+        // Issue #872 (the maintainer's exact dogfood scenario, attachment half):
+        // attach a file, type a note, tap Send, the send fails (a spurious flap /
+        // genuine drop) -> the composer keeps the draft AND the attachment tile.
+        // The user switches to another session and returns — and the ATTACHMENT
+        // (not just the text) MUST still be there. Before #872 the staged tiles
+        // were explicitly dropped (`attachments = emptyList()`) on every switch,
+        // so the attachment was unrecoverable through the UI even though the text
+        // survived (#832 AC2 gap).
+        //
+        // RED without the fix: the switch back found ZERO attachment tiles (the
+        // old onComposerTargetChanged dropped them). GREEN: the durable store
+        // reloads session A's staged attachment.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/sessionA")
+        vm.onDraftChange("please review")
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/shot.png"))
+        }
+        advanceUntilIdle()
+
+        // Capture the composed SendRequest the sheet would route, then fail it.
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        job.cancelAndJoin()
+        assertEquals(1, sent.size)
+
+        vm.restoreFailedSend(sent[0])
+        // The failed send kept the clean draft AND the attachment tile.
+        assertEquals("please review", vm.uiState.value.draft)
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertNotNull(vm.uiState.value.error)
+        // Both are durably persisted under session A.
+        assertEquals("please review", store.load("1/sessionA"))
+        assertEquals(
+            listOf("~/.pocketshell/attachments/host-1/shot.png"),
+            store.loadAttachments("1/sessionA").map { it.remotePath },
+        )
+
+        // Switch to session B: A's attachment must NOT bleed into B.
+        vm.onComposerTargetChanged("1/sessionB")
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+
+        // Return to session A: the kept draft AND the attachment tile are back.
+        vm.onComposerTargetChanged("1/sessionA")
+        assertEquals("please review", vm.uiState.value.draft)
+        assertEquals(
+            listOf("~/.pocketshell/attachments/host-1/shot.png"),
+            vm.uiState.value.attachments.map { it.remotePath },
+        )
+
+        // And a resend after the round-trip still carries the attachment.
+        val resent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val resendJob: Job = launch { vm.sendRequests.collect { resent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        resendJob.cancelAndJoin()
+        assertEquals(1, resent.size)
+        assertEquals(1, resent[0].attachments.size)
+        assertTrue(resent[0].text.contains("shot.png"))
+    }
+
+    @Test
+    fun deliveredSendClearsTheDurableAttachmentSlot() = runTest {
+        // Issue #872: a confirmed delivery must drop the durable attachment refs
+        // too (the sibling of clearing the text slot), so a later switch back
+        // does not resurrect already-sent tiles.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/a")
+        vm.onDraftChange("about to send")
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/sent.png"))
+        }
+        advanceUntilIdle()
+        // Persist the staged attachment via a failed-then-... no: simulate the
+        // durable persistence by failing once so the slot is written.
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        job.cancelAndJoin()
+        vm.restoreFailedSend(sent[0])
+        assertEquals(
+            listOf("~/.pocketshell/attachments/host-1/sent.png"),
+            store.loadAttachments("1/a").map { it.remotePath },
+        )
+
+        // Now the (re)send is delivered: the durable attachment slot is cleared.
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        vm.markSendDelivered()
+        assertTrue(store.loadAttachments("1/a").isEmpty())
+
+        vm.onComposerTargetChanged("1/b")
+        vm.onComposerTargetChanged("1/a")
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+    }
+
+    @Test
+    fun discardClearsTheDurableAttachmentSlot() = runTest {
+        // Issue #872: Discard must drop the durable attachment slot too, else a
+        // switch back resurrects the attachment the user just discarded.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/a")
+        vm.onDraftChange("draft")
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/x.png"))
+        }
+        advanceUntilIdle()
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+        job.cancelAndJoin()
+        vm.restoreFailedSend(sent[0])
+        assertFalse(store.loadAttachments("1/a").isEmpty())
+
+        vm.discardDraft()
+        assertTrue(store.loadAttachments("1/a").isEmpty())
+
+        vm.onComposerTargetChanged("1/b")
+        vm.onComposerTargetChanged("1/a")
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertEquals("", vm.uiState.value.draft)
     }
 
     @Test

@@ -19,6 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
+    # Issue #851: the nightly-fault release guard queries the latest "Nightly
+    # Extensive Tests" run via `gh run list` / `gh run view`, which needs read
+    # access to the Actions API.
+    permissions:
+      contents: read
+      actions: read
+
     env:
       ANDROID_SDK: /usr/local/lib/android/sdk
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -85,6 +92,8 @@ jobs:
           EMULATOR: ${{ env.ANDROID_SDK }}/emulator/emulator
           RELEASE_VALIDATION_SKIP_MAIN_GUARD: ${{ env.RELEASE_VALIDATION_SKIP_MAIN_GUARD }}
           TERMINAL_RELEASE_GATE: ${{ inputs.terminal_release_gate && '1' || '0' }}
+          # Issue #851: `gh` auth for the nightly-fault release guard.
+          GH_TOKEN: ${{ github.token }}
         with:
           api-level: 34
           target: google_apis

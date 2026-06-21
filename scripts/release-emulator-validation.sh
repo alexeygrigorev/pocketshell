@@ -66,6 +66,12 @@ Environment overrides:
   RELEASE_VALIDATION_SKIP_MAIN_GUARD=1
       Skip the clean pushed-main guard for CI workflow_dispatch runs where the
       checkout is intentionally detached.
+  NIGHTLY_FAULT_GATE_DISABLED=1
+      Skip the nightly-fault release guard (issue #851). The guard FAILS the
+      release when the latest "Nightly Extensive Tests" fault/bootstrap run is
+      red, cancelled, stale (tested an older sha than the release HEAD), or
+      missing. Use this escape hatch only for a deliberate fault-suite-waived
+      release; the summary records that it was skipped.
   TERMINAL_RELEASE_GATE=1
       Also run the optional high-confidence terminal release gate. This starts
       the real-agent Docker target, SSHes into it from the emulator, drives real
@@ -594,6 +600,40 @@ run_long_running_session_instrumentation() {
 
 require_clean_pushed_main
 write_summary_header
+
+# Issue #851 (epic #848): FAIL the release when the latest nightly fault /
+# bootstrap run is red, cancelled, stale, or missing. The toxiproxy
+# network-fault proofs + the bootstrap setup-scenario matrix run ONLY in the
+# nightly "Nightly Extensive Tests" workflow, whose extensive job is
+# `continue-on-error: true` — so a RED fault run masks as a `success` workflow
+# conclusion. This guard inspects the EXTENSIVE-job conclusion (not the masked
+# workflow conclusion) AND that the run covers the release HEAD, so a stale /
+# cancelled / red fault run blocks the tag instead of silently passing.
+check_nightly_fault_run() {
+  local log_dir="$RUN_DIR/nightly-fault-guard"
+  mkdir -p "$log_dir"
+  local log_file="$log_dir/result.txt"
+  printf '\n## Nightly fault/bootstrap run guard (issue #851)\n\n' >> "$SUMMARY_PATH"
+  record_artifact "nightly fault guard log" "$log_file"
+
+  local rc=0
+  env NIGHTLY_FAULT_RELEASE_HEAD="$(git rev-parse HEAD)" \
+    scripts/check-nightly-fault-run.sh >"$log_file" 2>&1 || rc=$?
+  cat "$log_file"
+
+  {
+    printf '```\n'
+    cat "$log_file"
+    printf '```\n'
+  } >> "$SUMMARY_PATH"
+
+  if [[ "$rc" -ne 0 ]]; then
+    sed -i 's/^Automated status: RUNNING$/Automated status: FAIL/' "$SUMMARY_PATH"
+    fail "nightly fault/bootstrap run guard BLOCKED the release (see $log_file). Re-run 'Nightly Extensive Tests' (workflow_dispatch, force_run=true) on the release commit and wait for the extensive job to go green, then re-run this gate. Override with NIGHTLY_FAULT_GATE_DISABLED=1 only for a deliberately fault-suite-waived release."
+  fi
+}
+
+check_nightly_fault_run
 
 run_required \
   "pre-release confidence gate" \

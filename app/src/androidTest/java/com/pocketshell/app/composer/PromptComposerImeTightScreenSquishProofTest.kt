@@ -210,9 +210,15 @@ class PromptComposerImeTightScreenSquishProofTest {
                 "hostHeightDp=${(hostBounds.bottom - hostBounds.top) / density} density=$density",
         )
 
-        // 1) Draft keeps a sensible MULTI-LINE height — not crushed to a thin strip.
-        //    Pre-#801 the double-count collapsed the usable room to ~176dp and the
-        //    floor crushed the field; the fix gives it the genuine room.
+        // 1) Draft keeps a sensible MULTI-LINE height — not crushed to a single
+        //    line. Issue #873: the field now WRAPS to its content (≈ its 56dp
+        //    keyboard-up min for this 3-line draft, whose lines each fit in one
+        //    visual line) instead of `fillMaxHeight`-inflating to the whole room
+        //    above the keyboard (the old ~97dp+ that left dead space). The
+        //    squish this proof guards is now carried by the control-row-not-crushed
+        //    + controls-reachable checks below; here we only confirm the field is
+        //    not crushed BELOW its multi-line min (the maintainer's ~36dp
+        //    single-line crush).
         assertTrue(
             "Draft field crushed to a thin strip (the #801 squish). " +
                 "draftHeightDp=$draftHeightDp minDp=$MIN_DRAFT_HEIGHT_DP",
@@ -319,13 +325,15 @@ class PromptComposerImeTightScreenSquishProofTest {
         const val NAV_BAR_DP = 48f
         const val STATUS_BAR_DP = 52f
 
-        // In the genuinely tight ~175dp budget above the keyboard the field cannot
-        // be huge — but it must keep at least ~2 readable lines, never the ~36dp
-        // single-line crush the maintainer reported. 60dp excludes that crush. (In
-        // this tight config the draft height is NOT the primary red/green
-        // discriminator — the control-row height below is; the old reserve+floor
-        // crushed the CONTROLS to a 16dp sliver while the draft stayed ~73dp.)
-        const val MIN_DRAFT_HEIGHT_DP = 60f
+        // The field must keep its multi-line content visible, never the ~36dp
+        // single-line crush the maintainer reported. Issue #873: the field now
+        // wraps to its 3-line content (~49dp) instead of `fillMaxHeight`-inflating
+        // to the whole room above the keyboard, so 44dp (above the ~36dp
+        // single-line crush, below the 3-line content) excludes the crush while
+        // accepting the new compact field. (In this tight config the draft height
+        // is NOT the primary red/green discriminator — the control-row height
+        // below is; the old reserve+floor crushed the CONTROLS to a 16dp sliver.)
+        const val MIN_DRAFT_HEIGHT_DP = 44f
 
         // THE primary discriminator: mic/Send discs are ~44dp in the mockup. The
         // pre-#801 reserve+floor crammed the control row into a ~16dp sliver (the

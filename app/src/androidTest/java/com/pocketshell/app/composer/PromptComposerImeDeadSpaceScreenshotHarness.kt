@@ -92,6 +92,12 @@ class PromptComposerImeDeadSpaceScreenshotHarness {
     @Test
     fun emptyDraftKeyboardUpHold() = stageAndHold(draft = null)
 
+    // Issue #873: the maintainer's EXACT reported state — a SHORT one-word draft
+    // ("gghh") with the keyboard up. Stages it for the keyboard-up screenshot that
+    // must show the compact field with NO ~1cm dead band below the text.
+    @Test
+    fun shortDraftKeyboardUpHold() = stageAndHold(draft = "gghh")
+
     @Test
     fun longDraftKeyboardUpHold() = stageAndHold(
         draft = "Reduce the connector/indent cell width so the tree lines stop " +

@@ -286,8 +286,12 @@ class PromptComposerImeEmptyDraftDeadSpaceProofTest {
         // collapses the gap to the small banner/spacer chrome (well under 80dp).
         const val DEAD_BAND_MAX_DP = 80f
 
-        // The empty field's honoured min height (96dp in PromptComposerSheet),
-        // less a dp of slop.
-        const val MIN_EMPTY_DRAFT_HEIGHT_DP = 90f
+        // The empty field's honoured keyboard-UP min height. Issue #873: the
+        // field now WRAPS to its content (the editor carries `heightIn(min, max)`)
+        // instead of `fillMaxHeight`-inflating, so an empty field sits at its
+        // keyboard-up single-line `minHeight` of 24dp — as compact as its content,
+        // no dead space — rather than the old inflated ~96dp+. 18dp = ~one text
+        // line; below this the editor would be crushed to nothing.
+        const val MIN_EMPTY_DRAFT_HEIGHT_DP = 18f
     }
 }

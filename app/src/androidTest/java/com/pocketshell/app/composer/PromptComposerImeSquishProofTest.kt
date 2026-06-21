@@ -289,9 +289,12 @@ class PromptComposerImeSquishProofTest {
         )
 
         // 3) The draft field must keep a sensible multi-line height — NOT crushed
-        //    to a thin strip. The double-subtract crushed it to ~78dp (the
-        //    maintainer's "single line"); the fix gives it ~192dp.
-        //    [MIN_DRAFT_HEIGHT_DP] sits well between the two.
+        //    to a single line. Issue #873: the field now WRAPS to its content (≈ its
+        //    56dp keyboard-up min for this 3-line draft) instead of
+        //    `fillMaxHeight`-inflating to ~192dp (which is the dead space the
+        //    maintainer circled). The squish this proof guards is now carried by
+        //    the controls-laid-out-below + controls-reachable checks above; here we
+        //    only confirm the field is not crushed below its multi-line min.
         assertTrue(
             "Draft field crushed to a thin strip (squish). " +
                 "draftHeightDp=$draftHeightDp minDp=$MIN_DRAFT_HEIGHT_DP",
@@ -401,10 +404,12 @@ class PromptComposerImeSquishProofTest {
         const val NAV_BAR_DP = 24f
         const val STATUS_BAR_DP = 28f
 
-        // Minimum draft-field height that counts as "not crushed". Measured: the
-        // double-subtract squish crushed it to ~78dp; the #567 fix gives ~192dp.
-        // 130dp sits comfortably between, so it is red-on-base and green-on-fix.
-        const val MIN_DRAFT_HEIGHT_DP = 130f
+        // Minimum draft-field height that counts as "not crushed to one line".
+        // Issue #873: the field now wraps to its 3-line content (~49dp) instead of
+        // `fillMaxHeight`-inflating to ~192dp (the dead space). 44dp (above the
+        // ~36dp single-line crush, below the 3-line content) excludes the squish
+        // while accepting the new compact field.
+        const val MIN_DRAFT_HEIGHT_DP = 44f
 
         // Density-scaled slop so a sub-dp rounding wobble never flips a boundary.
         const val SLOP_DP = 4f

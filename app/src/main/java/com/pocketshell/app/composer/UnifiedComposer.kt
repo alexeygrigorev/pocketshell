@@ -113,7 +113,21 @@ private fun DraftFieldBox(
         decorationBox: @Composable (@Composable () -> Unit) -> Unit,
     ) -> Unit,
 ) {
-    val sizeModifier = if (maxHeight != null) {
+    // Issue #873: the height bound (`heightIn(min, max)`) lives on the EDITOR, not
+    // on the surrounding box, so the box WRAPS to the editor's content. Previously
+    // the box carried `heightIn(min, max)` and the editor `fillMaxHeight()`'d it —
+    // which made the editor greedily fill whatever height the parent offered. With
+    // the composer's keyboard-up `weight(1f)` scroll region that meant a one-line
+    // draft box inflated toward its 220dp max (≈155dp on a resized sheet), centring
+    // the text in a sea of empty space: the ~1cm dead band the maintainer circled.
+    //
+    // Binding the EDITOR to `heightIn(min, max)` instead makes a short draft wrap
+    // to ~its `min` (compact, no dead space) while a multi-line `BasicTextField`
+    // still self-scrolls to the caret once the content exceeds `max` (the #765
+    // caret-follow invariant — a bounded BasicTextField owns its own scroll). The
+    // box then wraps to the editor + padding, so the parent `weight(1f, fill =
+    // false)` genuinely wraps to content with no reserved void.
+    val editorSizeModifier = if (maxHeight != null) {
         Modifier.heightIn(min = minHeight, max = maxHeight)
     } else {
         Modifier.heightIn(min = minHeight)
@@ -126,7 +140,6 @@ private fun DraftFieldBox(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .then(sizeModifier)
             .background(
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 shape = draftShape,
@@ -137,7 +150,12 @@ private fun DraftFieldBox(
                 shape = draftShape,
             )
             .padding(horizontal = PocketShellSpacing.lg, vertical = 14.dp),
-        contentAlignment = Alignment.CenterStart,
+        // Issue #873: top-align the editor within the box. The editor carries the
+        // `min` height, so for a one-line draft the box is exactly the editor's
+        // min — there is no extra box height to centre the text in, and as the
+        // user types the caret grows downward from the top (never floating in the
+        // middle of an over-tall box).
+        contentAlignment = Alignment.TopStart,
     ) {
         var fieldModifier = Modifier.fillMaxWidth()
         if (focusRequester != null) {
@@ -146,19 +164,21 @@ private fun DraftFieldBox(
         if (fieldTag != null) {
             fieldModifier = fieldModifier.testTag(fieldTag)
         }
-        // Issue #765: do NOT wrap the editor in an external `Modifier.
+        // Issue #765/#873: do NOT wrap the editor in an external `Modifier.
         // verticalScroll(...)`. A multi-line `BasicTextField` scrolls ITSELF to
         // keep the caret in view when it is given a bounded height and owns its
         // own scroll. An external `verticalScroll` modifier OVERRIDES that
-        // built-in caret-follow, so on a long draft with the keyboard up the
-        // editor stayed pinned at the top and the line being typed scrolled out
-        // of view ("it starts cutting, I don't see anything"). Instead we let the
-        // editor `fillMaxHeight()` of the height-bounded [DraftFieldBox] so the
-        // framework scrolls it to the caret natively.
+        // built-in caret-follow ("it starts cutting, I don't see anything").
+        // Instead the editor carries the `heightIn(min, max)` bound directly
+        // (#873) — it wraps to content for a short draft (no dead space) and
+        // self-scrolls to the caret natively once a long draft exceeds `max`.
         val editableModifier = if (singleLine) {
-            fieldModifier
+            // A single-line field keeps only the `min` floor so the box never
+            // collapses below it; it has no `max` because it cannot grow taller
+            // than one line anyway.
+            fieldModifier.heightIn(min = minHeight)
         } else {
-            fieldModifier.fillMaxHeight()
+            fieldModifier.then(editorSizeModifier)
         }
         val textStyle = TextStyle(
             color = MaterialTheme.colorScheme.onSurface,

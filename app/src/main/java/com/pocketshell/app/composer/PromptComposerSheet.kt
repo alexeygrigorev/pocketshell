@@ -866,7 +866,16 @@ internal fun SheetContent(
                     // `heightIn(max = …)` keeps the sheet compact at partial-expand
                     // (#234); when it is UP the outer
                     // `heightIn(max = availableAboveKeyboard)` is the only ceiling,
-                    // so the field fills the genuine room above the keyboard.
+                    // so the field is bounded to the genuine room above the keyboard.
+                    //
+                    // Issue #873: `fill = false` keeps the column wrap-content, but
+                    // it only ACTUALLY wraps once the draft field stops greedily
+                    // filling its weighted share. That is handled in
+                    // [ComposerDraftField]: keyboard-up the field's `heightIn(min,
+                    // max)` is on the EDITOR (so a one-line draft wraps to ~one line
+                    // and self-scrolls past `max` on a long draft) rather than a
+                    // `fillMaxHeight` box that inflated a short draft to ~155dp — the
+                    // ~1cm dead band the maintainer circled.
                     .weight(1f, fill = false)
                     .then(
                         if (keyboardUp) {
@@ -922,15 +931,26 @@ internal fun SheetContent(
                         },
                         placeholder = COMPOSER_PLACEHOLDER,
                         fieldTag = COMPOSER_DRAFT_TAG,
-                        // Issue #801: keyboard-UP the field shares only ~175dp with
-                        // the control row, so its `minHeight` must be small enough
-                        // that the weighted scroll region never demands more than the
-                        // room above the keyboard (which would re-introduce the
-                        // crush). 56dp ≈ 2 lines is the floor; the `weight(1f)`
-                        // region then grows it to fill the actual leftover (~3 lines
-                        // on a Pixel), and the field self-scrolls past that on a long
-                        // draft. Keyboard-DOWN it keeps the roomy 96dp min.
-                        minHeight = if (keyboardUp) 56.dp else 96.dp,
+                        // Issue #873: keyboard-UP the field WRAPS to its text content
+                        // (the `heightIn(min, max)` bound lives on the EDITOR in
+                        // [ComposerDraftField], not on a `fillMaxHeight` box), so a
+                        // SHORT draft is as compact as its content — one line of text
+                        // sits in a ~one-line-tall field, NOT centred in a tall box
+                        // with ~1cm of empty space below it (the dead band the
+                        // maintainer circled). `minHeight = 44.dp` keyboard-up is a
+                        // single comfortable line so the field never reserves a
+                        // multi-line void for a one-line draft; as the user types it
+                        // grows line-by-line up to `maxHeight = 220.dp`, then the
+                        // `BasicTextField` self-scrolls to the caret within that cap
+                        // (the #765 long-draft invariant). Keyboard-DOWN it keeps the
+                        // roomy 96dp min and fills its box (unchanged).
+                        //
+                        // `minHeight = 24.dp` keyboard-up is a single text line; with
+                        // the box's 14dp top + 14dp bottom padding the empty/one-line
+                        // field is ~one line tall — as compact as its content, with
+                        // no reserved multi-line void. The box stays a comfortable
+                        // tap target via that padding.
+                        minHeight = if (keyboardUp) 24.dp else 96.dp,
                         maxHeight = 220.dp,
                         focusRequester = draftFocusRequester,
                     )

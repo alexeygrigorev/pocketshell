@@ -961,20 +961,66 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #866 multi-chunk seed attach ANR proof (core-terminal androidTest).
+# Attaching a Codex (alt-screen) pane whose capture-pane seed is SEVERAL 64 KB
+# chunks must NOT pin the main thread on "Attaching…" → ANR. Pre-#866 the
+# on-main seed drain only honored the time budget for the FINAL chunk, so every
+# earlier chunk's VT parse ran inline and pinned the looper for seconds. The
+# proof attaches via the real production path (awaitSeed), feeds a multi-chunk
+# alt-screen snapshot on the main thread, and asserts the synchronous on-main
+# feed is bounded (the budget + tail pump) while the whole seed still paints.
+# Uses NO Docker fixture (in-process Compose UI test). The JVM sibling
+# SshTerminalBridgeTest#onMainMultiChunkSeedRespectsTimeBudgetAcrossWholeFeed...
+# proves the same property deterministically in the per-push Unit job.
+CORE_TERMINAL_MULTICHUNK_SEED_CLASS="com.pocketshell.core.terminal.ui.CodexMultiChunkSeedAttachMainThreadProofTest"
+MULTICHUNK_SEED_STATUS="PASS"
+
+run_core_terminal_multichunk_seed() {
+  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_MULTICHUNK_SEED_CLASS" \
+    --stacktrace
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  MULTICHUNK_SEED_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #866 multi-chunk seed attach proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #866 MULTI-CHUNK SEED ATTACH PROOF: $CORE_TERMINAL_MULTICHUNK_SEED_CLASS (attempt 1)"
+  echo "=========================================================="
+  multichunk_seed_start=$SECONDS
+  if run_core_terminal_multichunk_seed; then
+    echo "MULTICHUNK_SEED_PASS: passed on attempt 1 (elapsed $((SECONDS - multichunk_seed_start))s)"
+  else
+    echo ">>> MULTI-CHUNK SEED ATTACH PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_multichunk_seed; then
+      echo "MULTICHUNK_SEED_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "MULTICHUNK_SEED_FAILED: #866 proof failed twice"
+      MULTICHUNK_SEED_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
 # append-burst proof failed, OR the #796 output-burst-IME proof failed, OR the
-# suite-level budget was exhausted by a #470 stall (issue #835). A budget
-# timeout is NOT green — it still turns the job red — but it is labelled
-# distinctly below so the classifier reports "journey timeout / #470 stall"
-# instead of "EMULATOR INFRA UNAVAILABLE".
+# #866 multi-chunk seed attach proof failed, OR the suite-level budget was
+# exhausted by a #470 stall (issue #835). A budget timeout is NOT green — it
+# still turns the job red — but it is labelled distinctly below so the
+# classifier reports "journey timeout / #470 stall" instead of "EMULATOR INFRA
+# UNAVAILABLE".
 if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
-      && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" ]]; then
+      && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
+      && "$MULTICHUNK_SEED_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
-        && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" ]]; then
+        && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
+        && "$MULTICHUNK_SEED_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -1011,6 +1057,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #796 output-burst-IME ANR proof (\`shared:core-terminal\`): **$OUTPUT_BURST_IME_STATUS**"
   echo "- \`$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS\`"
+  echo
+  echo "Core-terminal #866 multi-chunk seed attach ANR proof (\`shared:core-terminal\`): **$MULTICHUNK_SEED_STATUS**"
+  echo "- \`$CORE_TERMINAL_MULTICHUNK_SEED_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -1052,7 +1101,8 @@ echo "=========================================================="
   # empty — so we MUST still write the header (with the append-burst class)
   # here, otherwise an append-burst-only regression falls through to the grep's
   # else-branch and is mislabeled as an infra abort, burying the real cause.
-  if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" ]]; then
+  if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" \
+        || "$MULTICHUNK_SEED_STATUS" == "FAIL" ]]; then
     echo
     echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
     for c in "${FAILED_CLASSES[@]}"; do
@@ -1063,6 +1113,9 @@ echo "=========================================================="
     fi
     if [[ "$OUTPUT_BURST_IME_STATUS" == "FAIL" ]]; then
       echo "- \`$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS\` (#796 output-burst-IME ANR proof)"
+    fi
+    if [[ "$MULTICHUNK_SEED_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_MULTICHUNK_SEED_CLASS\` (#866 multi-chunk seed attach ANR proof)"
     fi
   fi
 } > "$SUMMARY"

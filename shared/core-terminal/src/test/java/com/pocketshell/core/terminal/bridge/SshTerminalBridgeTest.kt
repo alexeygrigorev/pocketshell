@@ -175,6 +175,193 @@ class SshTerminalBridgeTest {
     }
 
     /**
+     * Issue #866 (HIGH-severity ANR): a MULTI-CHUNK on-main seed — the Codex
+     * alt-screen `capture-pane -e` snapshot over 200+ scrollback rows is several
+     * 64 KB chunks — must respect the [SshTerminalBridge.SEED_DRAIN_MAX_MILLIS]
+     * budget ACROSS THE WHOLE FEED, not just on the final chunk.
+     *
+     * This is the exact class-coverage gap that let #829 ship: the existing budget
+     * test ([onMainSeedDrainStopsAtTimeBudgetAndHandsRemainderToScheduler]) uses a
+     * SINGLE-chunk fixture, so it only ever exercised the final/only chunk — the
+     * one chunk the pre-#866 code budgeted. Every NON-final chunk drained FULLY
+     * inline (unbudgeted), pinning the main thread for seconds on a multi-chunk
+     * seed → the "Attaching…" ANR.
+     *
+     * Red→green: on the pre-#866 code the first chunk (not the last) is dispatched
+     * with `allowHandoff = false`, so the time budget is IGNORED and ALL of that
+     * chunk's slices — plus every later chunk's slices — drain inline before the
+     * call returns. The inline `directDrains` count therefore equals the TOTAL
+     * slice count (far over the budget). With the #866 fix the inline drain STOPS
+     * at the budget on the FIRST chunk and the untouched tail is handed to the
+     * frame-yielding pump, so the inline count is bounded near the budget. The full
+     * payload must still render with no swallowed bytes and no deadlock.
+     */
+    @Test(timeout = 10_000)
+    fun onMainMultiChunkSeedRespectsTimeBudgetAcrossWholeFeedAndHandsTailToPump() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val trace = RecordingTraceSink()
+        val clock = AtomicLong(0L)
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = MULTI_CHUNK_SEED_LINES + 100,
+            traceSink = trace,
+            nowMillis = { clock.getAndAdd(SEED_CLOCK_STEP_MS) },
+        )
+        // A dense-SGR (alt-screen-shaped) seed spanning SEVERAL 64 KB queue chunks —
+        // the #866 ANR shape (>1 chunk), distinct from the #829 single-chunk fixture.
+        val payload = multiChunkDenseSgrSeedPayload()
+        val totalChunks = expectedChunks(payload.bytes.size)
+        val totalSlices = expectedDrainSlices(payload.bytes.size)
+        assertTrue(
+            "fixture must span MULTIPLE process-to-terminal queue chunks (the #866 ANR shape)",
+            totalChunks >= 3,
+        )
+        assertTrue(
+            "fixture must span far more drain slices than the budget allows inline",
+            totalSlices > EXPECTED_INLINE_SLICES * 4,
+        )
+
+        bridge.feedBytes(payload.bytes)
+
+        // Load-bearing #866 assertion: the inline (synchronous, pre-looper-advance)
+        // main-thread drain must STOP at the time budget on the FIRST chunk — NOT
+        // run every chunk's slices inline (the pre-#866 ANR). The budget trips after
+        // ceil(SEED_DRAIN_MAX_MILLIS / SEED_CLOCK_STEP_MS) slices.
+        val inlineSlices = trace.directDrains.size
+        val expectedInline =
+            ((SshTerminalBridge.SEED_DRAIN_MAX_MILLIS + SEED_CLOCK_STEP_MS - 1) / SEED_CLOCK_STEP_MS).toInt()
+        assertEquals(
+            "multi-chunk seed must stop inline draining at the WHOLE-FEED time budget " +
+                "(pre-#866 drained all $totalSlices slices inline); trace=$trace",
+            expectedInline,
+            inlineSlices,
+        )
+        assertTrue(
+            "the bounded inline drain must leave the bulk of the seed for the pump; trace=$trace",
+            inlineSlices < totalSlices,
+        )
+
+        // The handed-off tail (later chunks + queued remainder) drains via the
+        // frame-yielding pump once the looper advances — the FULL payload must render
+        // with no lost bytes and no deadlock (the test's 10s timeout guards the
+        // would-be full-queue deadlock if the tail were written inline).
+        drainMainLooperUntil { trace.outputDrainSnapshot().sum() >= payload.bytes.size }
+        assertEquals(payload.bytes.size, trace.outputDrainSnapshot().sum())
+        assertEquals(payload.transcriptText, bridge.emulator.screen.transcriptText)
+    }
+
+    /**
+     * Issue #866 boundary: a seed that is EXACTLY two queue chunks. Pre-#866 the
+     * first (non-final) chunk drained fully inline; the fix bounds it. Confirms the
+     * budget+pump handoff also covers the smallest multi-chunk case (not just the
+     * many-chunk one), and the whole payload still renders losslessly.
+     */
+    @Test(timeout = 10_000)
+    fun onMainTwoChunkSeedBoundsInlineDrainAndPumpsTheTail() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val trace = RecordingTraceSink()
+        val clock = AtomicLong(0L)
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 4_000,
+            traceSink = trace,
+            nowMillis = { clock.getAndAdd(SEED_CLOCK_STEP_MS) },
+        )
+        val payload = twoChunkSeedPayload()
+        assertEquals(
+            "boundary fixture must be exactly two queue chunks",
+            2,
+            expectedChunks(payload.bytes.size),
+        )
+        val totalSlices = expectedDrainSlices(payload.bytes.size)
+
+        bridge.feedBytes(payload.bytes)
+
+        // Pre-#866, the FIRST (non-final) chunk drained fully inline (~32 slices for
+        // a 64 KB chunk at 2 KB/slice) before the final chunk handed off at the
+        // budget, so inline >> the budget. The fix bounds the inline drain to the
+        // whole-feed budget (~6 slices) on the very first chunk. Assert the inline
+        // count stays near the budget — NOT the whole first chunk's slice count.
+        val inlineSlices = trace.directDrains.size
+        assertTrue(
+            "two-chunk seed must bound the inline drain to the whole-feed budget " +
+                "(pre-#866 ran the whole first chunk inline); inline=$inlineSlices " +
+                "total=$totalSlices; trace=$trace",
+            inlineSlices <= EXPECTED_INLINE_SLICES * 2,
+        )
+
+        drainMainLooperUntil { trace.outputDrainSnapshot().sum() >= payload.bytes.size }
+        assertEquals(payload.bytes.size, trace.outputDrainSnapshot().sum())
+        assertEquals(payload.transcriptText, bridge.emulator.screen.transcriptText)
+    }
+
+    /**
+     * Issue #866 + #468 ordering: when a large MULTI-CHUNK seed is handed to the
+     * pump, the gate's buffered live `%output` must still flush STRICTLY AFTER the
+     * whole seed tail (seed-before-live), and live bytes that arrive WHILE the pump
+     * is still draining must not race ahead. Drives the real attach shape:
+     * closeSeedGate -> buffer live -> seedThenOpenGate(bigSeed) -> drain. The final
+     * grid must be seed-then-live in order, with no swallowed bytes.
+     */
+    @Test(timeout = 10_000)
+    fun multiChunkSeedHandoffStillFlushesBufferedLiveStrictlyAfterTheSeed() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val clock = AtomicLong(0L)
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = MULTI_CHUNK_SEED_LINES + 100,
+            nowMillis = { clock.getAndAdd(SEED_CLOCK_STEP_MS) },
+        )
+        bridge.closeSeedGate()
+
+        // Live %output buffered behind the gate while the capture-pane round-trip is
+        // in flight — these MUST land after the seed, in order.
+        bridge.feedBytes("live-after-seed-1\r\n".toByteArray(Charsets.US_ASCII))
+        bridge.feedBytes("live-after-seed-2".toByteArray(Charsets.US_ASCII))
+
+        // The big multi-chunk seed lands and is handed to the pump. End the seed
+        // with a CRLF so the buffered live output starts on a fresh row (the seed's
+        // last cursor position is otherwise mid-row, an artifact of the fixture, not
+        // of the ordering under test).
+        val seed = multiChunkDenseSgrSeedPayload()
+        val seedBytes = seed.bytes + "\r\n".toByteArray(Charsets.US_ASCII)
+        bridge.seedThenOpenGate(seedBytes)
+
+        // Drain the pump + scheduler until the deferred buffered-live flush has run
+        // (the second live line is the last byte fed through the whole pipeline).
+        drainMainLooperUntil {
+            bridge.emulator.screen.transcriptText.contains("live-after-seed-2")
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val transcript = bridge.emulator.screen.transcriptText
+        val nonEmpty = transcript.lineSequence().map { it.trimEnd() }.filter { it.isNotEmpty() }.toList()
+        // Seed renders first; the two buffered live lines are the LAST visible lines,
+        // in arrival order — never interleaved into the middle of the seed tail.
+        val tail = nonEmpty.takeLast(2)
+        assertEquals(
+            "buffered live output must flush strictly after the whole multi-chunk seed tail",
+            listOf("live-after-seed-1", "live-after-seed-2"),
+            tail,
+        )
+        // And the seed's own content is all present before the live tail (no
+        // swallowed seed bytes, no live byte interleaved into the seed body).
+        assertTrue(
+            "the seed body must be present before the live tail",
+            nonEmpty.size > 2 && nonEmpty.first().isNotEmpty(),
+        )
+        val firstLiveIndex = nonEmpty.indexOf("live-after-seed-1")
+        assertEquals(
+            "live output must be the contiguous final block (strictly after the seed)",
+            nonEmpty.size - 2,
+            firstLiveIndex,
+        )
+    }
+
+    /**
      * Issue #829 control: the COMMON small seed must still drain fully inline (the
      * budget only bounds the pathological case). With a stable clock the budget
      * never trips, so the whole seed paints synchronously before the call returns
@@ -626,6 +813,62 @@ class SshTerminalBridgeTest {
         return Payload(payload, payloadText)
     }
 
+    /**
+     * Issue #866: a dense-SGR (alt-screen-shaped) seed spanning SEVERAL 64 KB
+     * process-to-terminal queue chunks — the multi-chunk Codex `capture-pane -e`
+     * snapshot shape that triggered the "Attaching…" ANR. Each line carries
+     * per-cell SGR colour escapes (like a TUI redraw) so the parse is work-dense,
+     * not just append-cheap.
+     */
+    private fun multiChunkDenseSgrSeedPayload(): Payload {
+        val payloadLines = List(MULTI_CHUNK_SEED_LINES) { line ->
+            denseSgrLine(line)
+        }
+        // transcriptText strips the SGR escapes; the visible glyphs are what render.
+        val payloadText = payloadLines.joinToString(separator = "\n") { stripSgr(it) }
+        val payloadWireText = payloadLines.joinToString(separator = "\r\n")
+        val payload = payloadWireText.toByteArray(Charsets.US_ASCII)
+        assertTrue(
+            "multi-chunk seed fixture must exceed several process-to-terminal queue chunks",
+            payload.size > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES * 2,
+        )
+        return Payload(payload, payloadText)
+    }
+
+    /**
+     * Issue #866 boundary fixture: a seed sized to exactly TWO queue chunks, so the
+     * first chunk is non-final (the case the pre-#866 code drained fully inline).
+     */
+    private fun twoChunkSeedPayload(): Payload {
+        // Target ~1.5 queues of payload so it splits into exactly two chunks.
+        val targetBytes = SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES + (32 * 1024)
+        val lines = mutableListOf<String>()
+        var bytes = 0
+        var line = 0
+        while (bytes < targetBytes) {
+            val text = "two-chunk-%05d ".format(line) +
+                ('a'.code + (line % 26)).toChar().toString().repeat(LINE_LENGTH - 16)
+            lines += text
+            bytes += text.toByteArray(Charsets.US_ASCII).size + 2 // + CRLF
+            line += 1
+        }
+        val payloadText = lines.joinToString(separator = "\n")
+        val payloadWireText = lines.joinToString(separator = "\r\n")
+        return Payload(payloadWireText.toByteArray(Charsets.US_ASCII), payloadText)
+    }
+
+    private fun denseSgrLine(line: Int): String = buildString {
+        val glyphCount = LINE_LENGTH - 1
+        for (col in 0 until glyphCount) {
+            val color = 31 + ((line + col) % 7) // SGR 31..37 (foreground colours)
+            append("[").append(color).append('m')
+            append(('a'.code + ((line + col) % 26)).toChar())
+        }
+        append("[0m")
+    }
+
+    private fun stripSgr(s: String): String = SGR_REGEX.replace(s, "")
+
     private fun rawSshStyleBurstPayload(): Payload {
         val payloadLines = List(RAW_BURST_LINES) { line ->
             "ssh-burst-%04d ".format(line) +
@@ -786,5 +1029,15 @@ class SshTerminalBridgeTest {
         // the budget trips after ceil(24/4)=6 inline slices.
         private const val SEED_CLOCK_STEP_MS = 4L
         private const val EXPECTED_INLINE_SLICES = 6
+
+        // Issue #866: multi-chunk on-main seed fixture. Each dense-SGR line is far
+        // wider than its glyph count (per-cell colour escapes), so ~1200 lines span
+        // SEVERAL 64 KB queue chunks — the multi-chunk Codex alt-screen seed that
+        // pinned the main thread (every non-final chunk drained inline pre-#866).
+        private const val MULTI_CHUNK_SEED_LINES = 1_200
+
+        // Strips SGR (CSI ... m) escapes so the expected transcript matches the
+        // glyphs Termux renders (it consumes the colour escapes, not the screen).
+        private val SGR_REGEX = Regex("\\[[0-9;]*m")
     }
 }

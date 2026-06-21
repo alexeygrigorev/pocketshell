@@ -162,6 +162,45 @@ public class SshTerminalBridge(
 
     private val gatedLiveBuffer = java.io.ByteArrayOutputStream()
 
+    /**
+     * Issue #866: deadlock- and ordering-safe handoff of a large MULTI-CHUNK
+     * on-main seed feed to the frame-budgeted [drainScheduler].
+     *
+     * Before #866, the on-main seed drain ([dispatchMainLooperDrains]) only
+     * honored the [SEED_DRAIN_MAX_MILLIS] time budget for the FINAL chunk of a
+     * feed — every earlier chunk drained FULLY inline (unbudgeted) so the next
+     * chunk's queue write would not block on a full queue. A Codex alt-screen
+     * `capture-pane` snapshot captured with `-e` (full SGR) over 200+ scrollback
+     * rows is several 64 KB chunks, so the first N-1 chunks each ran an unbounded
+     * VT parse on the main thread → the looper pinned for seconds → the
+     * "Attaching…" ANR the maintainer hit.
+     *
+     * The fix makes the on-main seed budget bound the WHOLE feed, not just the
+     * last chunk. Once the feed-scoped budget trips on ANY chunk, the bridge
+     * stops draining AND stops writing further chunks inline, and hands the
+     * UNTOUCHED remaining tail to [seedTailPump] — a looper-resident pump that
+     * writes the tail one queue-sized chunk at a time (only as much as currently
+     * fits, so a write never blocks the looper), drains within budget, and yields
+     * a frame between turns so input dispatch / the frame-coalesced repaint run
+     * between parse turns. The pump is FIFO ([seedTailSegments]) so the gate's
+     * buffered-live flush and the deferred gate-open ([seedTailGateOpenPending])
+     * are sequenced strictly AFTER the seed tail — preserving the #468
+     * seed-before-live ordering across the handoff.
+     *
+     * All of this state is touched only under [feedLock] (the pump's writes and
+     * drains run on the main looper; the producers append under the same lock),
+     * so a single producer + the pump never interleave a partial chunk.
+     */
+    private val seedTailSegments = ArrayDeque<SeedTailSegment>()
+
+    @Volatile
+    private var seedTailPumpScheduled: Boolean = false
+
+    // When a seed tail is in flight, [seedThenOpenGate]/[openGateFlushingPending]
+    // defer the actual `gated = false` open until the pump fully drains, so
+    // future live `%output` cannot reach the queue before the seed tail is done.
+    private var seedTailGateOpenPending: Boolean = false
+
     @Volatile
     private var remoteStdin: OutputStream? = null
 
@@ -266,73 +305,57 @@ public class SshTerminalBridge(
     }
 
     private fun feedBytesUntraced(data: ByteArray, offset: Int, count: Int) {
-        val handler = SessionReflection.getMainThreadHandler(session)
-        val isHandlerLooper = Looper.myLooper() == handler.looper
-        val seedDrainStartedAtMillis = nowMillis()
-        // #829: when the FINAL chunk's on-main seed drain exceeds the time budget we
-        // hand its already-queued tail to the frame-budgeted scheduler so the rest
-        // paints across frames instead of pinning the main thread inline. Only the
-        // final chunk may hand off (deadlock-safety, see dispatchMainLooperDrains).
-        var seedDrainHandedOff = false
-        synchronized(feedLock) {
-            var remaining = count
-            var chunkOffset = offset
-            while (remaining > 0) {
-                val chunkLength = minOf(remaining, PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES)
-                val written = SessionReflection.writeProcessToTerminalQueue(
-                    session = session,
-                    data = data,
-                    offset = chunkOffset,
-                    length = chunkLength,
-                )
-                if (!written) return
-                val isLastChunk = remaining - chunkLength <= 0
-                if (isHandlerLooper && !seedDrainHandedOff) {
-                    // On-main seed/reattach feed: drain it synchronously so the
-                    // `capture-pane` snapshot paints before live `%output` flows.
-                    // Time-bounded (#829): on the final chunk, if this on-main drain
-                    // exceeds SEED_DRAIN_MAX_MILLIS it stops and hands the rest to the
-                    // frame-budgeted scheduler rather than running unbounded. Earlier
-                    // chunks must drain fully (allowHandoff=false) so the next write
-                    // doesn't block on a full queue (see dispatchMainLooperDrains).
-                    val budgetExhausted = dispatchMainLooperDrains(
-                        handler = handler,
-                        queuedBytes = chunkLength,
-                        startedAtMillis = seedDrainStartedAtMillis,
-                        allowHandoff = isLastChunk,
-                    )
-                    if (budgetExhausted) {
-                        seedDrainHandedOff = true
-                        drainScheduler.requestDrain()
-                    }
-                } else if (isHandlerLooper) {
-                    // Budget already exhausted earlier in this feed: queue + yield.
-                    drainScheduler.requestDrain()
-                } else {
-                    // Off-main live `%output`: hand continuation to the #803
-                    // frame-budgeted scheduler. requestDrain() is idempotent across
-                    // a burst — many chunks collapse into AT MOST one pending
-                    // main-looper drain turn, which parses one per-frame budget and
-                    // yields, so a dense colored diff can't pin the main thread.
-                    drainScheduler.requestDrain()
-                }
-                chunkOffset += chunkLength
-                remaining -= chunkLength
-            }
-        }
+        feedChunks(data = data, offset = offset, count = count, traceState = null)
     }
 
     private fun feedBytesTraced(data: ByteArray, offset: Int, count: Int, traceState: TraceState) {
+        traceState.traceSink.onFeedStarted(count)
+        feedChunks(data = data, offset = offset, count = count, traceState = traceState)
+    }
+
+    /**
+     * The single chunk-feed loop shared by the traced and untraced paths.
+     *
+     * Off the main looper (live `%output`): write each 64 KB chunk and hand the
+     * drain to the frame-budgeted [drainScheduler] (the #803 path; the producer
+     * thread blocks on a full queue and the scheduler drains it from the looper).
+     *
+     * On the main looper (the `capture-pane` seed / reattach feed): drain inline
+     * so the snapshot paints before live bytes — but bounded by
+     * [SEED_DRAIN_MAX_MILLIS] across the WHOLE feed (#866). The moment that
+     * feed-scoped budget trips on ANY chunk, stop draining AND stop writing
+     * further chunks inline; hand the untouched remaining tail to [seedTailPump]
+     * (FIFO, frame-yielding) instead of running unbounded VT parses on the main
+     * thread (the #866 "Attaching…" ANR on a multi-chunk Codex alt-screen seed).
+     */
+    private fun feedChunks(data: ByteArray, offset: Int, count: Int, traceState: TraceState?) {
         val handler = SessionReflection.getMainThreadHandler(session)
         val isHandlerLooper = Looper.myLooper() == handler.looper
-        val traceSink = traceState.traceSink
-        val pendingDrainMessages = traceState.pendingDrainMessages
         val feedStartedAtNanos = System.nanoTime()
         val seedDrainStartedAtMillis = nowMillis()
-        var seedDrainHandedOff = false
         var chunks = 0
-        traceSink.onFeedStarted(count)
         synchronized(feedLock) {
+            // Re-entrant on-looper feed while a seed tail is already being pumped:
+            // append to the FIFO so ordering (seed tail -> this feed) is preserved,
+            // and let the pump drain it. Never write straight to the queue here —
+            // that would race the pump's writes and reorder bytes.
+            if (isHandlerLooper && seedTailPumpScheduled) {
+                enqueueSeedTailSegmentLocked(
+                    SeedTailSegment(
+                        data = data,
+                        offset = offset,
+                        remaining = count,
+                        traceState = traceState,
+                    ),
+                )
+                traceState?.traceSink?.onFeedCompleted(
+                    bytes = count,
+                    chunks = 0,
+                    durationNanos = System.nanoTime() - feedStartedAtNanos,
+                )
+                return
+            }
+
             var remaining = count
             var chunkOffset = offset
             while (remaining > 0) {
@@ -344,61 +367,208 @@ public class SshTerminalBridge(
                     offset = chunkOffset,
                     length = chunkLength,
                 )
-                val writeNanos = System.nanoTime() - writeStartedAtNanos
                 if (!written) return
                 chunks += 1
-                traceSink.onProcessQueueWrite(
-                    bytes = chunkLength,
-                    durationNanos = writeNanos,
-                    waitedForDrain = writeNanos >= TRACE_WAIT_THRESHOLD_NANOS,
-                )
-                val pending = PendingDrainMessage(
-                    bytes = chunkLength,
-                    scheduledAtNanos = System.nanoTime(),
-                )
-                pendingDrainMessages.add(pending)
-                traceSink.onDrainMessageScheduled(
-                    bytes = chunkLength,
-                    pendingMessages = pendingDrainMessages.size,
-                    directDispatch = isHandlerLooper,
-                )
-                val isLastChunk = remaining - chunkLength <= 0
-                if (isHandlerLooper && !seedDrainHandedOff) {
-                    // On-main seed drain, time-bounded (#829): on the final chunk it
-                    // stops and hands the remainder to the frame-budgeted scheduler
-                    // past the budget. Earlier chunks drain fully (allowHandoff=false)
-                    // so the next write doesn't block on a full queue.
-                    val budgetExhausted = dispatchMainLooperDrains(
-                        handler = handler,
-                        queuedBytes = chunkLength,
-                        startedAtMillis = seedDrainStartedAtMillis,
-                        allowHandoff = isLastChunk,
-                    ) { bytes, durationNanos ->
-                        traceSink.onDirectDrainDispatched(bytes = bytes, durationNanos = durationNanos)
-                    }
-                    if (budgetExhausted) {
-                        seedDrainHandedOff = true
-                        drainScheduler.requestDrain()
-                    }
-                } else if (isHandlerLooper) {
-                    // Budget already exhausted earlier in this feed: queue + yield.
-                    drainScheduler.requestDrain()
-                } else {
-                    // Off-main live `%output`: #803 frame-budgeted scheduler owns
-                    // continuation (see [feedBytesUntraced]). The per-slice trace
-                    // callbacks (onProcessOutputDrained / onScreenUpdated) still
-                    // fire from each scheduler-driven slice drain.
-                    drainScheduler.requestDrain()
-                }
+                traceState?.let { recordChunkWrite(it, chunkLength, System.nanoTime() - writeStartedAtNanos, isHandlerLooper) }
                 chunkOffset += chunkLength
                 remaining -= chunkLength
+
+                if (!isHandlerLooper) {
+                    // Off-main live `%output`: the #803 frame-budgeted scheduler owns
+                    // continuation. requestDrain() is idempotent across a burst — many
+                    // chunks collapse into AT MOST one pending main-looper drain turn.
+                    drainScheduler.requestDrain()
+                    continue
+                }
+
+                // On-main seed/reattach feed: drain inline (snapshot before live),
+                // bounded across the WHOLE feed by SEED_DRAIN_MAX_MILLIS (#866).
+                val budgetExhausted = dispatchMainLooperDrains(
+                    handler = handler,
+                    queuedBytes = chunkLength,
+                    startedAtMillis = seedDrainStartedAtMillis,
+                    traceState = traceState,
+                )
+                if (budgetExhausted) {
+                    // #866: the feed-scoped budget tripped. The just-written chunk's
+                    // unparsed tail is already FIFO-queued; the frame-budgeted
+                    // [drainScheduler] paints it across frames either way.
+                    drainScheduler.requestDrain()
+                    if (remaining > 0) {
+                        // There are UNTOUCHED later chunks (a multi-chunk seed, the
+                        // #866 ANR shape). We must NOT write the next chunk inline: it
+                        // would block on a full queue while no async drainer can run
+                        // under this synchronous feed. Hand them to the looper-resident,
+                        // frame-yielding seed tail pump (FIFO, writes only what fits).
+                        enqueueSeedTailSegmentLocked(
+                            SeedTailSegment(
+                                data = data,
+                                offset = chunkOffset,
+                                remaining = remaining,
+                                traceState = traceState,
+                            ),
+                        )
+                        scheduleSeedTailPumpLocked()
+                    }
+                    // remaining == 0: single/final chunk — the queued tail drains via
+                    // the scheduler alone (the #829 path); no pump needed.
+                    traceState?.traceSink?.onFeedCompleted(
+                        bytes = count,
+                        chunks = chunks,
+                        durationNanos = System.nanoTime() - feedStartedAtNanos,
+                    )
+                    return
+                }
             }
         }
-        traceSink.onFeedCompleted(
+        traceState?.traceSink?.onFeedCompleted(
             bytes = count,
             chunks = chunks,
             durationNanos = System.nanoTime() - feedStartedAtNanos,
         )
+    }
+
+    private fun recordChunkWrite(
+        traceState: TraceState,
+        chunkLength: Int,
+        writeNanos: Long,
+        isHandlerLooper: Boolean,
+    ) {
+        traceState.traceSink.onProcessQueueWrite(
+            bytes = chunkLength,
+            durationNanos = writeNanos,
+            waitedForDrain = writeNanos >= TRACE_WAIT_THRESHOLD_NANOS,
+        )
+        val pending = PendingDrainMessage(
+            bytes = chunkLength,
+            scheduledAtNanos = System.nanoTime(),
+        )
+        traceState.pendingDrainMessages.add(pending)
+        traceState.traceSink.onDrainMessageScheduled(
+            bytes = chunkLength,
+            pendingMessages = traceState.pendingDrainMessages.size,
+            directDispatch = isHandlerLooper,
+        )
+    }
+
+    // ----------------------------------------------------------------------
+    // Issue #866: seed tail pump. Caller holds [feedLock] for the *Locked methods.
+    // ----------------------------------------------------------------------
+
+    private fun enqueueSeedTailSegmentLocked(segment: SeedTailSegment) {
+        seedTailSegments.addLast(segment)
+    }
+
+    private fun scheduleSeedTailPumpLocked() {
+        if (seedTailPumpScheduled) return
+        seedTailPumpScheduled = true
+        val handler = SessionReflection.getMainThreadHandler(session)
+        // Yield a frame so the scheduler's drain turns service the queue before the
+        // pump writes the next chunk — keeps each looper turn bounded (no ANR) and
+        // guarantees the next write finds room (no looper-blocking write).
+        handler.postDelayed({ runSeedTailPumpTurn() }, MainThreadDrainScheduler.DEFAULT_YIELD_DELAY_MS)
+    }
+
+    /**
+     * One frame-bounded turn of the seed tail pump (runs on the main looper).
+     * Drains the queue and writes the head segment's next chunk — but only as much
+     * as currently fits, so a write never blocks the looper — until either the
+     * [SEED_DRAIN_MAX_MILLIS] turn budget trips or the FIFO + queue are empty. When
+     * the whole tail has drained it runs the deferred gate-open (#468 ordering) and
+     * clears the pump. Otherwise it reposts itself one frame later.
+     */
+    private fun runSeedTailPumpTurn() {
+        if (stopped.get()) return
+        val handler = SessionReflection.getMainThreadHandler(session)
+        val turnStartedAtMillis = nowMillis()
+        var pumpDone = false
+        var openGateAfterPump = false
+        synchronized(feedLock) {
+            while (true) {
+                // Drain a slice of whatever is already queued.
+                if (SessionReflection.availableProcessOutputBytes(session) > 0) {
+                    val head = seedTailSegments.firstOrNull()
+                    val dispatchStartedAtNanos = System.nanoTime()
+                    handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
+                    head?.traceState?.traceSink?.onDirectDrainDispatched(
+                        bytes = PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES,
+                        durationNanos = System.nanoTime() - dispatchStartedAtNanos,
+                    )
+                }
+
+                // Write as much of the head segment as currently fits (non-blocking).
+                val head = seedTailSegments.firstOrNull()
+                if (head != null) {
+                    val room = PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES -
+                        SessionReflection.availableProcessOutputBytes(session)
+                    if (room > 0) {
+                        val toWrite = minOf(head.remaining, room)
+                        val writeStartedAtNanos = System.nanoTime()
+                        val written = SessionReflection.writeProcessToTerminalQueue(
+                            session = session,
+                            data = head.data,
+                            offset = head.offset,
+                            length = toWrite,
+                        )
+                        if (!written) {
+                            // Queue closed (session torn down); drop the tail.
+                            seedTailSegments.clear()
+                            seedTailGateOpenPending = false
+                            pumpDone = true
+                            break
+                        }
+                        head.traceState?.let {
+                            recordChunkWrite(it, toWrite, System.nanoTime() - writeStartedAtNanos, true)
+                        }
+                        head.offset += toWrite
+                        head.remaining -= toWrite
+                        if (head.remaining == 0) {
+                            seedTailSegments.removeFirst()
+                            head.traceState?.traceSink?.onFeedCompleted(
+                                bytes = 0,
+                                chunks = 0,
+                                durationNanos = 0L,
+                            )
+                        }
+                    }
+                }
+
+                // Done when nothing is queued and no segment bytes remain.
+                if (SessionReflection.availableProcessOutputBytes(session) == 0 &&
+                    seedTailSegments.isEmpty()
+                ) {
+                    pumpDone = true
+                    break
+                }
+                // Yield once this turn has spent its main-thread budget.
+                if (nowMillis() - turnStartedAtMillis >= SEED_DRAIN_MAX_MILLIS) {
+                    break
+                }
+            }
+
+            if (pumpDone) {
+                seedTailPumpScheduled = false
+                openGateAfterPump = seedTailGateOpenPending
+                seedTailGateOpenPending = false
+            }
+        }
+        // #866 lock-ordering: [flushAndOpenGateLocked] takes `gateLock` then
+        // `feedLock`; this pump must therefore NEVER take `gateLock` while holding
+        // `feedLock` (that inversion deadlocks). Open the deferred gate only after
+        // the `feedLock` block above has been released.
+        if (openGateAfterPump) {
+            // The seed tail is fully drained: open the gate AND flush any live
+            // `%output` that buffered while the pump was running (gated stayed true
+            // through the whole tail), in arrival order after the seed tail — the
+            // deferred #468 seed-before-live open. With the pump now cleared,
+            // [flushAndOpenGateLocked] sets `gated = false` and feeds the buffer.
+            synchronized(gateLock) { flushAndOpenGateLocked() }
+        }
+        if (!pumpDone) {
+            // Repost one frame later so the looper services input dispatch / the
+            // scheduler's own drain turns between pump turns.
+            handler.postDelayed({ runSeedTailPumpTurn() }, MainThreadDrainScheduler.DEFAULT_YIELD_DELAY_MS)
+        }
     }
 
     /**
@@ -408,51 +578,53 @@ public class SshTerminalBridge(
      * one-shot before live bytes flow), so it deliberately drains inline so the
      * `capture-pane` snapshot paints before the live stream starts.
      *
-     * Issue #829: the seed drain is now TIME-BOUNDED for symmetry with the live
+     * Issue #829/#866: the seed drain is TIME-BOUNDED for symmetry with the live
      * [MainThreadDrainScheduler] turn budget. The budget is measured from
      * [startedAtMillis] (the start of the WHOLE on-main feed, shared across its
      * chunks), so a pathologically large seed cannot pin the main thread in one
      * unbounded inline run. After at least one slice (forward progress), if the
      * feed has spent more than [SEED_DRAIN_MAX_MILLIS] of main-thread wall time
-     * this stops early and returns `true`; the caller then hands the remainder —
-     * already FIFO-queued — to the frame-budgeted scheduler, which paces the rest
-     * across frames. The granularity floor is one slice, so the worst-case inline
-     * cost is [SEED_DRAIN_MAX_MILLIS] plus one 2 KB slice's parse.
+     * this stops early and returns `true`; the caller ([feedChunks]) then hands
+     * the remainder — the already-queued tail of THIS chunk plus the untouched
+     * later chunks — to the frame-budgeted path, which paces the rest across
+     * frames. The granularity floor is one slice, so the worst-case inline cost is
+     * [SEED_DRAIN_MAX_MILLIS] plus one 2 KB slice's parse.
      *
-     * Deadlock-safety: handoff is only honored when [allowHandoff] is `true` (the
-     * caller passes it ONLY for the final chunk of the feed). The bridge runs the
-     * on-main feed synchronously while holding the looper, so a later chunk's
-     * `writeProcessToTerminalQueue` would BLOCK forever on a full 64 KB queue with
-     * no async drainer able to run (the scheduler's posted runnable can't execute
-     * while this synchronous feed owns the looper). For non-final chunks we
-     * therefore drain the chunk FULLY (ignoring the budget for handoff) so the next
-     * write has room; only the final chunk — after which the feed returns and frees
-     * the looper — may hand its tail to the scheduler.
+     * Deadlock-safety (#866): the budget is now honored for ANY chunk, not only
+     * the final one. The pre-#866 code drained every non-final chunk FULLY inline
+     * (unbudgeted) to keep the next write from blocking on a full 64 KB queue —
+     * but that let a multi-chunk seed pin the looper for seconds (the "Attaching…"
+     * ANR). [feedChunks] now stops writing further chunks inline the moment this
+     * returns `true`, and hands the untouched tail to the looper-resident
+     * [runSeedTailPumpTurn] (which writes only what fits, never blocking the
+     * looper, and yields a frame between turns) — so there is no full-queue
+     * deadlock and no unbounded inline parse.
      *
-     * @return `true` if the time budget was exhausted AND [allowHandoff] is set, so
-     *   the caller should hand continuation to the frame-budgeted scheduler;
-     *   `false` if this chunk fully drained (within budget, or handoff disallowed).
+     * @return `true` if the on-main feed has spent its [SEED_DRAIN_MAX_MILLIS]
+     *   budget (the caller hands the remaining tail to the frame-yielding pump);
+     *   `false` if this chunk fully drained within budget.
      */
     private inline fun dispatchMainLooperDrains(
         handler: Handler,
         queuedBytes: Int,
         startedAtMillis: Long,
-        allowHandoff: Boolean,
-        onDispatched: (bytes: Int, durationNanos: Long) -> Unit = { _, _ -> },
+        traceState: TraceState?,
     ): Boolean {
         var remaining = queuedBytes
         while (remaining > 0) {
             val drainBudget = minOf(remaining, PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES)
             val dispatchStartedAtNanos = System.nanoTime()
             handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
-            onDispatched(drainBudget, System.nanoTime() - dispatchStartedAtNanos)
+            traceState?.traceSink?.onDirectDrainDispatched(
+                bytes = drainBudget,
+                durationNanos = System.nanoTime() - dispatchStartedAtNanos,
+            )
             remaining -= drainBudget
-            // Time budget (#829): checked AFTER at least one slice so the seed always
-            // makes forward progress. Stop inline draining once the on-main feed has
-            // exceeded its wall-time budget — but ONLY on the final chunk, where the
-            // feed is about to return and the scheduler can safely drain the tail
-            // (see deadlock-safety above).
-            if (allowHandoff && nowMillis() - startedAtMillis >= SEED_DRAIN_MAX_MILLIS) {
+            // Time budget (#829/#866): checked AFTER at least one slice so the seed
+            // always makes forward progress. Stop inline draining once the on-main
+            // feed has exceeded its wall-time budget, on ANY chunk; the caller hands
+            // the remaining tail to the frame-yielding pump (see deadlock-safety).
+            if (nowMillis() - startedAtMillis >= SEED_DRAIN_MAX_MILLIS) {
                 return true
             }
         }
@@ -522,7 +694,25 @@ public class SshTerminalBridge(
             null
         }
         gatedLiveBuffer.reset()
-        gated = false
+        // #866 ordering: if a large seed deferred a tail to the frame-yielding pump,
+        // the buffered-live flush below re-enters [feedChunks] which, seeing the pump
+        // active, appends to the same FIFO (so live lands strictly AFTER the seed
+        // tail). The actual `gated = false` open must then ALSO wait until the pump
+        // drains, or a concurrent live `%output` write would race the pump's tail
+        // writes and reorder bytes. Decide under [feedLock] so the pump cannot finish
+        // (and clear the flag) between this check and the deferral. Defer the open to
+        // the pump; otherwise open now.
+        val deferGateOpen = synchronized(feedLock) {
+            if (seedTailPumpScheduled) {
+                seedTailGateOpenPending = true
+                true
+            } else {
+                false
+            }
+        }
+        if (!deferGateOpen) {
+            gated = false
+        }
         if (pending != null) {
             feedBytesToEmulator(pending, 0, pending.size)
         }
@@ -539,6 +729,14 @@ public class SshTerminalBridge(
         // Issue #803: drop any scheduled main-looper drain turn so a torn-down
         // session leaves no posted runnable behind.
         drainScheduler.cancel()
+        // Issue #866: drop any in-flight seed tail so the torn-down session leaves
+        // no pending pump work. The pump turn itself guards on stopped.get() and
+        // returns early; clearing the FIFO frees the retained byte arrays.
+        synchronized(feedLock) {
+            seedTailSegments.clear()
+            seedTailPumpScheduled = false
+            seedTailGateOpenPending = false
+        }
         SessionReflection.closeTerminalToProcessQueue(session)
         inputDrainerThread?.interrupt()
         inputDrainerThread = null
@@ -709,6 +907,19 @@ private class PendingDrainMessage(
 ) {
     var remainingBytes: Int = bytes
 }
+
+/**
+ * Issue #866: a not-yet-written tail of an on-main seed feed handed to the
+ * frame-yielding [SshTerminalBridge] pump. [offset]/[remaining] advance as the
+ * pump writes the segment one queue-sized chunk at a time. The underlying
+ * [data] array is never mutated, so retaining a reference is safe.
+ */
+private class SeedTailSegment(
+    val data: ByteArray,
+    var offset: Int,
+    var remaining: Int,
+    val traceState: TraceState?,
+)
 
 private class TraceState(
     val traceSink: SshTerminalBridge.TraceSink,

@@ -31,7 +31,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
-import com.pocketshell.app.voice.SESSION_TOGGLE_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -44,19 +43,17 @@ import org.junit.runner.RunWith
 /**
  * Issue #786 screenshot + contract evidence — the Conversation tab's bottom band
  * is collapsed to JUST the `>_` composer launcher. The maintainer circled the
- * full command bar (the #628 previous-session toggle `› <project>` chip + the
- * snippets `{}` chip) and asked to remove it. This test renders the EXACT screen
- * seam that decides the per-tab bottom band — the real
- * [TmuxTerminalBottomControls] — for both tabs and proves:
+ * full command bar (the snippets `{}` chip + command chips) and asked to remove
+ * it. This test renders the EXACT screen seam that decides the per-tab bottom
+ * band — the real [TmuxTerminalBottomControls] — for both tabs and proves:
  *
  *  - **Conversation tab (`showConversation = true`)** → ONLY the composer
- *    launcher. No `session:toggle-previous` chip, no `snippets` chip, no static
- *    command chips, no `show keyboard` chip. The launcher is fully within the
- *    window root (#657/F1 containment, not just "displayed").
+ *    launcher. No `snippets` chip, no static command chips, no `show keyboard`
+ *    chip. The launcher is fully within the window root (#657/F1 containment,
+ *    not just "displayed").
  *  - **Terminal tab (`showConversation = false`)** → the full
  *    [com.pocketshell.app.voice.BottomChipControls] band: the same launcher PLUS
- *    the Terminal `show keyboard` chip (and the #628 toggle chip when a previous
- *    session exists). Untouched by #786.
+ *    the Terminal `show keyboard` chip. Untouched by #786.
  *
  * The full `TmuxSessionScreen` needs Hilt + a live tmux connect, so this renders
  * the real bottom-controls seam directly and captures a labelled full-device
@@ -97,11 +94,6 @@ class TmuxConversationBottomComposerScreenshotTest {
                         onEnterTap = {},
                         onShowKeyboardTap = {},
                         onAddSnippetTap = {},
-                        // A previous session EXISTS — proving the #628 toggle chip
-                        // is suppressed on the Conversation tab specifically, not
-                        // merely absent because there is nothing to toggle to.
-                        previousSessionName = "git-course-management-platform",
-                        onTogglePreviousSession = {},
                         onShowHotkeysTap = {},
                         modifier = Modifier.testTag(CONVERSATION_BAND_TAG),
                     )
@@ -119,8 +111,6 @@ class TmuxConversationBottomComposerScreenshotTest {
                         onEnterTap = {},
                         onShowKeyboardTap = {},
                         onAddSnippetTap = {},
-                        previousSessionName = "git-course-management-platform",
-                        onTogglePreviousSession = {},
                         onShowHotkeysTap = {},
                         modifier = Modifier.testTag(TERMINAL_BAND_TAG),
                     )
@@ -168,17 +158,6 @@ class TmuxConversationBottomComposerScreenshotTest {
             }
         }
 
-        // The #628 previous-session toggle chip — the `› <project>` pill the
-        // maintainer circled — appears EXACTLY ONCE (Terminal only), never on the
-        // Conversation tab even though a previousSessionName was supplied.
-        compose.onAllNodesWithTag(SESSION_TOGGLE_CHIP_TAG).let { nodes ->
-            assert(nodes.fetchSemanticsNodes().size == 1) {
-                "the #628 previous-session toggle chip must be Terminal-only after " +
-                    "#786 — found ${nodes.fetchSemanticsNodes().size} (a second one " +
-                    "means it leaked back onto the Conversation tab)"
-            }
-        }
-
         // The snippets chip appears EXACTLY ONCE (Terminal only) — removed from
         // the Conversation tab (#786); it stays reachable via the composer `{}`.
         compose.onAllNodesWithText(ADD_PROMPT_CHIP_LABEL).let { nodes ->
@@ -193,6 +172,21 @@ class TmuxConversationBottomComposerScreenshotTest {
         // No key bar raw-key labels anywhere.
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithText("Tab").assertDoesNotExist()
+
+        // Issue #868: the previous-session toggle chip (#628) was hard-cut. The
+        // production [TmuxTerminalBottomControls] no longer exposes any
+        // previous-session parameter, so the chip cannot be rendered on EITHER
+        // band. Guard against it leaking back: the chip carried the
+        // `session:toggle-previous` tag and a leading "›" pill — assert neither
+        // is present anywhere in the real bottom-band seam.
+        compose.onNodeWithTag(REMOVED_SESSION_TOGGLE_CHIP_TAG).assertDoesNotExist()
+        compose.onAllNodesWithText("›", substring = true).let { nodes ->
+            assert(nodes.fetchSemanticsNodes().isEmpty()) {
+                "the #628 previous-session toggle chip ('› <name>' pill) was " +
+                    "removed (#868) — no '›'-prefixed chip may render in the " +
+                    "bottom band; found ${nodes.fetchSemanticsNodes().size}"
+            }
+        }
     }
 
     @Composable
@@ -254,5 +248,9 @@ class TmuxConversationBottomComposerScreenshotTest {
         const val ROOT_TAG = "issue786:bottoms-root"
         const val CONVERSATION_BAND_TAG = "issue786:conversation-band"
         const val TERMINAL_BAND_TAG = "issue786:terminal-band"
+        // Issue #868: the deleted #628 toggle chip used to carry this tag. The
+        // constant is gone from production, so this test references the literal
+        // string to prove the chip never reappears in the bottom band.
+        const val REMOVED_SESSION_TOGGLE_CHIP_TAG = "session:toggle-previous"
     }
 }

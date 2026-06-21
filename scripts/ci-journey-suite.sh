@@ -474,6 +474,18 @@ JOURNEY_CLASSES=(
   # assumeFalse(isRunningOnCi())). It lives under com.pocketshell.app.tmux, so it
   # carries its fully-qualified name directly.
   "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest"
+  # ADDED (#868): the previous-session-toggle REMOVED regression guard (AC4).
+  # The maintainer's #628 previous-session toggle button was hard-cut from the
+  # Conversation bottom composer; this proof composes the production
+  # TmuxConversationBottomComposer (real Compose-rule seam) and HARD-asserts the
+  # toggle control is absent so the removed button cannot silently return. It is
+  # a PURE Compose screenshot/assertion test — NO Docker fixture, NO SSH/tmux,
+  # NO toxiproxy, NO port — so it needs no tests.yml service change, and it does
+  # NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())). Per G9
+  # (a test per acceptance criterion, wired into a running gate) it must run
+  # per-push so the toggle's removal is durably guarded. It lives under
+  # com.pocketshell.app.tmux, so it carries its fully-qualified name directly.
+  "com.pocketshell.app.tmux.TmuxConversationBottomComposerScreenshotTest"
   # ADDED (epic #792 Slice D, #822/V7a + #823 — D31 durable-fix gate): the
   # PROACTIVE silent mid-session drop detection + auto-recovery journey. The
   # maintainer's headline #822 bug: SSH silently drops on stable Wi-Fi while the

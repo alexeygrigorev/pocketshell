@@ -1,9 +1,5 @@
 package com.pocketshell.app.voice
 
-import android.content.Context
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -30,7 +26,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -43,7 +38,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.delay
 import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.assistant.FolderCandidate
@@ -387,9 +381,9 @@ internal const val ASSISTANT_CHOOSING_TAG: String = "assistant:choosing"
 internal fun assistantChoiceTag(path: String): String = "assistant:choice:$path"
 
 /**
- * The static secondary command chips (`git status`, `tmux ls`, …), the optional
- * `dirs` project-navigation chip, and the optional previous-session toggle chip —
- * rendered inline WITHOUT their own scroll container.
+ * The static secondary command chips (`git status`, `tmux ls`, …) and the
+ * optional `dirs` project-navigation chip — rendered inline WITHOUT their own
+ * scroll container.
  *
  * Issue #813: this content is now hosted inside the single shared
  * horizontally-scrollable flexible region in [BottomChipControls] (alongside the
@@ -403,22 +397,7 @@ private fun StaticChipStripContent(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onProjectNavigationTap: (() -> Unit)? = null,
-    // Issue #628: toggle chip for switching back to the previous session.
-    // Rendered at the START of the strip (before command chips) so it is
-    // the first thing the user sees in the chip row.
-    previousSessionName: String? = null,
-    onTogglePreviousSession: (() -> Unit)? = null,
 ) {
-    // Issue #628: toggle chip at the start of the strip. The "›"
-    // prefix signals directionality ("go back to"). Uses the accent
-    // style (icon chip) to visually distinguish from command chips.
-    if (previousSessionName != null && onTogglePreviousSession != null) {
-        CommandChip(
-            label = "$SESSION_TOGGLE_CHIP_PREFIX$previousSessionName",
-            onClick = onTogglePreviousSession,
-            modifier = Modifier.testTag(SESSION_TOGGLE_CHIP_TAG),
-        )
-    }
     chips.forEach { chip ->
         CommandChip(
             label = chip,
@@ -595,12 +574,6 @@ internal fun BottomChipControls(
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
-    // Issue #628: one-tap toggle to switch back to the previous tmux
-    // session. When non-null, a chip with the "› <name>" label is
-    // rendered at the start of the scrollable chip strip. Tapping it
-    // triggers the existing fast-switch path.
-    previousSessionName: String? = null,
-    onTogglePreviousSession: (() -> Unit)? = null,
     // Issue #249: gate the command chips and optional composer launcher on whether
     // the SSH/tmux session is live. While disconnected or reconnecting a
     // chip tap would `writeInputToPane` into a dead bridge — the bytes
@@ -610,62 +583,7 @@ internal fun BottomChipControls(
     inputEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    // Issue #628: one-time hint logic. The hint appears the first time
-    // `previousSessionName` becomes non-null and the user hasn't dismissed
-    // it yet. It auto-dismisses after 5 seconds or on tap, and records the
-    // dismissal in SharedPreferences so it never shows again.
-    val context = LocalContext.current
-    var hintDismissed by remember {
-        mutableStateOf(
-            context.getSharedPreferences(PREFS_SESSION_TOGGLE, Context.MODE_PRIVATE)
-                .getBoolean(PREF_SESSION_TOGGLE_HINT_DISMISSED, false)
-        )
-    }
-    val showHint = previousSessionName != null && !hintDismissed
-
-    if (showHint) {
-        LaunchedEffect(Unit) {
-            delay(SESSION_TOGGLE_HINT_DURATION_MS)
-            hintDismissed = true
-            context.getSharedPreferences(PREFS_SESSION_TOGGLE, Context.MODE_PRIVATE)
-                .edit()
-                .putBoolean(PREF_SESSION_TOGGLE_HINT_DISMISSED, true)
-                .apply()
-        }
-    }
-
     Column(modifier = modifier) {
-        // Issue #628: inline hint banner above the chip row.
-        AnimatedVisibility(
-            visible = showHint,
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            val hintName = previousSessionName ?: ""
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(color = PocketShellColors.SurfaceElev)
-                    .clickable {
-                        hintDismissed = true
-                        context.getSharedPreferences(PREFS_SESSION_TOGGLE, Context.MODE_PRIVATE)
-                            .edit()
-                            .putBoolean(PREF_SESSION_TOGGLE_HINT_DISMISSED, true)
-                            .apply()
-                    }
-                    .testTag(SESSION_TOGGLE_HINT_TAG)
-                    .padding(
-                        horizontal = PocketShellSpacing.md,
-                        vertical = PocketShellSpacing.sm,
-                    ),
-            ) {
-                Text(
-                    text = "Tap ‹ $hintName to flip back",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyDense,
-                )
-            }
-        }
         // Issue #813 (clean rework — D22): the composer launcher RESERVES its
         // width FIRST and is NEVER the element that overflows. We compute the
         // available row width with [BoxWithConstraints] and hand the chip area
@@ -735,10 +653,6 @@ internal fun BottomChipControls(
                             chips = chips,
                             onChipTap = if (inputEnabled) onChipTap else { _ -> },
                             onProjectNavigationTap = onProjectNavigationTap,
-                            // Issue #628: pass the toggle chip through so it renders
-                            // at the START of the row, before the command chips.
-                            previousSessionName = previousSessionName,
-                            onTogglePreviousSession = onTogglePreviousSession,
                         )
                     }
                     // Primary cluster: high-frequency, pinned to the right of the
@@ -888,19 +802,6 @@ internal val DefaultSessionChips: List<String> = listOf(
 
 internal const val SHOW_KEYBOARD_CHIP_LABEL: String = "show keyboard"
 internal const val ENTER_CHIP_LABEL: String = "Enter"
-
-// Issue #628: one-tap toggle chip for switching back to the previous
-// tmux session. The "›" prefix signals directionality ("go back to").
-internal const val SESSION_TOGGLE_CHIP_PREFIX: String = "› "
-internal const val SESSION_TOGGLE_CHIP_TAG: String = "session:toggle-previous"
-
-// Issue #628: one-time hint shown on first use of the toggle chip.
-// After the user sees it once (or taps it), it is permanently dismissed
-// via SharedPreferences so it never appears again.
-internal const val SESSION_TOGGLE_HINT_TAG: String = "session:toggle-previous-hint"
-internal const val PREF_SESSION_TOGGLE_HINT_DISMISSED: String = "pref_session_toggle_hint_dismissed"
-private const val PREFS_SESSION_TOGGLE: String = "pocketshell_session_toggle"
-private const val SESSION_TOGGLE_HINT_DURATION_MS: Long = 5_000L
 
 // Issue #454: the saved-snippet picker chip. The old `+ snippet` / `+ prompt`
 // / `+ command` labels were unclear — the leading `+` read as "add a NEW

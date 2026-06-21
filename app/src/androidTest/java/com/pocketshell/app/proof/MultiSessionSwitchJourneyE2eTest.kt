@@ -580,10 +580,9 @@ class MultiSessionSwitchJourneyE2eTest {
 
         // The WHOLE header must show exactly ONE identity: scan every text node
         // under the breadcrumb row and assert NONE bears the leaving project
-        // label. (The previous-session toggle chip renders the leaving SESSION
-        // name in the bottom chrome — intended #628/#705 UX — but the leaving
-        // PROJECT FOLDER label has no legitimate place in the header once the
-        // switch has landed, so it is the unambiguous duplicated-identity proof.)
+        // label. The leaving PROJECT FOLDER label has no legitimate place in the
+        // header once the switch has landed, so it is the unambiguous
+        // duplicated-identity proof.
         val headerTexts = headerBreadcrumbTexts()
         val staleHeaderNodes = headerTexts.filter { it.contains(fromProjectLabel) }
         assertTrue(
@@ -754,11 +753,8 @@ class MultiSessionSwitchJourneyE2eTest {
         // TMUX_CONSOLIDATED_SESSION_LABEL_TAG ("tmux:chrome:session-label")
         // rendered as `agentName ?: sessionName` from the nav-route TARGET
         // (TmuxSessionScreen.kt). We read THAT node's text directly rather than
-        // scanning the whole tree, because the bottom chrome legitimately
-        // renders the LEAVING session name in the #628 previous-session toggle
-        // chip (`session:toggle-previous`) and one-time flip-back hint
-        // (`session:toggle-previous-hint`) — those controls are intended UX and
-        // must not be mistaken for a stale header crumb (#705).
+        // scanning the whole tree, so the crumb assertion targets exactly the
+        // header identity (#705).
         //
         // Retry briefly because the crumb flips on the same frame the surface
         // reveals.

@@ -645,6 +645,84 @@ class DesignRenders {
     }
 
     /**
+     * Issue #858: the session tree distinguishes a z.ai-profile Claude from a
+     * default Anthropic Claude. The profiled row carries a distinct neutral
+     * "Z.AI" profile chip BEFORE its purple "Claude" agent badge; the default
+     * Claude row carries the badge only (no spurious chip).
+     *
+     * The real `ProfileChip` + `WorkspaceSessionRow` are app-module private
+     * composables, so this is a MIRROR using the shared ui-kit primitives the
+     * screen composes ([ListRow] + [StatusDot] + [Badge]) plus a local chip
+     * matching the app's neutral-accent ProfileChip shape — it is the fast
+     * first visual check only; the app's real composable is verified on the
+     * emulator (the chip's placement/colour is the app composable, not this).
+     */
+    @Test
+    fun hostDetailProfiledSessionTree() = render("host-detail-profiled-session-tree") {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            TreeRootHeader(label = "git", count = "2 agents")
+
+            // z.ai Claude: profile chip + agent badge (the #858 distinction).
+            ListRow(
+                title = "git-zai-app",
+                leading = { StatusDot(status = ConnectionStatus.Connected) },
+                trailing = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ProfileChipMirror(label = "Z.AI")
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Badge(label = "Claude", role = BadgeRole.Agent)
+                    }
+                },
+                onClick = {},
+                modifier = Modifier
+                    .background(
+                        PocketShellColors.Surface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(start = 16.dp),
+            )
+
+            // Default Claude: agent badge only, NO chip.
+            ListRow(
+                title = "git-default-app",
+                leading = { StatusDot(status = ConnectionStatus.Connected) },
+                trailing = { Badge(label = "Claude", role = BadgeRole.Agent) },
+                onClick = {},
+                modifier = Modifier
+                    .background(
+                        PocketShellColors.Surface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .padding(start = 16.dp),
+            )
+        }
+    }
+
+    /** Mirror of the app's neutral-accent #858 `ProfileChip` for the render. */
+    @Composable
+    private fun ProfileChipMirror(label: String) {
+        Box(
+            modifier = Modifier
+                .background(
+                    PocketShellColors.SurfaceElev.copy(alpha = 0.9f),
+                    RoundedCornerShape(6.dp),
+                )
+                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp))
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        ) {
+            Text(
+                text = label,
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.labelMono,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+
+    /**
      * Issue #675: the decluttered multi-window agent tree. A session with two
      * Claude windows (w0, w1) is broken out into per-window child rows. The
      * agent type is shown ONCE per window (the `w0 claude` / `w1 claude` titles

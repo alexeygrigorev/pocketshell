@@ -443,6 +443,9 @@ public fun TmuxSessionScreen(
     // this session?" and the picker opens in the unknown ("we don't know this
     // session — choose") mode.
     val currentSessionRecordedKind by viewModel.currentSessionRecordedKind.collectAsState()
+    // Issue #858: the recorded non-default profile (e.g. z.ai Claude), shown in
+    // the "What is this session?" sheet so a profiled session is distinguishable.
+    val currentSessionRecordedProfile by viewModel.currentSessionRecordedProfile.collectAsState()
     LaunchedEffect(status, canReconnect) {
         recordTmuxReconnectUiStateRendered(
             status = status,
@@ -2104,6 +2107,9 @@ public fun TmuxSessionScreen(
                 // Option B today: no guess. A follow-up (Option A) passes a
                 // cgroup-based suggestion here with zero other change.
                 suggestedKind = null,
+                // Issue #858: the recorded non-default profile/provider, so a
+                // z.ai Claude reads differently from a default Claude here.
+                currentProfile = currentSessionRecordedProfile,
             )
         }
 

@@ -117,4 +117,29 @@ class SessionKindLabelTest {
             assertEquals(false, sessionBadgeLabel(entry(kind)).contains(" · "))
         }
     }
+
+    // --- #858: the profile chip label compresses the recorded profile to its
+    //     distinguishing provider part for the tree chip. ---
+
+    @Test
+    fun profileChipLabelExtractsProviderFromParenthesisedName() {
+        // The z.ai case: "Claude (Z.AI)" → "Z.AI" so the chip is compact and
+        // names only the distinguishing provider next to the Claude badge.
+        assertEquals("Z.AI", profileChipLabel("Claude (Z.AI)"))
+        assertEquals("Work", profileChipLabel("Codex (Work)"))
+    }
+
+    @Test
+    fun profileChipLabelShowsBareNameVerbatim() {
+        // A profile without the `Kind (Provider)` shape is shown as-is.
+        assertEquals("zlaude", profileChipLabel("zlaude"))
+    }
+
+    @Test
+    fun profileChipLabelNullOrBlankIsNull() {
+        // No profile / default / legacy session → no chip.
+        assertEquals(null, profileChipLabel(null))
+        assertEquals(null, profileChipLabel(""))
+        assertEquals(null, profileChipLabel("   "))
+    }
 }

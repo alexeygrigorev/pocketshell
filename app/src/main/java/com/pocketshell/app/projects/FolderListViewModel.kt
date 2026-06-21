@@ -164,6 +164,14 @@ data class FolderSessionEntry(
     val attached: Boolean,
     val agentKind: SessionAgentKind,
     val windows: List<FolderSessionWindowEntry> = emptyList(),
+    /**
+     * Issue #858: the human label of the non-default profile this session was
+     * launched with (e.g. `"Claude (Z.AI)"`), read back from the host-side
+     * `@ps_agent_profile` tmux user option. `null` for a default / non-profiled
+     * / legacy session — so the tree distinguishes a z.ai Claude from a default
+     * Claude, and shows no spurious chip for a default session.
+     */
+    val recordedProfile: String? = null,
 )
 
 data class FolderSessionWindowEntry(
@@ -2174,6 +2182,7 @@ class FolderListViewModel internal constructor(
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,
+            recordedProfile = recordedProfile,
             windows = windows.map { window ->
                 FolderSessionWindowEntry(
                     index = window.index,

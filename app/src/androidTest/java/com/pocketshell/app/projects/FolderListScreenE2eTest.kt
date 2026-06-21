@@ -1308,6 +1308,129 @@ class FolderListScreenE2eTest {
     }
 
     /**
+     * Issue #858: the session tree visibly distinguishes a z.ai-profile Claude
+     * from a default Anthropic Claude. CLASS COVERAGE (D31/G2): the flat view is
+     * fed {z.ai-profile Claude, default Claude, named-profile Codex, no-profile
+     * Codex}, and the legacy/missing-option case (recordedProfile == null) is the
+     * default + no-profile rows. The profiled rows MUST show the profile chip
+     * (compressed to the provider, e.g. "Z.AI"); the default / no-profile rows
+     * MUST NOT show any chip. Rendered against the real [FolderListScreen] on the
+     * emulator (not a proxy), so the user-visible distinction is the assertion.
+     */
+    @Test
+    fun profiledSessionsShowProfileChipDefaultSessionsDoNot() {
+        val fakeGateway = FakeFolderListGateway(
+            rows = listOf(
+                // z.ai Claude — carries @ps_agent_profile.
+                FolderSessionRow(
+                    sessionName = "zai-claude",
+                    lastActivity = 1_700_004_000L,
+                    attached = true,
+                    cwd = "/home/u/git/pocketshell",
+                    agentKind = SessionAgentKind.Claude,
+                    recordedProfile = "Claude (Z.AI)",
+                ),
+                // Default Claude — no profile (the legacy/missing-option case).
+                FolderSessionRow(
+                    sessionName = "default-claude",
+                    lastActivity = 1_700_003_500L,
+                    attached = true,
+                    cwd = "/home/u/git/pocketshell",
+                    agentKind = SessionAgentKind.Claude,
+                    recordedProfile = null,
+                ),
+                // Codex WITH a named profile.
+                FolderSessionRow(
+                    sessionName = "codex-work",
+                    lastActivity = 1_700_002_000L,
+                    attached = true,
+                    cwd = "/home/u/git/pocketshell",
+                    agentKind = SessionAgentKind.Codex,
+                    recordedProfile = "Codex (Work)",
+                ),
+                // Codex WITHOUT a profile.
+                FolderSessionRow(
+                    sessionName = "codex-default",
+                    lastActivity = 1_700_001_000L,
+                    attached = false,
+                    cwd = "/home/u/git/pocketshell",
+                    agentKind = SessionAgentKind.Codex,
+                    recordedProfile = null,
+                ),
+            ),
+            projectFoldersByRoot = mapOf("~/git" to listOf("/home/u/git/pocketshell")),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue858-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue858",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                    hostDetailViewMode = HostDetailViewMode.Flat,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(folderListFlatRowTestTag("zai-claude"))
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // z.ai Claude: the profile chip is present and reads "Z.AI" (compressed
+        // from "Claude (Z.AI)"), next to the "Claude" kind badge.
+        compose.onNodeWithTag(
+            folderListFlatRowProfileChipTestTag("zai-claude"),
+            useUnmergedTree = true,
+        ).assertExists().onChild().assertTextEquals("Z.AI")
+        compose.onNodeWithTag(
+            folderListFlatRowBadgeTestTag("zai-claude"),
+            useUnmergedTree = true,
+        ).onChild().assertTextEquals("Claude")
+
+        // Codex with a named profile: chip reads "Work" next to the "Codex" badge.
+        compose.onNodeWithTag(
+            folderListFlatRowProfileChipTestTag("codex-work"),
+            useUnmergedTree = true,
+        ).assertExists().onChild().assertTextEquals("Work")
+
+        // Default Claude: NO profile chip (the plain kind only).
+        assertTrue(
+            "a default Claude must show no profile chip",
+            compose.onAllNodesWithTag(
+                folderListFlatRowProfileChipTestTag("default-claude"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+        // No-profile Codex: NO profile chip.
+        assertTrue(
+            "a no-profile Codex must show no profile chip",
+            compose.onAllNodesWithTag(
+                folderListFlatRowProfileChipTestTag("codex-default"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+
+        captureViewport("issue858-profile-chip-viewport.png")
+        android.os.SystemClock.sleep(200)
+        captureFullDevice("issue858-profile-chip-fulldevice.png")
+    }
+
+    /**
      * Flat-view empty state (#485): a host with zero sessions shows the
      * dedicated [FOLDER_LIST_FLAT_EMPTY_TAG] panel rather than rendering blank.
      */

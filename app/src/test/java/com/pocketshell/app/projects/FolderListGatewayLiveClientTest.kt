@@ -40,9 +40,12 @@ class FolderListGatewayLiveClientTest {
         val client = FakeTmuxClient()
         client.responses += CommandResponse(
             number = 1L,
+            // 7-field shape (#821 kind + #858 profile, both blank for these
+            // foreign sessions): name::created::activity::attached::kind::
+            // profile::session_path.
             output = listOf(
-                "git-cable-world::100::300::1::/home/testuser/git/cable-world",
-                "git-cable-world-map::101::301::0::/home/testuser",
+                "git-cable-world::100::300::1::::::/home/testuser/git/cable-world",
+                "git-cable-world-map::101::301::0::::::/home/testuser",
             ),
             isError = false,
         )
@@ -195,7 +198,7 @@ class FolderListGatewayLiveClientTest {
         val client = FakeTmuxClient()
         client.responses += CommandResponse(
             number = 1L,
-            output = listOf("git-cable-world::100::300::1::/home/testuser/git/cable-world"),
+            output = listOf("git-cable-world::100::300::1::::::/home/testuser/git/cable-world"),
             isError = false,
         )
         client.responses += CommandResponse(

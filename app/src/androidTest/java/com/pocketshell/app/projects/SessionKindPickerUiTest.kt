@@ -8,6 +8,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
@@ -129,6 +130,51 @@ class SessionKindPickerUiTest {
         compose.onNodeWithTag(SESSION_KIND_PICKER_SAVE_TAG).performClick()
         compose.waitForIdle()
         assertEquals(SessionAgentKind.OpenCode, picked)
+    }
+
+    @Test
+    fun recordedProfileShowsProviderProfileLine() {
+        // Issue #858 AC3 — "What is this session?" must surface the recorded
+        // non-default profile/provider so a z.ai Claude is distinguishable from
+        // a default Claude. When a profile is recorded the sheet renders the
+        // "Provider/profile:" line.
+        compose.setContent {
+            PocketShellTheme {
+                SessionKindPickerContent(
+                    sessionName = "work",
+                    onCancel = {},
+                    onPick = {},
+                    isUnknown = false,
+                    currentKind = SessionAgentKind.Claude,
+                    currentProfile = "Claude (Z.AI)",
+                )
+            }
+        }
+
+        compose.onNodeWithTag(SESSION_KIND_PICKER_PROFILE_TAG)
+            .assertIsDisplayed()
+            .assertTextContains("Provider/profile: Claude (Z.AI)")
+    }
+
+    @Test
+    fun noRecordedProfileOmitsProviderProfileLine() {
+        // Issue #858 AC3 (negative) — a default / legacy session has no recorded
+        // profile, so the "Provider/profile:" line must NOT render (the plain
+        // kind only, no spurious provider attribution).
+        compose.setContent {
+            PocketShellTheme {
+                SessionKindPickerContent(
+                    sessionName = "work",
+                    onCancel = {},
+                    onPick = {},
+                    isUnknown = false,
+                    currentKind = SessionAgentKind.Claude,
+                    currentProfile = null,
+                )
+            }
+        }
+
+        compose.onNodeWithTag(SESSION_KIND_PICKER_PROFILE_TAG).assertDoesNotExist()
     }
 
     private fun captureScreenshot(name: String) {

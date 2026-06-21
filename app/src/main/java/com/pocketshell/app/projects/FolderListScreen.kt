@@ -1432,6 +1432,19 @@ private fun FlatSessionRow(
         },
         trailing = {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Issue #858: a non-default profile (e.g. z.ai Claude) gets a
+                // distinct chip BEFORE the kind badge so it reads as a separate
+                // dimension. A default / non-profiled / legacy session shows no
+                // chip — just the plain kind badge.
+                profileChipLabel(session.recordedProfile)?.let { chip ->
+                    ProfileChip(
+                        label = chip,
+                        modifier = Modifier.testTag(
+                            folderListFlatRowProfileChipTestTag(session.sessionName),
+                        ),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
                 AgentTypeBadge(
                     session = session,
                     modifier = Modifier.testTag(folderListFlatRowBadgeTestTag(session.sessionName)),
@@ -1988,6 +2001,18 @@ private fun WorkspaceSessionRow(
         // are broken out (each window row carries the agent identity in its
         // title), so it is dropped on an expanded session (#675).
         if (!expandedIntoWindows) {
+            // Issue #858: a non-default profile (e.g. z.ai Claude) gets a
+            // distinct chip BEFORE the kind badge so the tree distinguishes it
+            // from a default Claude. No chip for a default / legacy session.
+            profileChipLabel(session.recordedProfile)?.let { chip ->
+                Spacer(modifier = Modifier.width(8.dp))
+                ProfileChip(
+                    label = chip,
+                    modifier = Modifier.testTag(
+                        folderSessionProfileChipTestTag(folderPath, session.sessionName),
+                    ),
+                )
+            }
             Spacer(modifier = Modifier.width(8.dp))
             AgentTypeBadge(
                 session = session,
@@ -2202,6 +2227,65 @@ private fun AgentTypeBadge(
 }
 
 private val SessionBadgeMaxWidth = 84.dp
+
+private val ProfileChipMaxWidth = 70.dp
+
+/**
+ * Issue #858: a small chip next to the agent badge that names the NON-default
+ * profile a session was launched with — so a z.ai-routed Claude reads
+ * differently from a default Anthropic Claude in the tree. Rendered ONLY when
+ * [FolderSessionEntry.recordedProfile] is non-null; a default / non-profiled /
+ * legacy session shows no chip (the plain kind badge only).
+ *
+ * The chip uses a distinct neutral-accent fill (not the agent-accent purple of
+ * the kind badge) so the two pills read as separate dimensions: "what agent"
+ * (badge) and "which provider/profile" (this chip).
+ */
+@Composable
+private fun ProfileChip(
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .widthIn(max = ProfileChipMaxWidth)
+            .background(
+                PocketShellColors.SurfaceElev.copy(alpha = 0.9f),
+                RoundedCornerShape(6.dp),
+            )
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp))
+            .padding(horizontal = PocketShellDensity.chipPadH, vertical = PocketShellDensity.chipPadV),
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.labelMono,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * Compact provider/profile label for the [ProfileChip] (issue #858). The
+ * recorded profile is the host's human label (e.g. `"Claude (Z.AI)"`); the chip
+ * wants just the distinguishing provider part, so when the label is of the form
+ * `Kind (Provider)` it shows `Provider` (e.g. `"Z.AI"`). Any other shape (a bare
+ * profile name) is shown verbatim. Returns `null` for a blank label so the
+ * caller renders no chip.
+ */
+internal fun profileChipLabel(profile: String?): String? {
+    val raw = profile?.trim().orEmpty()
+    if (raw.isEmpty()) return null
+    val open = raw.lastIndexOf('(')
+    val close = raw.lastIndexOf(')')
+    if (open in 0 until close) {
+        val inner = raw.substring(open + 1, close).trim()
+        if (inner.isNotEmpty()) return inner
+    }
+    return raw
+}
 
 /**
  * Compact host-detail tree gutter. The shared density token keeps the default
@@ -2722,6 +2806,9 @@ fun folderListFlatRowTileTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:tile"
 fun folderListFlatRowBadgeTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:badge"
+/** Issue #858: tags the non-default profile chip on a flat host-detail row. */
+fun folderListFlatRowProfileChipTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:profile"
 fun folderListFlatRowActionsTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop"
 
@@ -2751,6 +2838,9 @@ fun folderSessionTileTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:tile"
 fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:badge"
+/** Issue #858: tags the non-default profile chip on a tree session child row. */
+fun folderSessionProfileChipTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:profile"
 fun folderSessionActionsTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop"
 

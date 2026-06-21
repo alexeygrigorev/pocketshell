@@ -75,6 +75,14 @@ fun SessionKindPickerSheet(
      * follow-up (Option A) passes a cgroup guess here with no other change.
      */
     suggestedKind: SessionAgentKind? = null,
+    /**
+     * Issue #858: the session's recorded NON-default profile label (e.g.
+     * `"Claude (Z.AI)"`), read back from `@ps_agent_profile`. When non-null,
+     * the sheet shows a "Provider/profile" line so the user can tell a z.ai
+     * Claude apart from a default Claude. `null` for a default / non-profiled
+     * / legacy session — no line shown.
+     */
+    currentProfile: String? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -90,6 +98,7 @@ fun SessionKindPickerSheet(
             isUnknown = isUnknown,
             currentKind = currentKind,
             suggestedKind = suggestedKind,
+            currentProfile = currentProfile,
         )
     }
 }
@@ -106,6 +115,7 @@ internal fun SessionKindPickerContent(
     isUnknown: Boolean,
     currentKind: SessionAgentKind? = null,
     suggestedKind: SessionAgentKind? = null,
+    currentProfile: String? = null,
 ) {
     // Initial selection precedence: an explicit suggestion (Option A, future)
     // wins; otherwise pre-select the session's current recorded kind so the
@@ -148,6 +158,20 @@ internal fun SessionKindPickerContent(
                 color = PocketShellColors.TextSecondary,
                 style = PocketShellType.bodyMono,
             )
+
+            // Issue #858: surface the recorded NON-default profile/provider so
+            // the user can tell a z.ai Claude apart from a default Claude. Only
+            // shown when a profile was recorded; a default / legacy session has
+            // no line (the plain kind only).
+            currentProfile?.trim()?.takeIf { it.isNotEmpty() }?.let { profile ->
+                Text(
+                    text = "Provider/profile: $profile",
+                    color = PocketShellColors.Text,
+                    style = PocketShellType.bodyMono,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag(SESSION_KIND_PICKER_PROFILE_TAG),
+                )
+            }
 
             SessionAgentKind.pickable.forEach { kind ->
                 SessionKindRow(
@@ -231,6 +255,8 @@ internal fun sessionKindPickerLabel(kind: SessionAgentKind): String = when (kind
 const val SESSION_KIND_PICKER_SHEET_TAG: String = "session-kind-picker:sheet"
 const val SESSION_KIND_PICKER_CONTENT_TAG: String = "session-kind-picker:content"
 const val SESSION_KIND_PICKER_TITLE_TAG: String = "session-kind-picker:title"
+/** Issue #858: tags the recorded provider/profile line in the picker. */
+const val SESSION_KIND_PICKER_PROFILE_TAG: String = "session-kind-picker:profile"
 const val SESSION_KIND_PICKER_CANCEL_TAG: String = "session-kind-picker:cancel"
 const val SESSION_KIND_PICKER_SAVE_TAG: String = "session-kind-picker:save"
 

@@ -149,6 +149,13 @@ internal class HostTreeModel {
         var agentKind: SessionAgentKind,
         var windows: List<WindowState>,
         /**
+         * Issue #858: the non-default profile label (e.g. `"Claude (Z.AI)"`)
+         * read back from `@ps_agent_profile`, or `null` for a default /
+         * non-profiled / legacy session. Held across reconciles like the kind
+         * so a transient blank read doesn't drop the tree's profile chip.
+         */
+        var recordedProfile: String?,
+        /**
          * Wall-clock millis this node was inserted optimistically by an
          * app-initiated action (#653/#678), or `null` if it came from a probe.
          * A reconcile must NOT prune a node whose optimistic grace has not yet
@@ -234,6 +241,10 @@ internal class HostTreeModel {
                 attached = false,
                 agentKind = node.foreignGuess ?: SessionAgentKind.Probing,
                 windows = emptyList(),
+                // The client cache holds ordering/expand/foreign-guess only, not
+                // the recorded profile — the first reconcile re-reads it from the
+                // host @ps_agent_profile option (#858).
+                recordedProfile = null,
                 // A registry seed is NOT app-inserted: leave it prunable by the
                 // first reconcile if the session is gone.
                 optimisticSince = null,
@@ -356,6 +367,11 @@ internal class HostTreeModel {
                 // overwritten by another agent kind or a CONFIRMED Shell — an
                 // incoming Probing must NOT clobber a known agent.
                 existing.agentKind = mergeAgentKind(existing.agentKind, entry.agentKind)
+                // Issue #858: the recorded profile is durable host-side, so a
+                // fresh non-null read is authoritative; a transient blank read
+                // (e.g. a degraded probe) keeps the held label rather than
+                // dropping the chip.
+                existing.recordedProfile = entry.recordedProfile ?: existing.recordedProfile
                 existing.windows = mergeWindows(existing.windows, entry.windows.map { it.toState() })
                 // The probe confirmed this node — it is no longer optimistic.
                 existing.optimisticSince = null
@@ -709,6 +725,7 @@ internal class HostTreeModel {
             attached = attached,
             agentKind = agentKind,
             windows = windows.map { it.toState() },
+            recordedProfile = recordedProfile,
             optimisticSince = optimisticSince,
         )
 
@@ -718,6 +735,7 @@ internal class HostTreeModel {
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,
+            recordedProfile = recordedProfile,
             windows = windows.map { it.toEntry() },
         )
 

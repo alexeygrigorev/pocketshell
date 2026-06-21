@@ -45,10 +45,12 @@ class FolderListGatewayKindAuthorityTest {
     @Test
     fun recordedClaudeAndCodexSessionsClassifyFromRecordedKindWithNoKindRoundTrip() = runTest {
         // Two sessions WE launched: one recorded claude, one recorded codex.
-        // Field order (#821): name, created, activity, attached, @ps_agent_kind, path.
+        // Field order (#821 + #858): name, created, activity, attached,
+        // @ps_agent_kind, @ps_agent_profile (blank here — default profiles),
+        // path.
         val listSessions =
-            "rec-claude${SEP}1${SEP}2${SEP}1${SEP}claude${SEP}/work/claude\n" +
-                "rec-codex${SEP}1${SEP}2${SEP}1${SEP}codex${SEP}/work/codex"
+            "rec-claude${SEP}1${SEP}2${SEP}1${SEP}claude${SEP}${SEP}/work/claude\n" +
+                "rec-codex${SEP}1${SEP}2${SEP}1${SEP}codex${SEP}${SEP}/work/codex"
         // list-panes -a: name, win_index, win_name, win_active, pane_active,
         // cwd, tty, command, window_id, pane_pid.
         val listPanes =
@@ -77,9 +79,41 @@ class FolderListGatewayKindAuthorityTest {
     }
 
     @Test
+    fun recordedProfileIsReadBackAndCarriedOnTheRow() = runTest {
+        // Issue #858 end-to-end read-back: a z.ai Claude session carries its
+        // recorded @ps_agent_profile; a default Claude carries none. The
+        // gateway enumeration surfaces the profile on the row model.
+        val listSessions =
+            "zai-claude${SEP}1${SEP}2${SEP}1${SEP}claude${SEP}Claude (Z.AI)${SEP}/work/zai\n" +
+                "def-claude${SEP}1${SEP}2${SEP}1${SEP}claude${SEP}${SEP}/work/def"
+        val listPanes =
+            "zai-claude${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/zai${SEP}/dev/pts/1${SEP}node${SEP}@0${SEP}111\n" +
+                "def-claude${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/def${SEP}/dev/pts/2${SEP}node${SEP}@1${SEP}222"
+        val session = FakeSshSession(enumerationStdout = "$listSessions\n$MARKER\n$listPanes")
+        val gateway = gateway(session)
+
+        val rows = (gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
+            as FolderListResult.Sessions).rows
+
+        assertEquals(
+            "Claude (Z.AI)",
+            rows.first { it.sessionName == "zai-claude" }.recordedProfile,
+        )
+        assertEquals(
+            "a default Claude carries no profile label",
+            null,
+            rows.first { it.sessionName == "def-claude" }.recordedProfile,
+        )
+        // The kind is still authoritative for both.
+        assertEquals(SessionAgentKind.Claude, rows.first { it.sessionName == "zai-claude" }.agentKind)
+        assertEquals(SessionAgentKind.Claude, rows.first { it.sessionName == "def-claude" }.agentKind)
+    }
+
+    @Test
     fun foreignSessionIsClassifiedByTheOneShotDaemonGuess() = runTest {
-        // A session we did NOT launch: blank @ps_agent_kind (the 5th field).
-        val listSessions = "foreign${SEP}1${SEP}2${SEP}1${SEP}${SEP}/work/foreign"
+        // A session we did NOT launch: blank @ps_agent_kind (5th field) AND
+        // blank @ps_agent_profile (6th field).
+        val listSessions = "foreign${SEP}1${SEP}2${SEP}1${SEP}${SEP}${SEP}/work/foreign"
         val listPanes =
             "foreign${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/foreign${SEP}/dev/pts/3${SEP}node${SEP}@0${SEP}333"
         val session = FakeSshSession(

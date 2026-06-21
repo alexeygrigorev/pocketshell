@@ -518,7 +518,7 @@ def test_launch_agent_records_kind_before_exec(tmp_path, monkeypatch, kind):
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
     order = []
 
-    def fake_record(k, env=None, runner=None):
+    def fake_record(k, env=None, runner=None, profile=None):
         order.append(("record", k, env.get("TMUX") if env else None))
         return True
 
@@ -551,7 +551,7 @@ def test_launch_agent_execs_even_when_record_is_noop(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     captured = {}
 
-    def quiet_record(k, env=None, runner=None):
+    def quiet_record(k, env=None, runner=None, profile=None):
         return False
 
     def fake_execvpe(file, argv, env):
@@ -567,6 +567,170 @@ def test_launch_agent_execs_even_when_record_is_noop(tmp_path, monkeypatch):
         record_kind=quiet_record,
     )
     assert captured["file"] == "codex"
+
+
+# ---------------------------------------------------------------------------
+# Record the launch PROFILE as @ps_agent_profile (issue #858). The wrapper
+# distinguishes a z.ai Claude (named profile) from a default Anthropic Claude
+# by writing the non-default profile's human label as a second per-session
+# tmux user option, alongside @ps_agent_kind. A default / no-profile launch
+# writes no profile option so the tree shows the plain kind.
+# ---------------------------------------------------------------------------
+
+
+def test_record_agent_kind_writes_profile_option_when_profile_set():
+    calls = []
+    ok = agents.record_agent_kind(
+        "claude",
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        runner=lambda argv, **kw: calls.append(argv),
+        profile="Claude (Z.AI)",
+    )
+    assert ok is True
+    # Kind FIRST, profile SECOND — both session-scoped (no -g).
+    assert calls == [
+        ["tmux", "set-option", "@ps_agent_kind", "claude"],
+        ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"],
+    ]
+
+
+def test_record_agent_kind_no_profile_writes_only_kind():
+    # A default / no-profile launch records the kind but NO profile option,
+    # so a default session shows the plain kind with no spurious chip.
+    calls = []
+    ok = agents.record_agent_kind(
+        "claude",
+        env={"TMUX": "x"},
+        runner=lambda argv, **kw: calls.append(argv),
+        profile=None,
+    )
+    assert ok is True
+    assert calls == [["tmux", "set-option", "@ps_agent_kind", "claude"]]
+
+
+def test_record_agent_kind_empty_profile_writes_only_kind():
+    # An empty-string profile is treated like no profile (no option written).
+    calls = []
+    agents.record_agent_kind(
+        "codex",
+        env={"TMUX": "x"},
+        runner=lambda argv, **kw: calls.append(argv),
+        profile="",
+    )
+    assert calls == [["tmux", "set-option", "@ps_agent_kind", "codex"]]
+
+
+def test_launch_agent_records_profile_before_exec(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    recorded = {}
+
+    def fake_record(k, env=None, runner=None, profile=None):
+        recorded["kind"] = k
+        recorded["profile"] = profile
+        return True
+
+    agents.launch_agent(
+        _FakeCtx(),
+        "claude",
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        profile="Claude (Z.AI)",
+        execvpe=lambda f, a, e: None,
+        record_kind=fake_record,
+    )
+    assert recorded == {"kind": "claude", "profile": "Claude (Z.AI)"}
+
+
+def test_cli_agent_named_profile_records_profile_option(tmp_path, monkeypatch):
+    """End-to-end #858: launching claude via the z.ai profile inside tmux
+    writes BOTH @ps_agent_kind=claude AND @ps_agent_profile=<name> before
+    exec, via the real --profile resolution path."""
+    home = _seed_zlaude_home(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    calls = []
+    monkeypatch.setattr(agents.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
+    rc = main(
+        [
+            "agent",
+            "claude",
+            "--dir",
+            str(workdir),
+            "--profile",
+            "Claude (Z.AI)",
+        ]
+    )
+    assert rc == 0
+    assert ["tmux", "set-option", "@ps_agent_kind", "claude"] in calls
+    assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in calls
+
+
+def test_cli_agent_default_profile_records_no_profile_option(tmp_path, monkeypatch):
+    """A default Claude profile records the kind but no profile option, so a
+    default session is the plain kind with no spurious label."""
+    _seed_zlaude_home(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    calls = []
+    monkeypatch.setattr(agents.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
+    rc = main(
+        ["agent", "claude", "--dir", str(workdir), "--profile", "Claude"]
+    )
+    assert rc == 0
+    assert ["tmux", "set-option", "@ps_agent_kind", "claude"] in calls
+    assert not any(
+        argv[:3] == ["tmux", "set-option", "@ps_agent_profile"] for argv in calls
+    )
+
+
+def test_cli_agent_no_profile_records_no_profile_option(tmp_path, monkeypatch):
+    """A bare launch (no --profile/--config-dir) records the kind only."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    calls = []
+    monkeypatch.setattr(agents.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
+    rc = main(["agent", "codex", "--dir", str(workdir)])
+    assert rc == 0
+    assert ["tmux", "set-option", "@ps_agent_kind", "codex"] in calls
+    assert not any(
+        argv[:3] == ["tmux", "set-option", "@ps_agent_profile"] for argv in calls
+    )
+
+
+def test_resolve_config_dir_default_profile_label_is_none(tmp_path, monkeypatch):
+    """The default Claude profile resolves to a None profile label."""
+    _seed_zlaude_home(tmp_path, monkeypatch)
+    cfg, env, label = agents._resolve_config_dir(
+        _FakeCtx(), "claude", None, "Claude"
+    )
+    assert label is None
+
+
+def test_resolve_config_dir_named_profile_label(tmp_path, monkeypatch):
+    """A named (non-default) profile resolves to its human label."""
+    _seed_zlaude_home(tmp_path, monkeypatch)
+    cfg, env, label = agents._resolve_config_dir(
+        _FakeCtx(), "claude", None, "Claude (Z.AI)"
+    )
+    assert label == "Claude (Z.AI)"
+
+
+def test_resolve_config_dir_config_dir_has_no_profile_label():
+    """An explicit --config-dir carries no named profile, so no label."""
+    cfg, env, label = agents._resolve_config_dir(
+        _FakeCtx(), "codex", "/home/u/.codex-x", None
+    )
+    assert cfg == "/home/u/.codex-x"
+    assert label is None
 
 
 # ---------------------------------------------------------------------------

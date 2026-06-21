@@ -1562,6 +1562,19 @@ public class TmuxSessionViewModel @Inject constructor(
     public val currentSessionRecordedKind: StateFlow<SessionAgentKind?> =
         _currentSessionRecordedKind.asStateFlow()
 
+    /**
+     * Issue #858: the active session's recorded NON-default profile label
+     * (e.g. `"Claude (Z.AI)"`), read fresh from the host-side
+     * `@ps_agent_profile` tmux user option alongside the kind. `null` for a
+     * default / non-profiled / legacy session (option absent). Refreshed by
+     * [refreshCurrentSessionRecordedKind] so the "What is this session?" sheet
+     * can show the provider/profile.
+     */
+    private val _currentSessionRecordedProfile: MutableStateFlow<String?> =
+        MutableStateFlow(null)
+    public val currentSessionRecordedProfile: StateFlow<String?> =
+        _currentSessionRecordedProfile.asStateFlow()
+
     // Last on-screen terminal grid reported by Compose. It can arrive
     // before or after the tmux control client attaches; once both are
     // known, the VM reports this size through `refresh-client -C`.
@@ -11524,6 +11537,7 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun refreshCurrentSessionRecordedKind() {
         val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: run {
             _currentSessionRecordedKind.value = null
+            _currentSessionRecordedProfile.value = null
             return
         }
         val session = sessionRef ?: return
@@ -11537,6 +11551,20 @@ public class TmuxSessionViewModel @Inject constructor(
                 }.getOrNull()
             }
             _currentSessionRecordedKind.value = sessionAgentKindFromOption(raw)
+            // Issue #858: read the recorded profile over the SAME warm session
+            // (D21 — no new connection) so the "What is this session?" sheet can
+            // show the provider/profile. A blank/absent option (default /
+            // non-profiled / legacy session) leaves the profile null.
+            val rawProfile = withContext(Dispatchers.IO) {
+                runCatching {
+                    session.exec(
+                        "tmux show-options -v -t '${escapeSingleQuoted(target)}' " +
+                            "@ps_agent_profile 2>/dev/null || true",
+                    ).stdout
+                }.getOrNull()
+            }
+            _currentSessionRecordedProfile.value =
+                rawProfile?.trim()?.takeIf { it.isNotEmpty() }
         }
     }
 

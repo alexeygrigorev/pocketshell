@@ -359,6 +359,7 @@ def record_agent_kind(
     kind: str,
     env: Optional[dict[str, str]] = None,
     runner=None,
+    profile: Optional[str] = None,
 ) -> bool:
     """Record the launched agent ``kind`` as a per-session tmux user option.
 
@@ -371,10 +372,20 @@ def record_agent_kind(
     change. The client reads it back through its session enumeration
     (``tmux list-sessions -F '…#{@ps_agent_kind}'``).
 
-    The option is session-scoped (not global): ``tmux set-option`` without
+    ``profile`` (issue #858) is the human label of the *non-default* profile
+    the agent was launched with — e.g. ``"Claude (Z.AI)"`` for a z.ai Claude
+    session, so the tree can distinguish it from a default Anthropic Claude.
+    It is the same launch-time-recordable dimension as the kind (the selected
+    profile name is known here, before ``os.execvpe``; #826 record-at-start
+    hard-cut — no detection/parse path). When set, it is written as the
+    per-session ``@ps_agent_profile`` user option alongside ``@ps_agent_kind``.
+    A default / no-profile launch passes ``None`` and writes NO profile
+    option, so a default session carries no spurious profile label.
+
+    The options are session-scoped (not global): ``tmux set-option`` without
     ``-g`` sets it on the current session, which is the session the agent
     was launched into. tmux session options persist for the life of the
-    session, so the recorded kind survives reconnect / app restart /
+    session, so the recorded kind/profile survives reconnect / app restart /
     app-kill / reinstall — exactly the durability the epic requires.
 
     No-op (returns ``False``) when not running inside tmux (``$TMUX``
@@ -399,6 +410,13 @@ def record_agent_kind(
             ["tmux", "set-option", "@ps_agent_kind", kind],
             check=False,
         )
+        if profile:
+            # Only a non-default profile is recorded; a default/no-profile
+            # launch writes no option so the tree shows the plain kind.
+            runner(
+                ["tmux", "set-option", "@ps_agent_profile", profile],
+                check=False,
+            )
     except Exception:
         # Recording the kind is best-effort; never block the launch on it.
         return False
@@ -413,6 +431,7 @@ def launch_agent(
     skip_permissions: bool,
     config_dir: Optional[str],
     extra_env: Optional[dict[str, str]] = None,
+    profile: Optional[str] = None,
     execvpe=None,
     record_kind=None,
 ) -> None:
@@ -421,6 +440,11 @@ def launch_agent(
     ``extra_env`` carries the selected profile's ``env:`` block (issue
     #732); it layers onto the launch environment under the #703 provider
     strip (see :func:`build_env`).
+
+    ``profile`` (issue #858) is the human label of the *non-default* profile
+    the launch used (``None`` for the engine default). It is recorded
+    alongside the kind as the ``@ps_agent_profile`` tmux user option so the
+    session tree can distinguish e.g. a z.ai Claude from a default Claude.
 
     ``execvpe`` is injected so tests can assert the exact call without
     actually replacing the process. When ``None`` (production) it resolves
@@ -473,7 +497,7 @@ def launch_agent(
     # this process (epic #821 Workstream A). Use this wrapper's own
     # environment (os.environ) for the TMUX detection — `env` is the
     # provider-stripped launch env that does not necessarily carry $TMUX.
-    record_kind(kind, dict(os.environ))
+    record_kind(kind, dict(os.environ), profile=profile)
 
     # Replace this process with the agent so it owns the pty cleanly.
     execvpe(argv[0], argv, env)
@@ -484,17 +508,21 @@ def _resolve_config_dir(
     kind: str,
     config_dir: Optional[str],
     profile: Optional[str],
-) -> tuple[Optional[str], dict[str, str]]:
-    """Resolve config dir + extra env from ``--config-dir`` / ``--profile``.
+) -> tuple[Optional[str], dict[str, str], Optional[str]]:
+    """Resolve config dir + extra env + profile label from the launch flags.
 
-    Returns ``(config_dir, extra_env)``. ``--config-dir`` and ``--profile``
-    are mutually exclusive (passing both is an error). When ``--profile`` is
-    given, it resolves the named host profile (via
+    Returns ``(config_dir, extra_env, profile_label)``. ``--config-dir`` and
+    ``--profile`` are mutually exclusive (passing both is an error). When
+    ``--profile`` is given, it resolves the named host profile (via
     :func:`pocketshell.profiles.resolve_profile`) to its ``config_dir`` AND
-    its ``env:`` block (issue #732) — an unknown profile is a clear error. A
-    default profile resolves to ``None`` config dir (the engine's built-in
-    location); ``--config-dir`` carries no profile env. Omitting both flags
-    returns ``(None, {})``.
+    its ``env:`` block (issue #732) — an unknown profile is a clear error.
+
+    ``profile_label`` (issue #858) is the resolved profile's human ``name``
+    for a *non-default* profile (e.g. ``"Claude (Z.AI)"``), so the session
+    tree can tell a z.ai Claude apart from a default Claude. The engine's
+    default profile, ``--config-dir`` (which carries no named profile), and
+    omitting both flags all resolve ``profile_label`` to ``None`` — so a
+    default session records no ``@ps_agent_profile`` option.
     """
     if config_dir is not None and profile is not None:
         click.echo(
@@ -504,7 +532,7 @@ def _resolve_config_dir(
         )
         ctx.exit(2)
     if profile is None:
-        return config_dir, {}
+        return config_dir, {}, None
 
     # Lazy import keeps the agent launch path from importing yaml unless a
     # profile is actually requested.
@@ -519,7 +547,10 @@ def _resolve_config_dir(
             err=True,
         )
         ctx.exit(2)
-    return resolved.config_dir, dict(resolved.env)
+    # Only a non-default profile is surfaced as a label; the default profile
+    # is the plain kind (no spurious chip in the tree).
+    label = None if resolved.default else resolved.name
+    return resolved.config_dir, dict(resolved.env), label
 
 
 def _make_agent_command(kind: str):
@@ -575,7 +606,7 @@ def _make_agent_command(kind: str):
         config_dir: Optional[str],
         profile: Optional[str],
     ) -> None:
-        config_dir, extra_env = _resolve_config_dir(
+        config_dir, extra_env, profile_label = _resolve_config_dir(
             ctx, kind, config_dir, profile
         )
         launch_agent(
@@ -585,6 +616,7 @@ def _make_agent_command(kind: str):
             skip_permissions=skip_permissions,
             config_dir=config_dir,
             extra_env=extra_env,
+            profile=profile_label,
         )
 
     return _cmd

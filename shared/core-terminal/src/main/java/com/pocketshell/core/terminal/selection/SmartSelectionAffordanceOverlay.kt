@@ -14,7 +14,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
 import com.termux.view.TerminalView
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.withContext
 
 /**
  * Compose overlay that paints lightweight affordances for smart-selection
@@ -177,6 +182,153 @@ public fun FilePathOverlay(
                 startCol = region.startCol,
                 endColExclusive = region.endColExclusive,
             )
+        }
+    }
+
+    Layout(
+        content = {},
+        modifier = modifier.drawBehind {
+            for (segment in smartSelectionAffordanceSegments(view, regions, size.width, size.height)) {
+                drawRect(
+                    color = segment.color,
+                    topLeft = Offset(segment.left, segment.top),
+                    size = Size(
+                        width = segment.right - segment.left,
+                        height = segment.thicknessPx,
+                    ),
+                )
+            }
+        },
+    ) { _, constraints ->
+        layout(
+            constraints.maxWidth.coerceAtLeast(0),
+            constraints.maxHeight.coerceAtLeast(0),
+        ) {}
+    }
+}
+
+/**
+ * Issue #871: tappable file paths AND URLs on an interactive-agent pane
+ * (Codex/Claude), WITHOUT the per-frame main-thread regex cost that caused the
+ * #803/#866/#796 ANR.
+ *
+ * ## Why a dedicated overlay instead of re-enabling [FilePathOverlay] + the URL scan
+ *
+ * The #796-REOPENED gate turned ALL four per-frame, full-viewport, **on-main**
+ * affordance scanners OFF for an agent pane to kill the ANR. Just flipping that
+ * gate back on would reintroduce the exact per-frame main-thread scan storm.
+ * This overlay restores the two affordances the maintainer actually wants on an
+ * agent pane (file path + URL) by splitting the work:
+ *
+ * 1. **On the main thread, debounced on viewport-settle** (NOT every frame): read
+ *    the visible rows into a thread-safe [ViewportRowsSnapshot] via
+ *    [extractVisibleViewportRows] — cheap (one `getSelectedText` per visible row).
+ *    [renderRequests] is [conflate]d so a `%output` burst collapses to the latest
+ *    settled snapshot instead of one scan per emulator tick.
+ * 2. **Off the main thread** ([scanDispatcher], default [Dispatchers.Default]):
+ *    run the expensive regex/reassembly passes ([filePathRegionsForRows] +
+ *    [urlRegionsForRows]) against the snapshot. This is the cost that previously
+ *    stalled the UI thread; it never runs on Main here.
+ * 3. Back on Main: publish the regions for the affordance hairline (drawn below)
+ *    and the host's hit-test snapshots.
+ *
+ * The heavier/less-valuable smart-selection match + engine-command scanners stay
+ * OFF for an agent pane (the conversation view, #818, is the richer agent
+ * surface); only path + URL are restored here, which is the scope of #871.
+ *
+ * @param onFilePathsChanged latest visible file-path snapshot for hit-testing.
+ * @param onUrlsChanged latest visible URL snapshot for hit-testing.
+ * @param scanDispatcher dispatcher the regex passes run on; defaults to
+ *   [Dispatchers.Default]. Injected by tests to observe the dispatch thread.
+ */
+@Composable
+public fun AgentPaneAffordanceOverlay(
+    view: TerminalView?,
+    renderRequests: Flow<Unit>,
+    viewportChangeKey: Any? = Unit,
+    onFilePathsChanged: (List<FilePathRegion>) -> Unit,
+    onUrlsChanged: (List<UrlRegion>) -> Unit,
+    scanDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    modifier: Modifier = Modifier,
+) {
+    var paths by remember { mutableStateOf<List<FilePathRegion>>(emptyList()) }
+    var urls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
+    val latestOnPathsChanged by rememberUpdatedState(onFilePathsChanged)
+    val latestOnUrlsChanged by rememberUpdatedState(onUrlsChanged)
+
+    LaunchedEffect(view, renderRequests, viewportChangeKey, scanDispatcher) {
+        if (view == null) {
+            paths = emptyList()
+            urls = emptyList()
+            latestOnPathsChanged(emptyList())
+            latestOnUrlsChanged(emptyList())
+            return@LaunchedEffect
+        }
+        // The Main dispatcher. The cheap viewport extraction and the Compose-state
+        // publish MUST run on Main (the live emulator is not thread-safe, and an
+        // off-main snapshot-state write would not notify the recomposer reliably).
+        // Only the regex pass is moved OFF it onto [scanDispatcher]. We use an
+        // explicit [Dispatchers.Main] rather than the LaunchedEffect's own context
+        // because `conflate()` runs the collector on the upstream/producer
+        // dispatcher (here a background pool), so `coroutineContext` is NOT Main.
+        val mainDispatcher = Dispatchers.Main
+        // Each render-settle (or initial composition) triggers ONE off-main scan
+        // of the latest snapshot. `conflate` drops intermediate emissions while a
+        // scan is in flight, so a Codex `%output` burst never queues N scans — the
+        // collector always re-extracts the freshest settled viewport, never a
+        // backlog. `onStart { emit(Unit) }` runs the initial scan before the first
+        // render signal arrives.
+        renderRequests.onStart { emit(Unit) }.conflate().collect {
+            // CHEAP, on Main: copy the live, non-thread-safe viewport into a
+            // plain-data snapshot.
+            val snapshot = withContext(mainDispatcher) { extractVisibleViewportRows(view) }
+            // EXPENSIVE, OFF Main: regex + wrapped-line reassembly. This is the
+            // per-frame cost that caused the #803/#866 ANR; here it never touches
+            // the UI thread.
+            val (freshPaths, freshUrls) = withContext(scanDispatcher) {
+                val p = runCatching { filePathRegionsForRows(snapshot.rows, snapshot.columns) }
+                    .getOrDefault(emptyList())
+                val u = runCatching { urlRegionsForRows(snapshot.rows, snapshot.columns) }
+                    .getOrDefault(emptyList())
+                p to u
+            }
+            // Publish the Compose-state diff back ON Main so the recomposer reliably
+            // picks it up (and the host's hit-test snapshot / hairline update).
+            withContext(mainDispatcher) {
+                if (freshPaths != paths) {
+                    paths = freshPaths
+                    latestOnPathsChanged(freshPaths)
+                }
+                if (freshUrls != urls) {
+                    urls = freshUrls
+                    latestOnUrlsChanged(freshUrls)
+                }
+            }
+        }
+    }
+
+    val regions = remember(paths, urls) {
+        buildList {
+            paths.forEach { region ->
+                add(
+                    TerminalMatchRegion(
+                        match = TerminalMatch.Path(region.path),
+                        row = region.row,
+                        startCol = region.startCol,
+                        endColExclusive = region.endColExclusive,
+                    ),
+                )
+            }
+            urls.forEach { region ->
+                add(
+                    TerminalMatchRegion(
+                        match = TerminalMatch.Url(region.url),
+                        row = region.row,
+                        startCol = region.startCol,
+                        endColExclusive = region.endColExclusive,
+                    ),
+                )
+            }
         }
     }
 

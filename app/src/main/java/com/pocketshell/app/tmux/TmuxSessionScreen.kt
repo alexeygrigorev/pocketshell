@@ -4466,11 +4466,18 @@ internal fun TmuxTerminalPager(
                 // pane has an empty set and the affordance is off.
                 engineCommands = engineCommands,
                 onEngineCommandTap = onEngineCommandTap,
-                // Issue #796 (REOPENED): an agent pane runs NO per-frame viewport
-                // affordance scanners — that per-frame regex cost was the Codex
-                // `%output` keyboard-up ANR. Affordances live in Conversation
-                // (#809/#818). Shell / non-agent panes keep full tappability.
+                // Issue #796 (REOPENED): an agent pane runs NO per-frame ON-MAIN
+                // viewport affordance scanners — that per-frame regex cost was the
+                // Codex `%output` keyboard-up ANR. Shell / non-agent panes keep the
+                // full on-main scanners (URL + path + match + command).
                 affordanceScannersEnabled = !isAgentPane,
+                // Issue #871: an agent pane STILL gets tappable file paths + URLs —
+                // agents emit file paths constantly and the maintainer taps them to
+                // open the file viewer. But via the OFF-main, debounced overlay
+                // (`AgentPaneAffordanceOverlay`), NOT the per-frame on-main scan, so
+                // the #803/#866 ANR is not reintroduced. The #796 over-correction
+                // had removed this affordance entirely from agent panes.
+                agentPaneLinkAffordancesEnabled = isAgentPane,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 2.dp, vertical = 4.dp),

@@ -25,6 +25,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pocketshell.core.terminal.selection.AgentPaneAffordanceOverlay
 import com.pocketshell.core.terminal.selection.EngineCommandOverlay
 import com.pocketshell.core.terminal.selection.EngineCommandRegion
 import com.pocketshell.core.terminal.selection.FilePathOverlay
@@ -249,6 +250,18 @@ fun TerminalSurface(
     // caller / test) keep full URL/path/command tappability — UNCHANGED. Hard cut
     // per D22: no settings flag, no per-pane "legacy scanner" fallback.
     affordanceScannersEnabled: Boolean = true,
+    // Issue #871: an interactive-agent pane (Codex/Claude) keeps tappable file
+    // paths and URLs even though [affordanceScannersEnabled] is `false` for it —
+    // BUT via an OFF-main, debounced scan ([AgentPaneAffordanceOverlay]), never
+    // the per-frame on-main scanners that caused the #803/#866/#796 ANR. Set
+    // `true` for an agent pane (the #679 agentKind/cgroup signal); the host wires
+    // `onFilePathTap` / `onUrlTap` as usual and a tap routes to the file viewer /
+    // browser exactly like a shell pane. The match + engine-command scanners stay
+    // off for an agent pane (the conversation view, #818, is its richer surface);
+    // only path + URL are restored. Has no effect when [affordanceScannersEnabled]
+    // is `true` (a shell pane already runs the full on-main scanners). Defaults to
+    // `false` so non-agent callers / tests are UNCHANGED.
+    agentPaneLinkAffordancesEnabled: Boolean = false,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
@@ -376,12 +389,21 @@ fun TerminalSurface(
     // app context — which is the behaviour every reasonable host would want.
     // Suppressing the overlay entirely (urlsEnabled = false) is what tests
     // and code paths that explicitly do not want URL detection should use.
-    val effectiveUrlTap: ((String) -> Unit)? = remember(onUrlTap, urlsEnabled, affordanceScannersEnabled, context) {
-        if (!affordanceScannersEnabled) {
-            // Issue #796: an agent pane does not run the URL scanner at all —
-            // its affordances live in the Conversation view (#809/#818). A null
-            // tap disables both the per-frame `findVisibleUrls` scan below and
-            // the URL hit-test.
+    val effectiveUrlTap: ((String) -> Unit)? = remember(
+        onUrlTap,
+        urlsEnabled,
+        affordanceScannersEnabled,
+        agentPaneLinkAffordancesEnabled,
+        context,
+    ) {
+        if (!affordanceScannersEnabled && !agentPaneLinkAffordancesEnabled) {
+            // Issue #796: an agent pane with NO link affordances does not run the
+            // URL scanner at all. A null tap disables both the per-frame
+            // `findVisibleUrls` scan and the URL hit-test. Issue #871: an agent
+            // pane with link affordances enabled (the default agent path now)
+            // falls through to the normal resolution below — the URL scan it
+            // drives is the OFF-main `AgentPaneAffordanceOverlay`, not the
+            // per-frame on-main scan, so the ANR is not reintroduced.
             null
         } else if (!urlsEnabled) {
             null
@@ -414,12 +436,35 @@ fun TerminalSurface(
     // scanners — only the cheap #803-paced repaint runs. Shell / non-agent panes
     // (default `true`) are unchanged.
     val matchScannerEnabled = affordanceScannersEnabled && matchListener != null
+    // The per-frame ON-MAIN file-path overlay is only for a shell / non-agent
+    // pane (`affordanceScannersEnabled`). An agent pane never wires it — its
+    // file-path scan runs OFF-main via [AgentPaneAffordanceOverlay] below.
     val filePathScannerEnabled = affordanceScannersEnabled && onFilePathTap != null
+    // Issue #871: the OFF-main, debounced agent-pane path+URL overlay. Active ONLY
+    // for an agent pane (`agentPaneLinkAffordancesEnabled`) when scanners are off.
+    // Wires the file-path tap hit-test and drives the URL hit-test snapshot too,
+    // restoring tappable paths/URLs without the per-frame on-main ANR cost.
+    val agentLinkOverlayEnabled =
+        !affordanceScannersEnabled &&
+            agentPaneLinkAffordancesEnabled &&
+            (onFilePathTap != null || effectiveUrlTap != null)
+    // The file-path tap is live when EITHER the shell-pane on-main overlay OR the
+    // agent-pane off-main overlay is feeding `visibleFilePaths`.
+    val filePathTapActive =
+        onFilePathTap != null && (filePathScannerEnabled || agentLinkOverlayEnabled)
 
-    LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick, coalescedRenderRequests) {
+    LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick, coalescedRenderRequests, agentLinkOverlayEnabled) {
         val view = terminalView
         if (view == null || effectiveUrlTap == null) {
             visibleUrls = emptyList()
+            return@LaunchedEffect
+        }
+        if (agentLinkOverlayEnabled) {
+            // Issue #871: on an agent pane the URL scan is driven OFF-main by
+            // [AgentPaneAffordanceOverlay] (which publishes into `visibleUrls`),
+            // NOT by this per-frame on-main scan. Skipping it here is what keeps
+            // the #803/#866 per-frame main-thread cost off agent panes while still
+            // making URLs tappable.
             return@LaunchedEffect
         }
         visibleUrls = runCatching { findVisibleUrls(view) }
@@ -464,15 +509,16 @@ fun TerminalSurface(
         visibleEngineCommands,
         effectiveUrlTap,
         onFilePathTap,
-        filePathScannerEnabled,
+        filePathTapActive,
         engineCommandTap,
     ) {
         val view = terminalView
         val tap = effectiveUrlTap
-        // Issue #796: an agent pane has scanners off, so the file-path tap is
-        // inert too (its snapshot stays empty and its affordance lives in
-        // Conversation). Mirror the scanner gate here for consistency.
-        val pathTapMaybe = if (filePathScannerEnabled) onFilePathTap else null
+        // The file-path tap is live when EITHER the shell-pane on-main overlay
+        // (#500) OR the agent-pane off-main overlay (#871) is feeding
+        // `visibleFilePaths`. When neither is, the tap stays inert (its snapshot
+        // is empty and the affordance lives in Conversation, #809/#818).
+        val pathTapMaybe = if (filePathTapActive) onFilePathTap else null
         if (view == null || (tap == null && pathTapMaybe == null && engineCommandTap == null)) {
             viewClient.onTapMaybeUrl = null
         } else {
@@ -581,8 +627,12 @@ fun TerminalSurface(
             // Issue #796: the smart-selection affordance overlay runs a
             // full-viewport `findVisibleTerminalMatches` scan per render frame —
             // one of the four scanners. Only wire it when a scanner consumer is
-            // active AND scanners are enabled (an agent pane wires none).
-            if (matchScannerEnabled || effectiveUrlTap != null) {
+            // active AND scanners are enabled (an agent pane wires none). Issue
+            // #871: gate on `affordanceScannersEnabled` too — an agent pane's
+            // `effectiveUrlTap` is now non-null (URLs are tappable there via the
+            // OFF-main overlay), so without this gate the on-main per-frame match
+            // scan would wrongly come back for agent panes (the ANR).
+            if (affordanceScannersEnabled && (matchScannerEnabled || effectiveUrlTap != null)) {
                 SmartSelectionAffordanceOverlay(
                     view = terminalView,
                     // Issue #796: gate the per-render match scan to ≤1/frame.
@@ -592,7 +642,8 @@ fun TerminalSurface(
                     onMatchesChanged = { visibleMatchRegions = it },
                 )
             }
-            // Issue #500: tappable file-path affordance + hit-test snapshot.
+            // Issue #500: tappable file-path affordance + hit-test snapshot (the
+            // ON-main per-frame scan, shell / non-agent panes only).
             if (filePathScannerEnabled) {
                 FilePathOverlay(
                     view = terminalView,
@@ -600,6 +651,21 @@ fun TerminalSurface(
                     renderRequests = coalescedRenderRequests,
                     viewportChangeKey = viewportTick,
                     onFilePathsChanged = { visibleFilePaths = it },
+                )
+            }
+            // Issue #871: an agent pane (Codex/Claude) gets tappable file paths +
+            // URLs via the OFF-main, debounced overlay — never the per-frame
+            // on-main scan above. It feeds BOTH `visibleFilePaths` and
+            // `visibleUrls` for the tap hit-test and paints the affordance
+            // hairlines. The match + engine-command scanners stay off for an agent
+            // pane (Conversation, #818, is the richer surface).
+            if (agentLinkOverlayEnabled) {
+                AgentPaneAffordanceOverlay(
+                    view = terminalView,
+                    renderRequests = coalescedRenderRequests,
+                    viewportChangeKey = viewportTick,
+                    onFilePathsChanged = { visibleFilePaths = it },
+                    onUrlsChanged = { visibleUrls = it },
                 )
             }
             // Issue #770: tappable engine-command affordance + hit-test snapshot.

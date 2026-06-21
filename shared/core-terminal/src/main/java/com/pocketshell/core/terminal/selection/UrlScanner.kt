@@ -139,6 +139,30 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
         visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
     }
 
+    return urlRegionsForRows(visualRows, columns)
+}
+
+/**
+ * Pure, Android-`TerminalView`-free URL detection over an already-extracted
+ * list of [VisualRow]s. This is the regex/reassembly half of [findVisibleUrls],
+ * split out so the **expensive** scan can run OFF the main thread once the cheap
+ * main-thread row extraction ([extractVisibleViewportRows]) has produced a
+ * thread-safe snapshot.
+ *
+ * Issue #871: an interactive-agent pane (Codex/Claude) must keep tappable file
+ * paths and URLs WITHOUT the per-frame main-thread regex cost that caused the
+ * #803/#866/#796 ANR. The fix runs THIS function on a background dispatcher,
+ * debounced on viewport-settle, while only the (cheap) [VisualRow] extraction
+ * stays on the UI thread (the live `TerminalView`/emulator is not thread-safe).
+ *
+ * Identical output to the inline scan [findVisibleUrls] previously performed —
+ * the row extraction was simply hoisted to the caller.
+ */
+public fun urlRegionsForRows(
+    visualRows: List<VisualRow>,
+    columns: Int,
+): List<UrlRegion> {
+    if (columns <= 0 || visualRows.isEmpty()) return emptyList()
     val out = mutableListOf<UrlRegion>()
     for (logical in reassemble(visualRows)) {
         val line = logical.text

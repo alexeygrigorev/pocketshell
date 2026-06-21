@@ -1032,6 +1032,50 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #871 agent-pane link-affordance off-main proof (core-terminal androidTest).
+# #871 is itself a regression of #803's over-correction: the #796 ANR fix gated
+# ALL per-frame on-main affordance scanners OFF agent panes, which also removed
+# the tappable file-path + URL affordance the maintainer relies on (agents emit
+# paths constantly). The fix restores the affordance via an OFF-main, debounced
+# overlay. This proof asserts BOTH (a) a file path AND a URL are tappable again
+# on a Codex AND a Claude agent pane, and (b) the LOAD-BEARING ANR-safety
+# property — the agent-pane scan runs OFF the main thread and is debounced, NOT
+# the per-frame on-main scan that caused the #803/#866/#796 ANR. Because #871 is
+# a regression of #803's over-correction, an un-gated test invites the exact
+# recurrence — so it runs in this per-push gate alongside the #803/#796/#866
+# proofs. Uses NO Docker fixture (in-process Compose UI test).
+CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS="com.pocketshell.core.terminal.ui.AgentPaneLinkAffordanceOffMainProofTest"
+AGENT_LINK_AFFORDANCE_STATUS="PASS"
+
+run_core_terminal_agent_link_affordance() {
+  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS" \
+    --stacktrace
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  AGENT_LINK_AFFORDANCE_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #871 agent-pane link-affordance proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #871 AGENT-PANE LINK-AFFORDANCE PROOF: $CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS (attempt 1)"
+  echo "=========================================================="
+  agent_link_affordance_start=$SECONDS
+  if run_core_terminal_agent_link_affordance; then
+    echo "AGENT_LINK_AFFORDANCE_PASS: passed on attempt 1 (elapsed $((SECONDS - agent_link_affordance_start))s)"
+  else
+    echo ">>> AGENT-PANE LINK-AFFORDANCE PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_agent_link_affordance; then
+      echo "AGENT_LINK_AFFORDANCE_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "AGENT_LINK_AFFORDANCE_FAILED: #871 proof failed twice"
+      AGENT_LINK_AFFORDANCE_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
@@ -1043,12 +1087,12 @@ SUITE_ELAPSED=$((SECONDS - SUITE_START))
 # UNAVAILABLE".
 if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
       && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
-      && "$MULTICHUNK_SEED_STATUS" == "PASS" ]]; then
+      && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
         && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
-        && "$MULTICHUNK_SEED_STATUS" != "FAIL" ]]; then
+        && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -1088,6 +1132,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #866 multi-chunk seed attach ANR proof (\`shared:core-terminal\`): **$MULTICHUNK_SEED_STATUS**"
   echo "- \`$CORE_TERMINAL_MULTICHUNK_SEED_CLASS\`"
+  echo
+  echo "Core-terminal #871 agent-pane link-affordance off-main proof (\`shared:core-terminal\`): **$AGENT_LINK_AFFORDANCE_STATUS**"
+  echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -1130,7 +1177,7 @@ echo "=========================================================="
   # here, otherwise an append-burst-only regression falls through to the grep's
   # else-branch and is mislabeled as an infra abort, burying the real cause.
   if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" \
-        || "$MULTICHUNK_SEED_STATUS" == "FAIL" ]]; then
+        || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
     echo
     echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
     for c in "${FAILED_CLASSES[@]}"; do
@@ -1144,6 +1191,9 @@ echo "=========================================================="
     fi
     if [[ "$MULTICHUNK_SEED_STATUS" == "FAIL" ]]; then
       echo "- \`$CORE_TERMINAL_MULTICHUNK_SEED_CLASS\` (#866 multi-chunk seed attach ANR proof)"
+    fi
+    if [[ "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\` (#871 agent-pane link-affordance off-main proof)"
     fi
   fi
 } > "$SUMMARY"

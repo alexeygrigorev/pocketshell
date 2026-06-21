@@ -51,6 +51,7 @@ import com.pocketshell.app.tmux.connection.ConnectionManager
 import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
+import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
@@ -120,12 +121,14 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -506,9 +509,39 @@ public class TmuxSessionViewModel @Inject constructor(
     private val _connectionStatus: MutableStateFlow<ConnectionStatus> =
         MutableStateFlow(ConnectionStatus.Idle)
 
-    /** Coarse-grained status the screen surfaces above the terminal. */
+    /**
+     * Coarse-grained status the screen surfaces above the terminal.
+     *
+     * This is the RAW projected status (the VM's reconnect-entry contract; pinned
+     * by the VM test-suite). The view does NOT collect this directly for the
+     * reconnect band — it collects [displayConnectionStatus], which debounces the
+     * sub-1s reconnect flash (issue #876). Keeping this raw flow unchanged means
+     * every reconnect-entry/grace test still observes the immediate projected
+     * status with no debounce timing skew.
+     */
     public val connectionStatus: StateFlow<ConnectionStatus> =
         _connectionStatus.asStateFlow()
+
+    /**
+     * Issue #876 — the DISPLAY status the screen's reconnect band collects.
+     *
+     * A PRESENTATION-LAYER debounce on the OBSERVED status: a momentary drop that
+     * self-recovers within [RECONNECT_UI_DEBOUNCE_MS] never surfaces the
+     * "Reconnecting" band (no flash); a sustained drop surfaces it exactly as
+     * before. This only changes WHEN the UI shows the indicator — it does NOT
+     * touch the frozen reconnect/lease/grace core (D28 / epic #792). Steady states
+     * (Connecting/Switching/Connected/Failed/Idle) surface immediately. Eager
+     * sharing keeps the band state continuous across the screen's
+     * subscribe/unsubscribe churn (it re-collects on every recomposition).
+     */
+    public val displayConnectionStatus: StateFlow<ConnectionStatus> =
+        _connectionStatus
+            .debounceReconnectUi()
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.Eagerly,
+                initialValue = ConnectionStatus.Idle,
+            )
 
     /**
      * EPIC #687 slice 1b: the VM-internal [ConnectionState] that [_connectionStatus]

@@ -1388,6 +1388,26 @@ public class TmuxSessionViewModel @Inject constructor(
     private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
     private var activeAttachMilestone: AttachMilestone? = null
 
+    // Issue #886: the blank-watchdog tick bound, injectable so a unit test can
+    // exhaust it quickly (the stuck-attach-reveal safety net). Defaults to the
+    // production constant — production behavior is unchanged.
+    private var connectedBlankWatchdogMaxTicks: Int = CONNECTED_BLANK_WATCHDOG_MAX_TICKS
+
+    internal fun setConnectedBlankWatchdogMaxTicksForTest(maxTicks: Int) {
+        connectedBlankWatchdogMaxTicks = maxTicks
+    }
+
+    // Issue #886: when false, [armConnectedBlankWatchdog] is suppressed entirely.
+    // Used ONLY by the watchdog-in-isolation characterization tests that manually
+    // arm the watchdog after connect(), so the connect()-auto-armed watchdog does
+    // not run a SECOND, concurrent watchdog over the same blank pane during setup.
+    // Always true in production.
+    private var connectedBlankWatchdogAutoArmEnabled: Boolean = true
+
+    internal fun setConnectedBlankWatchdogAutoArmEnabledForTest(enabled: Boolean) {
+        connectedBlankWatchdogAutoArmEnabled = enabled
+    }
+
     /**
      * Issue #640: pane IDs already seeded (via [seedPaneFromCapture]) during
      * the current attach. The cold-open reveal uses this to skip the redundant
@@ -4554,7 +4574,9 @@ public class TmuxSessionViewModel @Inject constructor(
                     target.user,
                 ),
             )
-            if (!activePaneSeeded) armConnectedBlankWatchdog(blankReseedGuard)
+            if (!activePaneSeeded) {
+                armConnectedBlankWatchdog(blankReseedGuard, surfaceErrorOnExhaustion = true)
+            }
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             // Issue #662: black-pane safety net for the open/switch path even
             // when the phone grid happens to MATCH tmux's current size (so
@@ -4980,7 +5002,9 @@ public class TmuxSessionViewModel @Inject constructor(
                     target.user,
                 ),
             )
-            if (!activePaneSeeded) armConnectedBlankWatchdog(fastSwitchRevealGuard)
+            if (!activePaneSeeded) {
+                armConnectedBlankWatchdog(fastSwitchRevealGuard, surfaceErrorOnExhaustion = true)
+            }
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             logAttachMilestone(
                 attempt = attempt,
@@ -8335,7 +8359,16 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal fun armConnectedBlankWatchdogForTest(guard: RuntimeRefreshGuard) {
-        armConnectedBlankWatchdog(guard)
+        // Issue #886: the manual seam arms the watchdog regardless of the
+        // auto-arm flag (the flag only suppresses the connect()-auto-armed
+        // watchdog so a test can drive ONE watchdog in isolation).
+        val previousAutoArm = connectedBlankWatchdogAutoArmEnabled
+        connectedBlankWatchdogAutoArmEnabled = true
+        try {
+            armConnectedBlankWatchdog(guard)
+        } finally {
+            connectedBlankWatchdogAutoArmEnabled = previousAutoArm
+        }
     }
 
     /**
@@ -8590,10 +8623,21 @@ public class TmuxSessionViewModel @Inject constructor(
      * as the channel is `Connected`, the user ends up on real content or a calm
      * "Attaching…" overlay — never a silent black pane.
      */
-    private fun armConnectedBlankWatchdog(refreshGuard: RuntimeRefreshGuard) {
+    private fun armConnectedBlankWatchdog(
+        refreshGuard: RuntimeRefreshGuard,
+        // Issue #886: when true, an exhausted watchdog (the active pane never
+        // produced a frame) surfaces a retryable error + Reconnect instead of
+        // exiting silently. ONLY the COLD/SWITCH ATTACH reveal handoffs pass true
+        // (the #886 infinite-"Attaching…" at OPEN). The reattach/reconnect reseed
+        // nets pass false: the transport was just re-established healthy, so a
+        // still-blank pane there keeps healing on later %output rather than being
+        // declared a stuck attach.
+        surfaceErrorOnExhaustion: Boolean = false,
+    ) {
+        if (!connectedBlankWatchdogAutoArmEnabled) return
         bridgeScope.launch {
             var tick = 0
-            while (tick < CONNECTED_BLANK_WATCHDOG_MAX_TICKS) {
+            while (tick < connectedBlankWatchdogMaxTicks) {
                 delay(CONNECTED_BLANK_WATCHDOG_TICK_MS)
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
@@ -8618,7 +8662,69 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 tick += 1
             }
+            // Issue #886: the watchdog exhausted every tick and the active pane
+            // is STILL blank — the attach reveal never completed (the seed
+            // capture-pane is wedged behind a busy/streaming agent channel, so
+            // it never lands and "Attaching…" would otherwise spin FOREVER). The
+            // old code fell off the end here SILENTLY, leaving the reveal stuck
+            // in Seeding with a green dot. For a COLD/SWITCH ATTACH reveal, surface
+            // a retryable error + the #823 Reconnect affordance instead of an
+            // infinite spinner. (Reattach/reconnect reseed nets pass
+            // surfaceErrorOnExhaustion=false and keep the old silent exit — the
+            // transport is healthy and later %output still heals the pane.)
+            if (!surfaceErrorOnExhaustion) return@launch
+            if (!isCurrentRuntime(refreshGuard)) return@launch
+            if (clientRef?.disconnected?.value == true) return@launch
+            if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
+            val stillBlank = activeVisiblePane()?.terminalState?.visibleScreenIsBlank() ?: false
+            if (stillBlank) {
+                failStuckAttachReveal()
+            }
         }
+    }
+
+    /**
+     * Issue #886: the attach reveal never produced a frame within the bounded
+     * blank-watchdog window — surface a retryable error so the user is NEVER
+     * left on an infinite "Attaching…" spinner. The control channel is up (green
+     * dot) but the active pane's `capture-pane` seed is wedged (the #470/#835
+     * enumeration-stall class on a streaming agent pane), so we drive the reveal
+     * to the honest-error surface [RevealState.Error] + the #823 Reconnect
+     * affordance by routing through the existing single-emitter [setConnectionState]
+     * `Unreachable` path (the SAME surface the 30 s panes-ready timeout uses).
+     * The current target is preserved as the reconnect target so the Reconnect
+     * button + pull-to-reconnect have something to re-dial.
+     */
+    private fun failStuckAttachReveal() {
+        val target = activeTarget ?: connectingTarget
+        Log.w(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-attach-reveal-stuck: blank-watchdog exhausted " +
+                "(${connectedBlankWatchdogMaxTicks} ticks x " +
+                "${CONNECTED_BLANK_WATCHDOG_TICK_MS}ms) with a still-blank active " +
+                "pane on a Connected channel — surfacing a retryable error + " +
+                "Reconnect instead of an infinite Attaching spinner. " +
+                "session=${target?.sessionName}",
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "attach_reveal_stuck",
+            "session" to target?.sessionName,
+            "hostId" to target?.hostId,
+            "maxTicks" to connectedBlankWatchdogMaxTicks,
+            "tickMs" to CONNECTED_BLANK_WATCHDOG_TICK_MS,
+        )
+        // Preserve the target so Reconnect has something to re-dial, then drop
+        // the loading overlay and drive the honest-error reveal surface.
+        connectingTarget = target
+        refreshReconnectAvailability()
+        _switchHidesTerminal.value = false
+        val where = target?.let { " ${it.user}@${it.host}:${it.port}" } ?: ""
+        setConnectionState(
+            ConnectionState.Unreachable(
+                "Session attach stalled$where. Tap Reconnect to retry.",
+            ),
+        )
     }
 
     /**

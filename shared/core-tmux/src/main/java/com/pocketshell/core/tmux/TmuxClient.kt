@@ -407,6 +407,17 @@ internal interface CommandTimeoutGate {
         private val NOOP_CHECKPOINT = Checkpoint { }
 
         /**
+         * Issue #886: the default absolute wall-clock ceiling for a single
+         * control-mode command, applied ALONGSIDE the per-command idle gate.
+         * Deliberately far larger than `DEFAULT_COMMAND_TIMEOUT_MS` (10 s) so it
+         * never preempts a healthy busy-but-alive redraw backlog (the #576/#794
+         * regression guard) and only catches a command whose reply genuinely
+         * never lands while the channel keeps streaming `%output` (the #886
+         * infinite-"Attaching…" / #470/#835 enumeration-stall class).
+         */
+        const val DEFAULT_ABSOLUTE_COMMAND_CEILING_MS: Long = 30_000L
+
+        /**
          * Issue #576 (P4) + #794: the production gate is an **idle/inactivity**
          * deadline, not a fixed wall-clock one. [timeoutMs] is the maximum
          * tolerated *silence* on the control channel **measured from the moment
@@ -442,10 +453,38 @@ internal interface CommandTimeoutGate {
          * — this gate cannot mask a genuinely silent channel, it just no longer
          * counts *pre-command* silence against the command.
          *
+         * ## Issue #886: the absolute wall-clock ceiling (ADDITIVE)
+         * The idle gate above is, by design, defeated by a continuously busy
+         * channel: an agent/Codex TUI that streams `%output` forever keeps
+         * [readerActivityNanos] advancing, so the idle deadline re-arms on every
+         * tick and NEVER fires even when THIS command's own reply is stuck
+         * behind the redraw backlog and will never land (the attach `capture-pane`
+         * seed on a streaming agent pane — the infinite "Attaching…" of #886, and
+         * the #470/#835 enumeration stall). The idle gate alone therefore cannot
+         * bound a command on a busy channel.
+         *
+         * [absoluteCeilingMs] adds a SECOND, independent watchdog that fires after
+         * a fixed wall-clock window measured from the command's own dispatch,
+         * regardless of reader activity. It is deliberately generous and DISTINCT
+         * from the (much shorter) idle [timeoutMs]: a healthy command answers in
+         * milliseconds, a busy-but-alive backlog answers within the ceiling, and
+         * only a genuinely-wedged command (reply never lands while the channel
+         * stays busy) reaches the ceiling and is cancelled. This preserves the
+         * #576/#794 "busy link tears down a healthy session" protection — the
+         * ceiling is far longer than any legitimate redraw — while guaranteeing a
+         * command can never wait forever. Whichever watchdog (idle OR ceiling)
+         * trips first cancels the body and returns `null`.
+         *
          * @param readerActivityNanos supplies the latest reader-progress
          *   timestamp (`System.nanoTime()` units). Read on each poll tick.
+         * @param absoluteCeilingMs the absolute wall-clock ceiling from command
+         *   dispatch. `null` disables it (pure idle-gate behaviour, for tests that
+         *   characterise the idle gate in isolation).
          */
-        fun realTime(readerActivityNanos: () -> Long): CommandTimeoutGate =
+        fun realTime(
+            readerActivityNanos: () -> Long,
+            absoluteCeilingMs: Long? = DEFAULT_ABSOLUTE_COMMAND_CEILING_MS,
+        ): CommandTimeoutGate =
             object : CommandTimeoutGate {
                 override suspend fun <T> run(timeoutMs: Long, body: suspend (Checkpoint) -> T): T? =
                     coroutineScope {
@@ -484,19 +523,34 @@ internal interface CommandTimeoutGate {
                                 delay(sleepMs)
                             }
                         }
+                        // #886: the absolute wall-clock ceiling watchdog. Fires
+                        // after a fixed window from dispatch even if the idle gate
+                        // keeps re-arming on a continuously-streaming channel. Runs
+                        // ALONGSIDE the idle watchdog — neither replaces the other.
+                        val ceilingWatchdog = absoluteCeilingMs?.let { ceilingMs ->
+                            async { delay(ceilingMs) }
+                        }
                         try {
                             select {
                                 bodyDeferred.onAwait { result ->
                                     watchdog.cancel()
+                                    ceilingWatchdog?.cancel()
                                     result
                                 }
                                 watchdog.onAwait {
                                     bodyDeferred.cancel()
+                                    ceilingWatchdog?.cancel()
+                                    null
+                                }
+                                ceilingWatchdog?.onAwait {
+                                    bodyDeferred.cancel()
+                                    watchdog.cancel()
                                     null
                                 }
                             }
                         } finally {
                             watchdog.cancel()
+                            ceilingWatchdog?.cancel()
                             bodyDeferred.cancel()
                         }
                     }
@@ -575,7 +629,8 @@ internal class RealTmuxClient(
     // this instance's [lastReaderActivityNanos], which isn't available at the
     // constructor-default evaluation point.
     private val commandTimeoutGate: CommandTimeoutGate =
-        commandTimeoutGate ?: CommandTimeoutGate.realTime { lastReaderActivityNanos }
+        commandTimeoutGate
+            ?: CommandTimeoutGate.realTime(readerActivityNanos = { lastReaderActivityNanos })
     private val clientId: Long = NEXT_CLIENT_ID.incrementAndGet()
     private val clientHash: Int = System.identityHashCode(this)
 
@@ -771,7 +826,33 @@ internal class RealTmuxClient(
         val chained =
             "capture-pane -p -e -S -$scrollbackLines -t $paneId ; " +
                 "display-message -p -t $paneId '#{cursor_x},#{cursor_y}'"
-        return sendMutex.withLock {
+        // Issue #886: bound the single-flight ACQUIRE itself (mirrors
+        // #702/#692 in sendChainedCommands). `sendMutex.withLock { … }` had no
+        // deadline on the *acquire* — only the body inside it was gated. The
+        // attach seed reaches here on the shared per-host `-CC` client and
+        // serializes against the in-session terminal's own control traffic; if a
+        // current holder is wedged (e.g. another command stalled behind a busy
+        // agent channel during an attach) the seed parks on the acquire forever
+        // and "Attaching…" never resolves (#886). `Mutex.lock()` is a cancellable
+        // suspension point, so bound ONLY the acquire with `withTimeoutOrNull` and
+        // surface a best-effort failure (the caller falls back to opening the seed
+        // gate without a snapshot, exactly as for a capture timeout).
+        val acquired = withTimeoutOrNull(commandTimeoutMs) {
+            sendMutex.lock()
+            true
+        }
+        if (acquired != true) {
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux captureWithCursor acquire wedged >${commandTimeoutMs}ms; " +
+                    "surfacing a best-effort failure so the seed gate opens. " +
+                    "paneId=$paneId",
+            )
+            throw TmuxClientException(
+                "tmux capture-pane (combined) acquire wedged after ${commandTimeoutMs}ms",
+            )
+        }
+        return try {
             if (closed) throw TmuxClientException("client is closed")
             if (!connected) throw TmuxClientException("client is not connected")
             val sh = shell ?: throw TmuxClientException("client has no active shell")
@@ -848,6 +929,8 @@ internal class RealTmuxClient(
                 }
                 throw t
             }
+        } finally {
+            sendMutex.unlock()
         }
     }
 

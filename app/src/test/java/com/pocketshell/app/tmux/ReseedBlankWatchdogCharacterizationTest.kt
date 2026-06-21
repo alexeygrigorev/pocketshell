@@ -143,6 +143,45 @@ class ReseedBlankWatchdogCharacterizationTest {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry = registry, sshLeaseManager = leaseManager)
         runCurrent()
+        // Issue #886: suppress the connect()-auto-armed blank-watchdog so the
+        // focused watchdog tests below drive ONE manually-armed watchdog in
+        // isolation (the auto-armed one would otherwise run a SECOND concurrent
+        // watchdog over the same blank pane and, on exhaustion, surface the #886
+        // retryable error mid-setup). The dedicated #886 end-to-end stuck-reveal
+        // test uses [connectVmExhaustingWatchdog], which leaves auto-arm ENABLED.
+        vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+        vm.setTmuxClientFactoryForTest { _, _, _ -> client }
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+        return vm
+    }
+
+    /**
+     * Issue #886: connect a VM whose active pane never seeds, leaving the
+     * connect()-auto-armed blank-watchdog at the PRODUCTION bound, then drain to
+     * idle so the watchdog runs to EXHAUSTION end-to-end through the real
+     * connect/reveal path. This is the strongest #886 proof: the retryable error
+     * surfaces from the real connect path, not a manually-armed watchdog.
+     */
+    private fun TestScope.connectVmExhaustingWatchdog(
+        client: FakeTmuxClient,
+    ): TmuxSessionViewModel {
+        val live = AlwaysConnectedSession(id = "live")
+        val connector = SingleSessionConnector(live)
+        val leaseManager =
+            testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry = registry, sshLeaseManager = leaseManager)
+        runCurrent()
         vm.setTmuxClientFactoryForTest { _, _, _ -> client }
         vm.connect(
             hostId = 1L,
@@ -435,8 +474,7 @@ class ReseedBlankWatchdogCharacterizationTest {
     fun connectedBlankWatchdogIsBoundedWhenEveryCaptureStaysEmpty() = runVmTest {
         // Characterize the bound: when every reseed capture comes back EMPTY (a
         // persistently degraded link), the watchdog re-seeds each tick but STOPS
-        // after CONNECTED_BLANK_WATCHDOG_MAX_TICKS rather than spinning forever,
-        // and it leaves the overlay raised (never reveals a black pane).
+        // after CONNECTED_BLANK_WATCHDOG_MAX_TICKS rather than spinning forever.
         val client = FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
         val vm = connectVm(client)
         val pane = vm.panes.value.single { it.paneId == "%1" }
@@ -459,12 +497,6 @@ class ReseedBlankWatchdogCharacterizationTest {
             "the watchdog must have attempted at least one reseed on a blank pane",
             client.captureCount() > capturesBefore,
         )
-        // The pane never painted (empty captures), so the overlay stays raised:
-        // the user sees a calm "Attaching…" state, NEVER a black Connected pane.
-        assertTrue(
-            "with no frame ever landing the watchdog must leave the overlay raised",
-            vm.switchHidesTerminal.value,
-        )
         // And it terminated (bounded). Drive a lot more virtual time: no further
         // captures are issued, proving the loop ended rather than spinning.
         val capturesAfterBound = client.captureCount()
@@ -475,6 +507,99 @@ class ReseedBlankWatchdogCharacterizationTest {
                 "issue NO further captures after the bound",
             capturesAfterBound,
             client.captureCount(),
+        )
+    }
+
+    // ---------------------------------------------------------------------
+    // (d) Issue #886 — the stuck-attach-reveal safety net (Part A).
+    //     When the blank-watchdog exhausts WITHOUT a frame ever landing (the
+    //     seed wedged behind a streaming agent channel), the reveal must NOT
+    //     stay an infinite "Attaching…" — it surfaces a retryable error + the
+    //     #823 Reconnect affordance.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun stuckAttachRevealSurfacesRetryableErrorAndReconnectInsteadOfInfiniteSpinner() = runVmTest {
+        // The reported #886 scenario, END-TO-END through the real connect/reveal
+        // path: a CONNECTED session (green dot) whose active pane never seeds
+        // (every capture-pane comes back empty — the wedged-seed stand-in for the
+        // capture stuck behind a streaming agent channel). Before #886 the
+        // connect()-auto-armed watchdog fell off the end SILENTLY, leaving
+        // switchHidesTerminal raised forever (the infinite "Attaching…" spinner).
+        // Now it must surface a retryable error + the #823 Reconnect affordance.
+        val client = FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
+        val vm = connectVmExhaustingWatchdog(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        // The pane row resolved (the session attached, green dot) but it is BLACK.
+        assertTrue(
+            "the session attached on a Connected channel but the pane never seeded",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+
+        // Part A: the spinner must be GONE — the user is never left on an
+        // infinite "Attaching…". (connectVmExhaustingWatchdog drained to idle, so
+        // the auto-armed watchdog already exhausted its 20 ticks.)
+        assertFalse(
+            "the loading overlay must be dropped on watchdog exhaustion — never an " +
+                "infinite Attaching spinner (#886)",
+            vm.switchHidesTerminal.value,
+        )
+        // The reveal projects to the honest-error surface (RevealState.Error,
+        // not retrying) so the screen shows a clear message, not a spinner.
+        val reveal = vm.revealState.value
+        assertTrue(
+            "the reveal must be the honest-error surface (was $reveal)",
+            reveal is com.pocketshell.core.connection.RevealState.Error &&
+                !reveal.retrying,
+        )
+        // The view-facing status is Failed with a "Tap Reconnect" message.
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "the connection status must surface a retryable Failed (was $status)",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            "the failure message must mention the attach stall and Reconnect",
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message.contains("Reconnect"),
+        )
+        // And the #823 Reconnect affordance is available to escape it.
+        assertTrue(
+            "the Reconnect affordance must be enabled so the user can retry",
+            vm.canReconnect.value,
+        )
+    }
+
+    @Test
+    fun watchdogThatHealsBeforeExhaustionDoesNotSurfaceAnError() = runVmTest {
+        // Class coverage (the happy / shell-attach path): the safety net must
+        // ONLY fire on genuine exhaustion. A pane that seeds before the bound (a
+        // frame lands) reveals Live normally — NO error, NO spurious Reconnect.
+        val client = FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        assertTrue(pane.terminalState.visibleScreenIsBlank())
+
+        // A good capture is queued — the first watchdog tick heals the pane.
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 9L, output = listOf("ISSUE886-HEALED"), isError = false),
+        )
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armConnectedBlankWatchdogForTest(guard)
+        advanceTimeBy(CONNECTED_BLANK_WATCHDOG_TICK_MS + 1)
+        advanceUntilIdle()
+
+        assertFalse(
+            "the healed pane drops the overlay (revealed Live)",
+            vm.switchHidesTerminal.value,
+        )
+        assertTrue(
+            "a healed reveal must NOT surface a Failed error",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        val reveal = vm.revealState.value
+        assertFalse(
+            "a healed reveal must NOT be the honest-error surface (was $reveal)",
+            reveal is com.pocketshell.core.connection.RevealState.Error,
         )
     }
 

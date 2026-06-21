@@ -20,13 +20,19 @@ import java.util.concurrent.atomic.AtomicLong
  *     continuous `%output` backlog never self-inflicts a timeout;
  *   * NOT re-arm on local write completion — a blackholed link (zero reader
  *     bytes) must still fire so dead-peer detection is never masked.
+ *
+ * These idle-gate cases pass `absoluteCeilingMs = null` so they exercise the
+ * idle gate IN ISOLATION (no #886 absolute ceiling interfering). The #886
+ * absolute-ceiling behaviour — and crucially the streaming-channel case where
+ * the idle gate is defeated and ONLY the ceiling can fire — is characterised in
+ * [CommandTimeoutGateAbsoluteCeilingTest].
  */
 class CommandTimeoutGateIdleDeadlineTest {
 
     @Test
     fun `body result wins when response arrives before idle deadline`() = runBlocking {
         val activity = AtomicLong(System.nanoTime())
-        val gate = CommandTimeoutGate.realTime { activity.get() }
+        val gate = CommandTimeoutGate.realTime(readerActivityNanos = { activity.get() }, absoluteCeilingMs = null)
 
         val result = withTimeout(2_000) {
             gate.run<String>(timeoutMs = 1_000) { checkpoint ->
@@ -43,7 +49,7 @@ class CommandTimeoutGateIdleDeadlineTest {
         // Activity timestamp is fixed in the past, so the channel reads as
         // silent for longer than the deadline from the first tick.
         val silentSince = System.nanoTime()
-        val gate = CommandTimeoutGate.realTime { silentSince }
+        val gate = CommandTimeoutGate.realTime(readerActivityNanos = { silentSince }, absoluteCeilingMs = null)
 
         val response = CompletableDeferred<String>() // never completes
 
@@ -60,7 +66,7 @@ class CommandTimeoutGateIdleDeadlineTest {
     @Test
     fun `re-arms while reader activity keeps advancing, then fires on silence`() = runBlocking {
         val activity = AtomicLong(System.nanoTime())
-        val gate = CommandTimeoutGate.realTime { activity.get() }
+        val gate = CommandTimeoutGate.realTime(readerActivityNanos = { activity.get() }, absoluteCeilingMs = null)
 
         val response = CompletableDeferred<String>() // never completes
 
@@ -110,7 +116,7 @@ class CommandTimeoutGateIdleDeadlineTest {
         // The old gate fired instantly here, escalating a read-only poll to a
         // FATAL transport teardown every ~timeoutMs (the ~11s flap).
         val staleActivity = System.nanoTime() - 10_000_000_000L // 10s in the past
-        val gate = CommandTimeoutGate.realTime { staleActivity }
+        val gate = CommandTimeoutGate.realTime(readerActivityNanos = { staleActivity }, absoluteCeilingMs = null)
 
         // The response lands quickly (50ms) — a healthy channel that simply had
         // not spoken for a while. It MUST win because the deadline window
@@ -144,7 +150,7 @@ class CommandTimeoutGateIdleDeadlineTest {
         // from its own dispatch — so dead-peer / wedged-channel detection is
         // preserved and the gate never hangs forever.
         val staleActivity = System.nanoTime() - 10_000_000_000L // 10s in the past
-        val gate = CommandTimeoutGate.realTime { staleActivity }
+        val gate = CommandTimeoutGate.realTime(readerActivityNanos = { staleActivity }, absoluteCeilingMs = null)
 
         val response = CompletableDeferred<String>() // never completes
 
@@ -171,7 +177,7 @@ class CommandTimeoutGateIdleDeadlineTest {
         // that delivers zero bytes. The body completes its WRITE (checkpoint)
         // but the reader never advances activity — the deadline must still fire.
         val silentSince = System.nanoTime()
-        val gate = CommandTimeoutGate.realTime { silentSince }
+        val gate = CommandTimeoutGate.realTime(readerActivityNanos = { silentSince }, absoluteCeilingMs = null)
 
         val response = CompletableDeferred<String>() // never completes
         var writeObserved = false

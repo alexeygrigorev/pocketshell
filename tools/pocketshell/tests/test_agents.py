@@ -470,11 +470,11 @@ def test_record_agent_kind_sets_session_option_inside_tmux(kind):
         runner=lambda argv, **kw: calls.append((argv, kw)),
     )
     assert ok is True
-    assert len(calls) == 1
-    argv, _kw = calls[0]
-    # Session-scoped (no -g): tmux applies it to the current session, which
-    # is the one the agent was launched into.
-    assert argv == ["tmux", "set-option", "@ps_agent_kind", kind]
+    # No profile passed -> the kind is set (session-scoped, no -g), and the
+    # @ps_agent_profile option is reconciled away by an unset (issue #889).
+    argvs = [argv for argv, _kw in calls]
+    assert ["tmux", "set-option", "@ps_agent_kind", kind] in argvs
+    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in argvs
 
 
 def test_record_agent_kind_noop_when_not_in_tmux():
@@ -594,9 +594,12 @@ def test_record_agent_kind_writes_profile_option_when_profile_set():
     ]
 
 
-def test_record_agent_kind_no_profile_writes_only_kind():
-    # A default / no-profile launch records the kind but NO profile option,
-    # so a default session shows the plain kind with no spurious chip.
+def test_record_agent_kind_no_profile_clears_profile_option():
+    # A default / no-profile launch records the kind AND reconciles the
+    # @ps_agent_profile option by UNSETTING it (issue #889), so a session
+    # previously launched with a non-default profile cannot keep a stale
+    # label. ``-uq`` makes unsetting an already-absent option a no-op, so a
+    # fresh default session stays clean.
     calls = []
     ok = agents.record_agent_kind(
         "claude",
@@ -605,11 +608,15 @@ def test_record_agent_kind_no_profile_writes_only_kind():
         profile=None,
     )
     assert ok is True
-    assert calls == [["tmux", "set-option", "@ps_agent_kind", "claude"]]
+    assert calls == [
+        ["tmux", "set-option", "@ps_agent_kind", "claude"],
+        ["tmux", "set-option", "-uq", "@ps_agent_profile"],
+    ]
 
 
-def test_record_agent_kind_empty_profile_writes_only_kind():
-    # An empty-string profile is treated like no profile (no option written).
+def test_record_agent_kind_empty_profile_clears_profile_option():
+    # An empty-string profile is treated like no profile: kind recorded, the
+    # @ps_agent_profile option unset (issue #889).
     calls = []
     agents.record_agent_kind(
         "codex",
@@ -617,7 +624,45 @@ def test_record_agent_kind_empty_profile_writes_only_kind():
         runner=lambda argv, **kw: calls.append(argv),
         profile="",
     )
-    assert calls == [["tmux", "set-option", "@ps_agent_kind", "codex"]]
+    assert calls == [
+        ["tmux", "set-option", "@ps_agent_kind", "codex"],
+        ["tmux", "set-option", "-uq", "@ps_agent_profile"],
+    ]
+
+
+def test_record_agent_kind_default_relaunch_clears_stale_profile():
+    # REPRODUCE-FIRST (issue #889): the reported false-z.ai-label bug. A tmux
+    # session is launched once with the z.ai profile (sets @ps_agent_profile),
+    # then the agent is killed and RELAUNCHED as a regular default Claude in
+    # the SAME session. tmux session options persist, so without the #889 fix
+    # the stale "Claude (Z.AI)" lingers and the tree mislabels the session.
+    # The default relaunch must emit the unset that clears it.
+    #
+    # Launch 1: z.ai profile.
+    zai_calls = []
+    agents.record_agent_kind(
+        "claude",
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        runner=lambda argv, **kw: zai_calls.append(argv),
+        profile="Claude (Z.AI)",
+    )
+    assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in zai_calls
+
+    # Launch 2: default relaunch in the same session. It MUST issue the unset
+    # so the previously-set @ps_agent_profile is reconciled away.
+    default_calls = []
+    agents.record_agent_kind(
+        "claude",
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        runner=lambda argv, **kw: default_calls.append(argv),
+        profile=None,
+    )
+    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in default_calls
+    # And it must NOT re-set a profile value.
+    assert not any(
+        argv[:3] == ["tmux", "set-option", "@ps_agent_profile"]
+        for argv in default_calls
+    )
 
 
 def test_launch_agent_records_profile_before_exec(tmp_path, monkeypatch):
@@ -669,9 +714,10 @@ def test_cli_agent_named_profile_records_profile_option(tmp_path, monkeypatch):
     assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in calls
 
 
-def test_cli_agent_default_profile_records_no_profile_option(tmp_path, monkeypatch):
-    """A default Claude profile records the kind but no profile option, so a
-    default session is the plain kind with no spurious label."""
+def test_cli_agent_default_profile_clears_profile_option(tmp_path, monkeypatch):
+    """A default Claude profile records the kind and reconciles the profile
+    option by UNSETTING it (issue #889), so a default launch never carries a
+    stale label and never sets a spurious one."""
     _seed_zlaude_home(tmp_path, monkeypatch)
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -684,13 +730,15 @@ def test_cli_agent_default_profile_records_no_profile_option(tmp_path, monkeypat
     )
     assert rc == 0
     assert ["tmux", "set-option", "@ps_agent_kind", "claude"] in calls
+    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in calls
     assert not any(
         argv[:3] == ["tmux", "set-option", "@ps_agent_profile"] for argv in calls
     )
 
 
-def test_cli_agent_no_profile_records_no_profile_option(tmp_path, monkeypatch):
-    """A bare launch (no --profile/--config-dir) records the kind only."""
+def test_cli_agent_no_profile_clears_profile_option(tmp_path, monkeypatch):
+    """A bare launch (no --profile/--config-dir) records the kind and unsets
+    @ps_agent_profile (issue #889)."""
     workdir = tmp_path / "work"
     workdir.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -701,8 +749,51 @@ def test_cli_agent_no_profile_records_no_profile_option(tmp_path, monkeypatch):
     rc = main(["agent", "codex", "--dir", str(workdir)])
     assert rc == 0
     assert ["tmux", "set-option", "@ps_agent_kind", "codex"] in calls
+    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in calls
     assert not any(
         argv[:3] == ["tmux", "set-option", "@ps_agent_profile"] for argv in calls
+    )
+
+
+def test_cli_agent_default_then_zai_relaunch_sets_profile(tmp_path, monkeypatch):
+    """Class coverage (issue #889): default-then-relaunched-z.ai. A default
+    launch in the session unsets the profile; relaunching the SAME session as
+    z.ai sets the correct label (the chip appears)."""
+    _seed_zlaude_home(tmp_path, monkeypatch)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
+
+    # Launch 1: default -> unset.
+    default_calls = []
+    monkeypatch.setattr(
+        agents.subprocess, "run", lambda argv, **kw: default_calls.append(argv)
+    )
+    assert main(["agent", "claude", "--dir", str(workdir), "--profile", "Claude"]) == 0
+    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in default_calls
+
+    # Launch 2: z.ai relaunch in the same session -> sets the label.
+    zai_calls = []
+    monkeypatch.setattr(
+        agents.subprocess, "run", lambda argv, **kw: zai_calls.append(argv)
+    )
+    assert (
+        main(
+            [
+                "agent",
+                "claude",
+                "--dir",
+                str(workdir),
+                "--profile",
+                "Claude (Z.AI)",
+            ]
+        )
+        == 0
+    )
+    assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in zai_calls
+    assert not any(
+        argv[:3] == ["tmux", "set-option", "-uq"] for argv in zai_calls
     )
 
 

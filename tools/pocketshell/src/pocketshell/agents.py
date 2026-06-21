@@ -379,8 +379,13 @@ def record_agent_kind(
     profile name is known here, before ``os.execvpe``; #826 record-at-start
     hard-cut — no detection/parse path). When set, it is written as the
     per-session ``@ps_agent_profile`` user option alongside ``@ps_agent_kind``.
-    A default / no-profile launch passes ``None`` and writes NO profile
-    option, so a default session carries no spurious profile label.
+    A default / no-profile launch passes ``None`` and the option is
+    RECONCILED to the current launch by UNSETTING it
+    (``tmux set-option -uq @ps_agent_profile``), so a session previously
+    launched with a non-default profile and then relaunched as a default
+    agent in the SAME tmux session does not keep the stale profile label
+    (issue #889). ``@ps_agent_kind`` is always overwritten on every launch
+    so it has no equivalent stale hazard.
 
     The options are session-scoped (not global): ``tmux set-option`` without
     ``-g`` sets it on the current session, which is the session the agent
@@ -411,10 +416,24 @@ def record_agent_kind(
             check=False,
         )
         if profile:
-            # Only a non-default profile is recorded; a default/no-profile
-            # launch writes no option so the tree shows the plain kind.
+            # A non-default profile is recorded so the tree shows its label.
             runner(
                 ["tmux", "set-option", "@ps_agent_profile", profile],
+                check=False,
+            )
+        else:
+            # A default / no-profile launch must RECONCILE the option to the
+            # current launch by UNSETTING it (issue #889). tmux session
+            # options persist for the life of the session, so a session
+            # launched once with a non-default profile (e.g. z.ai) and then
+            # relaunched as a default agent in the SAME session would keep the
+            # stale @ps_agent_profile and be mislabelled in the tree. The
+            # ``-u`` unsets the session option; ``-q`` makes unsetting an
+            # already-absent option a no-op (a fresh default session stays
+            # clean). The kind itself (set above) is always overwritten, so it
+            # has no equivalent stale hazard.
+            runner(
+                ["tmux", "set-option", "-uq", "@ps_agent_profile"],
                 check=False,
             )
     except Exception:
@@ -522,7 +541,8 @@ def _resolve_config_dir(
     tree can tell a z.ai Claude apart from a default Claude. The engine's
     default profile, ``--config-dir`` (which carries no named profile), and
     omitting both flags all resolve ``profile_label`` to ``None`` — so a
-    default session records no ``@ps_agent_profile`` option.
+    default launch clears any stale ``@ps_agent_profile`` option (issue
+    #889) rather than leaving a profile label behind.
     """
     if config_dir is not None and profile is not None:
         click.echo(

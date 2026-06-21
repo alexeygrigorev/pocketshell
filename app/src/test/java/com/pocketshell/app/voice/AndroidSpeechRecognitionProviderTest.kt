@@ -136,8 +136,10 @@ class AndroidSpeechRecognitionProviderTest {
                 -1L,
             ),
         )
+        // Possibly-complete mirrors the complete-silence window so the
+        // recognizer doesn't speculatively finalize early on a pause.
         assertEquals(
-            AndroidSpeechRecognitionProvider.DEFAULT_POSSIBLY_COMPLETE_SILENCE_MS,
+            AndroidSpeechRecognitionProvider.DEFAULT_COMPLETE_SILENCE_MS,
             intent.getLongExtra(
                 RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
                 -1L,
@@ -150,9 +152,9 @@ class AndroidSpeechRecognitionProviderTest {
                 -1L,
             ),
         )
-        // The values are comfortably above the short system default that caused
-        // the cut-off (~700ms–1s on many recognizers).
-        assertTrue(AndroidSpeechRecognitionProvider.DEFAULT_COMPLETE_SILENCE_MS >= 1_500L)
+        // #884: 2s was empirically too aggressive — the default floor is raised
+        // to >= 3.5s so a multi-second thinking pause survives.
+        assertTrue(AndroidSpeechRecognitionProvider.DEFAULT_COMPLETE_SILENCE_MS >= 3_500L)
     }
 
     @Test
@@ -250,18 +252,182 @@ class AndroidSpeechRecognitionProviderTest {
         session!!.cancel()
     }
 
+    // ---- Cause 3 (#884): EVERY transient end-reason restarts ----------------
+
+    /**
+     * #884 reproduce-first. The maintainer is on the FREE Android recognizer and
+     * it STILL stops mid-thought. Before this fix only 3 end-reasons restarted
+     * (no-match / speech-timeout / onResults); every OTHER recognizer error
+     * fired while recording — `ERROR_CLIENT`, `ERROR_RECOGNIZER_BUSY`,
+     * `ERROR_SERVER`, `ERROR_NETWORK`, `ERROR_NETWORK_TIMEOUT`, `ERROR_AUDIO` —
+     * mapped straight to `onError` and TERMINATED the dictation, losing the
+     * committed transcript. On-device a transient busy/server/network blip is
+     * common, so this is exactly how a long dictation got cut off.
+     *
+     * Each case here: speak a phrase (commit it), fire the transient error while
+     * still recording, assert dictation did NOT end (no final, no error) and a
+     * fresh recognizer turn started, then stop and confirm the committed phrase
+     * survived. RED on the base provider (it terminated on these), GREEN now.
+     */
+    @Test
+    fun everyTransientErrorMidDictation_restartsInsteadOfTerminating() {
+        val transientErrors = intArrayOf(
+            SpeechRecognizer.ERROR_NO_MATCH,
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+            SpeechRecognizer.ERROR_CLIENT,
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+            SpeechRecognizer.ERROR_SERVER,
+            SpeechRecognizer.ERROR_NETWORK,
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+            SpeechRecognizer.ERROR_AUDIO,
+        )
+        for (error in transientErrors) {
+            val provider = AndroidSpeechRecognitionProvider(context)
+            val listener = RecordingListener()
+
+            val session = provider.start(language = "en-US", listener = listener)
+            val r1 = latestRecognizer()
+
+            shadowOf(r1).triggerOnPartialResults(resultsBundle("kept phrase"))
+            shadowOf(r1).triggerOnError(error)
+
+            assertNull(
+                "error $error must NOT terminate dictation while recording",
+                listener.error,
+            )
+            assertNull(
+                "error $error must NOT finalize dictation while recording",
+                listener.finalText,
+            )
+
+            val r2 = latestRecognizer()
+            assertTrue("error $error must trigger a recognizer restart", r2 !== r1)
+
+            session!!.stopListening()
+            shadowOf(latestRecognizer()).triggerOnResults(resultsBundle("more text"))
+
+            assertEquals(
+                "transcript must survive error $error",
+                "kept phrase more text",
+                listener.finalText,
+            )
+        }
+    }
+
+    /**
+     * #884: an `onResults` that arrives because the recognizer paused (the user
+     * has NOT tapped stop) must roll into the next turn, accumulating — the
+     * same contract as a pause but via the results callback rather than an error.
+     */
+    @Test
+    fun onResultsAfterPause_whileRecording_restartsAndAccumulates() {
+        val provider = AndroidSpeechRecognitionProvider(context)
+        val listener = RecordingListener()
+
+        val session = provider.start(language = "en-US", listener = listener)
+        val r1 = latestRecognizer()
+
+        // The recognizer finalizes a turn on a pause (NOT a user stop).
+        shadowOf(r1).triggerOnResults(resultsBundle("turn one"))
+        assertNull(listener.finalText)
+        assertNull(listener.error)
+
+        val r2 = latestRecognizer()
+        assertTrue(r2 !== r1)
+        shadowOf(r2).triggerOnResults(resultsBundle("turn two"))
+        assertNull(listener.finalText)
+
+        val r3 = latestRecognizer()
+        assertTrue(r3 !== r2)
+        session!!.stopListening()
+        shadowOf(latestRecognizer()).triggerOnResults(resultsBundle("turn three"))
+
+        assertEquals("turn one turn two turn three", listener.finalText)
+        assertNull(listener.error)
+    }
+
+    /**
+     * #884: a permanently / instantly failing recognizer must not busy-loop the
+     * main thread forever. After [MAX_EMPTY_RESTART_BURST] consecutive empty
+     * instant restarts, commit whatever text we have. Here the first turn
+     * captures a phrase (resets the counter), then the recognizer fails
+     * instantly with no speech on every restart — the session eventually gives
+     * up but KEEPS the captured phrase rather than dropping it.
+     */
+    @Test
+    fun instantlyFailingRecognizer_eventuallyCommitsCapturedText() {
+        val provider = AndroidSpeechRecognitionProvider(context)
+        val listener = RecordingListener()
+
+        val session = provider.start(language = "en-US", listener = listener)
+        val r1 = latestRecognizer()
+        shadowOf(r1).triggerOnPartialResults(resultsBundle("captured before the storm"))
+
+        // Now hammer instant empty failures. Each idle() runs the posted
+        // restart; the new recognizer fails instantly with no speech.
+        var rounds = 0
+        while (listener.finalText == null && listener.error == null && rounds < 50) {
+            val r = latestRecognizer()
+            shadowOf(r).triggerOnError(SpeechRecognizer.ERROR_CLIENT)
+            rounds++
+        }
+
+        // The storm valve tripped and committed the captured phrase rather than
+        // spinning forever or dropping the text.
+        assertEquals("captured before the storm", listener.finalText)
+        assertNull(listener.error)
+        assertTrue("the storm valve must trip within a bounded burst", rounds <= 12)
+    }
+
+    /**
+     * #884: the silence floor is tunable from Settings → Voice. A provider wired
+     * with a higher window puts that value on the endpointer extras (clamped to
+     * the floor), so the user can make the recognizer even more patient.
+     */
+    @Test
+    fun silenceWindow_isTunableFromSettings() {
+        val provider = AndroidSpeechRecognitionProvider(
+            context = context,
+            silenceWindowMsProvider = { 9_000L },
+        )
+        val intent = provider.buildRecognizerIntent(language = "en-US")
+        assertEquals(
+            9_000L,
+            intent.getLongExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                -1L,
+            ),
+        )
+
+        // A pathologically-low setting is clamped to the floor so it can never
+        // reintroduce the short-default cut-off.
+        val clamped = AndroidSpeechRecognitionProvider(
+            context = context,
+            silenceWindowMsProvider = { 100L },
+        )
+        assertEquals(
+            AndroidSpeechRecognitionProvider.MIN_COMPLETE_SILENCE_MS,
+            clamped.buildRecognizerIntent(language = "en-US").getLongExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                -1L,
+            ),
+        )
+    }
+
     // ---- Terminal paths still behave -----------------------------------------
 
     @Test
-    fun hardError_endsDictationWithMessage() {
+    fun permissionDenied_endsDictationWithMessage() {
         val provider = AndroidSpeechRecognitionProvider(context)
         val listener = RecordingListener()
 
         provider.start(language = "en-US", listener = listener)
         val r1 = latestRecognizer()
-        shadowOf(r1).triggerOnError(SpeechRecognizer.ERROR_NETWORK)
+        shadowOf(r1).triggerOnError(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
 
-        assertTrue(listener.error?.contains("network", ignoreCase = true) == true)
+        // Mic permission revoked is the one genuinely fatal case — restarting
+        // can't help, so dictation ends with a message.
+        assertTrue(listener.error?.contains("permission", ignoreCase = true) == true)
         assertNull(listener.finalText)
     }
 

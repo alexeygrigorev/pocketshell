@@ -112,12 +112,26 @@ object VoiceModule {
     ): PromptComposerViewModel.VoiceSettingsSnapshot =
         SettingsRepositoryVoiceSnapshot(repository)
 
+    /**
+     * Issue #884: the Android recognizer reads the Settings → Voice silence
+     * window so the user can make it even more patient (the maintainer's daily
+     * dictation must not stop until they stop). The window is sampled lazily on
+     * each `start()` so a slider drag takes effect on the next mic tap; the
+     * provider clamps it to its own floor so a low value can't reintroduce the
+     * short-default cut-off. The exhaustive auto-restart is the real backstop.
+     */
     @Provides
     @Singleton
     fun provideSpeechRecognitionProvider(
         @ApplicationContext context: Context,
+        repository: SettingsRepository,
     ): PromptComposerViewModel.SpeechRecognitionProvider =
-        AndroidSpeechRecognitionProvider(context)
+        AndroidSpeechRecognitionProvider(
+            context = context,
+            silenceWindowMsProvider = {
+                (repository.settings.value.voiceSilenceThresholdSeconds * 1000f).toLong()
+            },
+        )
 
     /**
      * Issue #181: shared [PriceCatalogue] for the bundled `ai-pricing.json`.

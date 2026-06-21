@@ -334,6 +334,44 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #869: monotonic millisecond clock used by the submit ack-gate to
+     * (a) measure each `capture-pane` round-trip (the RTT addend) and (b) bound
+     * the needle-miss FALLBACK floor. Defaults to the device monotonic clock.
+     * Unit tests override it to read the `runTest` virtual scheduler time so the
+     * RTT measurement is deterministic under virtual time — `SystemClock`
+     * reads a constant 0 there, which would make every measured RTT zero and
+     * the fallback-floor top-up impossible to assert.
+     */
+    @Volatile
+    private var agentSubmitMonotonicMsForTest: (() -> Long)? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setAgentSubmitMonotonicClockForTest(clock: (() -> Long)?) {
+        agentSubmitMonotonicMsForTest = clock
+    }
+
+    private fun agentSubmitNowMs(): Long =
+        agentSubmitMonotonicMsForTest?.invoke() ?: SystemClock.elapsedRealtime()
+
+    /**
+     * Issue #869: test override for the submit ack-gate POLL window
+     * ([AGENT_SUBMIT_ACK_TIMEOUT_MS]). Production polls the full 2s window, but
+     * the needle-miss FALLBACK FLOOR is a SEPARATE invariant (Enter never fires
+     * before `FALLBACK_FLOOR + measuredRtt`) that must hold even if the poll
+     * window is shorter than the floor. A test sets a SHORT poll window so the
+     * floor — not the incidental poll-loop duration — is the binding constraint,
+     * proving the floor genuinely gates the Enter (red→green). Null ⇒ production
+     * default.
+     */
+    @Volatile
+    private var agentSubmitAckTimeoutMsOverrideForTest: Long? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setAgentSubmitAckTimeoutForTest(timeoutMs: Long?) {
+        agentSubmitAckTimeoutMsOverrideForTest = timeoutMs
+    }
+
+    /**
      * Issue #818: test override for the configured open-time default agent
      * session view. Unit tests build the view model without the
      * [com.pocketshell.app.settings.SettingsRepository] singleton, so this
@@ -9916,40 +9954,192 @@ public class TmuxSessionViewModel @Inject constructor(
                 client.sendCommand("send-keys -l -t $paneId -- '${escapeSingleQuoted(payload)}'")
                     .throwIfTmuxError("type agent input into pane $paneId")
             }
-            delayBeforeAgentSubmit(agent)
+            awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent)
             client.sendCommand("send-keys -t $paneId Enter")
                 .throwIfTmuxError("submit pasted agent input")
         }
     }
 
     /**
-     * Issue #526: wait between typing the composer's message text into the
-     * agent pane and pressing the submit Enter, so the Enter never races
-     * ahead of the agent TUI finishing its paste ingestion (which left the
-     * message sitting unsent until the user pressed Enter manually).
+     * Issue #869: ack-gate the submit Enter on the pasted composer text actually
+     * landing in the agent's input, instead of the pre-#869 blind fixed sleep
+     * ([com.pocketshell.app.settings.AppSettings.agentSubmitEnterDelayMs]) that
+     * was too short under real RTT. The maintainer's on-device symptom — "most
+     * of the time when I click Send it's not really sending; I have to press
+     * Enter after" — was an Enter that raced ahead of the agent TUI finishing
+     * its paste ingestion, leaving the message sitting unsent in the input line.
      *
-     * The wait is the user-configurable
-     * [com.pocketshell.app.settings.AppSettings.agentSubmitEnterDelayMs]
-     * (Settings → Terminal, default 150ms). Codex keeps a known-needed floor
-     * of [CODEX_AGENT_SUBMIT_DELAY_MS] so lowering the global delay can't
-     * regress the Codex TUI that motivated the original delay; the effective
-     * Codex wait is `max(configured, Codex floor)`.
+     * The gate works in two parts:
      *
-     * A zero effective delay sends the Enter back-to-back (the pre-#526
-     * behaviour) without a spurious `delay(0)` suspension.
+     * 1. **Minimum floor (the #526 setting, kept tunable).** Honour the
+     *    configured [com.pocketshell.app.settings.AppSettings.agentSubmitEnterDelayMs]
+     *    (Codex's [CODEX_AGENT_SUBMIT_DELAY_MS] floor still applies) as the
+     *    SHORTEST time before Enter. A zero/low configured value no longer means
+     *    "race the Enter" — the ack poll below still waits for confirmation.
+     *
+     * 2. **Ack on the paste landing (the #869 correctness fix).** Poll
+     *    `capture-pane -p` for the payload to appear in the pane's visible text.
+     *    Press Enter the instant a capture confirms the paste is in. This is
+     *    RTT-adaptive for free — each capture is a round-trip, so a high-latency
+     *    host naturally waits longer for the confirming capture to return.
+     *    Bounded by [AGENT_SUBMIT_ACK_TIMEOUT_MS]: if the payload never shows
+     *    (an unrecognised TUI rendering, or `capture-pane` keeps failing) we
+     *    fall back to pressing Enter anyway — never a hung Send.
+     *
+     * 3. **Hardened needle-miss fallback (#869, reviewer BLOCKED follow-up).**
+     *    The fallback is the EXACT failure surface for the maintainer's report:
+     *    if the needle never matched a real agent's reflowed input box, the
+     *    pre-#869 path would press Enter after only the ~150ms floor — the very
+     *    race that left messages unsent. So when the ack is NOT observed, the
+     *    submit Enter is held to an ADEQUATE working floor instead:
+     *    `max(minFloor, AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS + measuredRtt)`,
+     *    where `measuredRtt` is the longest `capture-pane` round-trip observed
+     *    during the polls (so a high-latency host waits proportionally longer).
+     *    The worst case is therefore a WORKING delay, never the 150ms that
+     *    caused the report. The best case is unchanged — an observed ack
+     *    submits the instant ingestion is seen.
      */
-    private suspend fun delayBeforeAgentSubmit(agent: AgentKind) {
+    private suspend fun awaitAgentPasteIngestedBeforeSubmit(
+        client: TmuxClient,
+        paneId: String,
+        payload: String,
+        agent: AgentKind,
+    ) {
         val configured = agentSubmitEnterDelayMsOverrideForTest
             ?: settingsRepository?.settings?.value?.agentSubmitEnterDelayMs
             ?: com.pocketshell.app.settings.AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS
-        val effective = if (agent == AgentKind.Codex) {
+        val minFloorMs = if (agent == AgentKind.Codex) {
             maxOf(configured.toLong(), CODEX_AGENT_SUBMIT_DELAY_MS)
         } else {
             configured.toLong()
         }
-        if (effective > 0L) {
-            delay(effective)
+
+        val gateStartMs = agentSubmitNowMs()
+
+        // An empty payload (e.g. a bare-Enter submit) has nothing to confirm —
+        // just honour the floor and return so we never poll for a missing needle.
+        val ackNeedle = agentSubmitAckNeedle(payload)
+        if (ackNeedle == null) {
+            if (minFloorMs > 0L) delay(minFloorMs)
+            return
         }
+
+        // Pre-floor: never submit before the configured/Codex floor even if the
+        // capture confirms instantly (preserves the #526 tunable minimum).
+        if (minFloorMs > 0L) delay(minFloorMs)
+
+        // Bound the ack poll by iteration count rather than a wall clock so the
+        // loop is deterministic under virtual time AND cannot spin forever (a
+        // `SystemClock` reading is a no-op 0 under the unit-test default-values
+        // runtime, which would make an elapsed-based bound never trip — #869
+        // OOM). Each capture is itself a round-trip, so this stays RTT-adaptive.
+        val ackTimeoutMs = agentSubmitAckTimeoutMsOverrideForTest ?: AGENT_SUBMIT_ACK_TIMEOUT_MS
+        val maxPolls = (ackTimeoutMs / AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
+            .toInt()
+            .coerceAtLeast(1)
+        var poll = 0
+        // The longest single `capture-pane` round-trip seen so far — the RTT
+        // addend for the hardened fallback floor (#869).
+        var maxCaptureRttMs = 0L
+        while (true) {
+            if (client.disconnected.value) return
+            val captureStartMs = agentSubmitNowMs()
+            val visible = agentPaneShowsPayload(client, paneId, ackNeedle)
+            maxCaptureRttMs = maxOf(maxCaptureRttMs, agentSubmitNowMs() - captureStartMs)
+            if (visible) {
+                // The paste is visible in the pane — the agent has ingested it.
+                // Press Enter now (caller does the send-keys Enter).
+                DiagnosticEvents.record(
+                    "action",
+                    "agent_submit_ack",
+                    "pane" to paneId,
+                    "result" to "ack_observed",
+                    "polls" to poll,
+                )
+                return
+            }
+            poll += 1
+            if (poll >= maxPolls) {
+                // Hardened needle-miss fallback (#869): we could not confirm
+                // ingestion. Do NOT degrade to the short floor that caused the
+                // missed-submit. Hold the Enter until an ADEQUATE working floor
+                // has elapsed since the gate started:
+                //   max(minFloor, FALLBACK_FLOOR + maxCaptureRtt).
+                val fallbackFloorMs = maxOf(
+                    minFloorMs,
+                    com.pocketshell.app.settings.AppSettings.AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS +
+                        maxCaptureRttMs,
+                )
+                val elapsedMs = agentSubmitNowMs() - gateStartMs
+                val remainingMs = fallbackFloorMs - elapsedMs
+                if (remainingMs > 0L) delay(remainingMs)
+                DiagnosticEvents.record(
+                    "action",
+                    "agent_submit_ack",
+                    "pane" to paneId,
+                    "result" to "fallback_floor",
+                    "polls" to poll,
+                    "fallbackFloorMs" to fallbackFloorMs,
+                )
+                return
+            }
+            delay(AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
+        }
+    }
+
+    /**
+     * Issue #869 (reviewer BLOCKED-G4 follow-up): derive the substring to look
+     * for in the pane to confirm the composer paste landed. The on-device fixture
+     * (#869 connected proof) showed that an agent input box does TWO things to a
+     * long prompt that break a naive whole-line substring match:
+     *
+     *  1. **It reflows/wraps the line**, and `capture-pane -p` returns the
+     *     wrapped rows; joining them inserts a separator at the wrap boundary —
+     *     which can land MID-WORD (`...against the...` rendered as `against t`
+     *     + `he new...`). A substring needle containing `against the` then misses.
+     *  2. **The HEAD of a very long prompt scrolls off** the top of the visible
+     *     viewport, so only the TAIL near the cursor is captured.
+     *
+     * Both are defeated by (a) stripping ALL whitespace from both needle and
+     * visible text (so a wrap-boundary space can never split a token), and (b)
+     * matching on the TAIL of the payload near the cursor (the part that stays
+     * visible) — [AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS] whitespace-stripped chars.
+     * Returns null when there is nothing meaningful to confirm (blank payload).
+     */
+    private fun agentSubmitAckNeedle(payload: String): String? {
+        val lastLine = payload
+            .split('\n')
+            .map { it.trim() }
+            .lastOrNull { it.isNotEmpty() }
+            ?: return null
+        // Strip ALL whitespace so a wrap-boundary separator can't split a token,
+        // then take the tail near the cursor (the part that stays on-screen).
+        val stripped = lastLine.replace(WHITESPACE_RUN_REGEX, "")
+        if (stripped.isEmpty()) return null
+        return stripped.takeLast(AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS)
+    }
+
+    /**
+     * Issue #869: `capture-pane -p` the pane and report whether [needle] is
+     * present in its visible text. Both the visible text and the needle are
+     * whitespace-STRIPPED (see [agentSubmitAckNeedle]) so a wrapped/reflowed
+     * input box — whose join inserts a separator at the wrap boundary — still
+     * matches. A failed/empty capture is reported as "not yet visible" so the
+     * caller keeps polling within its bounded timeout. Best-effort: never throws
+     * — a capture failure must not fail the send, only defer the Enter.
+     */
+    private suspend fun agentPaneShowsPayload(
+        client: TmuxClient,
+        paneId: String,
+        needle: String,
+    ): Boolean {
+        val response = runCatching {
+            client.sendBestEffortCommand("capture-pane -p -t $paneId")
+        }.getOrNull() ?: return false
+        if (response.isError) return false
+        val visible = response.output.joinToString(separator = "")
+            .replace(WHITESPACE_RUN_REGEX, "")
+        return visible.contains(needle)
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
@@ -13432,6 +13622,50 @@ internal const val CtrlXByte: Int = 0x18
  */
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
+
+/**
+ * Issue #869: ack-gate the submit Enter on the pasted composer text actually
+ * landing in the agent's input — rather than a blind fixed sleep that is too
+ * short under real RTT (the missed-submit the maintainer hit on-device:
+ * "most of the time when I click Send it's not really sending").
+ *
+ * After typing the prompt into the agent pane we poll `capture-pane` and only
+ * press Enter once the payload is visible in the pane (the agent has finished
+ * ingesting the paste). The poll is RTT-adaptive by construction: each
+ * `capture-pane` is itself a round-trip, so a high-latency host naturally
+ * waits longer before the confirming capture returns.
+ *
+ * - [AGENT_SUBMIT_ACK_POLL_INTERVAL_MS] is the wait between capture polls.
+ * - [AGENT_SUBMIT_ACK_TIMEOUT_MS] bounds the total wait so a TUI whose input
+ *   rendering we can't recognise (or a `capture-pane` that keeps failing) can
+ *   never deadlock Send — on timeout we fall back to pressing Enter anyway
+ *   (best-effort), so the worst case is the pre-#869 blind behaviour, never a
+ *   hung send. The Codex floor still applies as a MINIMUM wait so lowering the
+ *   global delay can't regress the Codex TUI that motivated the original delay.
+ */
+internal const val AGENT_SUBMIT_ACK_POLL_INTERVAL_MS: Long = 40L
+internal const val AGENT_SUBMIT_ACK_TIMEOUT_MS: Long = 2_000L
+
+/**
+ * Issue #869: how many whitespace-stripped TAIL characters of the pasted prompt
+ * the ack needle matches against `capture-pane`. Matching the TAIL (the part of
+ * the input near the cursor, which stays on-screen even when the head of a long
+ * prompt scrolls off the visible viewport) — and stripping ALL whitespace from
+ * both sides (so a wrap-boundary separator can never split a token) — makes the
+ * ack survive a reflowed/wrapped agent input box, the on-device case the
+ * connected proof exposed as a needle miss. 24 chars is specific enough to avoid
+ * a false positive against unrelated prompt content while comfortably fitting in
+ * the visible viewport near the cursor.
+ */
+internal const val AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS: Int = 24
+
+/**
+ * Issue #869: a regex matching runs of whitespace. The ack needle + the visible
+ * `capture-pane` text are both whitespace-STRIPPED with this so a wrapped agent
+ * input box (whose row-join inserts a separator at the wrap boundary, possibly
+ * mid-word) still matches the original prompt's tail.
+ */
+private val WHITESPACE_RUN_REGEX = Regex("\\s+")
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 

@@ -136,16 +136,23 @@ data class AppSettings(
      */
     val usageWarnThresholdPercent: Int = DEFAULT_USAGE_WARN_PERCENT,
     /**
-     * Issue #526: how long PocketShell waits after typing the composer's
-     * message text into the agent pane before pressing the submit Enter, in
-     * milliseconds. The composer's Send writes the text and the submit Enter
-     * as two separate `send-keys` calls; on a busy TUI (Claude Code, Codex)
-     * an Enter that lands before the agent has finished ingesting the pasted
-     * text is not treated as submit, so the message sits unsent in the input
-     * line. This configurable delay closes that race. Default
-     * [DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS]; tunable between
-     * [MIN_AGENT_SUBMIT_ENTER_DELAY_MS] and [MAX_AGENT_SUBMIT_ENTER_DELAY_MS]
-     * via the Settings → Terminal slider.
+     * Issue #526 / #869: the MINIMUM time PocketShell waits after typing the
+     * composer's message text into the agent pane before pressing the submit
+     * Enter, in milliseconds. The composer's Send writes the text and the
+     * submit Enter as two separate `send-keys` calls; on a busy TUI (Claude
+     * Code, Codex) an Enter that lands before the agent has finished ingesting
+     * the pasted text is not treated as submit, so the message sits unsent in
+     * the input line ("most of the time when I click Send it's not really
+     * sending").
+     *
+     * Issue #869 made the submit ACK-GATED: after this floor PocketShell polls
+     * `capture-pane` and only presses Enter once the paste is visible in the
+     * agent input (RTT-adaptive, bounded). This value is now the floor /
+     * minimum wait rather than the whole delay — Send confirms the paste
+     * landed regardless of how it is set, so a low value no longer reintroduces
+     * the missed-submit race. Default [DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS];
+     * tunable between [MIN_AGENT_SUBMIT_ENTER_DELAY_MS] and
+     * [MAX_AGENT_SUBMIT_ENTER_DELAY_MS] via the Settings → Terminal slider.
      */
     val agentSubmitEnterDelayMs: Int = DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
     val backgroundGraceMillis: Long = DEFAULT_BACKGROUND_GRACE_MILLIS,
@@ -304,6 +311,25 @@ data class AppSettings(
         const val MIN_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 0
         const val MAX_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 1000
         const val DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 150
+
+        /**
+         * Issue #869: the MINIMUM total wait before the submit Enter on the
+         * **needle-miss fallback** path — when the ack poll never confirmed the
+         * paste landed (an unrecognised TUI rendering, or `capture-pane` kept
+         * failing). On that path the ack-gate cannot prove ingestion finished,
+         * so it must NOT degrade to the pre-#869 ~150ms blind delay that caused
+         * the maintainer's missed-submit ("most of the time when I click Send
+         * it's not really sending"). Instead the WORST case is an ADEQUATE
+         * working delay: at least this floor PLUS an RTT-proportional addend
+         * (the measured `-CC` round-trip from the capture polls), so a
+         * high-latency host waits proportionally longer. 350ms is the bottom of
+         * the safe band — comfortably above the 150ms that raced under real RTT,
+         * still short enough that a one-off needle miss does not make Send feel
+         * laggy. This floor applies ONLY to the fallback; the happy path (a
+         * capture confirms the paste) still submits the instant ingestion is
+         * observed.
+         */
+        const val AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS: Long = 350L
 
         // Issue #549: opt-in by default. The recorder stays silent until the
         // user turns it on in Settings → Diagnostics, then records a short

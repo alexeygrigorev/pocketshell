@@ -34,6 +34,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/uv \
         /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
+        /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
     && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
     && test -n "$version" \

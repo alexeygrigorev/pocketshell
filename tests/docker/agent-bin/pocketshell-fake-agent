@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Issue #869: a MINIMAL, deterministic "fake agent" input box for the connected
+# submit-journey proof. The real `claude` / `codex` TUIs are unauthenticated in
+# the sandbox (they wedge on a sign-in / connectivity screen and never render an
+# input box), and the plain `agents` fixture shell does not present an agent
+# input line that echoes typed-but-not-yet-submitted text. Without such a pane
+# the #869 ack-gate's load-bearing property — does the `capture-pane` needle
+# actually match a REAL agent input-box echo, especially a WRAPPED/reflowed long
+# prompt? — cannot be proven on-device. This fixture closes that gap.
+#
+# Behaviour (intentionally tiny + deterministic):
+#   * Presents a single visible input line: `> <typed-text>`. As the user types
+#     (tmux `send-keys -l` literal chars from the composer Send), the characters
+#     are ECHOED into that line so `capture-pane -p` shows the typed-but-not-yet-
+#     submitted payload — exactly what the #869 ack-gate polls for.
+#   * The line WRAPS/REFLOWS naturally: when the buffer exceeds the pane width
+#     the terminal wraps it across visible rows, so `capture-pane` returns the
+#     payload split across rows. This is the most likely real-world needle MISS
+#     (a substring spanning a wrap boundary), so the proof MUST exercise it.
+#   * Strips bracketed-paste markers (`\e[200~` / `\e[201~`) so a pasted payload
+#     is shown as plain text, like a readline agent input box, not the literal
+#     escape sequence.
+#   * On Enter (`\r` / `\n`) it SUBMITS: prints a `FAKE-AGENT SUBMITTED: <text>`
+#     line into the scrollback and clears the input box. The connected test
+#     asserts this submitted marker appears AND the input box is left empty —
+#     proving the composer Send actually submitted the line (the maintainer's
+#     "when I click Send it's not really sending" symptom), not left it unsent.
+#
+# It deliberately does NOT use the alternate screen (no smcup): keeping the
+# transcript in the main buffer means `capture-pane -p` reads the input box and
+# the submitted markers directly, which is what the ack-gate + the test inspect.
+set -u
+
+PROMPT_PREFIX="> "
+SUBMIT_PREFIX="FAKE-AGENT SUBMITTED: "
+READY_MARKER="FAKE-AGENT-READY"
+
+old_tty="$(stty -g 2>/dev/null || true)"
+
+cleanup() {
+  if [ -n "${old_tty:-}" ]; then
+    stty "$old_tty" 2>/dev/null || true
+  else
+    stty sane 2>/dev/null || true
+  fi
+  printf '\033[?25h'
+  printf '\r\nFAKE-AGENT-EXIT\r\n'
+  exit 0
+}
+trap cleanup INT TERM
+
+# Raw, no-echo: we draw the input box ourselves so the echo is deterministic.
+stty -echo -icanon -icrnl min 1 time 0 2>/dev/null || true
+
+buffer=""
+last_submitted=""
+
+# Redraw the whole viewport cleanly: home + clear screen, print the readiness
+# marker, the most-recent submitted line (if any), then the input box. Clearing
+# the whole screen each render keeps the reflowed input box artifact-free as the
+# buffer wraps (a partial `\033[J` leaves stale wrapped rows above the cursor).
+# The terminal wraps the buffer when it exceeds the pane width, producing the
+# reflowed input box the #869 needle must survive.
+render() {
+  printf '\033[H\033[2J'
+  printf '%s\r\n' "$READY_MARKER"
+  if [ -n "$last_submitted" ]; then
+    printf '%s%s\r\n' "$SUBMIT_PREFIX" "$last_submitted"
+  fi
+  printf '%s%s' "$PROMPT_PREFIX" "$buffer"
+}
+
+render
+
+# Bash ANSI-C quoting ($'...') preserves the control byte EXACTLY. Command
+# substitution `$(printf '\r')` would strip the trailing CR, leaving an empty
+# string — so the CR/submit case would never match.
+CR=$'\r'
+LF=$'\n'
+DEL=$'\177'
+BS=$'\b'
+CU=$'\025'
+ESC=$'\033'
+
+# Read ONE byte. Returns it in REPLY (empty for a NUL / EOF). Uses bash `read`
+# rather than a per-byte `dd` so a long pasted prompt (hundreds of chars) is
+# ingested fast enough for `capture-pane` to see it within the ack-gate window.
+read_byte() {
+  IFS= read -r -s -N 1 REPLY
+}
+
+# Render is debounced: after each byte we keep reading any IMMEDIATELY-available
+# bytes (a burst from `send-keys -l` arrives back-to-back) and only redraw once
+# the burst drains, so a 300-char paste renders once, not 300 times.
+dirty=0
+flush() {
+  if [ "$dirty" = "1" ]; then
+    render
+    dirty=0
+  fi
+}
+
+while true; do
+  if ! read_byte; then
+    # EOF on the channel — exit; the outer `exec sh` keeps the pane alive.
+    cleanup
+  fi
+  ch="$REPLY"
+  if [ -z "$ch" ]; then
+    # A NUL byte — ignore.
+    continue
+  fi
+  case "$ch" in
+    "$CR"|"$LF")
+      # Submit: record the submitted line (shown by the next render) and clear
+      # the input box, so `capture-pane` shows the SUBMITTED marker AND an empty
+      # input — proving the composer Send actually submitted the line.
+      last_submitted="$buffer"
+      buffer=""
+      dirty=1
+      ;;
+    "$DEL"|"$BS")
+      buffer="${buffer%?}"
+      dirty=1
+      ;;
+    "$CU")
+      # Ctrl-U: clear the whole input line (readline kill-line). Lets a test
+      # reset the input box between cases deterministically.
+      buffer=""
+      dirty=1
+      ;;
+    "$ESC")
+      # Escape: consume a CSI sequence. Bracketed-paste markers are
+      # `\e[200~` (start) and `\e[201~` (end) — strip them so the pasted text
+      # shows as plain input, like a readline agent box.
+      read_byte || cleanup
+      if [ "$REPLY" = "[" ]; then
+        # Read until a final byte in the @-~ CSI-terminator range.
+        while true; do
+          read_byte || cleanup
+          case "$REPLY" in
+            [@A-Z\[\\\]\^_\`a-z\{\|\}~]) break ;;
+            *) : ;;
+          esac
+        done
+        # `200~` / `201~` are bracketed-paste markers — drop them entirely.
+        # Any other CSI (cursor keys etc.) is ignored for this minimal box.
+      fi
+      ;;
+    *)
+      buffer="$buffer$ch"
+      dirty=1
+      ;;
+  esac
+  # Drain any back-to-back burst bytes before redrawing (debounce).
+  while IFS= read -r -s -N 1 -t 0.02 REPLY; do
+    ch="$REPLY"
+    [ -z "$ch" ] && continue
+    case "$ch" in
+      "$CR"|"$LF") last_submitted="$buffer"; buffer=""; dirty=1 ;;
+      "$DEL"|"$BS") buffer="${buffer%?}"; dirty=1 ;;
+      "$CU") buffer=""; dirty=1 ;;
+      "$ESC")
+        read_byte || cleanup
+        if [ "$REPLY" = "[" ]; then
+          while true; do
+            read_byte || cleanup
+            case "$REPLY" in [@A-Z\[\\\]\^_\`a-z\{\|\}~]) break ;; *) : ;; esac
+          done
+        fi
+        ;;
+      *) buffer="$buffer$ch"; dirty=1 ;;
+    esac
+  done
+  flush
+done

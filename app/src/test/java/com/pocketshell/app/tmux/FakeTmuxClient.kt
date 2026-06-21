@@ -147,6 +147,15 @@ internal class FakeTmuxClient(
 
     var sendCommandDelayMs: Long = 0L
 
+    /**
+     * Issue #869: per-`capture-pane` round-trip delay so the submit ack-gate's
+     * RTT measurement (and its hardened needle-miss fallback floor) can be
+     * exercised deterministically under the `runTest` virtual clock — injecting
+     * a known RTT per capture lets a test assert the fallback waits
+     * `FALLBACK_FLOOR + injectedRtt` before pressing Enter.
+     */
+    var captureCommandDelayMs: Long = 0L
+
     var sendCommandGatePrefix: String? = null
 
     var sendCommandGate: CompletableDeferred<Unit>? = null
@@ -215,6 +224,9 @@ internal class FakeTmuxClient(
         }
         if (sendCommandDelayMs > 0L && cmd.startsWith("send-keys")) {
             delay(sendCommandDelayMs)
+        }
+        if (captureCommandDelayMs > 0L && cmd.startsWith("capture-pane")) {
+            delay(captureCommandDelayMs)
         }
         suspendForeverOnCommandPrefix?.let { prefix ->
             if (cmd.startsWith(prefix)) {

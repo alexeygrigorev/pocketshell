@@ -575,6 +575,24 @@ JOURNEY_CLASSES=(
   # cache seed (first state is Loading); GREEN after. Lives under
   # com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"
+  # ADDED (#869): the composer-Send ACK-GATE on-device submit JOURNEY — the
+  # load-bearing real-agent proof the #869 reviewer required (BLOCKED-G4). The
+  # maintainer's symptom: "most of the time when I click Send it's not really
+  # sending; I have to press Enter after." The fix ack-gates the submit Enter on
+  # a `capture-pane` confirming the paste landed, but its correctness hinges on
+  # the needle matching a REAL agent input-box echo — especially a WRAPPED long
+  # prompt — which cannot be proven on a JVM FakeTmuxClient. This journey drives
+  # a MINIMAL deterministic fake-agent input box (`pocketshell-fake-agent`,
+  # baked into the agents image) that echoes typed chars + reflows a long line,
+  # runs the production send path for BOTH a multi-word prompt AND a long
+  # wrapping prompt, and asserts from the terminal viewport + the
+  # `agent_submit_ack result=ack_observed` diagnostic that the line ACTUALLY
+  # SUBMITTED (needle matched the reflowed echo, input box left empty) — not the
+  # fallback. Uses ONLY the deterministic agents:2222 fixture that tests.yml
+  # already brings up (no toxiproxy, no new Docker service/port) and does NOT
+  # self-skip on CI (no assumeFalse(isRunningOnCi()) on the load-bearing
+  # assertion). It lives under the com.pocketshell.app.proof prefix.
+  "$FQCN_PREFIX.AgentSubmitAckJourneyE2eTest"
 )
 
 echo "=========================================================="

@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-06-14T00:00:00Z"
+exclude-newer = "2026-12-31T23:00:00Z"
 
 [[package]]
 name = "annotated-doc"
@@ -314,7 +314,7 @@ wheels = [
 
 [[package]]
 name = "pocketshell"
-version = "0.3.33"
+version = "0.4.13"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

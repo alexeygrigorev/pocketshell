@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,9 +38,8 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
-import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.ListRow
-import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -240,37 +238,22 @@ private fun ForwardingPassphraseDialog(
     onDismiss: () -> Unit,
     onOpen: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("SSH key passphrase") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Enter the passphrase for $keyName. It is used for this forwarding session and is not saved.")
-                OutlinedTextField(
-                    value = passphrase,
-                    onValueChange = onPassphraseChange,
-                    singleLine = true,
-                    label = { Text("Passphrase") },
-                    visualTransformation = PasswordVisualTransformation(),
-                )
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Open",
-                onClick = onOpen,
-                variant = ButtonVariant.Primary,
-                enabled = passphrase.isNotEmpty(),
-            )
-        },
-        dismissButton = {
-            PocketShellButton(
-                text = "Cancel",
-                onClick = onDismiss,
-                variant = ButtonVariant.Text,
-            )
-        },
-    )
+    FormDialog(
+        title = "SSH key passphrase",
+        confirmLabel = "Open",
+        onConfirm = onOpen,
+        onDismiss = onDismiss,
+        confirmEnabled = passphrase.isNotEmpty(),
+    ) {
+        Text("Enter the passphrase for $keyName. It is used for this forwarding session and is not saved.")
+        OutlinedTextField(
+            value = passphrase,
+            onValueChange = onPassphraseChange,
+            singleLine = true,
+            label = { Text("Passphrase") },
+            visualTransformation = PasswordVisualTransformation(),
+        )
+    }
 }
 
 private fun HostEntity.toForwardingHostKey(key: SshKeyEntity): ForwardingHostKey =

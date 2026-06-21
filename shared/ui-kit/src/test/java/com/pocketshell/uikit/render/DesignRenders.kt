@@ -258,6 +258,48 @@ class DesignRenders {
         )
     }
 
+    /**
+     * #861: the canonical input [FormDialog] the ~7 add/edit/rename/passphrase
+     * input dialogs converge onto. Renders the shared surface (20dp radius,
+     * `titleMedium` title in `Text`, `Surface` container) with a real
+     * `OutlinedTextField` + helper caption in the CONTENT SLOT and the canonical
+     * `Text` Cancel + `Primary` Save action row — proving the form-dialog look
+     * is consistent and token-driven.
+     */
+    @Test
+    fun formDialog() = render("form-dialog") {
+        com.pocketshell.uikit.components.FormDialog(
+            title = "Rename snippet",
+            confirmLabel = "Save",
+            onConfirm = {},
+            onDismiss = {},
+        ) {
+            OutlinedTextField(
+                value = "deploy-prod",
+                onValueChange = {},
+                label = { Text("Label") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = PocketShellColors.Text,
+                    unfocusedTextColor = PocketShellColors.Text,
+                    focusedBorderColor = PocketShellColors.Accent,
+                    unfocusedBorderColor = PocketShellColors.Border,
+                    focusedLabelColor = PocketShellColors.Accent,
+                    unfocusedLabelColor = PocketShellColors.TextSecondary,
+                    cursorColor = PocketShellColors.Accent,
+                    focusedContainerColor = PocketShellColors.SurfaceElev,
+                    unfocusedContainerColor = PocketShellColors.SurfaceElev,
+                ),
+            )
+            Text(
+                text = "Leave blank to use the first line of the body.",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+            )
+        }
+    }
+
     /** A single dense `ListRow` with a leading status dot and a trailing badge. */
     @Test
     fun listRow() = render("list-row") {

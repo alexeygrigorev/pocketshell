@@ -2,15 +2,12 @@ package com.pocketshell.app.jobs
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +21,7 @@ import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
@@ -232,73 +230,58 @@ private fun JobEditorDialog(
         every.trim().isNotEmpty() &&
         (!messageRequired || message.trim().isNotEmpty())
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = sessionName,
-                    onValueChange = { sessionName = it },
-                    singleLine = true,
-                    label = { Text("Session") },
-                )
-                OutlinedTextField(
-                    value = every,
-                    onValueChange = { every = it },
-                    singleLine = true,
-                    label = { Text("Every") },
-                )
-                OutlinedTextField(
-                    value = message,
-                    onValueChange = { message = it },
-                    minLines = 3,
-                    label = { Text("Message") },
-                )
-                if (showEnabled) {
-                    // State toggle (NOT a CTA): flips the local `enabled` flag,
-                    // which is passed verbatim to onSave. Kept as the muted Text
-                    // variant so it reads as a toggle affordance, not an action.
-                    PocketShellButton(
-                        text = if (enabled) "Pause job" else "Resume job",
-                        onClick = { enabled = !enabled },
-                        variant = ButtonVariant.Text,
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Save",
-                onClick = {
-                    onSave(
-                        RecurringJobDraft(
-                            sessionName = sessionName.trim(),
-                            every = every.trim(),
-                            message = message.takeIf { it.isNotBlank() },
-                        ),
-                        enabled,
-                    )
-                },
-                variant = ButtonVariant.Primary,
-                enabled = canSave,
+    FormDialog(
+        title = title,
+        confirmLabel = "Save",
+        onConfirm = {
+            onSave(
+                RecurringJobDraft(
+                    sessionName = sessionName.trim(),
+                    every = every.trim(),
+                    message = message.takeIf { it.isNotBlank() },
+                ),
+                enabled,
             )
         },
-        dismissButton = {
-            Row {
-                onRemove?.let {
-                    PocketShellButton(
-                        text = "Remove",
-                        onClick = it,
-                        variant = ButtonVariant.Destructive,
-                    )
-                }
+        onDismiss = onDismiss,
+        confirmEnabled = canSave,
+        extraAction = onRemove?.let {
+            {
                 PocketShellButton(
-                    text = "Cancel",
-                    onClick = onDismiss,
-                    variant = ButtonVariant.Text,
+                    text = "Remove",
+                    onClick = it,
+                    variant = ButtonVariant.Destructive,
                 )
             }
         },
-    )
+    ) {
+        OutlinedTextField(
+            value = sessionName,
+            onValueChange = { sessionName = it },
+            singleLine = true,
+            label = { Text("Session") },
+        )
+        OutlinedTextField(
+            value = every,
+            onValueChange = { every = it },
+            singleLine = true,
+            label = { Text("Every") },
+        )
+        OutlinedTextField(
+            value = message,
+            onValueChange = { message = it },
+            minLines = 3,
+            label = { Text("Message") },
+        )
+        if (showEnabled) {
+            // State toggle (NOT a CTA): flips the local `enabled` flag,
+            // which is passed verbatim to onSave. Kept as the muted Text
+            // variant so it reads as a toggle affordance, not an action.
+            PocketShellButton(
+                text = if (enabled) "Pause job" else "Resume job",
+                onClick = { enabled = !enabled },
+                variant = ButtonVariant.Text,
+            )
+        }
+    }
 }

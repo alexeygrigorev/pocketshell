@@ -34,7 +34,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -82,6 +81,7 @@ import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ConfirmDialog
+import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -2659,56 +2659,34 @@ private fun RenameSessionDialog(
     var newName by remember(sessionName) { mutableStateOf(sessionName) }
     val trimmed = newName.trim()
     val canRename = trimmed.isNotEmpty() && trimmed != sessionName
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = PocketShellColors.Surface,
-        title = {
-            Text(
-                text = "Rename session",
-                color = PocketShellColors.Text,
-                fontWeight = FontWeight.SemiBold,
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = "Rename $sessionName on this host.",
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.bodyDense,
-                )
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    singleLine = true,
-                    label = { Text("Session name") },
-                    keyboardActions = KeyboardActions(onDone = {
-                        if (canRename) onConfirm(trimmed)
-                    }),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(RENAME_SESSION_FIELD_TAG),
-                )
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Rename",
-                onClick = { onConfirm(trimmed) },
-                variant = ButtonVariant.Primary,
-                enabled = canRename,
-                modifier = Modifier.testTag(RENAME_SESSION_CONFIRM_TAG),
-            )
-        },
-        dismissButton = {
-            PocketShellButton(
-                text = "Cancel",
-                onClick = onDismiss,
-                variant = ButtonVariant.Text,
-                modifier = Modifier.testTag(RENAME_SESSION_CANCEL_TAG),
-            )
-        },
+    FormDialog(
+        title = "Rename session",
+        confirmLabel = "Rename",
+        onConfirm = { onConfirm(trimmed) },
+        onDismiss = onDismiss,
         modifier = Modifier.testTag(RENAME_SESSION_DIALOG_TAG),
-    )
+        confirmEnabled = canRename,
+        confirmTestTag = RENAME_SESSION_CONFIRM_TAG,
+        dismissTestTag = RENAME_SESSION_CANCEL_TAG,
+    ) {
+        Text(
+            text = "Rename $sessionName on this host.",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
+        )
+        OutlinedTextField(
+            value = newName,
+            onValueChange = { newName = it },
+            singleLine = true,
+            label = { Text("Session name") },
+            keyboardActions = KeyboardActions(onDone = {
+                if (canRename) onConfirm(trimmed)
+            }),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(RENAME_SESSION_FIELD_TAG),
+        )
+    }
 }
 
 /**

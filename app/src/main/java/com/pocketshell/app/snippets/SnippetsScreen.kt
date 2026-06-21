@@ -20,7 +20,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -46,6 +45,7 @@ import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ConfirmDialog
+import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
@@ -673,66 +673,55 @@ internal fun SnippetAddDialog(
     var body by remember { mutableStateOf("") }
     var kind by remember(initialKind) { mutableStateOf(initialKind) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(text = "Add snippet", color = PocketShellColors.Text)
-        },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = body,
-                    onValueChange = { body = it },
-                    label = { Text("Snippet text") },
-                    minLines = 3,
-                    maxLines = 6,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = dialogFieldColors(),
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "We'll use the first line as the label. " +
-                        "Use the row menu to rename it.",
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
-                )
-                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
-                Text(
-                    text = "Kind",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    KindToggle(
-                        target = SnippetKind.Prompt,
-                        current = kind,
-                        onSelect = { kind = it },
-                    )
-                    KindToggle(
-                        target = SnippetKind.Command,
-                        current = kind,
-                        onSelect = { kind = it },
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Save",
-                onClick = { onSave(body, kind) },
-                variant = ButtonVariant.Primary,
-                enabled = body.isNotBlank(),
+    FormDialog(
+        title = "Add snippet",
+        confirmLabel = "Save",
+        onConfirm = { onSave(body, kind) },
+        onDismiss = onDismiss,
+        confirmEnabled = body.isNotBlank(),
+    ) {
+        // Wrapped in a no-spacing Column so the FormDialog content slot's
+        // spacedBy rhythm doesn't alter this dialog's bespoke field/caption/
+        // toggle layout (preserved verbatim from the original AlertDialog).
+        Column {
+            OutlinedTextField(
+                value = body,
+                onValueChange = { body = it },
+                label = { Text("Snippet text") },
+                minLines = 3,
+                maxLines = 6,
+                modifier = Modifier.fillMaxWidth(),
+                colors = dialogFieldColors(),
             )
-        },
-        dismissButton = {
-            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
-        },
-        containerColor = PocketShellColors.Surface,
-        titleContentColor = PocketShellColors.Text,
-        textContentColor = PocketShellColors.TextSecondary,
-    )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "We'll use the first line as the label. " +
+                    "Use the row menu to rename it.",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+            Text(
+                text = "Kind",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                KindToggle(
+                    target = SnippetKind.Prompt,
+                    current = kind,
+                    onSelect = { kind = it },
+                )
+                KindToggle(
+                    target = SnippetKind.Command,
+                    current = kind,
+                    onSelect = { kind = it },
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -753,78 +742,66 @@ internal fun SnippetEditorDialog(
         mutableStateOf(SnippetKind.fromStorage(initial.kind))
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(text = "Edit snippet", color = PocketShellColors.Text)
+    FormDialog(
+        title = "Edit snippet",
+        confirmLabel = "Save",
+        onConfirm = {
+            val normalised = label.trim().ifEmpty { null }
+            onSave(normalised, body, kind)
         },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = { label = it },
-                    label = { Text("Label (optional)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    colors = dialogFieldColors(),
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Leave blank to auto-derive from the first line.",
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = body,
-                    onValueChange = { body = it },
-                    label = { Text("Body") },
-                    minLines = 3,
-                    maxLines = 6,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = dialogFieldColors(),
-                )
-                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
-                Text(
-                    text = "Kind",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    KindToggle(
-                        target = SnippetKind.Prompt,
-                        current = kind,
-                        onSelect = { kind = it },
-                    )
-                    KindToggle(
-                        target = SnippetKind.Command,
-                        current = kind,
-                        onSelect = { kind = it },
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Save",
-                onClick = {
-                    val normalised = label.trim().ifEmpty { null }
-                    onSave(normalised, body, kind)
-                },
-                variant = ButtonVariant.Primary,
-                enabled = body.isNotBlank(),
+        onDismiss = onDismiss,
+        confirmEnabled = body.isNotBlank(),
+    ) {
+        // Wrapped (see SnippetAddDialog) so the slot's spacedBy doesn't alter
+        // this dialog's bespoke field/caption/toggle layout.
+        Column {
+            OutlinedTextField(
+                value = label,
+                onValueChange = { label = it },
+                label = { Text("Label (optional)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                colors = dialogFieldColors(),
             )
-        },
-        dismissButton = {
-            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
-        },
-        containerColor = PocketShellColors.Surface,
-        titleContentColor = PocketShellColors.Text,
-        textContentColor = PocketShellColors.TextSecondary,
-    )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Leave blank to auto-derive from the first line.",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedTextField(
+                value = body,
+                onValueChange = { body = it },
+                label = { Text("Body") },
+                minLines = 3,
+                maxLines = 6,
+                modifier = Modifier.fillMaxWidth(),
+                colors = dialogFieldColors(),
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+            Text(
+                text = "Kind",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                KindToggle(
+                    target = SnippetKind.Prompt,
+                    current = kind,
+                    onSelect = { kind = it },
+                )
+                KindToggle(
+                    target = SnippetKind.Command,
+                    current = kind,
+                    onSelect = { kind = it },
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -842,42 +819,32 @@ internal fun SnippetRenameDialog(
         mutableStateOf(initial.label.orEmpty())
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(text = "Rename snippet", color = PocketShellColors.Text) },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = { label = it },
-                    label = { Text("Label") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    colors = dialogFieldColors(),
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Leave blank to use the first line of the body.",
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
-                )
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Save",
-                onClick = { onSave(label.trim().ifEmpty { null }) },
-                variant = ButtonVariant.Primary,
+    FormDialog(
+        title = "Rename snippet",
+        confirmLabel = "Save",
+        onConfirm = { onSave(label.trim().ifEmpty { null }) },
+        onDismiss = onDismiss,
+    ) {
+        // Wrapped (see SnippetAddDialog) so the slot's spacedBy doesn't alter
+        // this dialog's bespoke field + caption layout.
+        Column {
+            OutlinedTextField(
+                value = label,
+                onValueChange = { label = it },
+                label = { Text("Label") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                colors = dialogFieldColors(),
             )
-        },
-        dismissButton = {
-            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
-        },
-        containerColor = PocketShellColors.Surface,
-        titleContentColor = PocketShellColors.Text,
-        textContentColor = PocketShellColors.TextSecondary,
-    )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Leave blank to use the first line of the body.",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+            )
+        }
+    }
 }
 
 @Composable
@@ -890,63 +857,48 @@ internal fun CommandTemplateEditorDialog(
     var commands by remember(initial) { mutableStateOf(initial?.commands.orEmpty()) }
     val ready = label.isNotBlank() && commands.isNotBlank()
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
+    FormDialog(
+        title = if (initial == null) "Add macro" else "Edit macro",
+        confirmLabel = "Save",
+        onConfirm = { onSave(label, commands) },
+        onDismiss = onDismiss,
+        confirmEnabled = ready,
+    ) {
+        // Wrapped (see SnippetAddDialog) so the slot's spacedBy doesn't alter
+        // this dialog's bespoke two-field + caption layout.
+        Column {
+            OutlinedTextField(
+                value = label,
+                onValueChange = { label = it },
+                label = { Text("Name") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(commandTemplateLabelFieldTag()),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                colors = dialogFieldColors(),
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedTextField(
+                value = commands,
+                onValueChange = { commands = it },
+                label = { Text("Commands, one per line") },
+                minLines = 4,
+                maxLines = 8,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(commandTemplateCommandsFieldTag()),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+                colors = dialogFieldColors(),
+            )
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = if (initial == null) "Add macro" else "Edit macro",
-                color = PocketShellColors.Text,
+                text = "Use {{name}} placeholders; they will be filled before sending.",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
             )
-        },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = { label = it },
-                    label = { Text("Name") },
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(commandTemplateLabelFieldTag()),
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    colors = dialogFieldColors(),
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = commands,
-                    onValueChange = { commands = it },
-                    label = { Text("Commands, one per line") },
-                    minLines = 4,
-                    maxLines = 8,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(commandTemplateCommandsFieldTag()),
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
-                    colors = dialogFieldColors(),
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Use {{name}} placeholders; they will be filled before sending.",
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
-                )
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Save",
-                onClick = { onSave(label, commands) },
-                variant = ButtonVariant.Primary,
-                enabled = ready,
-            )
-        },
-        dismissButton = {
-            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
-        },
-        containerColor = PocketShellColors.Surface,
-        titleContentColor = PocketShellColors.Text,
-        textContentColor = PocketShellColors.TextSecondary,
-    )
+        }
+    }
 }
 
 internal fun commandTemplateLabelFieldTag(): String = "command-template-label"

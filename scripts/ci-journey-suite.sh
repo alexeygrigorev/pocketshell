@@ -211,6 +211,23 @@ JOURNEY_CLASSES=(
   # its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerImeTightScreenSquishProofTest"
 
+  # Issue #887: the terminal must stay FIXED when the soft keyboard shows —
+  # NEITHER resized NOR panned. The #457 design kept the terminal from RESIZING
+  # but PANNED it up (`graphicsLayer { translationY = panOffsetPx() }`), blacking
+  # out the top of the terminal (the maintainer's #887 screenshot). The fix sets
+  # the activity window to SOFT_INPUT_ADJUST_NOTHING and drops the in-app pan, so
+  # the keyboard overlays the bottom rows and the terminal does not move. This
+  # proof composes the PRODUCTION fixed terminal-column modifier under a SYNTHETIC
+  # ime() inset (the #780 model — deterministic on CI swiftshader, no real
+  # keyboard, HARD-asserts the inset applied, no assumeTrue skip) and asserts the
+  # terminal node's boundsInRoot are IDENTICAL keyboard-up vs keyboard-down (no
+  # pan, no resize) while the composer (`.imePadding()`) stays above the keyboard.
+  # A second case composes the DELETED #457 pan shape and asserts it WOULD move
+  # the terminal — the red→green guard proving the bounds-unchanged assertion is
+  # load-bearing (G1/G10). No Docker fixture; runs per-push so this exact
+  # regression cannot silently return. Carries its fully-qualified name directly.
+  "com.pocketshell.app.tmux.Issue887TerminalFixedUnderImeProofTest"
+
   # Issues #870/#880: the Android-recognizer recording-surface dogfood pair.
   # #880 — the recording elapsed timer was frozen at 00:00 with the Android
   # SpeechRecognizer (the Whisper PCM sampler that ticks recordingElapsedMs never

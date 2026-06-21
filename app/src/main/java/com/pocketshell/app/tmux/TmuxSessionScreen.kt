@@ -79,7 +79,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -492,11 +491,10 @@ public fun TmuxSessionScreen(
     // encapsulated in [TmuxImeLayoutState]:
     //  - Hold the `State<Int>` inside the holder WITHOUT a delegated read here,
     //    so the screen body never subscribes to the raw int.
-    //  - Read the raw pixel inset ONLY via `imeLayout.panOffsetPx()` inside the
-    //    pan `graphicsLayer { ... }` lambda (deferred to layout/draw time, not
-    //    composition) — see the terminal column's `.graphicsLayer` below. The
-    //    interpolated inset frames then re-run only the GPU layer block, never
-    //    recomposition.
+    //  - Issue #887: the terminal column no longer pans, so there is no raw
+    //    pixel-inset read on the render path at all. The screen body never
+    //    subscribes to the raw int — keeping it off the per-inset-frame
+    //    invalidation path (the #796 H4 invariant) for free.
     //  - `imeLayout.isImeVisible` is `derivedStateOf`-backed, so reading it only
     //    invalidates the reader when the inset CROSSES the 0 boundary (keyboard
     //    show/hide), not on every interpolation frame. The chrome / composer /
@@ -505,17 +503,16 @@ public fun TmuxSessionScreen(
     val navBarBottomPx = WindowInsets.navigationBars.getBottom(density)
     val imeLayout = rememberTmuxImeLayoutState(navBarBottomPx)
     val isImeVisible = imeLayout.isImeVisible
-    // Issue #457 (Part 1): the terminal column is PANNED up by the keyboard
-    // overlap (NOT resized) so the embedded TerminalView never shrinks and no
-    // tmux pane resize / full reflow + redraw fires. Issue #796 (H4): the pan
-    // offset is now read DEFERRED inside the terminal column's
-    // `.graphicsLayer { ... }` lambda below (`imeBottomPxState.value` at
-    // layout/draw time) rather than computed here in composition — so the burst
-    // of interpolated inset frames re-runs only the GPU pan layer, never a
-    // recomposition of this screen (which would drag the terminal-render subtree
-    // with it). The `imeKeyboardPanOffsetPx` helper deliberately ignores the
-    // nav-bar inset (panning by the full IME inset keeps the accessory row
-    // usable on devices that report IME and nav-bar separately).
+    // Issue #457 (Part 1) + #887: the terminal column stays FIXED when the soft
+    // keyboard shows — NEITHER resized NOR panned. The embedded TerminalView
+    // never shrinks (no tmux pane resize / full reflow + redraw — the #457
+    // invariant) AND it never moves up (the #887 fix: the keyboard simply
+    // overlays the bottom rows). `MainActivity` sets the activity window to
+    // `SOFT_INPUT_ADJUST_NOTHING` so the OS never pans/resizes the window, and
+    // the in-app GPU pan #457 used (`graphicsLayer { translationY = ... }`) is
+    // gone. `imeLayout.isImeVisible` is still read here (`derivedStateOf`-backed,
+    // boundary-gated per #796 H4) only to collapse the top chrome and drive the
+    // KeyBar while typing — it never moves the terminal grid.
     // Issue #184: while the soft keyboard is up, the user is in
     // "typing-focus" mode — the breadcrumb / window-strip / tabs chrome
     // up top eats vertical room that the terminal viewport (and the
@@ -1209,29 +1206,20 @@ public fun TmuxSessionScreen(
     ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                // Issue #457 (Part 1): PAN, do not resize. We translate the
-                // whole terminal column up by the keyboard overlap rather than
-                // applying `.imePadding()` (which would shrink the column ->
-                // shrink the embedded TerminalView -> trigger a tmux resize +
-                // full reflow/redraw). `graphicsLayer` translation is a pure
-                // GPU pan: the column keeps its full IME-down measured height,
-                // so the terminal grid stays constant and the bottom rows +
-                // cursor + key bar pan up above the keyboard. The IME-up chrome
-                // is already collapsed ([chromeCompressed]) so the small slice
-                // that pans off the top is never user-facing content.
-                //
-                // Issue #796 (H4): read the IME pan offset via
-                // `imeLayout.panOffsetPx()` INSIDE this lambda — a deferred read
-                // at layout/draw time, not in composition. The keyboard
-                // animation's burst of interpolated inset frames re-runs only
-                // this GPU layer block per frame; it does NOT recompose
-                // `TmuxSessionScreen` (and therefore never drags the
-                // `HorizontalPager` terminal-render subtree through a redundant
-                // recomposition while a Codex `%output` burst is in flight).
-                .graphicsLayer {
-                    translationY = imeLayout.panOffsetPx()
-                },
+                .fillMaxSize(),
+            // Issue #887: the terminal column stays FIXED when the soft keyboard
+            // shows — NEITHER resized NOR panned. The activity window is set to
+            // `SOFT_INPUT_ADJUST_NOTHING` (see [MainActivity.onCreate]) so the OS
+            // never pans/resizes the window, and we no longer apply the in-app
+            // `graphicsLayer { translationY = imeLayout.panOffsetPx() }` pan that
+            // #457 used. The keyboard simply OVERLAYS the bottom rows of the
+            // terminal (the maintainer's accepted trade-off in #887), and the
+            // composer (`PromptComposerSheet`, its own dialog window) is what
+            // floats above the keyboard. `imeLayout.isImeVisible` is still read
+            // (below) to collapse the top chrome / drive the KeyBar while typing,
+            // but the terminal grid + the embedded `TerminalView` never move,
+            // preserving the #457 no-resize invariant (no `updateSize()` / tmux
+            // pane resize / reflow) AND adding the #887 no-pan invariant.
         ) {
             // Issue #796 (H4): count recompositions of the terminal-render
             // COLUMN subtree (this Column hosts the top chrome, the

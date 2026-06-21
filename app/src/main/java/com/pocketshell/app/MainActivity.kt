@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -370,6 +371,23 @@ class MainActivity : FragmentActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+        // Issue #887: when the soft keyboard shows, the activity window must
+        // NEITHER resize NOR pan. `enableEdgeToEdge` already set
+        // `setDecorFitsSystemWindows(false)`, which leaves the default
+        // `SOFT_INPUT_ADJUST_UNSPECIFIED` resolving to PAN — so on the terminal
+        // screen the keyboard panned the whole window (and the embedded
+        // `TerminalView`) up, blacking out the top (the maintainer's #887
+        // report). `ADJUST_NOTHING` keeps the window FIXED: the keyboard simply
+        // overlays the bottom of the terminal. Crucially, because
+        // `setDecorFitsSystemWindows(false)` is still in force, the IME inset is
+        // STILL dispatched to the Compose hierarchy as a `WindowInsets.ime`
+        // value — so `.imePadding()` on the other text-entry screens (host
+        // form, settings, env, jobs, folder list — see [AppNavigator]) and the
+        // composer's host-window IME read keep working unchanged. `ADJUST_NOTHING`
+        // only suppresses the OS window pan/resize; it does not suppress inset
+        // reporting. This is the #457 no-resize design extended to no-pan (#887).
+        @Suppress("DEPRECATION")
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         StartupTiming.mark("main-set-content-called")
         setContent {
             val settings by settingsRepository.settings.collectAsState()

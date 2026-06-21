@@ -211,6 +211,16 @@ JOURNEY_CLASSES=(
   # its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerImeTightScreenSquishProofTest"
 
+  # Issues #870/#880: the Android-recognizer recording-surface dogfood pair.
+  # #880 — the recording elapsed timer was frozen at 00:00 with the Android
+  # SpeechRecognizer (the Whisper PCM sampler that ticks recordingElapsedMs never
+  # ran for that path). #870 — a long live partial transcript clipped the END so
+  # the newest recognized words scrolled out of view. This connected proof drives
+  # the PRODUCTION PromptComposerViewModel through the real Android-speech FSM and
+  # renders the REAL RecordingSurface, HARD-asserting the on-screen timer advances
+  # from 00:00 and the live transcript shows its tail. Pure Compose, no fixture.
+  "com.pocketshell.app.composer.PromptComposerRecordingTimerAndTailTest"
+
   # Issue #745: composer Send feedback on a DEGRADED connection. The maintainer
   # dogfooded a blind send: tapping Send cleared the draft and showed nothing —
   # no "Sending…" indicator, no connection-lost banner, and the "Not sent"

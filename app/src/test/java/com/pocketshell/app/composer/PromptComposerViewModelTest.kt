@@ -1192,6 +1192,86 @@ class PromptComposerViewModelTest {
         assertNull(vm.uiState.value.liveTranscript)
     }
 
+    // -- Issue #880: Android-recognizer recording timer must advance --------
+
+    @Test
+    fun androidSpeechRecordingTimerAdvancesFromStart() = runTest {
+        // #880 reproduce-first: with the Android SpeechRecognizer provider the
+        // composer recording timer was frozen at 00:00 — the Whisper PCM
+        // sampler loop that ticks [recordingElapsedMs] never ran for this path.
+        // Drive a virtual wall clock and assert the elapsed timer advances. On
+        // the unfixed code this stays at "00:00" (no ticking job for the
+        // Android path); with the fix the wall-clock tick advances it.
+        var now = 5_000_000L
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            storage = newStorage(),
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { now },
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        assertEquals("00:00", formatElapsed(vm.uiState.value.recordingElapsedMs))
+
+        // Advance the wall clock by 13s and let the ticker poll run.
+        now += 13_000L
+        advanceTimeBy(PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        assertEquals("00:13", formatElapsed(vm.uiState.value.recordingElapsedMs))
+
+        // Advance another 7s -> 20s total.
+        now += 7_000L
+        advanceTimeBy(PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        assertEquals("00:20", formatElapsed(vm.uiState.value.recordingElapsedMs))
+
+        // Settle: final lands the FSM in Idle and cancels the ticker.
+        speech.listener!!.onFinal("hello world")
+        advanceUntilIdle()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun androidSpeechTickerStopsWhenRecordingEnds() = runTest {
+        // The ticking job must terminate once recording ends so it does not
+        // keep updating state (or leak the coroutine) after Idle.
+        var now = 1_000L
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            storage = newStorage(),
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { now },
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        now += 4_000L
+        advanceTimeBy(PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        assertEquals("00:04", formatElapsed(vm.uiState.value.recordingElapsedMs))
+
+        // Stop (the user's "Insert"/"Send" path) -> Transcribing, then final.
+        speech.listener!!.onFinal("git status")
+        advanceUntilIdle()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+
+        // After Idle the clock keeps moving but the timer must NOT advance —
+        // the ticker is cancelled.
+        val frozen = vm.uiState.value.recordingElapsedMs
+        now += 60_000L
+        advanceTimeBy(10L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        assertEquals(frozen, vm.uiState.value.recordingElapsedMs)
+    }
+
     @Test
     fun androidSpeechEmptyFinalUsesLastPartialTranscript() = runTest {
         val speech = FakeSpeechRecognitionProvider()
@@ -4037,6 +4117,81 @@ class PromptComposerViewModelTest {
         // Settle the recording job so runTest doesn't hang.
         vm.onMicTap()
         advanceUntilIdle()
+    }
+
+    // -- Issue #870: long live transcript keeps the LATEST words visible ---
+
+    @Test
+    fun liveTranscriptTailKeepsLatestWordsWhenTooLong() {
+        // #870: as the partial transcript grows past the visible budget, the
+        // displayed text must surface the TAIL (newest words) with a leading
+        // ellipsis, not the head clipped off the end.
+        val longTranscript =
+            "please open the deployment pipeline and check the logs for the " +
+                "failing build then restart the worker and confirm the latest " +
+                "commit is deployed to production right now"
+        val tail = liveTranscriptTail(longTranscript, maxChars = 60)
+
+        // The newest words are present...
+        assertTrue(
+            "tail must contain the latest words, was: $tail",
+            tail.endsWith("deployed to production right now"),
+        )
+        // ...the oldest words are dropped...
+        assertFalse(
+            "tail must NOT show the head 'please open'",
+            tail.contains("please open the deployment"),
+        )
+        // ...and the truncation is marked with a LEADING ellipsis.
+        assertTrue("tail must start with a leading ellipsis", tail.startsWith("…"))
+        assertTrue("tail must fit the budget", tail.length <= 61)
+    }
+
+    @Test
+    fun liveTranscriptTailLeavesShortTextUntouched() {
+        // Short text fits — no ellipsis, no truncation.
+        val short = "git status"
+        assertEquals(short, liveTranscriptTail(short, maxChars = 60))
+    }
+
+    @Test
+    fun androidSpeechLivePartialSurfacesTailNotHead() = runTest {
+        // Drive the real recognizer state: a long partial must land a TAIL
+        // (latest words) in [UiState.liveTranscriptDisplay] so the on-screen
+        // text shows what is being recognized RIGHT NOW, not the head.
+        val speech = FakeSpeechRecognitionProvider()
+        val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
+        val vm = newVm(
+            storage = newStorage(),
+            voiceSettings = voice,
+            speechRecognitionProvider = speech,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onMicTap()
+        runCurrent()
+
+        val longPartial =
+            "summarize the conversation so far and then write a short status " +
+                "update describing what we changed and what is still left to do"
+        speech.listener!!.onPartial(longPartial)
+        runCurrent()
+
+        val display = vm.uiState.value.liveTranscriptDisplay
+        assertNotNull(display)
+        assertTrue(
+            "display must surface the latest words, was: $display",
+            display!!.endsWith("what is still left to do"),
+        )
+        assertFalse(
+            "display must not show the head",
+            display.startsWith("summarize the conversation"),
+        )
+        assertTrue("display must mark truncation with a leading ellipsis", display.startsWith("…"))
+
+        // Settle.
+        speech.listener!!.onFinal(longPartial)
+        advanceUntilIdle()
+        assertNull(vm.uiState.value.liveTranscriptDisplay)
     }
 
     // -- Issue #508/#580: two explicit stop buttons (Insert / Send) -------

@@ -899,7 +899,10 @@ internal fun SheetContent(
                         amplitude = state.amplitude,
                         capturing = state.hasDetectedSpeech,
                         elapsedLabel = formatElapsed(state.recordingElapsedMs),
-                        liveTranscript = state.liveTranscript,
+                        // Issue #870: render the END-anchored display slice so a
+                        // long live partial keeps its LATEST words visible
+                        // instead of clipping the newest words off the end.
+                        liveTranscript = state.liveTranscriptDisplay,
                         locked = state.recordingLocked,
                         onCancel = onCancelRecording,
                     )
@@ -3004,6 +3007,14 @@ private fun PromptComposerRecordingPreview() {
                     amplitude = 0.7f,
                     hasDetectedSpeech = true,
                     recordingElapsedMs = 17_000L,
+                    // Issue #870: a long live partial — the display surfaces the
+                    // TAIL (latest words) with a leading ellipsis.
+                    liveTranscript = "open the deployment pipeline and check the " +
+                        "logs then restart the worker and confirm the latest commit is deployed",
+                    liveTranscriptDisplay = liveTranscriptTail(
+                        "open the deployment pipeline and check the logs then restart " +
+                            "the worker and confirm the latest commit is deployed",
+                    ),
                     error = null,
                 ),
                 onClose = {},

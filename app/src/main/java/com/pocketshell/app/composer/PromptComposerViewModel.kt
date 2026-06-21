@@ -158,6 +158,19 @@ public class PromptComposerViewModel @Inject constructor(
     private var transcribeJob: Job? = null
 
     /**
+     * Issue #880: the wall-clock elapsed-timer ticker for the Android
+     * SpeechRecognizer recording path. The Whisper path already ticks
+     * [UiState.recordingElapsedMs] from inside its amplitude sampler loop
+     * ([sampleAmplitudeAndAutoStopOnSilence]); the Android recognizer path has
+     * no audio-capture source feeding that loop, so the timer used to sit
+     * frozen at `00:00`. This job advances the timer from [recordingStartedAtMs]
+     * on a fixed [SAMPLE_INTERVAL_MS] cadence, independent of any PCM clock, so
+     * the MM:SS counter increments for the recognizer path too. Cancelled the
+     * moment recording ends (stop / final / error / cancel / clear).
+     */
+    private var recordingTimerJob: Job? = null
+
+    /**
      * Issue #746: the session/pane this composer instance is currently
      * targeting (`"<hostId>/<sessionName>"`). The composer ViewModel is
      * activity-scoped and shared across every session on a host, so a draft
@@ -1154,9 +1167,16 @@ public class PromptComposerViewModel @Inject constructor(
                 silenceThresholdSeconds = 0f,
                 recordingElapsedMs = 0L,
                 liveTranscript = null,
+                liveTranscriptDisplay = null,
                 error = null,
             )
         }
+
+        // Issue #880: the Android recognizer path has no PCM sampler loop to
+        // advance the elapsed timer, so drive it from a wall-clock ticker
+        // anchored at recording start. Without this the MM:SS counter stayed
+        // frozen at 00:00 while dictating.
+        startRecordingTimerTicker()
     }
 
     /**
@@ -1243,6 +1263,32 @@ public class PromptComposerViewModel @Inject constructor(
         if (triggerAutoStop && _uiState.value.recording == RecordingState.Recording) {
             stopAndTranscribe()
         }
+    }
+
+    /**
+     * Issue #880: drive [UiState.recordingElapsedMs] from a wall-clock tick
+     * anchored at [recordingStartedAtMs], independent of any audio-capture/PCM
+     * source. Used by the Android SpeechRecognizer recording path, whose
+     * listener-driven flow never runs the Whisper amplitude sampler that
+     * otherwise advances the timer. Runs on [samplerDispatcher] so tests drive
+     * it under virtual time; cancelled by [stopRecordingTimerTicker] when
+     * recording ends.
+     */
+    private fun startRecordingTimerTicker() {
+        recordingTimerJob?.cancel()
+        recordingTimerJob = viewModelScope.launch(samplerDispatcher) {
+            while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                if (_uiState.value.recording != RecordingState.Recording) break
+                val elapsedMs = (clock() - recordingStartedAtMs).coerceAtLeast(0L)
+                _uiState.update { it.copy(recordingElapsedMs = elapsedMs) }
+                delay(SAMPLE_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopRecordingTimerTicker() {
+        recordingTimerJob?.cancel()
+        recordingTimerJob = null
     }
 
     private fun stopAndTranscribe() {
@@ -1657,6 +1703,9 @@ public class PromptComposerViewModel @Inject constructor(
             speechRecognitionGeneration == generation
 
     private fun stopAndroidSpeechRecognition() {
+        // Issue #880: recording is ending (moving to Transcribing) — stop the
+        // wall-clock elapsed-timer ticker so it does not keep updating state.
+        stopRecordingTimerTicker()
         val session = speechRecognitionSession ?: run {
             failAndroidSpeechRecognition(ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
             return
@@ -1710,6 +1759,10 @@ public class PromptComposerViewModel @Inject constructor(
                 amplitude = 0.35f,
                 hasDetectedSpeech = true,
                 liveTranscript = text,
+                // Issue #870: end-anchor the on-screen partial so a long
+                // dictation keeps its LATEST words visible (the sheet renders
+                // liveTranscriptDisplay, not the raw liveTranscript).
+                liveTranscriptDisplay = liveTranscriptTail(text),
                 error = null,
             )
         }
@@ -1738,6 +1791,7 @@ public class PromptComposerViewModel @Inject constructor(
                 hasDetectedSpeech = false,
                 recordingLocked = false,
                 liveTranscript = null,
+                liveTranscriptDisplay = null,
                 error = null,
             )
         }
@@ -1770,6 +1824,7 @@ public class PromptComposerViewModel @Inject constructor(
                 hasDetectedSpeech = false,
                 recordingLocked = false,
                 liveTranscript = null,
+                liveTranscriptDisplay = null,
                 error = androidSpeechFailureMessage(message),
             )
         }
@@ -1795,6 +1850,7 @@ public class PromptComposerViewModel @Inject constructor(
                 hasDetectedSpeech = false,
                 recordingLocked = false,
                 liveTranscript = null,
+                liveTranscriptDisplay = null,
                 draft = restoredDraft,
                 error = null,
             )
@@ -1807,6 +1863,10 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     private fun clearAndroidSpeechSession() {
+        // Issue #880: ensure the elapsed-timer ticker is stopped on every
+        // recognizer teardown path (final / error / cancel), independent of the
+        // stop-listening transition above.
+        stopRecordingTimerTicker()
         val session = speechRecognitionSession
         speechRecognitionSession = null
         speechRecognitionGeneration++
@@ -2383,6 +2443,18 @@ public class PromptComposerViewModel @Inject constructor(
         val recordingElapsedMs: Long = 0L,
         val liveTranscript: String? = null,
         /**
+         * Issue #870: the END-anchored slice of [liveTranscript] for the live
+         * dictation display. As the partial transcript grows past the visible
+         * width/height the on-screen text must keep the LATEST recognized words
+         * visible (the maintainer's report: it was clipping the END so the
+         * newest words scrolled out of view). Computed via [liveTranscriptTail]
+         * so a long partial surfaces its TAIL with a leading ellipsis
+         * (`…latest words`) rather than the head with a trailing one. Null when
+         * there is no live transcript. The sheet renders THIS, not the raw
+         * [liveTranscript].
+         */
+        val liveTranscriptDisplay: String? = null,
+        /**
          * Issue #688: ids of pending-transcription rows that currently have
          * a retry round-trip in flight. The composer banner renders a
          * "Retrying…" state and disables the Retry button for these rows so
@@ -2655,6 +2727,16 @@ public class PromptComposerViewModel @Inject constructor(
         public const val SAMPLE_INTERVAL_MS: Long = 50L
 
         /**
+         * Issue #870: character budget for the END-anchored live dictation
+         * display ([UiState.liveTranscriptDisplay] via [liveTranscriptTail]).
+         * Sized for the two-line `bodyDense` recording panel; a partial longer
+         * than this keeps its TAIL (latest words) with a leading ellipsis so the
+         * newest recognized words stay visible instead of being clipped off the
+         * end.
+         */
+        public const val LIVE_TRANSCRIPT_MAX_CHARS: Int = 90
+
+        /**
          * Issue #570: attachment staging must be bounded. A hung content
          * provider, stalled SSH upload, or dead remote must return the
          * composer to editable Idle state instead of leaving the upload
@@ -2782,6 +2864,42 @@ internal fun formatElapsed(elapsedMs: Long): String {
     val minutes = totalSeconds / 60L
     val seconds = totalSeconds % 60L
     return "%02d:%02d".format(minutes, seconds)
+}
+
+/**
+ * Issue #870: end-anchor a long live partial transcript so the LATEST
+ * recognized words stay visible as the text grows.
+ *
+ * The Android SpeechRecognizer (and Whisper) live-results display had a
+ * trailing `TextOverflow.Ellipsis`, so once the partial outgrew the small
+ * recording panel it clipped the END — the newest words scrolled out of
+ * view, the opposite of what the user wants while watching dictation land.
+ *
+ * This keeps the TAIL (the most recent words) and marks the dropped head
+ * with a LEADING ellipsis (`…latest words`). Truncation snaps to a word
+ * boundary where one exists within the budget so we never split a word.
+ * Short text that already fits is returned untouched (no ellipsis).
+ *
+ * Width-independent on purpose: [maxChars] is a generous character budget
+ * matched to the two-line panel, computed once at file scope so the unit
+ * tests can pin the tail behaviour without composing the sheet.
+ */
+internal fun liveTranscriptTail(
+    text: String,
+    maxChars: Int = PromptComposerViewModel.LIVE_TRANSCRIPT_MAX_CHARS,
+): String {
+    if (maxChars <= 0) return text
+    if (text.length <= maxChars) return text
+    // Budget one char for the leading ellipsis.
+    val budget = (maxChars - 1).coerceAtLeast(1)
+    var start = text.length - budget
+    // Snap forward to the next word boundary inside the kept window so the
+    // first visible word is whole, not a fragment of the dropped head.
+    val nextSpace = text.indexOf(' ', start)
+    if (nextSpace in start until text.length) {
+        start = nextSpace + 1
+    }
+    return "…" + text.substring(start).trimStart()
 }
 
 internal fun appendAttachmentPaths(draft: String, paths: List<String>): String {

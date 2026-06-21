@@ -434,6 +434,41 @@ class DesignRenders {
     }
 
     /**
+     * Issue #823: the manual-reconnect affordance on the dropped/Reconnecting
+     * session surface. `SessionSurfaceReconnectWrapper` is an app-only composable,
+     * so this fixture reproduces its visible chrome: the "Attaching…" surface
+     * placeholder with the VISIBLE, bottom-centre "Reconnect" button overlaid on
+     * top (a Secondary, compact [PocketShellButton]). Both this button and the
+     * (chrome-less) pull-down gesture call the existing `reconnect()` entrypoint.
+     * A reviewer can eyeball that the button reads as a clear, tappable affordance
+     * and does not collide with the centered "Attaching…" hold.
+     */
+    @Test
+    fun tmuxSurfaceReconnectAffordance() = render("tmux-surface-reconnect-affordance") {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(320.dp)
+                .background(color = PocketShellColors.Background),
+            contentAlignment = Alignment.Center,
+        ) {
+            LoadingIndicator.Spinner(
+                size = SpinnerSize.Medium,
+                label = "Attaching…",
+            )
+            PocketShellButton(
+                text = "Reconnect",
+                onClick = {},
+                variant = ButtonVariant.Secondary,
+                compact = true,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 24.dp),
+            )
+        }
+    }
+
+    /**
      * Issue #756: the canonical [PocketShellButton] — the single shared button
      * the ~142 raw Material `Button`/`TextButton` call sites (and the 9 files
      * that hand-re-declared the same accent `ButtonDefaults.buttonColors` block)

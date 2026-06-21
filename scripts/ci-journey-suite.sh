@@ -488,6 +488,22 @@ JOURNEY_CLASSES=(
   # assumeFalse(isRunningOnCi())). It lives under com.pocketshell.app.tmux, so it
   # carries its fully-qualified name directly.
   "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest"
+  # ADDED (#823): the manual-reconnect AFFORDANCE proof. The maintainer's ask:
+  # "there's not even a button to reconnect — maybe we'll do it the same way we
+  # refresh the session tree (pull down)." This proof composes the production
+  # SessionSurfaceReconnectWrapper (the same composable the session screen mounts)
+  # and HARD-asserts: (1) in a dropped/Reconnecting state a pull-down gesture fires
+  # the existing reconnect() entrypoint, (2) a VISIBLE, tappable "Reconnect" button
+  # is present in that state and a tap fires reconnect(), (3) the button stays
+  # tappable during the "Attaching…" hold, and (4) on a live (Connected) session
+  # BOTH affordances are absent so neither steals the terminal's gestures. It is a
+  # PURE Compose assertion test — NO Docker fixture, NO SSH/tmux, NO toxiproxy, NO
+  # port — so it needs no tests.yml service change, and it does NOT self-skip on CI
+  # (no assumeTrue / assumeFalse(isRunningOnCi())). Per G9 (a test per acceptance
+  # criterion, wired into a running gate) it must run per-push so the affordances
+  # cannot silently regress. It lives under com.pocketshell.app.tmux, so it carries
+  # its fully-qualified name directly.
+  "com.pocketshell.app.tmux.SessionSurfaceReconnectWrapperTest"
   # ADDED (#868): the previous-session-toggle REMOVED regression guard (AC4).
   # The maintainer's #628 previous-session toggle button was hard-cut from the
   # Conversation bottom composer; this proof composes the production

@@ -159,8 +159,10 @@ import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
 import com.pocketshell.app.voice.HotkeysChipIcon
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.app.voice.AssistantStrip
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.DisclosureIcon
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolArgsView
@@ -3664,6 +3666,15 @@ internal const val TMUX_SESSION_RECONNECT_TAG = "tmux:session:reconnect"
 internal const val TMUX_PULL_TO_RECONNECT_TAG = "tmux:session:pull-to-reconnect"
 
 /**
+ * Issue #823: test tag for the visible "Reconnect" button overlaid on the
+ * session surface while the session is dropped / Reconnecting (a tappable
+ * affordance, so the manual reconnect is not gesture-only). Like the pull
+ * gesture, the button calls the EXISTING [TmuxSessionViewModel.reconnect]
+ * entrypoint — no new connection logic (D28).
+ */
+internal const val TMUX_SURFACE_RECONNECT_BUTTON_TAG = "tmux:session:surface-reconnect-button"
+
+/**
  * Issue #823 (Slice 1): wraps the session surface (terminal pager /
  * conversation / placeholders) with a discoverable pull-to-reconnect gesture,
  * mirroring the session-tree's pull-to-refresh affordance
@@ -3746,6 +3757,28 @@ internal fun SessionSurfaceReconnectWrapper(
                         content()
                     }
                 }
+                // Issue #823: a VISIBLE, tappable "Reconnect" button — not only the
+                // pull gesture. The maintainer's "there's not even a button to
+                // reconnect" ask needs a discoverable control: the pull-down is
+                // easy to miss (it has no chrome until you drag), so a labelled
+                // button is overlaid on the surface whenever the session is dropped
+                // / Reconnecting. It is anchored bottom-centre of the surface (clear
+                // of the centered "Attaching…" placeholder) and stays visible even
+                // during the attach hold (`surfaceShowsCenteredLoader`), since that
+                // hold is exactly when the user wants to force a retry. Both the
+                // button and the pull route to the SAME existing [onReconnect]
+                // ([TmuxSessionViewModel.reconnect]) — no new connection logic, no
+                // second writer on the reconnect path (D28).
+                PocketShellButton(
+                    text = "Reconnect",
+                    onClick = onReconnect,
+                    variant = ButtonVariant.Secondary,
+                    compact = true,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 24.dp)
+                        .testTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG),
+                )
             }
         }
     } else {

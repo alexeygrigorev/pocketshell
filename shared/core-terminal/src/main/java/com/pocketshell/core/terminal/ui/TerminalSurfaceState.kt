@@ -161,9 +161,23 @@ class TerminalSurfaceState(
      * ([appendRemoteOutput]). [TerminalSurface] collects this and calls
      * [com.termux.view.TerminalView.forceFullRepaint]. Kept off Compose state
      * for the same burst-coalescing reasons as [renderRequests].
+     *
+     * `replay = 1` (PocketShell #879): on a beyond-grace reconnect the pane,
+     * its [TerminalSurfaceState], and its [TerminalView] are all re-created and
+     * the active pane is seeded from a full `capture-pane` snapshot BEFORE the
+     * fresh [TerminalSurface] subscribes its repaint collector (the #640
+     * seed-before-reveal contract). With `replay = 0` that seed's repaint
+     * `tryEmit` fired while no collector was attached, so the late-subscribing
+     * [TerminalView] never received it — Termux's #469 dirty cache then clipped
+     * the next draw to only the changed rows over a black canvas, leaving the
+     * seeded-but-"clean" rows black (the #553/#721 partial-blank-after-reconnect
+     * class on the previously-untested full-reconnect path). Replaying the
+     * most-recent full-repaint request to a late subscriber closes that drop.
+     * Harmless in steady state: one coalesced full repaint on bind, then the
+     * #469 dirty path resumes.
      */
     private val _fullRepaintRequests = MutableSharedFlow<Unit>(
-        replay = 0,
+        replay = 1,
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
@@ -352,6 +366,18 @@ class TerminalSurfaceState(
         bufferTick.value = bufferTick.value + 1
         return true
     }
+
+    /**
+     * Test-only seam (PocketShell #879): fire a full-repaint request exactly
+     * as the reattach re-seed does in [appendRemoteOutput], WITHOUT needing a
+     * real [SshTerminalBridge]. Lets a unit test reproduce the beyond-grace
+     * re-create ordering — seed emits the repaint BEFORE the fresh
+     * [TerminalSurface]'s collector subscribes — and assert that with
+     * `replay = 1` a late subscriber still receives the most-recent request
+     * (with `replay = 0` it was silently dropped, leaving the View black).
+     */
+    internal fun emitFullRepaintRequestForTesting(): Boolean =
+        _fullRepaintRequests.tryEmit(Unit)
 
     /**
      * Matcher used by [flowOfMatches] to extract tap-target candidates from

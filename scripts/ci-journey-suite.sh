@@ -1098,6 +1098,56 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #879 beyond-grace reconnect black-screen render proof (core-terminal
+# androidTest). After a background→foreground BEYOND-grace reconnect the pane,
+# its TerminalSurfaceState and its TerminalView are RE-CREATED; the capture-pane
+# seed fires the full-repaint signal BEFORE the fresh surface binds its repaint
+# collector (the #640 seed-before-reveal ordering). With `_fullRepaintRequests`
+# as a replay=0 flow the late-subscribing TerminalView NEVER received that
+# request → the renderer's #469 dirty clip painted only changed rows over a
+# black surface → ~95% black (the maintainer's screenshot). This proof drives
+# the EXACT production wiring (real TerminalSurfaceState flow + the real
+# TerminalSurface collector shape + a real TerminalView/TerminalRenderer)
+# through the re-create ordering and asserts the late subscriber forces a FULL
+# repaint (PEEK_FULL, every row repaints over black) — RED on replay=0, GREEN
+# on replay=1. The #553/#721 partial-blank class on the previously-untested
+# full-reconnect path; it joins the per-push gate so it cannot reach a green
+# `main` again. Uses NO Docker fixture (in-process render test). The proof drives
+# a REAL TerminalView (its onDraw under the platform dirty clip + the real
+# forceFullRepaint() + the real TerminalSurfaceState.fullRepaintRequests
+# collector), not a renderer-model stand-in.
+CORE_TERMINAL_REATTACH_REPAINT_CLASS="com.termux.view.TerminalViewReattachLateSubscribeRepaintInstrumentedTest"
+REATTACH_REPAINT_STATUS="PASS"
+
+run_core_terminal_reattach_repaint() {
+  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_REATTACH_REPAINT_CLASS" \
+    --stacktrace
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  REATTACH_REPAINT_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #879 reattach-repaint proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #879 REATTACH-REPAINT PROOF: $CORE_TERMINAL_REATTACH_REPAINT_CLASS (attempt 1)"
+  echo "=========================================================="
+  reattach_repaint_start=$SECONDS
+  if run_core_terminal_reattach_repaint; then
+    echo "REATTACH_REPAINT_PASS: passed on attempt 1 (elapsed $((SECONDS - reattach_repaint_start))s)"
+  else
+    echo ">>> REATTACH-REPAINT PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_reattach_repaint; then
+      echo "REATTACH_REPAINT_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "REATTACH_REPAINT_FAILED: #879 proof failed twice"
+      REATTACH_REPAINT_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
@@ -1109,12 +1159,14 @@ SUITE_ELAPSED=$((SECONDS - SUITE_START))
 # UNAVAILABLE".
 if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
       && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
-      && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" ]]; then
+      && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
+      && "$REATTACH_REPAINT_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
         && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
-        && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" ]]; then
+        && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
+        && "$REATTACH_REPAINT_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -1157,6 +1209,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #871 agent-pane link-affordance off-main proof (\`shared:core-terminal\`): **$AGENT_LINK_AFFORDANCE_STATUS**"
   echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\`"
+  echo
+  echo "Core-terminal #879 beyond-grace reattach-repaint proof (\`shared:core-terminal\`): **$REATTACH_REPAINT_STATUS**"
+  echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"

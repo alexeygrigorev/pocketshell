@@ -4571,6 +4571,28 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!isCurrentRuntime(blankReseedGuard)) return@launch
                 reseedBlankVisiblePanes(blankReseedGuard)
             }
+            // Issue #879: belt-and-suspenders for the BEYOND-GRACE reconnect
+            // (`connect(LifecycleReattach)`). On that path the pane, its
+            // [TerminalSurfaceState], and its [TerminalView] are all RE-CREATED:
+            // [preloadVisibleContentForNewPanes] seeds the active pane (firing the
+            // full-repaint signal) BEFORE the fresh surface reveals/binds its
+            // collector. The `replay = 1` flow change closes that drop at the
+            // render layer; this re-fire is the second safety net the #879
+            // research called for — a buffer that is correctly seeded but
+            // unpainted reads NON-blank, so the deferred [reseedBlankVisiblePanes]
+            // backstop above SKIPS it (it only re-captures fully-blank panes). So
+            // after the surface is revealed (collector definitely live), re-fire
+            // the UNCONDITIONAL full-viewport reseed of the active pane keyed to
+            // the target via the guard, which re-emits the full-repaint request to
+            // the now-subscribed View. Restricted to the reconnect trigger so a
+            // normal cold open / switch pays no extra capture. Dropped if the
+            // runtime/target was superseded mid-flight (the guard).
+            if (trigger == TmuxConnectTrigger.LifecycleReattach) {
+                bridgeScope.launch {
+                    if (!isCurrentRuntime(blankReseedGuard)) return@launch
+                    reseedActivePaneForReattach(blankReseedGuard)
+                }
+            }
             logAttachMilestone(
                 attempt = attempt,
                 target = target,

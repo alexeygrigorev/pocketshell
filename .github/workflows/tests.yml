@@ -57,6 +57,21 @@ jobs:
           chmod +x scripts/check-test-validity.sh
           scripts/check-test-validity.sh
 
+      # Issue #865: raw-component drift guardrail. After the #756 design-
+      # consistency migrations landed (#860/#861/#862/#863 — shared ConfirmDialog
+      # / FormDialog / LoadingIndicator.Spinner / PocketShellButton own the
+      # canonical dialog/spinner/text-button look), this fast static grep PINS a
+      # per-file baseline of the raw `AlertDialog(` / `CircularProgressIndicator(`
+      # / `TextButton(` call-sites that remain and FAILS only when a file gains a
+      # NEW one (or a new file ships with any). Stops the migrated backlog from
+      # silently re-growing. Cheap (< 1 s grep), no emulator — belongs in the Unit
+      # job. Re-baseline with `scripts/check-component-drift.sh --update` after a
+      # screen migrates (lowering a count is encouraged).
+      - name: Raw-component drift guard (issue #865)
+        run: |
+          chmod +x scripts/check-component-drift.sh
+          scripts/check-component-drift.sh
+
       # Issue #835: gate the emulator-journey suite's OWN budget/labelling logic
       # so the #470-stall hardening cannot silently regress. This is a fast
       # JVM-free shell test (stubbed gradle/adb, tiny budget) proving the suite

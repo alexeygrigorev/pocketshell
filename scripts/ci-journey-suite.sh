@@ -353,6 +353,18 @@ JOURNEY_CLASSES=(
   # lives under com.pocketshell.app.projects, not the proof prefix, so it carries
   # its fully-qualified name directly.
   "com.pocketshell.app.projects.FolderListWindowCloseAfterStopPollingDockerTest"
+  # ADDED (#883): window-aware "Stop session". The tree shows each tmux WINDOW
+  # as its own `[wN]` row, but in-session Stop used to always `kill-session`,
+  # taking the whole session (every window) down. This end-to-end test creates
+  # a real 2-window tmux session on the `agents` fixture (DEFAULT_HOST/PORT ->
+  # 10.0.2.2:2222), attaches the production TmuxSessionViewModel, and confirms
+  # a Stop on window 0 via killCurrentSession(windowIndex = 0). It asserts —
+  # over a FRESH SSH-exec `tmux list-windows` — that ONLY window 0 is gone and
+  # window 1 + the session SURVIVE, and that the tree drops only the killed
+  # window row. RED on base (kill-session destroyed both windows + the session,
+  # so list-windows fails); GREEN after the kill-window fix. Same fixture as the
+  # siblings above; no toxiproxy, no new Docker service; does NOT self-skip.
+  "com.pocketshell.app.projects.FolderListKillWindowDockerTest"
   # ADDED (#795, follow-up to #794): the ~90s STEADY-HOLD no-flap proof. #794
   # fixed the ~11s app-initiated SSH transport flap (the maintainer's
   # black-screen / "conversations don't work" report): on a quiet foreground

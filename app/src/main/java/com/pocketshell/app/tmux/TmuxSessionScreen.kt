@@ -2059,7 +2059,17 @@ public fun TmuxSessionScreen(
                             if (name.isNotEmpty()) onReplaceTmuxSession(name)
                         }
                         TmuxDialogMode.StopSession -> {
-                            viewModel.killCurrentSession()
+                            // Issue #883: "Stop session" on a `[wN]` window row
+                            // must remove only the window the pager is currently
+                            // showing — pass that window's tmux index so the VM
+                            // runs `kill-window` (the session + siblings survive)
+                            // rather than `kill-session` (the whole session). The
+                            // VM kills `activeTarget.sessionName:windowIndex`, so
+                            // only pass the index when the visible pane belongs to
+                            // the ACTIVE session (`currentPane` is non-null only
+                            // then); otherwise fall back to the whole-session kill
+                            // so we never kill a window of the wrong session.
+                            viewModel.killCurrentSession(currentPane?.windowIndex)
                             onBack()
                         }
                     }

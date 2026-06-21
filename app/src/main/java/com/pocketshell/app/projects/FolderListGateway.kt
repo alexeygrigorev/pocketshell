@@ -290,6 +290,42 @@ interface FolderListGateway {
     ): Result<Unit>
 
     /**
+     * Issue #883: kill ONE tmux WINDOW (`<sessionName>:<windowIndex>`) on the
+     * remote via an SSH-exec `tmux kill-window` over the same fresh lease
+     * [killSession] uses. The folder/session tree models each tmux window as
+     * its own `[wN]` row, but "Stop session" used to always run
+     * `kill-session`, taking the WHOLE session (every window) down. This is the
+     * window-aware Stop: it removes only the targeted window. tmux destroys the
+     * session itself when its last window closes, so stopping the only window
+     * still ends the session (the common single-window case is unchanged).
+     *
+     * Verified-teardown contract (mirrors [killSession], #518/#655/#464): the
+     * kill runs over the fresh gateway lease and is confirmed before success is
+     * reported. A success carries [WindowKillOutcome.sessionSurvived]:
+     *   - `false` — the kill closed the last window and tmux auto-destroyed the
+     *     session (`tmux has-session` now fails). The caller drops the whole
+     *     session row, exactly like a [killSession].
+     *   - `true`  — sibling window(s) remain: the session is still present AND
+     *     the targeted `windowIndex` is gone from `tmux list-windows`. The
+     *     caller drops only the killed window row; siblings + the session stay.
+     * A failure is returned when the session is still present and the targeted
+     * window is STILL listed (the kill did not land) so the tree keeps the
+     * still-live row.
+     *
+     * The default keeps unrelated fake gateways honest without forcing them to
+     * learn window kills; production overrides it below.
+     */
+    suspend fun killWindow(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        windowIndex: Int,
+    ): Result<WindowKillOutcome> = Result.failure(
+        UnsupportedOperationException("Window kill is not available."),
+    )
+
+    /**
      * Rename a tmux session on the remote host. The default keeps existing
      * test fakes honest without forcing every unrelated fake gateway to learn
      * rename behavior; production overrides it below.
@@ -331,6 +367,18 @@ data class FolderImportPayload(
     val remoteName: String,
     val length: Long?,
     val openStream: () -> InputStream?,
+)
+
+/**
+ * Issue #883: result of a verified [FolderListGateway.killWindow].
+ *
+ * @property sessionSurvived `true` when sibling window(s) remain (the session
+ *   is still present after the window kill); `false` when the killed window was
+ *   the session's last and tmux auto-destroyed the session. The caller uses
+ *   this to decide whether to drop just the window row or the whole session.
+ */
+data class WindowKillOutcome(
+    val sessionSurvived: Boolean,
 )
 
 class SshFolderListGateway internal constructor(
@@ -1266,6 +1314,63 @@ class SshFolderListGateway internal constructor(
             )
             if (hasSession.exitCode == 0) {
                 throw RuntimeException("tmux session '$target' is still running.")
+            }
+        }
+    }
+
+    override suspend fun killWindow(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        windowIndex: Int,
+    ): Result<WindowKillOutcome> {
+        val target = sessionName.trim()
+        if (target.isEmpty()) {
+            return Result.failure(IllegalArgumentException("No session to stop."))
+        }
+        if (windowIndex < 0) {
+            return Result.failure(IllegalArgumentException("Invalid window index."))
+        }
+        return withLeaseSession(host, keyPath, passphrase) { session ->
+            val quotedName = shellQuote(target)
+            // Issue #883: target the specific window of the session by index.
+            // The colon target `<session>:<index>` is a tmux window target, so
+            // kill-window removes ONLY that window. We single-quote the whole
+            // `session:index` so a session name with shell metacharacters is
+            // safe (the index is a plain integer).
+            val quotedWindow = shellQuote("$target:$windowIndex")
+            session.exec(pathAware("tmux kill-window -t $quotedWindow"))
+            // Authoritative check. tmux destroys the session when its LAST
+            // window closes, so the kill "succeeded" in two distinct shapes:
+            //   * the session is GONE (last window closed) — has-session fails;
+            //   * the session is STILL present but the targeted window index is
+            //     no longer listed (a sibling window survived).
+            // It FAILED only when the session is present AND the targeted index
+            // is still listed — surface a failure so the tree keeps the row.
+            val hasSession = session.exec(
+                pathAware("tmux has-session -t $quotedName"),
+            )
+            if (hasSession.exitCode != 0) {
+                // Last window closed → tmux auto-destroyed the session.
+                WindowKillOutcome(sessionSurvived = false)
+            } else {
+                val listWindows = session.exec(
+                    pathAware(
+                        "tmux list-windows -t $quotedName -F '#{window_index}'",
+                    ),
+                )
+                val remainingIndices = listWindows.stdout
+                    .lineSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .toList()
+                if (remainingIndices.contains(windowIndex.toString())) {
+                    throw RuntimeException(
+                        "tmux window '$target:$windowIndex' is still running.",
+                    )
+                }
+                WindowKillOutcome(sessionSurvived = true)
             }
         }
     }

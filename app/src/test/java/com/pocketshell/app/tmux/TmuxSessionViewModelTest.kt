@@ -337,6 +337,195 @@ class TmuxSessionViewModelTest {
         collector.cancel()
     }
 
+    // ----------------------------------------------------------- Issue #883
+
+    /**
+     * Issue #883 (reproduce-first). The tree presents each tmux WINDOW as its
+     * own `[wN]` row, but "Stop session" used to ALWAYS run `kill-session`,
+     * taking the whole session (every window) down. This proves the fix: Stop
+     * on a window row of a MULTI-window session runs `kill-window` for ONLY
+     * that window — NOT `kill-session` — and, because a sibling window
+     * survived, broadcasts a WINDOW-close (not a whole-session kill) so the
+     * tree drops only the killed window row.
+     *
+     * Pre-fix `killCurrentSession(windowIndex)` ignored the index and called
+     * `killSession`, so `killedSessionNames` would contain "multi" and
+     * `killedWindowTargets` would be empty — this test fails on base.
+     */
+    @Test
+    fun stopOnMultiWindowRowKillsOnlyThatWindow() = runTest(scheduler) {
+        val signals = SessionLifecycleSignals()
+        val gateway = RecordingStopGateway(
+            killSucceeds = true,
+            windowKillSessionSurvived = true,
+        )
+        val vm = newVm(
+            sessionLifecycleSignals = signals,
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "multi",
+            client = client,
+        )
+        runCurrent()
+        // Two windows of the same session — `[w0]` (@10) and `[w1]` (@11).
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    "%0", "@10", "$0", "win0", paneIndex = 0,
+                    windowIndex = 0, sessionName = "multi",
+                ),
+                TmuxSessionViewModel.ParsedPane(
+                    "%1", "@11", "$0", "win1", paneIndex = 0,
+                    windowIndex = 1, sessionName = "multi",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        val closed = async { signals.closedWindows.first() }
+        runCurrent()
+
+        // The user is viewing window 0 (`[w0]`) and taps Stop.
+        vm.killCurrentSession(windowIndex = 0)
+        advanceUntilIdle()
+
+        val event = closed.await()
+        assertEquals(7L, event.hostId)
+        assertEquals(
+            "the closed-window signal must carry window 0's stable tmux id (@10)",
+            "@10",
+            event.windowId,
+        )
+        assertEquals(
+            "Stop on a window row must run kill-window for ONLY that window; " +
+                "got ${gateway.killedWindowTargets}",
+            listOf("multi:0"),
+            gateway.killedWindowTargets,
+        )
+        assertTrue(
+            "Stop on a window row must NOT run kill-session (that would take " +
+                "the whole session + sibling window down); got ${gateway.killedSessionNames}",
+            gateway.killedSessionNames.isEmpty(),
+        )
+    }
+
+    /**
+     * Issue #883 class coverage: Stop on the LAST/only window of a session.
+     * tmux auto-destroys the session when its final window closes, so the
+     * gateway reports `sessionSurvived = false` and the VM must broadcast a
+     * whole-session kill (the row drops entirely), exactly as today.
+     */
+    @Test
+    fun stopOnLastWindowDestroysTheSession() = runTest(scheduler) {
+        val signals = SessionLifecycleSignals()
+        val gateway = RecordingStopGateway(
+            killSucceeds = true,
+            windowKillSessionSurvived = false,
+        )
+        val vm = newVm(
+            sessionLifecycleSignals = signals,
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "solo",
+            client = client,
+        )
+        runCurrent()
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    "%0", "@20", "$0", "win0", paneIndex = 0,
+                    windowIndex = 0, sessionName = "solo",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        val killed = async { signals.killedSessions.first() }
+        runCurrent()
+
+        vm.killCurrentSession(windowIndex = 0)
+        advanceUntilIdle()
+
+        val event = killed.await()
+        assertEquals(7L, event.hostId)
+        assertEquals(
+            "closing the last window destroys the session — the whole-session " +
+                "signal must carry the session name",
+            "solo",
+            event.sessionName,
+        )
+        assertEquals(
+            "the last-window Stop still goes through kill-window on the remote",
+            listOf("solo:0"),
+            gateway.killedWindowTargets,
+        )
+    }
+
+    /**
+     * Issue #883 class coverage: the whole-session Stop path (no window index)
+     * still runs `kill-session` and broadcasts a session kill — the session-
+     * level / fallback intent is unchanged.
+     */
+    @Test
+    fun stopWithoutWindowIndexKillsWholeSession() = runTest(scheduler) {
+        val signals = SessionLifecycleSignals()
+        val gateway = RecordingStopGateway(killSucceeds = true)
+        val vm = newVm(
+            sessionLifecycleSignals = signals,
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "whole",
+            client = client,
+        )
+        runCurrent()
+
+        val killed = async { signals.killedSessions.first() }
+        runCurrent()
+
+        // No window index — the session-level Stop.
+        vm.killCurrentSession()
+        advanceUntilIdle()
+
+        val event = killed.await()
+        assertEquals("whole", event.sessionName)
+        assertEquals(
+            "the no-window Stop must run kill-session, not kill-window",
+            listOf("whole"),
+            gateway.killedSessionNames,
+        )
+        assertTrue(
+            "the no-window Stop must NOT run kill-window; got ${gateway.killedWindowTargets}",
+            gateway.killedWindowTargets.isEmpty(),
+        )
+    }
+
     // ----------------------------------------------------------- Issue #665
 
     @Test
@@ -13572,8 +13761,17 @@ class TmuxSessionViewModelTest {
      */
     private class RecordingStopGateway(
         private val killSucceeds: Boolean,
+        // Issue #883: window-kill outcome. `null` means killWindow was never
+        // expected to be called (a session-level kill test). `true` => a
+        // sibling window survived; `false` => the session was destroyed.
+        private val windowKillSessionSurvived: Boolean? = null,
+        private val windowKillSucceeds: Boolean = true,
     ) : FolderListGateway {
         val killedSessionNames = mutableListOf<String>()
+
+        // Issue #883: records the `<sessionName>:<windowIndex>` window targets
+        // killWindow was asked to stop, plus whether kill-session was used.
+        val killedWindowTargets = mutableListOf<String>()
 
         override suspend fun listSessionsWithFolder(
             host: com.pocketshell.core.storage.entity.HostEntity,
@@ -13621,6 +13819,26 @@ class TmuxSessionViewModelTest {
             }
             killedSessionNames += sessionName
             return Result.success(Unit)
+        }
+
+        override suspend fun killWindow(
+            host: com.pocketshell.core.storage.entity.HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+            windowIndex: Int,
+        ): Result<com.pocketshell.app.projects.WindowKillOutcome> {
+            killedWindowTargets += "$sessionName:$windowIndex"
+            if (!windowKillSucceeds) {
+                return Result.failure(
+                    RuntimeException("tmux window '$sessionName:$windowIndex' is still running."),
+                )
+            }
+            return Result.success(
+                com.pocketshell.app.projects.WindowKillOutcome(
+                    sessionSurvived = windowKillSessionSurvived ?: false,
+                ),
+            )
         }
     }
 

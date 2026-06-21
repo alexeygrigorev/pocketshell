@@ -11775,28 +11775,94 @@ public class TmuxSessionViewModel @Inject constructor(
      * DAO; production Hilt always injects both, so production always takes the
      * verified path.
      */
-    public fun killCurrentSession() {
+    public fun killCurrentSession(windowIndex: Int? = null) {
         val current = activeTarget ?: return
         val target = current.sessionName
         val gateway = folderListGateway
         val dao = hostDao
+        // Issue #883: the tree presents each tmux WINDOW as its own `[wN]` row,
+        // so a "Stop session" on a window row must remove only THAT window
+        // (`tmux kill-window -t '<session>:<index>'`) — not the whole session.
+        // tmux auto-destroys the session when its last window closes, so a
+        // single-window session still dies on Stop (the common case), while a
+        // multi-window session keeps its other window(s). We resolve the stable
+        // tmux window id (`@N`) of the targeted window now so a surviving-session
+        // close can drop just that row by id. `windowIndex == null` (no window
+        // info — e.g. an older probe that never tagged a window index) keeps the
+        // whole-session kill below.
+        val windowId = windowIndex?.let { idx ->
+            _panes.value.firstOrNull { it.windowIndex == idx }?.windowId
+        }
         if (gateway == null || dao == null) {
             // No gateway/host DAO (unit-test constructor) — best-effort send
             // over the control channel and still signal so the tree reconciles.
-            sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(target)}'")
-            sessionLifecycleSignals?.emitKilled(current.hostId, target)
+            if (windowIndex != null) {
+                sendLifecycleCommand(
+                    "kill-window -t '${escapeSingleQuoted("$target:$windowIndex")}'",
+                )
+                if (windowId != null) {
+                    sessionLifecycleSignals?.emitWindowClosed(current.hostId, windowId)
+                } else {
+                    sessionLifecycleSignals?.emitKilled(current.hostId, target)
+                }
+            } else {
+                sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(target)}'")
+                sessionLifecycleSignals?.emitKilled(current.hostId, target)
+            }
             return
         }
         bridgeScope.launch {
             Log.i(
                 ISSUE_464_KILL_TAG,
-                "stop-session-start host=${current.hostId} name=$target",
+                "stop-session-start host=${current.hostId} name=$target window=$windowIndex",
             )
             val host = withContext(Dispatchers.IO) { dao.getById(current.hostId) }
             if (host == null) {
                 Log.w(
                     ISSUE_464_KILL_TAG,
                     "stop-session-host-missing host=${current.hostId} name=$target",
+                )
+                return@launch
+            }
+            if (windowIndex != null) {
+                // Issue #883: window-aware Stop — kill just the targeted window.
+                val result = gateway.killWindow(
+                    host = host,
+                    keyPath = current.keyPath,
+                    passphrase = current.passphrase,
+                    sessionName = target,
+                    windowIndex = windowIndex,
+                )
+                result.fold(
+                    onSuccess = { outcome ->
+                        if (outcome.sessionSurvived && windowId != null) {
+                            // Sibling window(s) remain: drop only the killed
+                            // window row by its stable tmux id.
+                            Log.i(
+                                ISSUE_464_KILL_TAG,
+                                "stop-window-signal host=${current.hostId} name=$target " +
+                                    "window=$windowIndex windowId=$windowId session-survived",
+                            )
+                            sessionLifecycleSignals?.emitWindowClosed(current.hostId, windowId)
+                        } else {
+                            // Last window closed → tmux destroyed the session
+                            // (or we couldn't resolve the window id): drop the
+                            // whole session row, same as a session kill.
+                            Log.i(
+                                ISSUE_464_KILL_TAG,
+                                "stop-window-signal host=${current.hostId} name=$target " +
+                                    "window=$windowIndex session-destroyed",
+                            )
+                            sessionLifecycleSignals?.emitKilled(current.hostId, target)
+                        }
+                    },
+                    onFailure = { error ->
+                        Log.w(
+                            ISSUE_464_KILL_TAG,
+                            "stop-window-failed host=${current.hostId} name=$target " +
+                                "window=$windowIndex err=${error.javaClass.simpleName}: ${error.message}",
+                        )
+                    },
                 )
                 return@launch
             }

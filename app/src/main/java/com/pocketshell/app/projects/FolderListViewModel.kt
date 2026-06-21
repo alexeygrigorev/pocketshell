@@ -748,6 +748,14 @@ class FolderListViewModel internal constructor(
                     onSessionKilled(killed)
                 }
             }
+            // Issue #883: a confirmed single-window close (the session survived).
+            // Drop ONLY that window row from this tree — siblings + the session
+            // stay — then reconcile if the tree screen is still composed.
+            viewModelScope.launch {
+                signals.closedWindows.collect { closed ->
+                    onWindowClosed(closed)
+                }
+            }
         }
         // EPIC #679 requirement #2: reconcile INFREQUENTLY, not on a constant
         // poll. The tree is held across opens, so a foreground/resume only
@@ -795,6 +803,25 @@ class FolderListViewModel internal constructor(
         // re-probing now would re-acquire the warm lease and race the session
         // screen's own attach, and a gateway that still reports the just-killed
         // session would resurrect the dropped row.
+        if (probeJob != null) refresh()
+    }
+
+    /**
+     * Issue #883: handle a confirmed single-window close broadcast from the
+     * per-session screen (the parent session survived). Drops ONLY the closed
+     * window's row from the maintained tree by its stable tmux id
+     * ([HostTreeModel.removeWindow]) so sibling window rows + the session node
+     * keep their slots, then — like [onSessionKilled] — reconciles only when
+     * the tree screen is still composed (otherwise the optimistic drop stands
+     * and the next bind/resume re-probe confirms it). Ignores other hosts.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun onWindowClosed(closed: com.pocketshell.app.tmux.ClosedWindow) {
+        val params = bound ?: return
+        if (params.hostId != closed.hostId) return
+        if (tree.removeWindow(closed.windowId)) {
+            emitReady()
+        }
         if (probeJob != null) refresh()
     }
 

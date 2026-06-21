@@ -362,6 +362,164 @@ class FolderListViewModelWindowCloseTest {
         }
     }
 
+    @Test
+    fun inSessionWindowStopPrunesOnlyThatWindowRow() = runTest {
+        // Issue #883: the in-session "Stop session" on a `[wN]` window row kills
+        // just that window (kill-window) and — when a sibling window survived —
+        // the per-session screen broadcasts a ClosedWindow over
+        // SessionLifecycleSignals, which the tree consumes via [onWindowClosed].
+        // The tree must drop ONLY that window's row by id; the sibling window +
+        // the parent session + an unrelated session stay. Pre-fix there was no
+        // ClosedWindow path at all (in-session Stop always killed the whole
+        // session). We drive [onWindowClosed] directly (the handler the
+        // collector invokes) so the assertion is deterministic and independent
+        // of cross-test Main-dispatcher ordering; a separate test proves the
+        // signal→handler wiring.
+        val gateway = SteppingGateway(
+            listOf(
+                FolderListResult.Sessions(
+                    rows = listOf(
+                        row("multi", windows = listOf(win(0, "@30"), win(1, "@31"))),
+                        row("solo", windows = listOf(win(0, "@39"))),
+                    ),
+                ),
+            ),
+        )
+        val vm = newViewModel(gateway, registryWith(FakeTmuxClient()), processStarted = true)
+        try {
+            bind(vm)
+            runCurrent()
+            assertEquals(
+                listOf("@30", "@31"),
+                windowIds(vm.state.value as FolderListUiState.Ready, "multi"),
+            )
+
+            // Real journey: the user navigated to the session screen → the tree
+            // screen's probe is paused (stopPolling), so the optimistic by-id
+            // drop must stand on its own. Window @30 was killed; the session
+            // survived → ClosedWindow(@30).
+            vm.stopPolling()
+            runCurrent()
+            vm.onWindowClosed(com.pocketshell.app.tmux.ClosedWindow(HOST.id, "@30"))
+            runCurrent()
+
+            val after = vm.state.value as FolderListUiState.Ready
+            assertEquals(
+                "only the killed window @30 is removed; the sibling window @31 survives",
+                listOf("@31"),
+                windowIds(after, "multi"),
+            )
+            assertEquals(
+                "the parent session and the unrelated session stay on the tree",
+                listOf("multi", "solo"),
+                after.flatSessions.map { it.sessionName },
+            )
+            assertEquals(
+                "the unrelated session's window is untouched",
+                listOf("@39"),
+                windowIds(after, "solo"),
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun closedWindowForOtherHostLeavesTreeUntouched() = runTest {
+        // Issue #883 class coverage: a ClosedWindow for a DIFFERENT host must
+        // not mutate this host's tree.
+        val gateway = SteppingGateway(
+            listOf(
+                FolderListResult.Sessions(
+                    rows = listOf(row("multi", windows = listOf(win(0, "@40"), win(1, "@41")))),
+                ),
+            ),
+        )
+        val vm = newViewModel(gateway, registryWith(FakeTmuxClient()), processStarted = true)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+
+            vm.onWindowClosed(com.pocketshell.app.tmux.ClosedWindow(HOST.id + 1, "@40"))
+            runCurrent()
+
+            assertEquals(
+                "a window close on another host must not touch this host's tree",
+                listOf("@40", "@41"),
+                windowIds(vm.state.value as FolderListUiState.Ready, "multi"),
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun closedWindowsSignalIsWiredToOnWindowClosed() = runTest {
+        // Issue #883: prove the per-session screen's ClosedWindow broadcast is
+        // actually subscribed to and routed into the tree prune. We construct
+        // the VM WITH the shared SessionLifecycleSignals (the Hilt singleton),
+        // emit a ClosedWindow, and confirm the window row is pruned — i.e. the
+        // init wired signals.closedWindows.collect -> onWindowClosed.
+        val signals = com.pocketshell.app.tmux.SessionLifecycleSignals()
+        val gateway = SteppingGateway(
+            listOf(
+                FolderListResult.Sessions(
+                    rows = listOf(row("multi", windows = listOf(win(0, "@50"), win(1, "@51")))),
+                ),
+            ),
+        )
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        val vm = FolderListViewModel(
+            gateway = gateway,
+            hostDao = FakeHostDao(HOST),
+            projectRootDao = FakeProjectRootDao(),
+            sshLeaseManager = SshLeaseManager(
+                connector = SshLeaseConnector {
+                    Result.failure(IllegalStateException("prewarm disabled for window-close test"))
+                },
+                scope = this,
+                idleTtlMillis = 0L,
+            ),
+            applicationContext = context,
+            forwardingController = ForwardingController(context),
+            sessionLifecycleSignals = signals,
+            attachLifecycle = false,
+        ).also {
+            it.ioDispatcher = dispatcher
+            it.setProcessStartedForTest(true)
+            viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
+        }
+        try {
+            bind(vm)
+            // Settle the cold-bind reconcile until Ready (bounded; heartbeat off).
+            repeat(50) {
+                if (vm.state.value is FolderListUiState.Ready) return@repeat
+                testScheduler.advanceTimeBy(50)
+                runCurrent()
+            }
+            check(vm.state.value is FolderListUiState.Ready) {
+                "tree never reached Ready; state=${vm.state.value}"
+            }
+            vm.stopPolling()
+            runCurrent()
+
+            // Emit on the SHARED signals bus — must reach onWindowClosed.
+            signals.emitWindowClosed(HOST.id, "@50")
+            repeat(10) { runCurrent() }
+
+            assertEquals(
+                "the ClosedWindow signal must be wired to prune the window row",
+                listOf("@51"),
+                windowIds(vm.state.value as FolderListUiState.Ready, "multi"),
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
     private fun windowIds(state: FolderListUiState.Ready, sessionName: String): List<String?> =
         state.flatSessions.first { it.sessionName == sessionName }.windows.map { it.windowId }
 

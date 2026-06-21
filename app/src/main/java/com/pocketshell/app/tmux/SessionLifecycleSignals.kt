@@ -27,6 +27,26 @@ data class KilledSession(
 )
 
 /**
+ * Issue #883: one tmux WINDOW was closed by an in-session "Stop session" on a
+ * `[wN]` window row, while sibling window(s) and the parent session stayed
+ * alive. The folder/session tree models each window as its own row, so a
+ * window kill that leaves the session running must drop ONLY that window row
+ * (via [com.pocketshell.app.projects.HostTreeModel.removeWindow]), not the
+ * whole session ([KilledSession]).
+ *
+ * @property hostId the host the window belonged to (the tree filters on it).
+ * @property windowId the stable tmux window id (`@N`) of the closed window —
+ *   the same id the tree's enumeration tags windows with and `removeWindow`
+ *   keys on. When the session's LAST window is closed the kill surfaces as a
+ *   [KilledSession] instead, so this only ever carries a surviving-session
+ *   window close.
+ */
+data class ClosedWindow(
+    val hostId: Long,
+    val windowId: String,
+)
+
+/**
  * Process-scoped fan-out of tmux-session lifecycle signals — issue #464.
  *
  * Today it carries exactly one event: a confirmed session kill. The kill
@@ -51,10 +71,34 @@ class SessionLifecycleSignals @Inject constructor() {
     /** Hot stream of confirmed session kills. No replay (see class doc). */
     val killedSessions: SharedFlow<KilledSession> = _killedSessions.asSharedFlow()
 
+    // Issue #883: confirmed single-window closes where the session survived.
+    private val _closedWindows = MutableSharedFlow<ClosedWindow>(
+        replay = 0,
+        extraBufferCapacity = 8,
+    )
+
+    /**
+     * Issue #883: hot stream of confirmed window closes (the session survived).
+     * Same no-replay semantics as [killedSessions] — the tree's re-probe is the
+     * authoritative source if a subscriber missed the event.
+     */
+    val closedWindows: SharedFlow<ClosedWindow> = _closedWindows.asSharedFlow()
+
     /** Broadcast a confirmed kill of [sessionName] on [hostId]. */
     fun emitKilled(hostId: Long, sessionName: String) {
         val trimmed = sessionName.trim()
         if (trimmed.isEmpty()) return
         _killedSessions.tryEmit(KilledSession(hostId = hostId, sessionName = trimmed))
+    }
+
+    /**
+     * Issue #883: broadcast a confirmed close of the window with tmux id
+     * [windowId] on [hostId], the parent session having survived. A blank
+     * [windowId] is ignored (the tree keys [removeWindow] on the stable id).
+     */
+    fun emitWindowClosed(hostId: Long, windowId: String) {
+        val trimmed = windowId.trim()
+        if (trimmed.isEmpty()) return
+        _closedWindows.tryEmit(ClosedWindow(hostId = hostId, windowId = trimmed))
     }
 }

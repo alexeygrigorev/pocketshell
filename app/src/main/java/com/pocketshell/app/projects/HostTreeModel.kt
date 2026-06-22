@@ -443,11 +443,23 @@ internal class HostTreeModel {
                 // overwritten by another agent kind or a CONFIRMED Shell — an
                 // incoming Probing must NOT clobber a known agent.
                 existing.agentKind = mergeAgentKind(existing.agentKind, entry.agentKind)
-                // Issue #858: the recorded profile is durable host-side, so a
-                // fresh non-null read is authoritative; a transient blank read
-                // (e.g. a degraded probe) keeps the held label rather than
-                // dropping the chip.
-                existing.recordedProfile = entry.recordedProfile ?: existing.recordedProfile
+                // Issue #858 / #889: reconcile the recorded profile against the
+                // host. A fresh NON-NULL read is always authoritative (a z.ai
+                // launch or a profile change). A BLANK read is authoritative
+                // ONLY when the incoming read is itself authoritative — i.e. it
+                // carries a real recorded agent kind or a confirmed shell (the
+                // host returned a live `@ps_agent_kind`, not a slow/incomplete
+                // probe). That blank means the host CLEARED `@ps_agent_profile`
+                // (a default relaunch in the same tmux session, #889): the stale
+                // z.ai chip MUST drop, not stay sticky. A blank read from a
+                // DEGRADED probe (incoming kind still Probing/Exited —
+                // `@ps_agent_kind` not read) keeps the held label so a transient
+                // blank doesn't flicker the chip off (the #858 stickiness intent).
+                existing.recordedProfile = when {
+                    entry.recordedProfile != null -> entry.recordedProfile
+                    entry.agentKind.isAuthoritativeRead -> null
+                    else -> existing.recordedProfile
+                }
                 existing.windows = mergeWindows(existing.windows, entry.windows.map { it.toState() })
                 // The probe confirmed this node — it is no longer optimistic.
                 existing.optimisticSince = null
@@ -846,6 +858,20 @@ internal class HostTreeModel {
         get() = this == SessionAgentKind.Claude ||
             this == SessionAgentKind.Codex ||
             this == SessionAgentKind.OpenCode
+
+    /**
+     * Issue #889: an AUTHORITATIVE host read of this session's classification —
+     * a detected agent runtime OR a confirmed [SessionAgentKind.Shell]. These
+     * are the kinds the gateway emits when it actually read back a host-side
+     * `@ps_agent_kind` (or affirmatively saw a shell pane), so a co-reported
+     * BLANK `@ps_agent_profile` is the host's "this session has no profile"
+     * verdict — a default relaunch CLEARED it — not a degraded/transient probe.
+     * [SessionAgentKind.Probing] / [SessionAgentKind.Exited] are NOT
+     * authoritative: a blank profile alongside them is an incomplete probe and
+     * must keep the held label (the #858 transient-blank protection).
+     */
+    private val SessionAgentKind.isAuthoritativeRead: Boolean
+        get() = isAgent || this == SessionAgentKind.Shell
 
     companion object {
         /**

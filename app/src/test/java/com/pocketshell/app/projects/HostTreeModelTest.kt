@@ -26,6 +26,7 @@ class HostTreeModelTest {
         agentKind: SessionAgentKind = SessionAgentKind.Shell,
         attached: Boolean = false,
         windows: List<FolderSessionWindowEntry> = emptyList(),
+        recordedProfile: String? = null,
     ): FolderSessionEntry =
         FolderSessionEntry(
             sessionName = name,
@@ -33,6 +34,7 @@ class HostTreeModelTest {
             attached = attached,
             agentKind = agentKind,
             windows = windows,
+            recordedProfile = recordedProfile,
         )
 
     private fun window(
@@ -256,6 +258,199 @@ class HostTreeModelTest {
             "a known agent WINDOW is not clobbered by an incoming Probing",
             SessionAgentKind.Claude,
             win.agentKind,
+        )
+    }
+
+    // --- Recorded profile reconcile (#889 reopen) ------------------------
+
+    /**
+     * #889 (reopen): the maintainer's `git-pocketshell` session was launched
+     * once under the z.ai profile (`@ps_agent_profile="Claude (Z.AI)"`) and then
+     * relaunched as a DEFAULT Claude. The host wrapper correctly clears the
+     * option (v0.4.14 / 2d5c07b6), so the gateway reads back a blank profile
+     * (`recordedProfile == null`) on an AUTHORITATIVE read (the session still
+     * carries a real `@ps_agent_kind=claude`). The tree MUST drop the chip.
+     *
+     * The pre-fix `existing.recordedProfile = entry.recordedProfile ?: existing`
+     * made the label sticky against ANY blank read — so a cleared profile was
+     * swallowed and the false "ZAI Claude" chip survived every reconcile on
+     * device, even though the host had already cleared it. This is the durable
+     * client-side root cause the wrapper-only fix could never reach.
+     */
+    @Test
+    fun reconcileClearsRecordedProfileWhenAuthoritativeReadHasNone() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        // Launch-1: z.ai Claude — the chip is recorded and shown.
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "git-pocketshell",
+                        agentKind = SessionAgentKind.Claude,
+                        recordedProfile = "Claude (Z.AI)",
+                    ),
+                ),
+            ),
+            now = 100L,
+        )
+        assertEquals(
+            "Claude (Z.AI)",
+            tree.sessionEntries().first { it.sessionName == "git-pocketshell" }.recordedProfile,
+        )
+        // Relaunch as a DEFAULT Claude: the host cleared @ps_agent_profile, so
+        // the authoritative read carries a real claude kind but NO profile.
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "git-pocketshell",
+                        agentKind = SessionAgentKind.Claude,
+                        recordedProfile = null,
+                    ),
+                ),
+            ),
+            now = 200L,
+        )
+        assertNull(
+            "a default relaunch (authoritative kind read, no profile) must DROP " +
+                "the stale z.ai chip — not keep it sticky (the #889 false-label bug)",
+            tree.sessionEntries().first { it.sessionName == "git-pocketshell" }.recordedProfile,
+        )
+    }
+
+    /**
+     * #889 class coverage: a non-null profile read is always authoritative —
+     * a z.ai launch (or a profile CHANGE) sets/updates the chip across kinds.
+     */
+    @Test
+    fun reconcileAppliesNonNullProfileAndProfileChange() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        // Default → relaunch z.ai: the chip appears.
+        tree.reconcile(
+            snapshot(listOf(session("s", agentKind = SessionAgentKind.Claude, recordedProfile = null))),
+            now = 100L,
+        )
+        assertNull(tree.sessionEntries().first { it.sessionName == "s" }.recordedProfile)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("s", agentKind = SessionAgentKind.Claude, recordedProfile = "Claude (Z.AI)"),
+                ),
+            ),
+            now = 200L,
+        )
+        assertEquals(
+            "Claude (Z.AI)",
+            tree.sessionEntries().first { it.sessionName == "s" }.recordedProfile,
+        )
+        // A profile CHANGE (z.ai → a Work profile) is taken verbatim.
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("s", agentKind = SessionAgentKind.Claude, recordedProfile = "Claude (Work)"),
+                ),
+            ),
+            now = 300L,
+        )
+        assertEquals(
+            "Claude (Work)",
+            tree.sessionEntries().first { it.sessionName == "s" }.recordedProfile,
+        )
+    }
+
+    /**
+     * #889 class coverage: a DEGRADED / non-authoritative probe (the kind comes
+     * back as [SessionAgentKind.Probing] — i.e. `@ps_agent_kind` was NOT read,
+     * a slow/incomplete re-probe) must NOT drop a held chip. This is the
+     * transient-blank protection the sticky merge was originally added for; the
+     * fix must preserve it. Only an authoritative read (a real agent kind) with
+     * no profile clears the chip.
+     */
+    @Test
+    fun reconcileKeepsProfileWhenDegradedProbeReportsProbing() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("s", agentKind = SessionAgentKind.Claude, recordedProfile = "Claude (Z.AI)"),
+                ),
+            ),
+            now = 100L,
+        )
+        // A degraded probe: Probing kind, blank profile. The chip must NOT drop
+        // (a slow re-probe is not an authoritative "cleared" signal).
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("s", agentKind = SessionAgentKind.Probing, recordedProfile = null),
+                ),
+            ),
+            now = 200L,
+        )
+        assertEquals(
+            "a transient Probing read must keep the held profile chip",
+            "Claude (Z.AI)",
+            tree.sessionEntries().first { it.sessionName == "s" }.recordedProfile,
+        )
+    }
+
+    /**
+     * #889 class coverage: a Codex z.ai-style profile is dropped the same way on
+     * a default relaunch — the clear is kind-agnostic, not Claude-special.
+     */
+    @Test
+    fun reconcileClearsRecordedProfileForCodexDefaultRelaunch() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("c", agentKind = SessionAgentKind.Codex, recordedProfile = "Codex (Work)"),
+                ),
+            ),
+            now = 100L,
+        )
+        tree.reconcile(
+            snapshot(
+                listOf(session("c", agentKind = SessionAgentKind.Codex, recordedProfile = null)),
+            ),
+            now = 200L,
+        )
+        assertNull(
+            "a default Codex relaunch must drop the stale profile chip",
+            tree.sessionEntries().first { it.sessionName == "c" }.recordedProfile,
+        )
+    }
+
+    /**
+     * #889 class coverage: a CONFIRMED Shell downgrade (the session is no longer
+     * an agent at all) is authoritative and must also drop the profile chip — a
+     * shell session can never carry an agent profile.
+     */
+    @Test
+    fun reconcileClearsRecordedProfileOnConfirmedShellDowngrade() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("s", agentKind = SessionAgentKind.Claude, recordedProfile = "Claude (Z.AI)"),
+                ),
+            ),
+            now = 100L,
+        )
+        tree.reconcile(
+            snapshot(
+                listOf(session("s", agentKind = SessionAgentKind.Shell, recordedProfile = null)),
+            ),
+            now = 200L,
+        )
+        assertNull(
+            "a confirmed Shell downgrade must drop the stale agent profile chip",
+            tree.sessionEntries().first { it.sessionName == "s" }.recordedProfile,
         )
     }
 

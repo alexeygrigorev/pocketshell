@@ -79,6 +79,7 @@ case "${1:-}" in
     agent_kind="${1:-}"
     shift || true
     agent_dir=""
+    agent_profile=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --dir)
@@ -91,6 +92,10 @@ case "${1:-}" in
         --config-dir)
           shift 2
           ;;
+        --profile)
+          agent_profile="${2:-}"
+          shift 2
+          ;;
         *)
           shift
           ;;
@@ -98,6 +103,24 @@ case "${1:-}" in
     done
     if [ -n "$agent_dir" ]; then
       cd "$agent_dir" 2>/dev/null || true
+    fi
+    # Issue #821 / #858 / #889: mirror the REAL wrapper's record_agent_kind
+    # (tools/pocketshell/src/pocketshell/agents.py) so an end-to-end Docker
+    # journey exercises the SAME tmux user-option write/clear the device hits,
+    # not a happy fake that never records. Inside tmux ($TMUX set, e.g. a
+    # send-keys-launched pane) the kind is ALWAYS written, and the profile is
+    # RECONCILED to this launch: a non-default --profile sets the label, a
+    # default / no-profile launch UNSETS the option (`set-option -uq`) so a
+    # stale z.ai @ps_agent_profile cannot survive a default relaunch in the same
+    # tmux session (the #889 reported false-label root cause). Best-effort: a
+    # tmux failure never blocks the agent launch.
+    if [ -n "${TMUX:-}" ] && [ -n "$agent_kind" ]; then
+      tmux set-option @ps_agent_kind "$agent_kind" 2>/dev/null || true
+      if [ -n "$agent_profile" ]; then
+        tmux set-option @ps_agent_profile "$agent_profile" 2>/dev/null || true
+      else
+        tmux set-option -uq @ps_agent_profile 2>/dev/null || true
+      fi
     fi
     case "$agent_kind" in
       codex|claude|opencode)

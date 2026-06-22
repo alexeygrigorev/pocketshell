@@ -607,6 +607,17 @@ JOURNEY_CLASSES=(
   # session (the reconnect/restart durability AC). It does NOT self-skip on CI.
   # Lives under com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.ManualKindWriterDockerTest"
+  # ADDED (#889 reopen, D31/D32 G10): the FALSE z.ai chip on a session
+  # relaunched as a DEFAULT Claude. End-to-end against the `agents` fixture
+  # (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222, no new Docker service/port): a
+  # z.ai-profile launch SETS `@ps_agent_profile`, a default relaunch in the
+  # SAME tmux session UNSETS it (the fixture `pocketshell agent` now mirrors the
+  # real wrapper's record_agent_kind), and the REAL SshFolderListGateway read-
+  # back + REAL HostTreeModel reconcile DROP the stale chip — covering BOTH the
+  # host clear (v0.4.14) AND the client-side sticky-merge root cause the prior
+  # wrapper-only fix could not reach. It does NOT self-skip on CI. Lives under
+  # com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.ProfileChipRelaunchDockerTest"
   # ADDED (#853, epic #848): the OUTDATED-host agent-launch friendly-hint guard
   # (#759). When the host `pocketshell` predates the `agent` subcommand (the
   # maintainer's v0.3.34 dogfood failure) an agent launch must surface the

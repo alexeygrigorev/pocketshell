@@ -210,6 +210,57 @@ Not allowed between review rounds:
 
 If the orchestrator accidentally edits scoped code during a review round, that edit must be called out explicitly in the next implementer brief. The implementer owns either adopting it, replacing it, or reverting it. The issue still needs another reviewer pass.
 
+## Definition of Done — "ready" means *verified gone*, not *change landed* (locked principle D33)
+
+The maintainer's standing directive (2026-06-22): **be certain.** When anyone says
+a thing is fixed/ready/done, it must be *really* done — the reported symptom is
+reproduced as a failing test, the fix turns it green, and the symptom is then
+confirmed gone. "The change is committed" and "a test is green somewhere" are NOT
+"done". This is the single bar that ends the close-it-then-it-comes-back cycle,
+and it binds all three actors. It does not replace D31/D32/G1–G10 — it is the
+one-line contract those gates implement.
+
+**The loop is reproduce → fix → verify → report, in that order:**
+
+1. **Implementer — reproduce FIRST, then fix.** Before writing the fix, land a
+   test that reproduces the maintainer's *exact reported scenario on the real
+   path* (the on-device/connected journey for on-device reports; the production
+   screen/sheet state, not a proxy or stand-in — F2/G10). Watch it **fail (red)**
+   and capture that. Where the bug only manifests against a non-happy state
+   (stale profile, old CLI, a real drop/timeout, keyboard up), **add the fixture
+   that creates that state** — a happy fixture that can't enter the failing state
+   proves nothing (the v0.4.10/#847 lesson). Then fix until the test is **green**,
+   re-run it, and only then report — with the red→green commands + artifacts in
+   the status comment. Do not write "done" while any touched module is red or the
+   reproduction is missing.
+
+2. **Reviewer — independently RUN it and confirm the symptom is gone.** The
+   reviewer does not approve on a code-read or on the implementer's word. The
+   reviewer, *this run*, (a) reproduces the symptom on base = sees the test
+   **fail red without the fix**, (b) applies the fix and sees it **pass green**,
+   (c) for any user-facing flow, reproduces the **actual journey** on
+   emulator+Docker and confirms from authoritative artifacts that the
+   user-visible symptom is *actually gone* — not that an assertion passed. The
+   review comment must state explicitly: "reproduced the symptom red on base,
+   confirmed gone green with the fix, here is the artifact." Default verdict is
+   `CHANGES REQUESTED` (D31); unproven ⇒ reject; uncertainty ⇒ reject. A fix the
+   reviewer could not personally drive to red→green on the real path is `BLOCKED`
+   (G4), never `APPROVED`.
+
+3. **Orchestrator — never tell the maintainer "ready" without the proof in
+   hand.** Before reporting a fix as done/ready/shipped to the maintainer, the
+   orchestrator personally confirms the red→green evidence and the
+   symptom-gone artifact exist in the issue and the verification gate passed. If
+   that proof is not in hand, the orchestrator says so plainly — "fixed but not
+   yet verified on the real path", or "still reproducing" — and does NOT call it
+   ready. Honest uncertainty beats a false "done". Reporting a not-verified fix
+   as done is itself a process violation.
+
+If the reproduction cannot be run on the real path (environment can't enter the
+state), inject the failing state **synthetically** and hard-fail otherwise (the
+#780 model) — never self-skip the load-bearing assertion, and never downgrade to
+a proxy and call it done. This is locked decision **D33** in `docs/decisions.md`.
+
 ## Local Confidence Before CI
 
 GitHub Actions is the release backstop, not the first test runner. The

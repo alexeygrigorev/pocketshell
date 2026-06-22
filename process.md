@@ -689,7 +689,23 @@ verification checklist passes, from `~/git/pocketshell` on `main`:
    git -C .worktrees/issue-<N> diff --no-color > /tmp/issue-<N>.patch
    ```
 
-   If the implementer committed inside the worktree, diff against `main`:
+   **`git diff` only captures TRACKED files — it silently omits untracked
+   NEW files (commonly the new regression test).** Always list and copy the
+   untracked files too, or you will merge a fix WITHOUT its test (the exact
+   "shipped but not really fixed" failure D33 exists to prevent):
+
+   ```bash
+   WT=.worktrees/issue-<N>
+   git -C "$WT" ls-files --others --exclude-standard   # the new files
+   # copy each into main at the same relative path, e.g.:
+   #   cp "$WT/<path>" "<path>"
+   ```
+
+   Verify the applied file set in `main` matches the implementer's reported
+   file list (modified + NEW) before running the gate.
+
+   If the implementer committed inside the worktree, diff against `main`
+   (a commit-based diff DOES include new files, so this caveat is moot):
 
    ```bash
    git -C .worktrees/issue-<N> diff --no-color main..HEAD \

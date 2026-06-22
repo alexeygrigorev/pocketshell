@@ -437,6 +437,27 @@ JOURNEY_CLASSES=(
   # that `tests.yml` already brings up (no toxiproxy, no workflow change) and
   # does NOT self-skip on CI.
   "$FQCN_PREFIX.SendNoReconnectE2eTest"
+  # ADDED (#875 Angle C, cross-links #874/#879): the STABLE-WIFI no-spurious-reconnect
+  # journey. The maintainer re-reported (v0.4.14) random ~1s reconnects on stable wifi
+  # while idle / recording a voice note. Confirmed root cause Angle C: the #548
+  # validated-handoff predicate keyed on Network.networkHandle equality ALONE, but a
+  # physically stable wifi mints a NEW handle on a supplicant reassoc (band-steer
+  # 2.4↔5GHz, mesh/extender roam) → false handoff → scheduleNetworkReconnect tore the
+  # warm `-CC` lease and re-dialed → the visible ~1s flap (and, coupled with the reseed,
+  # a transiently black Terminal). Fix: the handoff identity now treats a same-transport
+  # pure-{WIFI} reassoc as the SAME network (suppressed at the detector), while a real
+  # transport change (WIFI→CELLULAR / VPN) still reconnects. This journey opens a real
+  # `tmux -CC` session and drives a same-SSID reassoc DETERMINISTICALLY by pushing a
+  # synthetic pure-WIFI snapshot (new handle, same {WIFI} transports) through the
+  # PRODUCTION TerminalNetworkObserver detector + emit pipeline (the AVD can't mint a
+  # new handle on demand), then HARD-asserts the detector SUPPRESSED the emit, ZERO
+  # reconnect diagnostics fired, NO Connecting/Reconnecting/Disconnected/Tap-Reconnect
+  # band, and the viewport stayed painted — plus a positive control that a real
+  # WIFI→CELLULAR handoff still emits (class coverage, suppression is not blanket). RED
+  # on base (the reassoc emits a handoff → the live session reconnects); GREEN after the
+  # Angle-C fix. Uses ONLY the deterministic agents:2222 fixture tests.yml already brings
+  # up (no toxiproxy, no workflow change) and does NOT self-skip on CI.
+  "$FQCN_PREFIX.StableWifiNoSpuriousReconnectE2eTest"
   # ADDED (#796 H3): the composer-open -> terminal-relayout collision regression
   # catcher. The maintainer's exact v0.4.6 Codex freeze: a bursting Codex pane +
   # OPENING the Prompt Composer (showMicSheet toggles in the body root group)

@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import java.util.concurrent.LinkedBlockingDeque
 import org.junit.After
@@ -337,6 +338,97 @@ class TmuxClientTest {
             client.close()
         }
     }
+
+    @Test
+    fun `cancelled liveness probe does not desync the next command response (issue 875 Angle A)`() =
+        runBlocking {
+            // Issue #875 (Angle A) — a CANCELLED probe must not desync the tmux
+            // control-mode response-correlation FIFO.
+            //
+            // Production shape: LivenessProbe wraps each probeLiveness() (→
+            // `refresh-client` via sendBestEffortCommand) in an OUTER
+            // withTimeoutOrNull(perProbeTimeoutMs). During a busy moment the outer
+            // timeout can fire and CANCEL the probe coroutine while it is parked in
+            // deferred.await() inside sendCommandInternal, AFTER `refresh-client\n`
+            // already reached the wire — so tmux still emits the orphaned %begin/%end.
+            //
+            // Before the fix the generic cancel-catch removed the pending command
+            // WITHOUT incrementing staleResponseBlocksToIgnore, so the reader bound
+            // that stale block to the NEXT command (off-by-one FIFO desync); the next
+            // command never matched its own block, rode its full timeout, and tripped
+            // a TransportDropped → the spurious ~1s reconnect.
+            //
+            // RED on base: the follow-up `list-sessions` receives the stale probe
+            // block number (5) instead of its own (6). GREEN with fix: the cancel-catch
+            // increments staleResponseBlocksToIgnore, the reader discards the orphan,
+            // and `list-sessions` gets its own block (6). This covers the whole CLASS
+            // (any sendCommand cancelled mid-flight after the write), not only the probe.
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope)
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                // Fire the probe in the production shape: an OUTER withTimeoutOrNull
+                // around probeLiveness(). Short budget + no response fed → the outer
+                // timeout cancels the probe while it awaits the never-fed block.
+                val probeResult = scope.async {
+                    withTimeoutOrNull(300L) { client.probeLiveness() }
+                }
+                // Wait until refresh-client actually reached the wire — the precondition
+                // for the desync (tmux WILL emit a block for a written-then-abandoned cmd).
+                withTimeout(2_000) {
+                    while (!shell.stdinAsString().contains("refresh-client")) { yield(); delay(5) }
+                }
+                assertNull(
+                    "probe must time out (cancelled mid-await)",
+                    withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { probeResult.await() },
+                )
+                shell.resetStdin()
+
+                // A real follow-up command. Queue it FIRST — it writes its line and
+                // parks awaiting its own %begin. The cancelled probe's orphan block
+                // then arrives WHILE this command is the head of pendingQueue, so a
+                // mis-binding desync (base) actually mis-correlates THIS command.
+                val followUp = scope.async { client.sendCommand("list-sessions") }
+                withTimeout(2_000) {
+                    while (!shell.stdinAsString().contains("list-sessions")) { yield(); delay(5) }
+                }
+
+                // tmux delivers the ORPHANED block (5) for the cancelled refresh-client
+                // while `list-sessions` is queued awaiting its block. On BASE the reader
+                // polls the pending `list-sessions` and binds block 5 to it (off-by-one).
+                // With the fix, staleResponseBlocksToIgnore discards block 5.
+                shell.feed(
+                    "%begin 1700000000 5 0\n" +
+                        "%end 1700000000 5 0\n",
+                )
+                repeat(10) { yield(); delay(10) }
+
+                // `list-sessions`'s OWN block (6).
+                shell.feed(
+                    "%begin 1700000000 6 0\n" +
+                        "session 0: 1 windows\n" +
+                        "%end 1700000000 6 0\n",
+                )
+                val result = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { followUp.await() }
+
+                assertEquals(
+                    "next command must get its OWN response block (6), not the stale " +
+                        "cancelled-probe block (5) — correlation desync = issue 875",
+                    6L,
+                    result.number,
+                )
+                assertFalse(result.isError)
+                assertEquals(listOf("session 0: 1 windows"), result.output)
+            } finally {
+                client.close()
+            }
+        }
 
     @Test
     fun `sendCommand surfaces error response with isError set`() = runBlocking {

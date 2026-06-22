@@ -81,6 +81,20 @@ class TerminalNetworkObserver @Inject constructor(
     fun refresh(reason: String = "refresh"): TerminalNetworkChange? =
         updateFromSnapshot(currentSnapshot(), reason)
 
+    /**
+     * Issue #875 (Angle C) test seam: push a SYNTHETIC default-network snapshot
+     * through the REAL detector + REAL emit pipeline (the same code production
+     * runs on a `ConnectivityManager` callback), so a connected journey can drive
+     * a same-SSID wifi reassociation deterministically (the AVD can't mint a new
+     * `networkHandle` on demand). Returns the emitted change, or null when the
+     * detector suppressed it (the fixed pure-WIFI reassoc case). Not for production.
+     */
+    @androidx.annotation.VisibleForTesting
+    fun emitSyntheticSnapshotForTest(
+        snapshot: TerminalNetworkSnapshot,
+        reason: String,
+    ): TerminalNetworkChange? = updateFromSnapshot(snapshot, reason)
+
     private fun updateFromSnapshot(
         snapshot: TerminalNetworkSnapshot,
         reason: String,
@@ -185,9 +199,37 @@ internal fun TerminalNetworkChange.networkDiagnosticFields(): Array<Pair<String,
         "deferredFromBackground" to deferredFromBackground,
     )
 
+/**
+ * Issue #875 (Angle C — same-SSID wifi reassoc → false validated-handoff).
+ *
+ * The `#548` proactive-reconnect feature treats any change in the default
+ * network's identity as a handoff worth a fresh-lease reconnect. Identity used
+ * to be `networkHandle` equality ALONE — but a *physically stable* wifi still
+ * mints a NEW `networkHandle` when the supplicant re-associates (a 2.4↔5 GHz
+ * band-steer, a mesh/extender AP roam, a brief RF re-association). SSH almost
+ * always survives a same-AP/same-IP reassoc, so the resulting teardown+redial is
+ * a self-inflicted ~1s flap on stable wifi — exactly the maintainer's report.
+ *
+ * A genuine handoff that #548 must still catch crosses transports (WIFI→CELLULAR,
+ * a VPN coming up/down, ETHERNET↔WIFI). So we now treat two validated snapshots
+ * as the SAME network identity when EITHER the handle matches OR the transport
+ * sets are identical AND that set is a *pure single-WIFI* network (no cellular /
+ * VPN / ethernet on either side). That suppresses the band-steer/mesh reassoc
+ * (the spurious case) while a real transport change still flips identity and
+ * reconnects. We deliberately scope the relaxation to pure `{WIFI}`: a VPN or a
+ * tethered/multi-transport network re-establishing can legitimately need the
+ * fresh lease, so those keep the strict handle check.
+ */
 internal fun TerminalNetworkSnapshot.Validated.hasSameNetworkIdentityAs(
     other: TerminalNetworkSnapshot.Validated,
-): Boolean = networkHandle == other.networkHandle
+): Boolean =
+    networkHandle == other.networkHandle ||
+        (isPureWifi() && other.isPureWifi() && transports == other.transports)
+
+private val PURE_WIFI_TRANSPORTS: Set<String> = setOf("WIFI")
+
+private fun TerminalNetworkSnapshot.Validated.isPureWifi(): Boolean =
+    transports == PURE_WIFI_TRANSPORTS
 
 internal fun TerminalNetworkSnapshot.hasSameNetworkIdentityAs(
     other: TerminalNetworkSnapshot,

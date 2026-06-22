@@ -160,4 +160,74 @@ class TerminalNetworkChangeDetectorTest {
         assertEquals(TerminalNetworkSnapshot.Validated("cell"), handoff.current)
         assertEquals(1L, handoff.sequence)
     }
+
+    // --- Issue #875 (Angle C) — a same-SSID wifi supplicant reassociation mints
+    // a NEW networkHandle on a PHYSICALLY STABLE wifi (band-steer 2.4↔5 GHz, mesh
+    // roam, RF re-association). Keyed on handle equality alone, the detector used
+    // to treat that as a validated handoff → a self-inflicted ~1s fresh-lease
+    // reconnect on stable wifi. SSH almost always survives a same-AP reassoc.
+
+    @Test
+    fun `same-transport wifi reassociation to a new handle does not emit a reconnect (issue 875)`() {
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi-handle-A", setOf("WIFI")),
+        )
+
+        // Band-steer / mesh roam: SAME pure-WIFI transport, NEW handle.
+        // RED on base (handle inequality → emits a handoff); GREEN with the
+        // transport-aware identity (pure-WIFI same-transport reassoc = same network).
+        assertNull(
+            "a pure-WIFI same-transport reassoc to a new handle must NOT emit (issue 875)",
+            detector.update(
+                snapshot = TerminalNetworkSnapshot.Validated("wifi-handle-B", setOf("WIFI")),
+                reason = "default-network-capabilities",
+            ),
+        )
+
+        // The new handle is still LEARNED, so a subsequent REAL transport change
+        // (WIFI→CELLULAR) is still caught as a handoff against the latest wifi handle.
+        val realHandoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("cell-handle", setOf("CELLULAR")),
+            reason = "real-handoff",
+        )
+        assertTrue("a real WIFI→CELLULAR handoff must still emit", realHandoff != null)
+        assertEquals("wifi-handle-B", realHandoff!!.previousValidated!!.networkHandle)
+        assertEquals("cell-handle", realHandoff.current.networkHandle)
+    }
+
+    @Test
+    fun `wifi to cellular handoff still emits even though the handle differs (issue 875 regression guard)`() {
+        // The #548 feature must survive the Angle-C fix: a genuine transport change
+        // is a real handoff and must still reconnect.
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi-handle", setOf("WIFI")),
+        )
+
+        val handoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("cell-handle", setOf("CELLULAR")),
+            reason = "real-handoff",
+        )
+
+        assertTrue("WIFI→CELLULAR must still be a handoff", handoff != null)
+        assertEquals("wifi-handle", handoff!!.previousValidated!!.networkHandle)
+        assertEquals("cell-handle", handoff.current.networkHandle)
+    }
+
+    @Test
+    fun `wifi reassoc that adds a VPN transport still emits a reconnect (issue 875 scope guard)`() {
+        // The relaxation is scoped to PURE {WIFI} on both sides. A VPN coming up
+        // (or any non-WIFI transport joining) is NOT a benign reassoc — it can
+        // legitimately need the fresh lease, so it keeps the strict handle check.
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi-handle-A", setOf("WIFI")),
+        )
+
+        val handoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("wifi-vpn-handle", setOf("WIFI", "VPN")),
+            reason = "vpn-up",
+        )
+
+        assertTrue("a WIFI→WIFI+VPN change must still emit (not a pure-WIFI reassoc)", handoff != null)
+        assertEquals("wifi-vpn-handle", handoff!!.current.networkHandle)
+    }
 }

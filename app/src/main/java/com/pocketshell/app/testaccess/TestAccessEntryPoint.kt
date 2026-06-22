@@ -1,5 +1,6 @@
 package com.pocketshell.app.testaccess
 
+import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.tmux.SessionLifecycleSignals
@@ -72,4 +73,14 @@ internal interface TestAccessEntryPoint {
      * session was dropped as a restore target.
      */
     fun lastSessionStore(): LastSessionStore
+
+    /**
+     * Issue #875 (Angle C): the singleton [TerminalNetworkObserver] — the SAME
+     * instance `MainActivity` wired its `changes` collector to — so the connected
+     * journey ([com.pocketshell.app.proof.StableWifiNoSpuriousReconnectE2eTest])
+     * can push a synthetic same-SSID wifi reassociation snapshot through the REAL
+     * detector + emit pipeline and assert the live session does NOT spuriously
+     * reconnect (the AVD cannot mint a new `networkHandle` on demand).
+     */
+    fun terminalNetworkObserver(): TerminalNetworkObserver
 }

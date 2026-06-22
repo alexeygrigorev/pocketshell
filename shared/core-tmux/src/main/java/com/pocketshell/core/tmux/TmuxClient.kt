@@ -1165,8 +1165,26 @@ internal class RealTmuxClient(
                     deferred.await()
                 }
             } catch (t: Throwable) {
+                // Issue #875 (Angle A — liveness-probe FIFO desync): this catch
+                // fires when the awaiting coroutine is CANCELLED (the common case:
+                // an OUTER `withTimeoutOrNull` around `probeLiveness`/`sendBestEffort`
+                // fires while we are parked in `deferred.await()`), as well as on a
+                // genuine write error. If the command line was already WRITTEN to the
+                // wire (`writeCompleted`) but we abandon it before its `%begin` arrived
+                // (`commandNumber < 0L`), tmux WILL still emit a `%begin/%end` block for
+                // it. Without accounting for that orphaned block the reader binds it to
+                // the NEXT command (`pendingQueue.poll()` at the `%begin` branch),
+                // desyncing the response-correlation FIFO by one — and the later
+                // mis-correlated command rides its full timeout → `TransportDropped` →
+                // a spurious ~1s reconnect. Mirror the fail-open-drain accounting
+                // (`staleResponseBlocksToIgnore += 1`) so a cancelled-after-write
+                // command leaves the FIFO consistent.
                 synchronized(responseCorrelationLock) {
-                    pendingQueue.remove(pendingCmd)
+                    val stillWaitingForBegin = pendingCmd.commandNumber < 0L
+                    val removed = pendingQueue.remove(pendingCmd)
+                    if (writeCompleted && removed && stillWaitingForBegin) {
+                        staleResponseBlocksToIgnore += 1
+                    }
                 }
                 writeJob.cancel()
                 if (!writeCompleted) {

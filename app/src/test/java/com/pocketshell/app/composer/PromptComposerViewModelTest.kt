@@ -4376,46 +4376,26 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
     }
 
-    // -- Issue #870: long live transcript keeps the LATEST words visible ---
+    // -- Issue #870 (reopen): the raw growing partial is preserved for the
+    //    width-aware two-line display ----------------------------------------
+    //
+    // The width-INDEPENDENT VM-side char budget (liveTranscriptTail /
+    // liveTranscriptDisplay) was removed (D22 hard-cut) because on a real device
+    // the 90-char tail did not fit two lines at the panel width and the trailing
+    // ellipsis re-clipped the NEWEST words — the exact reopen symptom. The visible
+    // tail is now resolved width-aware at render time by the dedicated two-line
+    // LiveTranscriptTwoLine composable; its load-bearing proof is the connected
+    // test PromptComposerLiveTranscriptTwoLineTest (it needs a real TextMeasurer /
+    // panel width, which a JVM unit test cannot provide). At the VM level we only
+    // assert the FULL growing partial is preserved (head NOT dropped here), so the
+    // render-time tail has the whole text to anchor against.
 
     @Test
-    fun liveTranscriptTailKeepsLatestWordsWhenTooLong() {
-        // #870: as the partial transcript grows past the visible budget, the
-        // displayed text must surface the TAIL (newest words) with a leading
-        // ellipsis, not the head clipped off the end.
-        val longTranscript =
-            "please open the deployment pipeline and check the logs for the " +
-                "failing build then restart the worker and confirm the latest " +
-                "commit is deployed to production right now"
-        val tail = liveTranscriptTail(longTranscript, maxChars = 60)
-
-        // The newest words are present...
-        assertTrue(
-            "tail must contain the latest words, was: $tail",
-            tail.endsWith("deployed to production right now"),
-        )
-        // ...the oldest words are dropped...
-        assertFalse(
-            "tail must NOT show the head 'please open'",
-            tail.contains("please open the deployment"),
-        )
-        // ...and the truncation is marked with a LEADING ellipsis.
-        assertTrue("tail must start with a leading ellipsis", tail.startsWith("…"))
-        assertTrue("tail must fit the budget", tail.length <= 61)
-    }
-
-    @Test
-    fun liveTranscriptTailLeavesShortTextUntouched() {
-        // Short text fits — no ellipsis, no truncation.
-        val short = "git status"
-        assertEquals(short, liveTranscriptTail(short, maxChars = 60))
-    }
-
-    @Test
-    fun androidSpeechLivePartialSurfacesTailNotHead() = runTest {
-        // Drive the real recognizer state: a long partial must land a TAIL
-        // (latest words) in [UiState.liveTranscriptDisplay] so the on-screen
-        // text shows what is being recognized RIGHT NOW, not the head.
+    fun androidSpeechLivePartialKeepsFullGrowingTextForWidthAwareDisplay() = runTest {
+        // Drive the real recognizer state: a long partial must land in
+        // [UiState.liveTranscript] UNTRUNCATED (no VM char budget) so the
+        // render-time two-line area can keep the newest words visible at the
+        // actual panel width.
         val speech = FakeSpeechRecognitionProvider()
         val voice = FakeVoiceSettings(provider = VoiceTranscriptionProvider.AndroidSpeech)
         val vm = newVm(
@@ -4433,22 +4413,18 @@ class PromptComposerViewModelTest {
         speech.listener!!.onPartial(longPartial)
         runCurrent()
 
-        val display = vm.uiState.value.liveTranscriptDisplay
-        assertNotNull(display)
+        // The full growing text is preserved verbatim — newest words at the tail,
+        // head NOT clipped at the VM (trimming is render-time + width-aware).
+        assertEquals(longPartial, vm.uiState.value.liveTranscript)
         assertTrue(
-            "display must surface the latest words, was: $display",
-            display!!.endsWith("what is still left to do"),
+            "raw live transcript must contain the latest words",
+            vm.uiState.value.liveTranscript!!.endsWith("what is still left to do"),
         )
-        assertFalse(
-            "display must not show the head",
-            display.startsWith("summarize the conversation"),
-        )
-        assertTrue("display must mark truncation with a leading ellipsis", display.startsWith("…"))
 
         // Settle.
         speech.listener!!.onFinal(longPartial)
         advanceUntilIdle()
-        assertNull(vm.uiState.value.liveTranscriptDisplay)
+        assertNull(vm.uiState.value.liveTranscript)
     }
 
     // -- Issue #508/#580: two explicit stop buttons (Insert / Send) -------

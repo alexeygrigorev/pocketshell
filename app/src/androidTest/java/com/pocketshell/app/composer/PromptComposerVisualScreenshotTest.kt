@@ -120,6 +120,34 @@ class PromptComposerVisualScreenshotTest {
     }
 
     @Test
+    fun capturesRecordingWithLongLiveTranscriptTwoLine() {
+        // Issue #870 (reopen): the dedicated two-line live-transcript area at the
+        // DEFAULT font scale (the realistic device condition). The newest words
+        // ("deployed to production right now") must occupy the visible lines; the
+        // dropped head is marked with a leading ellipsis. Visual companion to the
+        // load-bearing PromptComposerLiveTranscriptTwoLineTest.
+        var state by mutableStateOf(
+            PromptComposerViewModel.UiState(
+                draft = "",
+                recording = PromptComposerViewModel.RecordingState.Recording,
+                amplitude = 0.8f,
+                hasDetectedSpeech = true,
+                recordingElapsedMs = 17_000L,
+                liveTranscript = "open the deployment pipeline and check the logs " +
+                    "for the failing build then restart the worker and confirm the " +
+                    "latest commit is deployed to production right now",
+            ),
+        )
+        renderComposer { state }
+        compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_LIVE_TRANSCRIPT_TAG).assertIsDisplayed()
+        // Nudge a recompose so the capture lands on a fully-drawn frame.
+        compose.runOnIdle { state = state.copy(amplitude = 0.6f) }
+        compose.waitForIdle()
+        WalkthroughScreenshotArtifacts.capture("issue-870-recording-two-line-default-scale")
+    }
+
+    @Test
     fun capturesAttachmentChips() {
         // Issue #544: the composer with staged attachments rendered as compact
         // removable chips at the bottom — the draft text stays clean (no

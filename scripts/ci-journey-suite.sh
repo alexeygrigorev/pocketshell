@@ -238,6 +238,15 @@ JOURNEY_CLASSES=(
   # from 00:00 and the live transcript shows its tail. Pure Compose, no fixture.
   "com.pocketshell.app.composer.PromptComposerRecordingTimerAndTailTest"
 
+  # Issue #870 (reopen): the live Android-recognizer transcript was STILL cut on
+  # device — the width-independent 90-char tail did not fit two lines at the real
+  # panel width, so the trailing ellipsis re-clipped the NEWEST words. This renders
+  # the PRODUCTION RecordingSurface in a NARROW panel (the on-device condition the
+  # wide AVD masked), feeds a long growing partial, and HARD-asserts the visible
+  # live transcript ends with the newest words AND fits the two-line area at the
+  # real width (measured) — i.e. not clipped. Pure Compose, no fixture.
+  "com.pocketshell.app.composer.PromptComposerLiveTranscriptTwoLineTest"
+
   # Issue #745: composer Send feedback on a DEGRADED connection. The maintainer
   # dogfooded a blind send: tapping Send cleared the draft and showed nothing —
   # no "Sending…" indicator, no connection-lost banner, and the "Not sent"

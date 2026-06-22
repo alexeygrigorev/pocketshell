@@ -15,7 +15,6 @@ import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -152,8 +151,11 @@ class PromptComposerRecordingTimerAndTailTest {
             }.isSuccess
         }
 
-        // #870 — feed a long live partial through the real recognizer listener so
-        // the production applyLiveSpeechTranscript computes liveTranscriptDisplay.
+        // #870 — feed a long live partial through the real recognizer listener.
+        // The production applyLiveSpeechTranscript stores the raw growing partial;
+        // the dedicated two-line LiveTranscriptTwoLine area resolves a width-aware
+        // visible tail at render time (the load-bearing reproduce-first proof of
+        // the tail staying visible lives in PromptComposerLiveTranscriptTwoLineTest).
         val longPartial =
             "open the deployment pipeline and check the logs for the failing " +
                 "build then restart the worker and confirm the latest commit is " +
@@ -161,28 +163,19 @@ class PromptComposerRecordingTimerAndTailTest {
         compose.runOnIdle { speech.listener!!.onPartial(longPartial) }
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 5_000) {
-            !vm.uiState.value.liveTranscriptDisplay.isNullOrBlank()
+            !vm.uiState.value.liveTranscript.isNullOrBlank()
         }
 
-        val rendered = vm.uiState.value.liveTranscriptDisplay!!
-        // The rendered display surfaces the TAIL (latest words), not the head.
+        // The raw growing partial is preserved verbatim (head NOT clipped at the
+        // VM — trimming is render-time + width-aware).
         assertTrue(
-            "live display must keep the latest words, was: $rendered",
-            rendered.endsWith("deployed to production right now"),
+            "live transcript must keep the latest words",
+            vm.uiState.value.liveTranscript!!.endsWith("deployed to production right now"),
         )
-        assertFalse(
-            "live display must not show the dropped head",
-            rendered.contains("open the deployment pipeline"),
-        )
-        assertTrue("live display must mark truncation with a leading ellipsis", rendered.startsWith("…"))
 
-        // #870 containment (#657 / F1): the live-transcript text must be FULLY
-        // within the window root — so "the latest words are actually visible",
-        // not merely present in the tree (a tail that overflowed the 2-line
-        // panel and got re-clipped would fail this, where assertIsDisplayed
-        // would not).
+        // #870 containment (#657 / F1): the live-transcript area is FULLY within
+        // the window root.
         compose.onNodeWithTag(COMPOSER_LIVE_TRANSCRIPT_TAG).assertIsDisplayed()
         compose.assertNodeFullyWithinRoot(COMPOSER_LIVE_TRANSCRIPT_TAG)
-        compose.onNodeWithTag(COMPOSER_LIVE_TRANSCRIPT_TAG).assertTextEquals(rendered)
     }
 }

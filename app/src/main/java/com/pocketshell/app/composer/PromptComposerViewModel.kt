@@ -1213,7 +1213,6 @@ public class PromptComposerViewModel @Inject constructor(
                 silenceThresholdSeconds = 0f,
                 recordingElapsedMs = 0L,
                 liveTranscript = null,
-                liveTranscriptDisplay = null,
                 error = null,
             )
         }
@@ -1804,11 +1803,12 @@ public class PromptComposerViewModel @Inject constructor(
                 draft = newDraft,
                 amplitude = 0.35f,
                 hasDetectedSpeech = true,
+                // Issue #870 (reopen): the raw growing partial. The sheet's
+                // dedicated two-line LiveTranscriptTwoLine area resolves the
+                // visible tail width-aware at render time, so the newest words
+                // always stay visible — no VM-side char budget (the superseded
+                // width-independent approach re-clipped the tail on device).
                 liveTranscript = text,
-                // Issue #870: end-anchor the on-screen partial so a long
-                // dictation keeps its LATEST words visible (the sheet renders
-                // liveTranscriptDisplay, not the raw liveTranscript).
-                liveTranscriptDisplay = liveTranscriptTail(text),
                 error = null,
             )
         }
@@ -1837,7 +1837,6 @@ public class PromptComposerViewModel @Inject constructor(
                 hasDetectedSpeech = false,
                 recordingLocked = false,
                 liveTranscript = null,
-                liveTranscriptDisplay = null,
                 error = null,
             )
         }
@@ -1870,7 +1869,6 @@ public class PromptComposerViewModel @Inject constructor(
                 hasDetectedSpeech = false,
                 recordingLocked = false,
                 liveTranscript = null,
-                liveTranscriptDisplay = null,
                 error = androidSpeechFailureMessage(message),
             )
         }
@@ -1896,7 +1894,6 @@ public class PromptComposerViewModel @Inject constructor(
                 hasDetectedSpeech = false,
                 recordingLocked = false,
                 liveTranscript = null,
-                liveTranscriptDisplay = null,
                 draft = restoredDraft,
                 error = null,
             )
@@ -2508,19 +2505,17 @@ public class PromptComposerViewModel @Inject constructor(
          * [RecordingState.Recording]. Render with [formatElapsed].
          */
         val recordingElapsedMs: Long = 0L,
-        val liveTranscript: String? = null,
         /**
-         * Issue #870: the END-anchored slice of [liveTranscript] for the live
-         * dictation display. As the partial transcript grows past the visible
-         * width/height the on-screen text must keep the LATEST recognized words
-         * visible (the maintainer's report: it was clipping the END so the
-         * newest words scrolled out of view). Computed via [liveTranscriptTail]
-         * so a long partial surfaces its TAIL with a leading ellipsis
-         * (`…latest words`) rather than the head with a trailing one. Null when
-         * there is no live transcript. The sheet renders THIS, not the raw
-         * [liveTranscript].
+         * Issue #870 (reopen): the live, growing partial transcript for the
+         * Android recognizer. The sheet renders it in a DEDICATED TWO-LINE area
+         * ([com.pocketshell.app.composer.LiveTranscriptTwoLine]) that resolves the
+         * visible tail width-aware at render time, so the newest recognized words
+         * are always visible (the maintainer's design direction). The superseded
+         * width-independent VM-side char budget (`liveTranscriptDisplay` /
+         * `liveTranscriptTail`) was removed (D22 hard-cut) because it could not
+         * know the panel width and so re-clipped the tail on device.
          */
-        val liveTranscriptDisplay: String? = null,
+        val liveTranscript: String? = null,
         /**
          * Issue #688: ids of pending-transcription rows that currently have
          * a retry round-trip in flight. The composer banner renders a
@@ -2794,16 +2789,6 @@ public class PromptComposerViewModel @Inject constructor(
         public const val SAMPLE_INTERVAL_MS: Long = 50L
 
         /**
-         * Issue #870: character budget for the END-anchored live dictation
-         * display ([UiState.liveTranscriptDisplay] via [liveTranscriptTail]).
-         * Sized for the two-line `bodyDense` recording panel; a partial longer
-         * than this keeps its TAIL (latest words) with a leading ellipsis so the
-         * newest recognized words stay visible instead of being clipped off the
-         * end.
-         */
-        public const val LIVE_TRANSCRIPT_MAX_CHARS: Int = 90
-
-        /**
          * Issue #570: attachment staging must be bounded. A hung content
          * provider, stalled SSH upload, or dead remote must return the
          * composer to editable Idle state instead of leaving the upload
@@ -2931,42 +2916,6 @@ internal fun formatElapsed(elapsedMs: Long): String {
     val minutes = totalSeconds / 60L
     val seconds = totalSeconds % 60L
     return "%02d:%02d".format(minutes, seconds)
-}
-
-/**
- * Issue #870: end-anchor a long live partial transcript so the LATEST
- * recognized words stay visible as the text grows.
- *
- * The Android SpeechRecognizer (and Whisper) live-results display had a
- * trailing `TextOverflow.Ellipsis`, so once the partial outgrew the small
- * recording panel it clipped the END — the newest words scrolled out of
- * view, the opposite of what the user wants while watching dictation land.
- *
- * This keeps the TAIL (the most recent words) and marks the dropped head
- * with a LEADING ellipsis (`…latest words`). Truncation snaps to a word
- * boundary where one exists within the budget so we never split a word.
- * Short text that already fits is returned untouched (no ellipsis).
- *
- * Width-independent on purpose: [maxChars] is a generous character budget
- * matched to the two-line panel, computed once at file scope so the unit
- * tests can pin the tail behaviour without composing the sheet.
- */
-internal fun liveTranscriptTail(
-    text: String,
-    maxChars: Int = PromptComposerViewModel.LIVE_TRANSCRIPT_MAX_CHARS,
-): String {
-    if (maxChars <= 0) return text
-    if (text.length <= maxChars) return text
-    // Budget one char for the leading ellipsis.
-    val budget = (maxChars - 1).coerceAtLeast(1)
-    var start = text.length - budget
-    // Snap forward to the next word boundary inside the kept window so the
-    // first visible word is whole, not a fragment of the dropped head.
-    val nextSpace = text.indexOf(' ', start)
-    if (nextSpace in start until text.length) {
-        start = nextSpace + 1
-    }
-    return "…" + text.substring(start).trimStart()
 }
 
 internal fun appendAttachmentPaths(draft: String, paths: List<String>): String {

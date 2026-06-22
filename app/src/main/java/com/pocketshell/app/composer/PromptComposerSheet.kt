@@ -101,12 +101,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -899,10 +903,11 @@ internal fun SheetContent(
                         amplitude = state.amplitude,
                         capturing = state.hasDetectedSpeech,
                         elapsedLabel = formatElapsed(state.recordingElapsedMs),
-                        // Issue #870: render the END-anchored display slice so a
-                        // long live partial keeps its LATEST words visible
-                        // instead of clipping the newest words off the end.
-                        liveTranscript = state.liveTranscriptDisplay,
+                        // Issue #870 (reopen): pass the RAW growing partial; the
+                        // dedicated two-line LiveTranscriptTwoLine area resolves
+                        // the visible tail width-aware at render time so the
+                        // newest words always stay visible.
+                        liveTranscript = state.liveTranscript,
                         locked = state.recordingLocked,
                         onCancel = onCancelRecording,
                     )
@@ -1425,7 +1430,12 @@ private fun RecordingSurface(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(if (liveTranscript.isNullOrBlank()) 68.dp else 112.dp)
+            // Issue #870 (reopen): a MIN height (not a fixed one) so the dedicated
+            // two-line live-transcript area is never vertically clipped — on a
+            // large-font device the font-scaled two-line box grows the panel
+            // instead of being cut off (the recording panel grows downward; the
+            // sticky action row stays put).
+            .heightIn(min = if (liveTranscript.isNullOrBlank()) 68.dp else 112.dp)
             .background(
                 color = PocketShellColors.SurfaceElev,
                 shape = RoundedCornerShape(12.dp),
@@ -1480,13 +1490,87 @@ private fun RecordingSurface(
         }
         if (!liveTranscript.isNullOrBlank()) {
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
+            LiveTranscriptTwoLine(
                 text = liveTranscript,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(COMPOSER_LIVE_TRANSCRIPT_TAG),
+            )
+        }
+    }
+}
+
+/**
+ * Issue #870 (reopen): the live partial-transcript area for the Android
+ * recognizer. The maintainer's design direction is a DEDICATED TWO-LINE area
+ * whose second line always holds the live, in-progress recognition — so the
+ * newest words are always visible and the cut point is well-defined, instead of
+ * clipping a single line.
+ *
+ * The previous fix anchored the tail with a width-INDEPENDENT character budget
+ * ([liveTranscriptTail], 90 chars) and a trailing `TextOverflow.Ellipsis`. On a
+ * real device the 90-char tail did not fit two lines at the panel width / font
+ * scale, so the trailing ellipsis re-clipped the END — the newest words
+ * scrolled out of view again (the exact reopen symptom). A character budget
+ * cannot know the panel width, so it cannot guarantee the tail fits.
+ *
+ * This is width-AWARE: it measures the text with a [TextMeasurer] at the actual
+ * available width + font scale, and if the full text needs more than
+ * [LIVE_TRANSCRIPT_MAX_LINES] lines it drops leading characters (keeping the
+ * TAIL), snaps to a word boundary, and prepends a leading `…`, iterating until
+ * the kept tail fits the two-line box. The box is a fixed two-line height and
+ * the text is bottom-anchored, so the most recent words always occupy the
+ * visible lines.
+ *
+ * [onResolved] reports the text actually laid out (the trimmed tail, or the raw
+ * text when it already fits) so a test can assert the on-screen visible content
+ * keeps the newest words — not merely that the full string is present in the
+ * semantics tree behind a trailing ellipsis.
+ */
+@Composable
+private fun LiveTranscriptTwoLine(
+    text: String,
+    modifier: Modifier = Modifier,
+    onResolved: (String) -> Unit = {},
+) {
+    val measurer = rememberTextMeasurer()
+    val style = PocketShellType.bodyDense
+    val density = LocalDensity.current
+    val boxHeight = with(density) {
+        (style.fontSize.toPx() * LIVE_TRANSCRIPT_LINE_HEIGHT_FACTOR * LIVE_TRANSCRIPT_MAX_LINES).toDp()
+    }
+
+    Box(
+        modifier = modifier.height(boxHeight),
+        contentAlignment = Alignment.BottomStart,
+    ) {
+        BoxWithConstraints {
+            val widthPx = constraints.maxWidth
+            // Recompute the visible tail whenever the text or the available
+            // width / font scale changes — width-aware, so a tail that fits on a
+            // wide panel but not a narrow one is trimmed correctly.
+            val resolved = remember(text, widthPx, density.density, density.fontScale) {
+                resolveLiveTranscriptTail(
+                    text = text,
+                    measurer = measurer,
+                    style = style,
+                    maxWidthPx = widthPx,
+                    maxLines = LIVE_TRANSCRIPT_MAX_LINES,
+                )
+            }
+            LaunchedEffect(resolved) { onResolved(resolved) }
+            Text(
+                text = resolved,
                 color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                maxLines = 2,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.testTag(COMPOSER_LIVE_TRANSCRIPT_TAG),
+                style = style,
+                // The tail is pre-trimmed to fit MAX_LINES at this width, so the
+                // newest words always render. maxLines is a belt-and-braces cap;
+                // the leading ellipsis (not a trailing one) marks the dropped
+                // head, so any residual overflow drops the OLDEST words, never
+                // the newest.
+                maxLines = LIVE_TRANSCRIPT_MAX_LINES,
+                overflow = TextOverflow.Clip,
+                modifier = Modifier.testTag(COMPOSER_LIVE_TRANSCRIPT_TEXT_TAG),
             )
         }
     }
@@ -2850,8 +2934,93 @@ internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"
 
 /** Issue #453: elapsed mm:ss recording timer rendered next to the waveform. */
 internal const val COMPOSER_TIMER_TAG = "prompt-composer-timer"
+
+/**
+ * Issue #870: the dedicated two-line live-transcript container (the fixed-height
+ * box). [COMPOSER_LIVE_TRANSCRIPT_TEXT_TAG] tags the inner [Text] that holds the
+ * resolved (tail-trimmed) content so a test can read what is actually laid out.
+ */
 internal const val COMPOSER_LIVE_TRANSCRIPT_TAG = "prompt-composer-live-transcript"
+internal const val COMPOSER_LIVE_TRANSCRIPT_TEXT_TAG = "prompt-composer-live-transcript-text"
 internal const val COMPOSER_RECORDING_LOCKED_TAG = "prompt-composer-recording-locked"
+
+/**
+ * Issue #870 (reopen): the dedicated live-transcript area holds exactly this
+ * many lines — line two is the live, in-progress recognition (the maintainer's
+ * design direction). A long partial keeps its TAIL within these lines.
+ */
+internal const val LIVE_TRANSCRIPT_MAX_LINES: Int = 2
+
+/**
+ * Issue #870: rough line-height multiple over the font size, used to size the
+ * fixed two-line box. `bodyDense` does not set an explicit `lineHeight`, so the
+ * platform default is ~1.2–1.4×; 1.5× gives the two-line panel a little breathing
+ * room and matches the prior 112dp panel allowance without hard-coding a dp.
+ */
+internal const val LIVE_TRANSCRIPT_LINE_HEIGHT_FACTOR: Float = 1.5f
+
+/**
+ * Issue #870 (reopen): width-aware tail resolution for the live transcript.
+ *
+ * Returns the slice of [text] that fits within [maxLines] lines at [maxWidthPx]
+ * for [style], measured with [measurer]. When the full text fits, it is returned
+ * untouched. Otherwise the OLDEST words are dropped (keeping the TAIL/newest
+ * words), snapped to a word boundary, with a leading `…` marking the cut — so the
+ * latest recognized words are always the ones rendered, regardless of device
+ * width or font scale. This is the property the width-independent character
+ * budget in the superseded `liveTranscriptTail` could not guarantee.
+ *
+ * Pure (no Compose state) so it is unit-testable with a real [TextMeasurer].
+ */
+internal fun resolveLiveTranscriptTail(
+    text: String,
+    measurer: TextMeasurer,
+    style: TextStyle,
+    maxWidthPx: Int,
+    maxLines: Int = LIVE_TRANSCRIPT_MAX_LINES,
+): String {
+    if (maxWidthPx <= 0 || maxLines <= 0 || text.isEmpty()) return text
+
+    fun fits(candidate: String): Boolean {
+        val result = measurer.measure(
+            text = candidate,
+            style = style,
+            constraints = Constraints(maxWidth = maxWidthPx),
+        )
+        return result.lineCount <= maxLines
+    }
+
+    if (fits(text)) return text
+
+    // Binary-search the smallest number of dropped LEADING characters such that
+    // the remaining tail (with a leading "… ") fits maxLines. We drop from the
+    // head, so the newest words at the tail are always kept.
+    var lo = 1 // drop at least one char (full text already failed `fits`)
+    var hi = text.length
+    var bestStart = text.length
+    while (lo <= hi) {
+        val mid = (lo + hi) / 2
+        val start = mid
+        val candidate = "… " + text.substring(start).trimStart()
+        if (fits(candidate)) {
+            // This tail fits; try keeping MORE of the text (drop fewer chars).
+            bestStart = start
+            hi = mid - 1
+        } else {
+            lo = mid + 1
+        }
+    }
+
+    // Snap the kept window forward to the next word boundary so the first
+    // visible word is whole, not a fragment of the dropped head.
+    var start = bestStart.coerceIn(0, text.length)
+    val nextSpace = text.indexOf(' ', start)
+    if (nextSpace in start until text.length) {
+        start = nextSpace + 1
+    }
+    val tail = text.substring(start).trimStart()
+    return if (tail.isEmpty()) text.takeLast(1) else "… $tail"
+}
 
 /**
  * Issue #508: the two explicit stop actions shown in the Recording row,
@@ -3007,14 +3176,11 @@ private fun PromptComposerRecordingPreview() {
                     amplitude = 0.7f,
                     hasDetectedSpeech = true,
                     recordingElapsedMs = 17_000L,
-                    // Issue #870: a long live partial — the display surfaces the
-                    // TAIL (latest words) with a leading ellipsis.
+                    // Issue #870 (reopen): a long live partial — the dedicated
+                    // two-line area keeps the TAIL (latest words) visible and
+                    // marks the dropped head with a leading ellipsis.
                     liveTranscript = "open the deployment pipeline and check the " +
                         "logs then restart the worker and confirm the latest commit is deployed",
-                    liveTranscriptDisplay = liveTranscriptTail(
-                        "open the deployment pipeline and check the logs then restart " +
-                            "the worker and confirm the latest commit is deployed",
-                    ),
                     error = null,
                 ),
                 onClose = {},

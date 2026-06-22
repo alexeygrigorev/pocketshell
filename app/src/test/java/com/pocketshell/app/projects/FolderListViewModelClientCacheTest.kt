@@ -99,12 +99,10 @@ class FolderListViewModelClientCacheTest {
     fun coldStartWithCacheRendersInstantlyNoLoadingFlash() = runTest {
         val cache = newCache()
         // The PREVIOUS app session left a settled tree in the client cache.
-        cache.write(
-            HOST.name,
-            listOf(
-                node("alpha", 0, folderPath("alpha")),
-                node("beta", 1, folderPath("beta")),
-            ),
+        writeNodes(
+            cache,
+            node("alpha", 0, folderPath("alpha")),
+            node("beta", 1, folderPath("beta")),
         )
         val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
         val vm = newViewModel(gateway, cache)
@@ -142,12 +140,10 @@ class FolderListViewModelClientCacheTest {
     @Test
     fun silentReconcileKeepsNodeIdentityAndOrderStable() = runTest {
         val cache = newCache()
-        cache.write(
-            HOST.name,
-            listOf(
-                node("alpha", 0, folderPath("alpha")),
-                node("beta", 1, folderPath("beta")),
-            ),
+        writeNodes(
+            cache,
+            node("alpha", 0, folderPath("alpha")),
+            node("beta", 1, folderPath("beta")),
         )
         // The probe reports the SAME sessions in the SAME order, but flips beta's
         // attached flag (the "only one node changed" case).
@@ -187,12 +183,10 @@ class FolderListViewModelClientCacheTest {
     @Test
     fun sessionSwitchDoesNotReorderOrReloadTree() = runTest {
         val cache = newCache()
-        cache.write(
-            HOST.name,
-            listOf(
-                node("alpha", 0, folderPath("alpha")),
-                node("beta", 1, folderPath("beta")),
-            ),
+        writeNodes(
+            cache,
+            node("alpha", 0, folderPath("alpha")),
+            node("beta", 1, folderPath("beta")),
         )
         val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
         val vm = newViewModel(gateway, cache)
@@ -231,12 +225,10 @@ class FolderListViewModelClientCacheTest {
         val cache = newCache()
         // The cache holds a STALE session ('ghost') that no longer exists, plus a
         // real one ('alpha').
-        cache.write(
-            HOST.name,
-            listOf(
-                node("ghost", 0, folderPath("ghost")),
-                node("alpha", 1, folderPath("alpha")),
-            ),
+        writeNodes(
+            cache,
+            node("ghost", 0, folderPath("ghost")),
+            node("alpha", 1, folderPath("alpha")),
         )
         // The authoritative probe reports ONLY 'alpha'.
         val gateway = StubGateway(listOf(sessionRow("alpha")))
@@ -278,11 +270,123 @@ class FolderListViewModelClientCacheTest {
 
         // The first reconcile must have written the settled tree to the cache so
         // the NEXT cold start renders instantly (the local-first SWR half).
-        val cached = cache.read(HOST.name).map { it.session }
+        val cached = cache.read(HOST.name).nodes.map { it.session }
         assertEquals(
             "the reconcile mirrors the settled tree into the client cache",
             listOf("alpha", "beta"),
             cached,
+        )
+    }
+
+    // ---- REOPEN (v0.4.14): cold start renders the GROUPED tree, not a flat ---
+    // ---- list dumped into 'Other folders' with '0 projects' -----------------
+
+    /**
+     * Issue #867 REOPEN regression. The shipped fix cached ONLY the per-session
+     * nodes, so a cold-start render had no watched-root resolution / scanned
+     * project folders → every session fell into "Other folders" and each watched
+     * root showed "0 projects" (the spinner / empty-rebuild state the maintainer
+     * re-reported on v0.4.14). This is the load-bearing assertion the original
+     * test missed: it only checked the FLAT session list, which renders fine
+     * regardless of grouping (the G6/F2 proxy gap).
+     *
+     * RED on the shipped code: `treeRoots` is empty OR the "git" root has 0
+     * project subfolders and the sessions sit in "Other folders".
+     * GREEN with the structural cache: the cached "git" root paints WITH its
+     * project subfolders and the sessions bucketed under it, instantly.
+     */
+    @Test
+    fun coldStartRendersGroupedTreeFromCacheNotOtherFoldersFlash() = runTest {
+        val cache = newCache()
+        val gitRoot = canonical("/home/alexey/git")
+        // A previous app session left a SETTLED tree: two sessions under
+        // ~/git/<project>, the watched root resolved, and the scanned project
+        // subfolders — the full grouped shape, persisted to the client cache.
+        cache.write(
+            HOST.name,
+            TreeClientCache.CachedTree(
+                nodes = listOf(
+                    node("alpha", 0, folderPath("alpha")),
+                    node("beta", 1, folderPath("beta")),
+                ),
+                watchedFolders = listOf(watchedRoot("git", gitRoot)),
+                resolvedWatchedRootPaths = mapOf(gitRoot to gitRoot),
+                scannedProjectFoldersByRoot = mapOf(
+                    gitRoot to listOf(folderPath("alpha"), folderPath("beta"), folderPath("gamma")),
+                ),
+            ),
+        )
+        val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
+        val vm = newViewModel(gateway, cache, watchedRoots = listOf(watchedRoot("git", gitRoot)))
+
+        bind(vm)
+
+        // SYNCHRONOUSLY after bind (before any coroutine / reconcile / Room flow):
+        // the instant render shows the GROUPED tree — the "git" watched root with
+        // its project subfolders and the two sessions bucketed UNDER it, NOT a flat
+        // list dumped into "Other folders" with "0 projects".
+        val ready = vm.state.value as? FolderListUiState.Ready
+            ?: error("cold start must paint Ready instantly, got ${vm.state.value}")
+        val gitTreeRoot = ready.treeRoots.firstOrNull { it.path == gitRoot }
+            ?: error(
+                "the cached 'git' watched root must paint instantly with its grouping; " +
+                    "treeRoots=${ready.treeRoots.map { it.path }}",
+            )
+        // The 'git' root carries its project subfolders (the "N projects" count) —
+        // RED before the fix, where the structure was not cached so this was empty.
+        val gitProjectPaths = gitTreeRoot.folders.map { it.path }
+        assertTrue(
+            "the cached 'git' root must show its project subfolders instantly " +
+                "(not '0 projects'); folders=$gitProjectPaths",
+            gitProjectPaths.contains(folderPath("alpha")) &&
+                gitProjectPaths.contains(folderPath("beta")),
+        )
+        // And the sessions are bucketed UNDER the git root, not in "Other folders".
+        val sessionsUnderGit = gitTreeRoot.folders.flatMap { it.sessions }.map { it.sessionName }
+        assertEquals(
+            "the cached sessions must render UNDER their watched root, not 'Other folders'",
+            listOf("alpha", "beta").sorted(),
+            sessionsUnderGit.sorted(),
+        )
+    }
+
+    /**
+     * Issue #867 REOPEN: the freshened tree's STRUCTURE (not just the sessions)
+     * round-trips through the client cache, so the NEXT cold start (the test
+     * above) has the grouping to render. RED before the fix: the cache stored no
+     * structure, so `read(...).resolvedWatchedRootPaths` was empty.
+     */
+    @Test
+    fun reconcilePersistsTreeStructureToClientCache() = runTest {
+        val cache = newCache()
+        val gitRoot = canonical("/home/alexey/git")
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha"), sessionRow("beta")),
+            projectFoldersByRoot = mapOf(
+                gitRoot to listOf(folderPath("alpha"), folderPath("beta")),
+            ),
+            resolvedWatchedRootPaths = mapOf(gitRoot to gitRoot),
+        )
+        val vm = newViewModel(gateway, cache, watchedRoots = listOf(watchedRoot("git", gitRoot)))
+
+        bind(vm)
+        runCurrent()
+        assertEquals(listOf("alpha", "beta"), readySessions(vm))
+
+        val cached = cache.read(HOST.name)
+        assertEquals(
+            "the reconcile must persist the resolved watched-root paths to the cache",
+            mapOf(gitRoot to gitRoot),
+            cached.resolvedWatchedRootPaths,
+        )
+        assertEquals(
+            "the reconcile must persist the scanned project folders to the cache",
+            mapOf(gitRoot to listOf(folderPath("alpha"), folderPath("beta"))),
+            cached.scannedProjectFoldersByRoot,
+        )
+        assertTrue(
+            "the reconcile must persist the watched-root overlay to the cache",
+            cached.watchedFolders.any { canonical(it.path) == gitRoot },
         )
     }
 
@@ -318,6 +422,11 @@ class FolderListViewModelClientCacheTest {
     private fun folderPath(name: String): String =
         FolderListViewModel.canonicalisePath("/home/alexey/git/$name")
 
+    private fun canonical(path: String): String = FolderListViewModel.canonicalisePath(path)
+
+    private fun watchedRoot(label: String, path: String): ProjectRootEntity =
+        ProjectRootEntity(hostId = HOST.id, label = label, path = path)
+
     private fun node(name: String, order: Int, path: String): TreeRemoteSource.TreeNode =
         TreeRemoteSource.TreeNode(
             session = name,
@@ -325,6 +434,10 @@ class FolderListViewModelClientCacheTest {
             folderPath = path,
             collapsed = false,
         )
+
+    private fun writeNodes(cache: TreeClientCache, vararg nodes: TreeRemoteSource.TreeNode) {
+        cache.write(HOST.name, TreeClientCache.CachedTree(nodes = nodes.toList()))
+    }
 
     private fun sessionRow(name: String, attached: Boolean = true): FolderSessionRow =
         FolderSessionRow(
@@ -341,6 +454,7 @@ class FolderListViewModelClientCacheTest {
     private fun TestScope.newViewModel(
         gateway: FolderListGateway,
         cache: TreeClientCache,
+        watchedRoots: List<ProjectRootEntity> = emptyList(),
     ): FolderListViewModel {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
@@ -355,7 +469,7 @@ class FolderListViewModelClientCacheTest {
         return FolderListViewModel(
             gateway = gateway,
             hostDao = FakeHostDao(HOST),
-            projectRootDao = FakeProjectRootDao(),
+            projectRootDao = FakeProjectRootDao(watchedRoots),
             sshLeaseManager = manager,
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
             // No treeRemoteSource: this suite exercises the CLIENT cache path in
@@ -390,6 +504,11 @@ class FolderListViewModelClientCacheTest {
 
     private class StubGateway(
         @Volatile var rows: List<FolderSessionRow>?,
+        // Issue #867 (REOPEN): optional structural result so a test can assert
+        // the GROUPED tree (sessions under their watched root) on reconcile, not
+        // just the flat session list.
+        @Volatile var projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+        @Volatile var resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
     ) : FolderListGateway {
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
@@ -398,7 +517,11 @@ class FolderListViewModelClientCacheTest {
             watchedRoots: List<ProjectRootEntity>,
         ): FolderListResult {
             val r = rows ?: error("gateway probe must not be called (tree should be reused, not reloaded)")
-            return FolderListResult.Sessions(rows = r)
+            return FolderListResult.Sessions(
+                rows = r,
+                projectFoldersByRoot = projectFoldersByRoot,
+                resolvedWatchedRootPaths = resolvedWatchedRootPaths,
+            )
         }
 
         override suspend fun createSession(
@@ -444,8 +567,10 @@ class FolderListViewModelClientCacheTest {
         override suspend fun deleteById(id: Long) = error("not used")
     }
 
-    private class FakeProjectRootDao : ProjectRootDao {
-        private val roots = MutableStateFlow<List<ProjectRootEntity>>(emptyList())
+    private class FakeProjectRootDao(
+        initial: List<ProjectRootEntity> = emptyList(),
+    ) : ProjectRootDao {
+        private val roots = MutableStateFlow(initial)
         override fun getByHostId(hostId: Long): Flow<List<ProjectRootEntity>> = roots
         override suspend fun insert(root: ProjectRootEntity): Long = error("not used")
         override suspend fun update(root: ProjectRootEntity) = error("not used")

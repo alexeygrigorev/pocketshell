@@ -1680,14 +1680,33 @@ class FolderListViewModel internal constructor(
      */
     private fun hydrateFromClientCache(params: BoundParams): Boolean {
         val cache = treeClientCache ?: return false
-        val nodes = runCatching { cache.read(params.hostName) }.getOrDefault(emptyList())
-        if (nodes.isEmpty()) return false
-        tree.hydrate(nodes.map { it.toHydratedNode() })
+        val cached = runCatching { cache.read(params.hostName) }
+            .getOrDefault(TreeClientCache.CachedTree(nodes = emptyList()))
+        if (cached.isEmpty) return false
+        // Issue #867 (REOPEN): seed the watched-root overlay + the structural
+        // maps the grouping needs BEFORE the per-session hydrate's emit, so the
+        // FIRST cold-start frame already shows the SETTLED tree — sessions
+        // bucketed under their watched root, the project subfolders + counts
+        // visible — not "0 projects" with everything dumped into "Other
+        // folders". The authoritative Room `project_roots` Flow overwrites the
+        // seeded watched folders the moment it emits (advisory), and the first
+        // reconcile overwrites the structural maps wholesale.
+        if (cached.watchedFolders.isNotEmpty()) {
+            tree.setWatchedFolders(cached.watchedFolders)
+        }
+        // Hydrate the per-session nodes FIRST (populates `sessionFolderPaths`),
+        // then the structure — so [HostTreeModel.hydrateStructure]'s sticky-bucket
+        // seed sees the sessions and can place them under their root by id.
+        tree.hydrate(cached.nodes.map { it.toHydratedNode() })
+        tree.hydrateStructure(
+            resolvedWatchedRootPaths = cached.resolvedWatchedRootPaths,
+            scannedProjectFoldersByRoot = cached.scannedProjectFoldersByRoot,
+            historyProjectFoldersByRoot = cached.historyProjectFoldersByRoot,
+        )
         if (!tree.hasSnapshot) return false
-        // Render the seeded order / placement / collapse immediately — instant
-        // held shape, no Loading flash. The watched-root overlay (Room) and the
-        // confirmed kinds arrive with the watched-folder snapshot + first
-        // reconcile and update in place.
+        // Render the seeded order / placement / collapse + grouping immediately —
+        // instant held shape, no Loading flash, no empty-rebuild grouping. The
+        // confirmed kinds arrive with the first reconcile and update in place.
         emitReady()
         return true
     }
@@ -1701,9 +1720,20 @@ class FolderListViewModel internal constructor(
      */
     private fun persistClientCache(params: BoundParams) {
         val cache = treeClientCache ?: return
-        val nodes = tree.exportNodes().map { it.toTreeNode() }
+        // Issue #867 (REOPEN): snapshot the FULL presentation shape — the session
+        // nodes PLUS the watched-root overlay + the structural maps — so the next
+        // cold start can reproduce the SETTLED grouping instantly (sessions under
+        // their root, project counts), not just the flat session list.
+        val structure = tree.exportStructure()
+        val cached = TreeClientCache.CachedTree(
+            nodes = tree.exportNodes().map { it.toTreeNode() },
+            watchedFolders = lastWatchedFolders,
+            resolvedWatchedRootPaths = structure.resolvedWatchedRootPaths,
+            scannedProjectFoldersByRoot = structure.scannedProjectFoldersByRoot,
+            historyProjectFoldersByRoot = structure.historyProjectFoldersByRoot,
+        )
         viewModelScope.launch(ioDispatcher) {
-            runCatching { cache.write(params.hostName, nodes) }
+            runCatching { cache.write(params.hostName, cached) }
         }
     }
 

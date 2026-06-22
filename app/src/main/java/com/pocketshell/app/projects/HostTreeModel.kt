@@ -265,6 +265,82 @@ internal class HostTreeModel {
     }
 
     /**
+     * Issue #867 (REOPEN): seed the STRUCTURAL projection inputs from the client
+     * cold cache, so a cold-start instant render reproduces the SETTLED grouping
+     * — sessions bucketed under their watched root ("git → 74 projects"), the
+     * project subfolders + counts visible — instead of dumping everything into
+     * "Other folders" with "0 projects" until the first reconcile lands.
+     *
+     * ## Why the per-session [hydrate] alone was not enough (the shipped gap)
+     *
+     * [buildFolderTree] needs more than the per-session name+cwd+collapse to
+     * render the real tree: it needs [resolvedWatchedRootPaths] (so
+     * `bestRootForPath` can place a session under git/tmp rather than "Other
+     * folders"), and [scannedProjectFoldersByRoot]/[historyProjectFoldersByRoot]
+     * (the directory scan that supplies the project subfolders + the "X projects"
+     * count). The original #867 cache stored ONLY the session nodes, so on a cold
+     * start `resolvedWatchedRootPaths` was empty → every session fell into "Other
+     * folders" and each watched root showed "0 projects" — exactly the spinner /
+     * empty-rebuild state the maintainer re-reported on v0.4.14. The shipped unit
+     * test asserted only `flatSessions` (a flat list that renders fine without any
+     * structure), so the broken grouping passed review (the G6/F2 proxy gap).
+     *
+     * This is ADVISORY like [hydrate]: a no-op once the tree already has a
+     * snapshot (a live probe is always fresher), and the first authoritative
+     * [reconcile] overwrites every structural map wholesale (so a stale scan can
+     * never linger past the first refresh). It must run TOGETHER with [hydrate]
+     * (same cold-start seed) — never gate it on `hasSnapshot` independently.
+     */
+    fun hydrateStructure(
+        resolvedWatchedRootPaths: Map<String, String>,
+        scannedProjectFoldersByRoot: Map<String, List<String>>,
+        historyProjectFoldersByRoot: Map<String, List<String>>,
+    ) {
+        // Mirror [hydrate]'s advisory guard: never clobber a populated tree's
+        // (fresher) structure with the cached seed.
+        if (this.resolvedWatchedRootPaths.isNotEmpty() ||
+            this.scannedProjectFoldersByRoot.isNotEmpty() ||
+            this.historyProjectFoldersByRoot.isNotEmpty()
+        ) {
+            return
+        }
+        this.resolvedWatchedRootPaths = resolvedWatchedRootPaths
+        this.scannedProjectFoldersByRoot = scannedProjectFoldersByRoot
+        this.historyProjectFoldersByRoot = historyProjectFoldersByRoot
+        // Re-seed sticky placement from the seeded structure so an
+        // already-placed session is held under its root by id even before the
+        // first reconcile refreshes the sticky map (mirrors [reconcile] →
+        // [refreshStickyBuckets]). Without this the projection would re-bucket on
+        // the very first probe and could momentarily flash a placed session.
+        refreshStickyBuckets()
+    }
+
+    /**
+     * Issue #867 (REOPEN): EXPORT the structural projection inputs for the client
+     * cold cache, so the NEXT cold start can [hydrateStructure] the settled
+     * grouping instantly. These are the same three maps [reconcile] stores from
+     * the authoritative probe — purely presentation (directory layout +
+     * watched-root resolution), never authoritative session/kind state.
+     */
+    fun exportStructure(): CachedStructure =
+        CachedStructure(
+            resolvedWatchedRootPaths = resolvedWatchedRootPaths,
+            scannedProjectFoldersByRoot = scannedProjectFoldersByRoot,
+            historyProjectFoldersByRoot = historyProjectFoldersByRoot,
+        )
+
+    /**
+     * The structural projection inputs persisted to / restored from the client
+     * cold cache (issue #867 reopen). Bridges [HostTreeModel] and
+     * [TreeClientCache] without exposing the internal model fields.
+     */
+    data class CachedStructure(
+        val resolvedWatchedRootPaths: Map<String, String>,
+        val scannedProjectFoldersByRoot: Map<String, List<String>>,
+        val historyProjectFoldersByRoot: Map<String, List<String>>,
+    )
+
+    /**
      * Epic #821 slice C (issue #837): EXPORT the current tree state as the node
      * list to persist via `tree.upsert` after a mutation (toggle expand,
      * rename/insert, post-reconcile). Carries ONLY the durable presentation

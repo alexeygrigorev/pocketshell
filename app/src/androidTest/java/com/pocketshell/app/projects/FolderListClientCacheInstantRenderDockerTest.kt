@@ -14,6 +14,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -110,7 +111,7 @@ class FolderListClientCacheInstantRenderDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-        runCatching { cache.write(HOST_NAME, emptyList()) }
+        runCatching { cache.write(HOST_NAME, TreeClientCache.CachedTree(nodes = emptyList())) }
     }
 
     @Test
@@ -138,18 +139,32 @@ class FolderListClientCacheInstantRenderDockerTest {
 
         // The PREVIOUS app session left this settled tree in the client cache —
         // the host name keys the entry. This is what must paint instantly.
+        //
+        // Issue #867 REOPEN: cache the FULL settled shape — the session node PLUS
+        // the watched-root overlay + the resolved match path + the scanned project
+        // folders — so the cold-start instant render reproduces the GROUPED tree
+        // (the session bucketed UNDER the "/tmp" watched root), NOT a flat list
+        // dumped into "Other folders" with "0 projects" (the v0.4.14 symptom).
+        val watchRoot = FolderListViewModel.canonicalisePath("/tmp")
+        val canonicalFolder = FolderListViewModel.canonicalisePath(folder)
         cache.write(
             HOST_NAME,
-            listOf(
-                TreeRemoteSource.TreeNode(
-                    session = sessionName,
-                    order = 0,
-                    folderPath = FolderListViewModel.canonicalisePath(folder),
-                    collapsed = false,
+            TreeClientCache.CachedTree(
+                nodes = listOf(
+                    TreeRemoteSource.TreeNode(
+                        session = sessionName,
+                        order = 0,
+                        folderPath = canonicalFolder,
+                        collapsed = false,
+                    ),
                 ),
+                watchedFolders = listOf(
+                    ProjectRootEntity(hostId = 0L, label = "tmp", path = watchRoot),
+                ),
+                resolvedWatchedRootPaths = mapOf(watchRoot to watchRoot),
+                scannedProjectFoldersByRoot = mapOf(watchRoot to listOf(canonicalFolder)),
             ),
         )
-
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "issue867-key", privateKeyPath = keyFile.absolutePath),
         )
@@ -163,6 +178,12 @@ class FolderListClientCacheInstantRenderDockerTest {
             ),
         )
         val host = db.hostDao().getById(hostId)!!
+        // Persist the SAME watched root to Room so the authoritative overlay
+        // matches the cached one (the Room Flow overwrites the cached watched
+        // folders, advisory, the moment it emits).
+        db.projectRootDao().insert(
+            ProjectRootEntity(hostId = hostId, label = "tmp", path = watchRoot),
+        )
 
         // A FRESH view model = a cold app start. Bind the cached host.
         val vm = newViewModel()
@@ -194,6 +215,25 @@ class FolderListClientCacheInstantRenderDockerTest {
             "the cached session paints in its slot instantly",
             listOf(sessionName),
             firstState.flatSessions.map { it.sessionName },
+        )
+        // Issue #867 REOPEN load-bearing assertion (the v0.4.14 symptom): the
+        // instant render shows the GROUPED tree — the cached session bucketed
+        // UNDER the "/tmp" watched root with its project subfolder visible — NOT a
+        // flat list dumped into "Other folders" with the watched root at "0
+        // projects". RED before the structural cache (treeRoots had no folders).
+        val tmpRoot = firstState.treeRoots.firstOrNull { it.path == watchRoot }
+        assertTrue(
+            "the cached '/tmp' watched root must paint instantly WITH its project " +
+                "subfolder (not '0 projects') — treeRoots=" +
+                firstState.treeRoots.map { r -> r.path to r.folders.map { it.path } },
+            tmpRoot != null && tmpRoot.folders.any { it.path == canonicalFolder },
+        )
+        assertTrue(
+            "the cached session must render UNDER its watched root, not in 'Other " +
+                "folders' — tmpRoot folders=${tmpRoot?.folders?.map { it.path to it.sessions.map { s -> s.sessionName } }}",
+            tmpRoot!!.folders.any { row ->
+                row.path == canonicalFolder && row.sessions.any { it.sessionName == sessionName }
+            },
         )
 
         // The silent reconcile then converges on the authoritative live tree —

@@ -72,17 +72,20 @@ import org.junit.runner.RunWith
  * pattern from [PromptComposerDiscardE2eTest]) so the single-consumer
  * `Channel.receiveAsFlow()` is drained by exactly one collector for the test.
  *
- * ## AC2 attachment-refs note
+ * ## AC2 attachment-refs note (#872 design)
  *
- * The maintainer's reported case is a FAILED SEND. On that path
- * [PromptComposerViewModel.restoreFailedSend] folds the staged attachment paths
- * INTO the restored draft text (#694), so the intended attachment refs are part
- * of the durable string this test round-trips: [failedSendDraftWithAttachmentRef]
- * proves the attachment path survives switch-away-and-back as visible composer
- * text. Live in-flight attachment TILES (not yet sent) are session-local
- * transient state and are intentionally not carried across a switch — but the
- * failed-send refs the AC names ARE preserved, because they are already in the
- * draft string.
+ * The maintainer's reported case is a FAILED / dropped SEND. On that path
+ * [PromptComposerViewModel.restoreFailedSend] restores the CLEAN draft text PLUS
+ * the actual attachment TILE, and persists BOTH durably per-session (the clean
+ * text under the session key, the attachment ref under the `@att/` slot). It no
+ * longer folds the raw path into the draft string (#694), which polluted the
+ * editable text and double-appended on Retry — the #872 hard-cut.
+ * [failedSendDraftWithAttachmentRefRestoredOnSwitchBack] proves the attachment
+ * TILE survives switch-away-and-back via the production store, and
+ * [sendWhileAttachmentUploadInFlightCarriesTheAttachmentNotTextOnly] proves the
+ * v0.4.14 on-device drop (Send fired while the upload was still in flight,
+ * silently dropping the attachment) is fixed: the send now awaits the upload and
+ * carries the attachment.
  */
 @RunWith(AndroidJUnit4::class)
 class ComposerDraftDurabilityE2eTest {
@@ -263,12 +266,15 @@ class ComposerDraftDurabilityE2eTest {
     }
 
     /**
-     * Issue #832 AC2 — after a failed attachment-send the draft INCLUDING the
-     * intended attachment ref is discoverably restored. On the failed-send path
-     * the staged attachment path is folded into the restored draft text (#694),
-     * so it travels with the durable per-session string. This proves the
-     * attachment ref survives switch-away-and-back as visible composer text via
-     * the production store.
+     * Issue #832 AC2 / #872 — after a failed attachment-send the staged
+     * attachment is discoverably restored on switch-away-and-back. Updated for the
+     * #872 design (HARD-CUT D22): `restoreFailedSend` restores the CLEAN draft text
+     * plus the actual attachment TILE (it no longer folds the raw path into the
+     * draft string, which polluted the editable text and double-appended on
+     * Retry). The durable per-session store persists BOTH — the clean text under
+     * the session key and the attachment ref under the `@att/` slot — so a switch
+     * A→B→A reloads the clean draft AND re-shows the attachment tile, restored out
+     * of real `SharedPreferences`.
      */
     @Test
     fun failedSendDraftWithAttachmentRefRestoredOnSwitchBack() {
@@ -289,7 +295,7 @@ class ComposerDraftDurabilityE2eTest {
         }
 
         // Attach a file + type text, then trigger a failing send. restoreFailedSend
-        // folds the attachment path into the restored draft.
+        // restores the clean draft + the attachment TILE (not folded into text).
         compose.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed().performClick()
         compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.attachments.isNotEmpty() }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("review this")
@@ -299,21 +305,108 @@ class ComposerDraftDurabilityE2eTest {
             vm.uiState.value.error?.contains("Not sent") == true
         }
         compose.waitForIdle()
-        // The restored draft now contains the attachment ref; it is persisted.
-        val keptA = vm.uiState.value.draft
-        assert(keptA.contains(attachPath)) {
-            "expected restored draft to fold in the attachment ref, was: $keptA"
-        }
-        assertEquals(keptA, productionStore.load("1/sessionA"))
+        // The restored draft is the CLEAN text (no raw path), and the attachment is
+        // a staged tile. BOTH are persisted durably under session A.
+        assertEquals("review this", vm.uiState.value.draft)
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals(attachPath, vm.uiState.value.attachments.single().remotePath)
+        assertEquals("review this", productionStore.load("1/sessionA"))
+        assertEquals(
+            attachPath,
+            productionStore.loadAttachments("1/sessionA").single().remotePath,
+        )
 
-        // Switch away (empty) and back (the attachment-bearing draft is restored).
+        // Switch away (empty — no text, no tiles) and back: the clean draft AND the
+        // attachment tile are restored out of real SharedPreferences.
         compose.runOnUiThread { vm.onComposerTargetChanged("1/sessionB") }
-        compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.draft.isEmpty() }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            vm.uiState.value.draft.isEmpty() && vm.uiState.value.attachments.isEmpty()
+        }
         compose.runOnUiThread { vm.onComposerTargetChanged("1/sessionA") }
-        compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.draft == keptA }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            vm.uiState.value.draft == "review this" &&
+                vm.uiState.value.attachments.size == 1
+        }
         compose.waitForIdle()
-        // The attachment ref is visible in the composer again, via the real store.
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertTextContains(attachPath, substring = true)
-        WalkthroughScreenshotArtifacts.capture("issue-832-04-attachment-ref-restored")
+        // The clean draft text is visible again AND the attachment tile is back.
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertTextContains("review this", substring = true)
+        assertEquals(attachPath, vm.uiState.value.attachments.single().remotePath)
+        WalkthroughScreenshotArtifacts.capture("issue-832-04-attachment-tile-restored")
+    }
+
+    /**
+     * Issue #872 PART B reopen (v0.4.14) — the ACTUAL on-device drop, end-to-end
+     * over the production composer UI. The maintainer attaches a screenshot, types
+     * a note, taps Send; a reconnect/transport flap slows the attachment SFTP
+     * upload so it is STILL in flight when Send fires. On the old code Send
+     * CANCELLED the upload and fired a TEXT-ONLY request — the text "went through"
+     * but the attachment was silently dropped. This drives the real production
+     * `SheetContent` + `requestSend` path with a gated (still-in-flight) upload and
+     * proves the delivered send CARRIES the attachment, never a text-only drop.
+     *
+     * RED on the v0.4.14 base: the dispatched request had ZERO attachments and no
+     * attachment path in its text. GREEN with the fix: the send awaits the upload
+     * and dispatches WITH the attachment.
+     */
+    @Test
+    fun sendWhileAttachmentUploadInFlightCarriesTheAttachmentNotTextOnly() {
+        val vm = newViewModel()
+        val attachPath = "~/.pocketshell/attachments/host-1/20260622-slow-shot.png"
+        // The host's "onSend" confirms delivery (text goes through), exactly like
+        // the maintainer's report where the text was delivered.
+        val dispatched = java.util.Collections.synchronizedList(
+            mutableListOf<PromptComposerViewModel.SendRequest>(),
+        )
+        collectorScope.launch {
+            vm.sendRequests.collect { request ->
+                dispatched += request
+                vm.markSendDelivered()
+            }
+        }
+        // The upload is GATED so it is provably still in flight when Send fires.
+        val uploadGate = kotlinx.coroutines.CompletableDeferred<Result<List<String>>>()
+        vm.onComposerTargetChanged("1/sessionA")
+        renderComposer(
+            vm,
+            onAttachFiles = {
+                vm.attachFiles(count = 1) { uploadGate.await() }
+            },
+        )
+        awaitComposerComposed()
+
+        // Tap Attach (upload starts but BLOCKS), then type a note.
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed().performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            vm.uiState.value.attachmentUpload is
+                PromptComposerViewModel.AttachmentUploadState.Uploading
+        }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("look at this screenshot")
+        compose.waitForIdle()
+
+        // Tap Send WHILE the upload is still in flight (the maintainer's race).
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsEnabled().performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.sendInFlight }
+        compose.waitForIdle()
+        WalkthroughScreenshotArtifacts.capture("issue-872-01-send-while-uploading")
+        // NO request has gone out yet — never a text-only send that drops the file.
+        assertEquals(0, dispatched.size)
+
+        // The upload now completes (post-reconnect the SFTP transfer lands).
+        compose.runOnUiThread { uploadGate.complete(Result.success(listOf(attachPath))) }
+        compose.waitUntil(timeoutMillis = 5_000) { dispatched.size == 1 }
+        compose.waitForIdle()
+
+        // The delivered send CARRIES the attachment — both the structured tile and
+        // the attachment path folded into the composed prompt. Base dropped it.
+        val request = dispatched.single()
+        assertEquals(1, request.attachments.size)
+        assertEquals(attachPath, request.attachments.single().remotePath)
+        assert(request.text.contains(attachPath)) {
+            "expected the composed prompt to carry the attachment path, was: ${request.text}"
+        }
+        assert(request.text.startsWith("look at this screenshot")) {
+            "expected the typed note to lead the prompt, was: ${request.text}"
+        }
+        WalkthroughScreenshotArtifacts.capture("issue-872-02-send-carried-attachment")
     }
 }

@@ -686,9 +686,76 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private fun dispatchSendNow(withEnter: Boolean) {
         if (_uiState.value.sendInFlight) return
+        // Issue #872 (Part B reopen, v0.4.14): if the user taps Send while an
+        // attachment upload is STILL in flight, the old code cancelled the upload
+        // and fired a TEXT-ONLY send — silently dropping the attachment. That is
+        // the maintainer's exact on-device symptom: a reconnect/transport flap
+        // slows the SFTP transfer so it has not finished when Send fires, the text
+        // "goes through", and the attachment is gone with no tile, no durable
+        // ref, and no error. The #91510d0a durable-restore path never ran for this
+        // trigger (it is a DELIVERED send, not restoreFailedSend).
+        //
+        // Fix: do NOT cancel-and-drop. WAIT for the in-flight upload to resolve,
+        // then dispatch the send from the now-staged tiles so the attachment is
+        // carried — or, if the upload failed, surface the error and keep the draft
+        // (no silent text-only send). The user never loses the attachment.
+        if (attachmentJob?.isActive == true) {
+            dispatchSendAfterUpload(withEnter)
+            return
+        }
+        emitSendRequest(withEnter)
+    }
+
+    /**
+     * Issue #872: the user tapped Send while an attachment upload was still in
+     * flight. Park the composer in the in-flight state immediately (so the Send
+     * button disables + shows "Sending…" and a double-tap can't queue a second
+     * send), then await the upload before dispatching. On upload success the
+     * freshly-staged tiles are included in the send; on upload failure NO send
+     * goes out — the error banner is left in place and the draft is kept so the
+     * user can re-attach and retry. This is what closes the on-device silent
+     * drop: there is no code path that emits a text-only send while an attachment
+     * was being uploaded.
+     */
+    private fun dispatchSendAfterUpload(withEnter: Boolean) {
+        DiagnosticEvents.record("action", "composer_send_wait_upload")
+        // Flip into the in-flight state up front so the UI reflects "Sending…"
+        // and the in-flight guard blocks a double-tap while we await the upload.
+        _uiState.update { it.copy(sendInFlight = true, error = null) }
+        val job = attachmentJob ?: return emitSendRequest(withEnter)
+        viewModelScope.launch {
+            // Await the upload coroutine itself; `attachFiles` resolves the UI
+            // state (tiles staged on success, error banner on failure) before it
+            // completes, so once `join()` returns the state is settled.
+            job.join()
+            val staged = _uiState.value.attachments
+            if (staged.isEmpty()) {
+                // The upload failed (or staged nothing) — `attachFiles` has
+                // already set the error banner / reset the progress. Do NOT fire a
+                // text-only send that would silently drop the attachment the user
+                // staged. Leave the draft + error so they can re-attach and retry.
+                DiagnosticEvents.record("action", "composer_send_wait_upload_no_attachment")
+                _uiState.update { it.copy(sendInFlight = false) }
+                return@launch
+            }
+            // The upload completed and the tiles are staged — clear the in-flight
+            // flag so `emitSendRequest` can re-set it on the real dispatch (its
+            // own #745 in-flight contract), then dispatch WITH the attachment.
+            _uiState.update { it.copy(sendInFlight = false) }
+            emitSendRequest(withEnter)
+        }
+    }
+
+    /**
+     * Issue #211 / #745: compose + emit the [SendRequest] from the CURRENT draft
+     * and staged tiles, flipping the composer into the in-flight state. Split out
+     * of [dispatchSendNow] so the upload-await path ([dispatchSendAfterUpload])
+     * shares the exact same emission semantics once the upload has resolved.
+     */
+    private fun emitSendRequest(withEnter: Boolean) {
+        if (_uiState.value.sendInFlight) return
         val draft = _uiState.value.draft
         val attachments = _uiState.value.attachments
-        val uploadInFlight = attachmentJob?.isActive == true
         // Issue #544: compose the outgoing prompt = the user's clean draft
         // + the "Attached files:" suffix appended at the END from whatever
         // tiles remain at send time. The draft stayed clean while composing;
@@ -702,36 +769,15 @@ public class PromptComposerViewModel @Inject constructor(
             "composer_send",
             "textBytes" to text.toByteArray(Charsets.UTF_8).size,
             "attachmentCount" to attachments.size,
-            "uploadInFlight" to uploadInFlight,
             "withEnter" to withEnter,
         )
-        // Issue #570: if the user sends while an attachment upload is still
-        // stuck, treat that send as a text-only send and stop the unfinished
-        // upload from writing a late error/result back into the in-flight
-        // composer state.
-        if (uploadInFlight) {
-            attachmentJob?.cancel()
-            attachmentJob = null
-        }
         // Issue #745: flip the composer into the IN-FLIGHT state and clear
         // any stale "Not sent" banner BEFORE emitting the request. The draft
         // and staged attachment TILES stay on screen (cleared only on
-        // confirmed delivery). The upload-PROGRESS banner is reset to Idle
-        // here when we cancelled a stuck upload above, since its owning
-        // coroutine was cancelled and will never clear it itself (#570). The
-        // send button reads `sendInFlight` to disable itself + show the
-        // "Sending…" spinner for immediate feedback the moment Send is tapped.
-        _uiState.update {
-            it.copy(
-                sendInFlight = true,
-                error = null,
-                attachmentUpload = if (uploadInFlight) {
-                    AttachmentUploadState.Idle
-                } else {
-                    it.attachmentUpload
-                },
-            )
-        }
+        // confirmed delivery). The send button reads `sendInFlight` to disable
+        // itself + show the "Sending…" spinner for immediate feedback the moment
+        // Send is tapped.
+        _uiState.update { it.copy(sendInFlight = true, error = null) }
         // Issue #254: a `Channel.trySend` buffers the item until a
         // collector consumes it, so a send dispatched while the sheet's
         // collector is mid-recreate (dismiss → re-open) is delivered to

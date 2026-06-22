@@ -3200,18 +3200,21 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun requestSendDuringAttachmentUploadSendsCurrentTextOnlyAndClearsBusyState() = runTest {
-        // Issue #570: an in-flight upload should not disable the user's typed
-        // prompt. Uploading files are not staged chips yet, so this sends the
-        // current text without waiting for the stalled attachment batch and
-        // cancels the unfinished upload so it cannot write a late error into
-        // the now-sent composer state.
+    fun requestSendDuringAttachmentUploadWaitsForUploadThenSendsWithAttachment() = runTest {
+        // Issue #570 (intent) + Issue #872 (reopen, HARD-CUT D22): tapping Send
+        // while an upload is in flight must NOT disable the typed prompt — and it
+        // must NOT silently drop the attachment by firing a text-only send (the
+        // old #570 behaviour, which was the maintainer's on-device "attachment
+        // lost" symptom). The send instead parks IN-FLIGHT, awaits the upload, and
+        // then dispatches WITH the freshly-staged attachment. The typed text is
+        // retained throughout (no flicker), and the "Sending…" state shows
+        // immediately so the user gets feedback the moment they tap Send.
         val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
         val sent = collectSendRequests(vm)
         val uploadStarted = CompletableDeferred<Unit>()
         val uploadResult = CompletableDeferred<Result<List<String>>>()
 
-        vm.attachFiles(count = 2) {
+        vm.attachFiles(count = 1) {
             uploadStarted.complete(Unit)
             uploadResult.await()
         }
@@ -3222,23 +3225,26 @@ class PromptComposerViewModelTest {
         vm.requestSend(withEnter = true)
         runCurrent()
 
+        // In-flight immediately, typed draft retained, but NO request emitted yet
+        // (we are waiting for the upload — never a text-only send).
+        assertTrue(vm.uiState.value.sendInFlight)
+        assertEquals("send this now", vm.uiState.value.draft)
+        assertTrue(sent.isEmpty())
+
+        // The upload now lands its attachment.
+        uploadResult.complete(
+            Result.success(listOf("~/.pocketshell/attachments/host-1/late.png")),
+        )
+        advanceUntilIdle()
+
+        // Exactly one send went out, carrying BOTH the text and the attachment.
         assertEquals(1, sent.size)
-        assertEquals("send this now", sent[0].text)
         assertEquals(true, sent[0].withEnter)
-        // Issue #745: in-flight — the typed draft is retained (no flicker).
+        assertEquals(1, sent[0].attachments.size)
+        assertTrue(sent[0].text.startsWith("send this now"))
+        assertTrue(sent[0].text.contains("late.png"))
         assertEquals("send this now", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
-        assertTrue(vm.uiState.value.attachments.isEmpty())
-        // The stuck upload was cancelled, so its progress banner is reset.
-        assertEquals(
-            PromptComposerViewModel.AttachmentUploadState.Idle,
-            vm.uiState.value.attachmentUpload,
-        )
-        assertNull(vm.uiState.value.error)
-
-        uploadResult.complete(Result.failure(IllegalStateException("late upload failure")))
-        advanceUntilIdle()
-        assertNull(vm.uiState.value.error)
     }
 
     @Test
@@ -3754,6 +3760,174 @@ class PromptComposerViewModelTest {
         vm.onComposerTargetChanged("1/a")
         assertTrue(vm.uiState.value.attachments.isEmpty())
         assertEquals("", vm.uiState.value.draft)
+    }
+
+    // -- Issue #872 PART B reopen (v0.4.14): the ACTUAL on-device drop ----------
+    //
+    // The maintainer's exact reopen wording (2026-06-22): "attaching a
+    // screenshot, tapping Send — something happens with the connection (a
+    // reconnect), the text message goes through but the ATTACHMENT is lost."
+    //
+    // The text goes through => this is the DELIVERED path, NOT restoreFailedSend.
+    // The 91510d0a fix only made restoreFailedSend durable — but the real drop is
+    // in dispatchSendNow's upload-in-flight branch: when a reconnect/transport
+    // flap slows the attachment SFTP upload so it is STILL in flight when Send
+    // fires, the old code CANCELLED the upload and sent text-only, silently
+    // eating the attachment (no tile carried, no durable ref, no error). That is
+    // why the fix didn't hold on device — the durable path never ran for this
+    // trigger.
+
+    @Test
+    fun sendWhileUploadStillInFlightDoesNotSilentlyDropTheAttachment() = runTest {
+        // REPRODUCES THE REOPEN (RED on base): attach a screenshot whose upload is
+        // still in flight (a reconnect/flap slowed the SFTP transfer), type a
+        // note, tap Send. On base the upload is cancelled and a TEXT-ONLY request
+        // goes out with ZERO attachments — the attachment is silently lost. The
+        // fix must instead AWAIT the in-flight upload and dispatch the send WITH
+        // the attachment once it stages — so the attachment is never dropped.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/sessionA")
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+
+        // The upload is gated so it is provably still in flight when Send fires
+        // (the maintainer's race: reconnect slows the SFTP transfer).
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+        vm.attachFiles(count = 1) {
+            uploadStarted.complete(Unit)
+            uploadResult.await()
+        }
+        runCurrent()
+        uploadStarted.await()
+        vm.onDraftChange("look at this screenshot")
+
+        // Tap Send WHILE the upload is still in flight.
+        vm.requestSend(withEnter = true)
+        runCurrent()
+
+        // No request has gone out yet — the send waits for the upload, instead of
+        // firing a text-only request and dropping the attachment.
+        assertTrue(
+            "Send must not fire a text-only request while the attachment upload " +
+                "is still in flight (that is the on-device silent drop).",
+            sent.isEmpty(),
+        )
+
+        // The upload now finishes (post-reconnect the SFTP transfer completes).
+        uploadResult.complete(
+            Result.success(listOf("~/.pocketshell/attachments/host-1/shot.png")),
+        )
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        // EXACTLY ONE send went out, and it CARRIES the attachment — text AND the
+        // attachment path. Base behaviour dropped it (0 attachments, no path).
+        assertEquals(1, sent.size)
+        assertEquals(1, sent[0].attachments.size)
+        assertEquals(
+            "~/.pocketshell/attachments/host-1/shot.png",
+            sent[0].attachments.single().remotePath,
+        )
+        assertTrue(
+            "The composed prompt must carry the attachment path.",
+            sent[0].text.contains("shot.png"),
+        )
+        assertTrue(sent[0].text.startsWith("look at this screenshot"))
+        // And the live tile is on screen while in flight (so Retry has it).
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertTrue(vm.uiState.value.sendInFlight)
+    }
+
+    @Test
+    fun sendWhileUploadInFlightThatThenFailsKeepsAttachmentDurableForRetry() = runTest {
+        // CLASS COVERAGE (G2): the SAME race, but the in-flight upload FAILS
+        // (genuine drop). The attachment intent must NOT vanish silently — the
+        // composer surfaces an error and keeps the typed draft so the user can
+        // re-attach + retry, instead of a text-only send sailing through with the
+        // attachment gone. On base the upload was cancelled and a text-only send
+        // fired (RED: 1 send, 0 attachments, no error).
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/sessionA")
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+        vm.attachFiles(count = 1) {
+            uploadStarted.complete(Unit)
+            uploadResult.await()
+        }
+        runCurrent()
+        uploadStarted.await()
+        vm.onDraftChange("look at this")
+
+        vm.requestSend(withEnter = true)
+        runCurrent()
+        assertTrue("No text-only send may fire while the upload is pending.", sent.isEmpty())
+
+        // The upload fails (the reconnect tore the SFTP transfer down).
+        uploadResult.complete(Result.failure(IllegalStateException("transport dropped")))
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        // NO send sailed through silently without the attachment. The draft is
+        // kept and an error is surfaced so the user can re-attach and retry.
+        assertTrue(
+            "A failed attachment upload must NOT let a text-only send sail " +
+                "through silently (the on-device 'attachment lost' symptom).",
+            sent.isEmpty(),
+        )
+        assertEquals("look at this", vm.uiState.value.draft)
+        assertNotNull(vm.uiState.value.error)
+        assertFalse(vm.uiState.value.sendInFlight)
+    }
+
+    @Test
+    fun sendWhileTwoAttachmentsUploadingCarriesBothNotZero() = runTest {
+        // CLASS COVERAGE (G2): MULTIPLE attachments uploading when Send fires.
+        // Base dropped all of them (text-only). The fix awaits and carries both.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+        vm.attachFiles(count = 2) {
+            uploadStarted.complete(Unit)
+            uploadResult.await()
+        }
+        runCurrent()
+        uploadStarted.await()
+        vm.onDraftChange("review both")
+
+        vm.requestSend(withEnter = true)
+        runCurrent()
+        assertTrue(sent.isEmpty())
+
+        uploadResult.complete(
+            Result.success(
+                listOf(
+                    "~/.pocketshell/attachments/host-1/a.png",
+                    "~/.pocketshell/attachments/host-1/b.png",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        assertEquals(1, sent.size)
+        assertEquals(2, sent[0].attachments.size)
+        assertTrue(sent[0].text.contains("a.png"))
+        assertTrue(sent[0].text.contains("b.png"))
     }
 
     @Test

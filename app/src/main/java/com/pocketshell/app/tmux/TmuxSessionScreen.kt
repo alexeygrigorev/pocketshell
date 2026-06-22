@@ -1195,6 +1195,13 @@ public fun TmuxSessionScreen(
                 viewModel.detachAndExit()
                 onBack()
             },
+            onRedraw = {
+                // Issue #892: close the menu, then force a full-viewport reseed of the
+                // active pane over the warm session. No reconnect/detach/new lease — the
+                // VM reuses the #553/#879 full-reseed path (capture-pane -> full repaint).
+                moreExpanded = false
+                viewModel.redrawActivePane()
+            },
         )
     }
 
@@ -3867,6 +3874,12 @@ internal const val TMUX_PORT_FORWARDING_BUTTON_TAG = "tmux:session:port-forwardi
 /** Issue #592: stable test tag for the tmux kebab's global Settings item. */
 internal const val TMUX_SETTINGS_BUTTON_TAG = "tmux:session:settings-button"
 /**
+ * Issue #892: stable test tag for the kebab's "Redraw" item. Tapping it forces a
+ * full-viewport reseed of the active pane over the warm session (no reconnect /
+ * detach / new lease) — the manual escape hatch from a black/partial-black terminal.
+ */
+internal const val TMUX_REDRAW_BUTTON_TAG = "tmux:session:redraw-button"
+/**
  * Issue #497: stable test tags for the kebab's "Open file…" item and the
  * path-entry dialog it opens, so instrumentation can drive
  * kebab -> enter path -> file viewer.
@@ -5406,6 +5419,11 @@ internal fun TmuxMoreMenu(
     // back to the sessions dashboard. The session itself stays alive
     // on the remote; reattach via the normal sessions-list path.
     onDetach: () -> Unit = {},
+    // Issue #892: "Redraw" — force a full-viewport reseed of the active pane over the
+    // warm session (no reconnect/detach/new lease) to recover from a black/partial
+    // terminal. Defaulted so existing direct callers / tests of TmuxMoreMenu stay
+    // source-compatible.
+    onRedraw: () -> Unit = {},
 ) {
     DropdownMenu(
         expanded = expanded,
@@ -5447,6 +5465,15 @@ internal fun TmuxMoreMenu(
             text = { Text("Detach") },
             onClick = onDetach,
             modifier = Modifier.testTag(TMUX_DETACH_BUTTON_TAG),
+        )
+        // Issue #892: manual escape hatch from a black/partial-black terminal — force a
+        // full-viewport reseed of the pane you're looking at, over the warm session (no
+        // reconnect / detach / new lease). Lives in the "This session" group because it
+        // acts on the current pane's display only.
+        DropdownMenuItem(
+            text = { Text("Redraw") },
+            onClick = onRedraw,
+            modifier = Modifier.testTag(TMUX_REDRAW_BUTTON_TAG),
         )
 
         // --- Sessions: move between / create sessions on this host. ---

@@ -2942,6 +2942,75 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #892: the on-demand "Redraw" escape hatch. The user taps the kebab's
+     * **Redraw** item to manually recover from a black/partial-black terminal (the
+     * dogfood screenshot: ~100% black with only a lone stray cursor cell). This forces
+     * a FULL-viewport reseed of the active pane over the WARM session — it REUSES the
+     * exact #553/#879 full-reseed machinery ([reseedActivePaneForReattach] →
+     * [seedPaneFromCapture] → [TerminalSurfaceState.appendRemoteOutput], which fires the
+     * #721 `_fullRepaintRequests` full clear+repaint) and the other-pane blank net.
+     *
+     * D21/D28 contract (a warm-session reseed ONLY — NO reconnect, detach, or new lease):
+     *  - It NEVER calls `connect()`, bumps [connectGeneration], evicts/acquires a lease,
+     *    or touches the reconnect/grace state machine. It runs entirely over the
+     *    already-live `clientRef` (`-CC` control channel) against the current runtime
+     *    guard, exactly like the within-grace foreground reseed does.
+     *  - It does NOT raise `_switchHidesTerminal` (no "Attaching…" overlay) and does NOT
+     *    change [_connectionStatus] — the status stays the calm `Connected`.
+     *
+     * It differs from [reseedVisiblePaneIfBlank] (the #662 switch heal) in that it is
+     * UNCONDITIONAL: the screenshot state is NOT `visibleScreenIsBlank()` (a stray cursor
+     * cell is painted) and the pane is usually already in [panesSeededThisAttach], so the
+     * blank-gated / freshly-seeded skips would no-op exactly when the user needs the
+     * redraw. So Redraw passes `skipWhenFreshlySeeded = false` to force the recapture for
+     * BOTH shell panes and idle agent/alt-screen panes (which never re-emit `%output` to
+     * heal themselves).
+     *
+     * A no-op (returns having logged) when nothing is attached / the client is gone — the
+     * kebab item is only reachable inside a live session, so that is the defensive guard.
+     */
+    public fun redrawActivePane() {
+        val client = clientRef ?: run {
+            Log.i(ISSUE_145_RECONNECT_TAG, "tmux-redraw-skip no-client")
+            return
+        }
+        if (client.disconnected.value) {
+            Log.i(ISSUE_145_RECONNECT_TAG, "tmux-redraw-skip client-disconnected")
+            return
+        }
+        val target = activeTarget ?: run {
+            Log.i(ISSUE_145_RECONNECT_TAG, "tmux-redraw-skip no-target")
+            return
+        }
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-redraw-active-pane generation=$connectGeneration " +
+                "session=${target.sessionName} status=${_connectionStatus.value}",
+        )
+        ReconnectCauseTrail.record(
+            stage = "manual_redraw",
+            outcome = "reseed_only",
+            cause = "user_redraw_request",
+            trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "clientHash" to System.identityHashCode(client),
+        )
+        viewModelScope.launch {
+            if (client.disconnected.value) return@launch
+            val guard = RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+            // UNCONDITIONAL full-viewport restore of the active pane + the blank net over
+            // any OTHER visible pane. skipWhenFreshlySeeded=false forces the recapture even
+            // for a pane already seeded this attach — the whole point of a manual Redraw.
+            reseedActivePaneForReattach(guard, skipWhenFreshlySeeded = false)
+        }
+    }
+
+    /**
      * EPIC #687 P3 (J2/#553): the id-tagged FULL-VIEWPORT reseed for a within-grace
      * reattach. Unlike [reseedBlankVisiblePanes] (which `continue`s on any pane that is
      * not `transcriptText.isBlank()`), this UNCONDITIONALLY re-captures the active

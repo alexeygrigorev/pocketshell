@@ -1664,6 +1664,8 @@ class DesignRenders {
                     "What is this session?",
                     "Stop session",
                     "Detach",
+                    // Issue #892: manual full-viewport reseed escape hatch.
+                    "Redraw",
                 ),
                 "Sessions" to listOf(
                     "+ New session",

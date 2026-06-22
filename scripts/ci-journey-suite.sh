@@ -333,6 +333,20 @@ JOURNEY_CLASSES=(
   # partial blank is injected LOCALLY on the emulator, no toxiproxy), and does NOT
   # self-skip on CI, so it belongs in this per-push subset.
   "$FQCN_PREFIX.ReconnectPartialBlankReseedJourneyE2eTest"
+  # ADDED (#892 — the manual "Redraw" kebab escape hatch): the maintainer dogfooded a
+  # connected Claude session that came back ~100% BLACK with only a stray cursor cell
+  # (the partial-repaint class) and asked for a one-tap Redraw that force-repaints the
+  # whole terminal. This journey attaches a full-viewport static-banner pane, wipes the
+  # LIVE emulator to that black state (a local `CSI 2J`+`CSI H` — the REMOTE tmux grid
+  # still holds the banner), then OPENS the kebab and TAPS the stable-tagged Redraw item.
+  # RED on base (no `redrawActivePane()` reseed wired → nothing re-captures the warm pane
+  # → banner never returns); GREEN with the fix (the warm-session full-viewport reseed —
+  # the SAME #553/#879 `reseedActivePaneForReattach` path, UNCONDITIONAL — restores the
+  # full banner, with NO reconnect/detach/new lease and the session staying Connected).
+  # Two tests cover BOTH a shell pane AND an idle alt-screen (Claude/Codex) pane (D32 G2).
+  # Uses ONLY the deterministic agents:2222 fixture (the black state is injected LOCALLY
+  # on the emulator, no toxiproxy) and does NOT self-skip on CI, so it belongs here.
+  "$FQCN_PREFIX.RedrawFullViewportReseedJourneyE2eTest"
   # ADDED (epic #687 slice 2, #717 — reveal/reflow-heal absorbed from #658): after a
   # voice-send the active pane must NEVER go black. The composer/keyboard dismissal
   # shrinks the IME inset → `resizeRemotePty` → `maybeRefreshControlClientSize`; for an

@@ -99,6 +99,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.conversation.ConversationImageViewModel
@@ -2431,8 +2432,6 @@ public fun TmuxSessionScreen(
         // so the sent prompt appears in the transcript — exactly what the
         // old in-pane composer did. Terminal-tab sends keep the raw
         // write-bytes path.
-        val viewingConversation = currentAgentConversation?.detection != null &&
-            currentAgentConversation.selectedTab == SessionTab.Conversation
         // Issue #755: the terminal hotkey key bar now rides INSIDE the composer's
         // inset-anchored column (PR2 of the composer redesign), so it can never be
         // gone (hard-cut, D22). The terminal hotkeys now live in the dedicated
@@ -2460,7 +2459,25 @@ public fun TmuxSessionScreen(
             // send while the SSH/tmux link is degraded shows a connection-lost
             // indicator immediately rather than leaving the user waiting blind.
             connectionLost = !sessionLive,
-            onSend = { text, withEnter ->
+            sendTargetSnapshotProvider = { withEnter ->
+                val pane = surfacePane
+                val liveAgent = currentAgentConversation?.detection?.agent
+                val viewingConversationNow = currentAgentConversation?.detection != null &&
+                    currentAgentConversation.selectedTab == SessionTab.Conversation
+                val route = tmuxComposerSendRoute(
+                    viewingConversation = viewingConversationNow,
+                    liveAgent = liveAgent,
+                    presumedAgentKind = presumedAgentKind,
+                    withEnter = withEnter,
+                )
+                tmuxComposerSendTargetSnapshot(
+                    sessionKey = targetSessionId.value,
+                    paneId = pane?.paneId,
+                    route = route,
+                    agentKind = liveAgent ?: presumedAgentKind,
+                )
+            },
+            onSend = { request ->
                 // Issue #548: send is a connect-on-action path. If the
                 // control channel dropped while the composer was open, let
                 // the ViewModel kick/reuse reconnect and wait for the live
@@ -2473,41 +2490,33 @@ public fun TmuxSessionScreen(
                 // leaving session: while a switch hides the terminal `surfacePane`
                 // is null (the composer is itself suppressed), so a send can only
                 // land on the session the user is actually looking at.
-                val pane = surfacePane
-                if (pane == null) {
+                val target = request.sendTarget
+                if (target.sessionKey.isNotBlank() && target.sessionKey != targetSessionId.value) {
                     false
                 } else {
-                    val liveAgent = currentAgentConversation?.detection?.agent
-                    // Issue #716: a presumed-agent pane with no live detection
-                    // routes the send to the agent (payload formatting), not
-                    // raw bytes, using its sticky/last-known kind.
-                    val route = tmuxComposerSendRoute(
-                        viewingConversation = viewingConversation,
-                        liveAgent = liveAgent,
-                        presumedAgentKind = presumedAgentKind,
-                        withEnter = withEnter,
-                    )
-                    val sent = when (route) {
+                    val paneId = target.paneId.ifBlank { surfacePane?.paneId.orEmpty() }
+                    val sent = if (paneId.isBlank()) {
+                        false
+                    } else when (target.route) {
                         // Conversation tab: submit to the agent and echo the
                         // optimistic user Message into the feed (#459).
-                        TmuxComposerSendRoute.AgentConversation ->
-                            viewModel.sendToAgentPaneResult(pane.paneId, text).isSuccess
+                        OutboundRoute.AgentConversation ->
+                            viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
                         // Agent payload formatting: the Codex with-Enter case
                         // (live agent) or a presumed-agent send (#716). The
-                        // agent kind is the live one when present, else the
-                        // sticky/last-known presumed kind.
-                        TmuxComposerSendRoute.AgentPayload ->
-                            (liveAgent ?: presumedAgentKind)?.let { agentKind ->
+                        // agent kind was captured with the route at tap time.
+                        OutboundRoute.AgentPayload ->
+                            tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
                                 viewModel.sendAgentPayloadToPaneResult(
-                                    pane.paneId,
-                                    text,
+                                    paneId,
+                                    request.text,
                                     agentKind,
                                 ).isSuccess
                             } ?: false
-                        TmuxComposerSendRoute.RawBytes -> {
-                            val payload = if (withEnter) text + "\r" else text
+                        OutboundRoute.RawBytes -> {
+                            val payload = if (request.withEnter) request.text + "\r" else request.text
                             viewModel.writeInputToPaneResult(
-                                pane.paneId,
+                                paneId,
                                 payload.toByteArray(Charsets.UTF_8),
                             ).isSuccess
                         }
@@ -3430,6 +3439,39 @@ internal fun tmuxComposerSendRoute(
     presumedAgentKind != null -> TmuxComposerSendRoute.AgentPayload
     else -> TmuxComposerSendRoute.RawBytes
 }
+
+internal fun tmuxComposerOutboundRoute(route: TmuxComposerSendRoute): OutboundRoute = when (route) {
+    TmuxComposerSendRoute.AgentConversation -> OutboundRoute.AgentConversation
+    TmuxComposerSendRoute.AgentPayload -> OutboundRoute.AgentPayload
+    TmuxComposerSendRoute.RawBytes -> OutboundRoute.RawBytes
+}
+
+internal fun tmuxComposerAgentToken(agent: AgentKind?): String? = when (agent) {
+    AgentKind.ClaudeCode -> "claude"
+    AgentKind.Codex -> "codex"
+    AgentKind.OpenCode -> "opencode"
+    null -> null
+}
+
+internal fun tmuxComposerAgentKindFromToken(token: String?): AgentKind? = when (token?.lowercase()) {
+    "claude", "claudecode", "claude_code" -> AgentKind.ClaudeCode
+    "codex" -> AgentKind.Codex
+    "opencode", "open_code" -> AgentKind.OpenCode
+    else -> null
+}
+
+internal fun tmuxComposerSendTargetSnapshot(
+    sessionKey: String,
+    paneId: String?,
+    route: TmuxComposerSendRoute,
+    agentKind: AgentKind?,
+): PromptComposerViewModel.SendTargetSnapshot =
+    PromptComposerViewModel.SendTargetSnapshot(
+        sessionKey = sessionKey,
+        paneId = paneId.orEmpty(),
+        route = tmuxComposerOutboundRoute(route),
+        agentKind = tmuxComposerAgentToken(agentKind),
+    )
 
 internal fun handleTmuxSessionSelection(
     currentSessionName: String,

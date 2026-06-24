@@ -125,7 +125,7 @@ class PromptComposerImeLayoutRegressionTest {
                                 dismissed = true
                                 composerVisible.value = false
                             },
-                            onSend = { _, _ -> true },
+                            onSend = { _ -> true },
                             viewModel = vm,
                         )
                     }
@@ -296,7 +296,7 @@ class PromptComposerImeLayoutRegressionTest {
                     FauxTerminalBackdrop()
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _, _ -> true },
+                        onSend = { _ -> true },
                         viewModel = vm,
                     )
                 }

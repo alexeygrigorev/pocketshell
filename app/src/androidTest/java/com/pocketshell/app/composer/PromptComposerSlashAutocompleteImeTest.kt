@@ -106,7 +106,7 @@ class PromptComposerSlashAutocompleteImeTest {
                     FauxTerminalBackdrop()
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _, _ -> true },
+                        onSend = { _ -> true },
                         viewModel = vm,
                         // Issue #767: a Claude Code pane — the dropdown filters
                         // the Claude catalog.

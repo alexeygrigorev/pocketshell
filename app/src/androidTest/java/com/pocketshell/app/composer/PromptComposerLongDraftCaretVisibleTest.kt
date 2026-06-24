@@ -124,7 +124,7 @@ class PromptComposerLongDraftCaretVisibleTest {
                     FauxTerminalBackdrop()
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _, _ -> true },
+                        onSend = { _ -> true },
                         viewModel = vm,
                     )
                 }

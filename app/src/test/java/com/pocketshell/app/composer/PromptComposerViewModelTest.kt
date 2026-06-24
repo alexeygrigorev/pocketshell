@@ -3098,6 +3098,133 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun requestSendInIdleCarriesTapTimeSendTargetSnapshot() = runTest {
+        // Issue #900: the route metadata is captured when Send is tapped and
+        // carried with the one-shot request. Existing callers use the default
+        // empty RawBytes target; route-aware callers pass a concrete snapshot.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "session-A",
+            paneId = "%1",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+        vm.onDraftChange("hello target")
+
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        assertEquals("hello target", sent[0].text)
+        assertEquals(target, sent[0].sendTarget)
+    }
+
+    @Test
+    fun requestSendWhileRecordingPreservesOriginalSendTargetSnapshot() = runTest {
+        // Issue #900: a Send tap during Recording first stops the recorder and
+        // transcribes. The eventual request must keep the target captured from
+        // the original tap.
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("recording target") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+        val originalTarget = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "session-recording",
+            paneId = "%4",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        vm.requestSend(withEnter = true, sendTarget = originalTarget)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        assertEquals("recording target", sent[0].text)
+        assertEquals(originalTarget, sent[0].sendTarget)
+    }
+
+    @Test
+    fun requestSendWhileTranscribingPreservesOriginalSendTargetSnapshot() = runTest {
+        // Issue #900: a Send tap during Transcribing is deferred until the
+        // transcript lands. The emitted request must still target the pane that
+        // was current at tap time, not a later focus snapshot.
+        val release = CompletableDeferred<Unit>()
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                release.await()
+                return Result.success("deferred target")
+            }
+        }
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+        val originalTarget = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "session-original",
+            paneId = "%2",
+            route = OutboundRoute.AgentConversation,
+            agentKind = "claude",
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        vm.requestSend(withEnter = false, sendTarget = originalTarget)
+        runCurrent()
+        assertEquals(0, sent.size)
+
+        release.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        assertEquals("deferred target", sent[0].text)
+        assertEquals(originalTarget, sent[0].sendTarget)
+    }
+
+    @Test
+    fun requestSendWhileAttachmentUploadInFlightPreservesOriginalSendTargetSnapshot() = runTest {
+        // Issue #900: the upload-wait deferral must emit with the target from
+        // the original Send tap after the staged attachment arrives.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val sent = collectSendRequests(vm)
+        val uploadRelease = CompletableDeferred<Result<List<String>>>()
+        val originalTarget = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "session-upload",
+            paneId = "%3",
+            route = OutboundRoute.RawBytes,
+            agentKind = null,
+        )
+        vm.onDraftChange("send after upload")
+        vm.attachFiles(count = 1) {
+            uploadRelease.await()
+        }
+        runCurrent()
+
+        vm.requestSend(withEnter = true, sendTarget = originalTarget)
+        runCurrent()
+        assertEquals(0, sent.size)
+
+        uploadRelease.complete(Result.success(listOf("~/.pocketshell/attachments/host-1/shot.png")))
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        assertEquals(originalTarget, sent[0].sendTarget)
+        assertEquals(1, sent[0].attachments.size)
+    }
+
+    @Test
     fun requestSendWhileInFlightDoesNotQueueASecondRequest() = runTest {
         // Issue #745: a second Send tap while the first is still resolving is a
         // no-op (the button is already disabled in the UI, but the VM also
@@ -3730,6 +3857,66 @@ class PromptComposerViewModelTest {
         assertNull(store.load("1/a"))
 
         vm.onComposerTargetChanged("1/b")
+        vm.onComposerTargetChanged("1/a")
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun restoreFailedSendUsesRequestTargetWhenCurrentComposerMoved() = runTest {
+        // Issue #900: a send can resolve after the user has switched sessions.
+        // The failed draft belongs to the tap-time session carried by the request,
+        // not whatever composer target is current when the callback returns.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/a")
+        val request = PromptComposerViewModel.SendRequest(
+            text = "draft for A",
+            withEnter = true,
+            sendTarget = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/a"),
+        )
+
+        vm.onComposerTargetChanged("1/b")
+        vm.onDraftChange("draft for B")
+        vm.restoreFailedSend(request)
+
+        assertEquals("draft for B", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.error)
+        assertEquals("draft for A", store.load("1/a"))
+        assertEquals("draft for B", store.load("1/b"))
+
+        vm.onComposerTargetChanged("1/a")
+        assertEquals("draft for A", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun deliveredSendUsesRequestTargetWhenCurrentComposerMoved() = runTest {
+        // Issue #900: the success path has the same stale-callback risk as
+        // restore. A delayed success for A must clear A's durable draft without
+        // clearing B's currently visible draft.
+        val store = InMemoryComposerDraftStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged("1/a")
+        vm.onDraftChange("about to send")
+        val request = PromptComposerViewModel.SendRequest(
+            text = "about to send",
+            withEnter = true,
+            sendTarget = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/a"),
+        )
+
+        vm.onComposerTargetChanged("1/b")
+        vm.onDraftChange("draft for B")
+        vm.markSendDelivered(request)
+
+        assertNull(store.load("1/a"))
+        assertEquals("draft for B", vm.uiState.value.draft)
+        assertEquals("draft for B", store.load("1/b"))
+
         vm.onComposerTargetChanged("1/a")
         assertEquals("", vm.uiState.value.draft)
     }

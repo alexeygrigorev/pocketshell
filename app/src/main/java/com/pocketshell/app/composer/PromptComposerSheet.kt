@@ -183,7 +183,7 @@ import java.util.Locale
 @Composable
 public fun PromptComposerSheet(
     onDismiss: () -> Unit,
-    onSend: suspend (text: String, withEnter: Boolean) -> Boolean,
+    onSend: suspend (PromptComposerViewModel.SendRequest) -> Boolean,
     modifier: Modifier = Modifier,
     hostId: Long? = null,
     // Issue #745: live SSH/tmux connection liveness pushed from the host
@@ -209,6 +209,12 @@ public fun PromptComposerSheet(
     // Codex pane offers Codex's. Null on a plain shell pane / non-agent surface,
     // where the dropdown is simply never offered.
     agentKind: AgentKind? = null,
+    // Issue #900: optional tap-time route metadata provider for the eventual
+    // outbound queue. Called synchronously from the Send tap path before any
+    // recording/transcription/upload deferral can shift the focused pane.
+    sendTargetSnapshotProvider: (withEnter: Boolean) -> PromptComposerViewModel.SendTargetSnapshot = {
+        PromptComposerViewModel.SendTargetSnapshot()
+    },
     viewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #234: the composer is partial-expand by default so the terminal
     // viewport behind it stays visible. With `skipPartiallyExpanded = false`,
@@ -308,6 +314,7 @@ public fun PromptComposerSheet(
     // already-queued sends.
     val currentOnSend by rememberUpdatedState(onSend)
     val currentOnDismiss by rememberUpdatedState(onDismiss)
+    val currentSendTargetSnapshotProvider by rememberUpdatedState(sendTargetSnapshotProvider)
     LaunchedEffect(viewModel) {
         viewModel.sendRequests.collect { request ->
             // Issue #745: bound the send so the in-flight state can never hang.
@@ -317,14 +324,14 @@ public fun PromptComposerSheet(
             // instead of leaving the composer stuck on "Sending…". A null
             // (timeout) is treated exactly like a `false` (failed) send.
             val delivered = withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
-                currentOnSend(request.text, request.withEnter)
+                currentOnSend(request)
             } == true
             if (delivered) {
                 // Issue #745: only NOW clear the draft + staged attachments —
                 // the bytes are confirmed delivered, so there is no flicker of
                 // an optimistically-emptied field. Then dismiss the sheet so
                 // the user lands back on the terminal.
-                viewModel.markSendDelivered()
+                viewModel.markSendDelivered(request)
                 currentOnDismiss()
             } else {
                 viewModel.restoreFailedSend(request)
@@ -437,7 +444,10 @@ public fun PromptComposerSheet(
                 // ViewModel emits via `sendRequests` once the dispatch
                 // is ready; the `LaunchedEffect` above forwards it into
                 // the host's `onSend` + `onDismiss`.
-                viewModel.requestSend(withEnter)
+                viewModel.requestSend(
+                    withEnter = withEnter,
+                    sendTarget = currentSendTargetSnapshotProvider(withEnter),
+                )
             },
             onSnippets = if (hostId != null) {
                 { showSnippetPicker = true }

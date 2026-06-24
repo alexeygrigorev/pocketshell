@@ -251,6 +251,7 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private var pendingSendOnTranscribeSuccess: Boolean = false
     private var pendingSendWithEnter: Boolean = false
+    private var pendingSendTarget: SendTargetSnapshot = SendTargetSnapshot()
     private var attachmentJob: Job? = null
 
     /**
@@ -679,19 +680,30 @@ public class PromptComposerViewModel @Inject constructor(
      * Transcribing without dispatching nonsense in Idle. Tests and
      * non-Hilt callers reading the flow get the exact same semantics.
      */
-    public fun requestSend(withEnter: Boolean) {
+    public fun requestSend(
+        withEnter: Boolean,
+        sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
+    ) {
         when (_uiState.value.recording) {
-            RecordingState.Idle -> dispatchSendNow(withEnter)
+            RecordingState.Idle -> dispatchSendNow(withEnter, sendTarget)
             RecordingState.Recording -> {
                 pendingSendOnTranscribeSuccess = true
                 pendingSendWithEnter = withEnter
+                pendingSendTarget = sendTarget
                 stopAndTranscribe()
             }
             RecordingState.Transcribing -> {
                 pendingSendOnTranscribeSuccess = true
                 pendingSendWithEnter = withEnter
+                pendingSendTarget = sendTarget
             }
         }
+    }
+
+    private fun clearPendingTranscriptionSend() {
+        pendingSendOnTranscribeSuccess = false
+        pendingSendWithEnter = false
+        pendingSendTarget = SendTargetSnapshot()
     }
 
     /**
@@ -735,7 +747,10 @@ public class PromptComposerViewModel @Inject constructor(
      * a no-op when a send is already in flight so a double-tap can't queue a
      * second request while the first is still resolving.
      */
-    private fun dispatchSendNow(withEnter: Boolean) {
+    private fun dispatchSendNow(
+        withEnter: Boolean,
+        sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
+    ) {
         if (_uiState.value.sendInFlight) return
         // Issue #872 (Part B reopen, v0.4.14): if the user taps Send while an
         // attachment upload is STILL in flight, the old code cancelled the upload
@@ -751,10 +766,10 @@ public class PromptComposerViewModel @Inject constructor(
         // carried — or, if the upload failed, surface the error and keep the draft
         // (no silent text-only send). The user never loses the attachment.
         if (attachmentJob?.isActive == true) {
-            dispatchSendAfterUpload(withEnter)
+            dispatchSendAfterUpload(withEnter, sendTarget)
             return
         }
-        emitSendRequest(withEnter)
+        emitSendRequest(withEnter, sendTarget)
     }
 
     /**
@@ -768,7 +783,10 @@ public class PromptComposerViewModel @Inject constructor(
      * drop: there is no code path that emits a text-only send while an attachment
      * was being uploaded.
      */
-    private fun dispatchSendAfterUpload(withEnter: Boolean) {
+    private fun dispatchSendAfterUpload(
+        withEnter: Boolean,
+        sendTarget: SendTargetSnapshot,
+    ) {
         DiagnosticEvents.record("action", "composer_send_wait_upload")
         // Flip into the in-flight state up front so the UI reflects "Sending…"
         // and the in-flight guard blocks a double-tap while we await the upload.
@@ -778,7 +796,7 @@ public class PromptComposerViewModel @Inject constructor(
         // a wedged upload-await could otherwise leave "Sending…" stuck forever.
         // emitSendRequest re-arms it (idempotent) once the upload resolves.
         armSendWatchdog()
-        val job = attachmentJob ?: return emitSendRequest(withEnter)
+        val job = attachmentJob ?: return emitSendRequest(withEnter, sendTarget)
         viewModelScope.launch {
             // Await the upload coroutine itself; `attachFiles` resolves the UI
             // state (tiles staged on success, error banner on failure) before it
@@ -802,7 +820,7 @@ public class PromptComposerViewModel @Inject constructor(
             // flag so `emitSendRequest` can re-set it on the real dispatch (its
             // own #745 in-flight contract), then dispatch WITH the attachment.
             _uiState.update { it.copy(sendInFlight = false) }
-            emitSendRequest(withEnter)
+            emitSendRequest(withEnter, sendTarget)
         }
     }
 
@@ -812,7 +830,10 @@ public class PromptComposerViewModel @Inject constructor(
      * of [dispatchSendNow] so the upload-await path ([dispatchSendAfterUpload])
      * shares the exact same emission semantics once the upload has resolved.
      */
-    private fun emitSendRequest(withEnter: Boolean) {
+    private fun emitSendRequest(
+        withEnter: Boolean,
+        sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
+    ) {
         if (_uiState.value.sendInFlight) return
         val draft = _uiState.value.draft
         val attachments = _uiState.value.attachments
@@ -856,6 +877,7 @@ public class PromptComposerViewModel @Inject constructor(
                 // not the paths-folded-into-text proxy.
                 cleanDraft = draft,
                 attachments = attachments,
+                sendTarget = sendTarget,
             ),
         )
     }
@@ -869,10 +891,22 @@ public class PromptComposerViewModel @Inject constructor(
      * [dispatchSendNow] is what removes the optimistic-empty flicker: the
      * field never empties until the bytes are actually delivered.
      */
-    public fun markSendDelivered() {
+    public fun markSendDelivered(request: SendRequest? = null) {
         // Issue #891: the send resolved successfully — disarm the overall-send
         // watchdog so it cannot fire a spurious "Send failed" afterwards.
         disarmSendWatchdog()
+        val deliveryTarget = request?.sendTarget?.sessionKey?.takeIf { it.isNotBlank() } ?: composerTarget
+        if (deliveryTarget != null && deliveryTarget != composerTarget) {
+            composerDraftStore.clear(deliveryTarget)
+            composerDraftStore.clearAttachments(deliveryTarget)
+            _uiState.update {
+                it.copy(
+                    sendInFlight = false,
+                    attachmentUpload = AttachmentUploadState.Idle,
+                )
+            }
+            return
+        }
         _uiState.update {
             it.copy(
                 sendInFlight = false,
@@ -922,17 +956,32 @@ public class PromptComposerViewModel @Inject constructor(
             if (request.attachments.isEmpty()) request.text else ""
         }
         val restoredAttachments = request.attachments
+        val restoreTarget = request.sendTarget.sessionKey.takeIf { it.isNotBlank() } ?: composerTarget
+        if (restoreTarget != null && restoreTarget != composerTarget) {
+            composerDraftStore.save(restoreTarget, restoredDraft)
+            composerDraftStore.saveAttachments(restoreTarget, restoredAttachments.toDurableRefs())
+            _uiState.update { current ->
+                current.copy(
+                    recording = RecordingState.Idle,
+                    amplitude = 0f,
+                    recordingLocked = false,
+                    sendInFlight = false,
+                    attachmentUpload = AttachmentUploadState.Idle,
+                )
+            }
+            return
+        }
         savedStateHandle[KEY_DRAFT] = restoredDraft
         // Issue #746: a restored "Not sent" draft belongs to the session it
         // was sent from. Stamp the owner so switching away discards it rather
         // than carrying the banner into an unrelated session.
-        savedStateHandle[KEY_DRAFT_OWNER] = composerTarget
+        savedStateHandle[KEY_DRAFT_OWNER] = restoreTarget
         // Issue #832 / #872: the failed-send draft + staged attachments are the
         // EXACT case the maintainer reported losing. Persist BOTH to the durable
         // per-session store so switching away and back reloads them (the "Your
         // draft was kept" promise becomes recoverable, not just true for an
         // instant — and now covers the attachment, not just the text).
-        composerTarget?.let { target ->
+        restoreTarget?.let { target ->
             composerDraftStore.save(target, restoredDraft)
             composerDraftStore.saveAttachments(target, restoredAttachments.toDurableRefs())
         }
@@ -1492,8 +1541,7 @@ public class PromptComposerViewModel @Inject constructor(
             // — there is no audio buffer to transcribe and therefore no
             // transcript to send. The user sees the mic error and can
             // re-record or send manually.
-            pendingSendOnTranscribeSuccess = false
-            pendingSendWithEnter = false
+            clearPendingTranscriptionSend()
             activeProvider = null
             DiagnosticEvents.record(
                 "action",
@@ -1521,8 +1569,7 @@ public class PromptComposerViewModel @Inject constructor(
             savedStateHandle[KEY_WAS_RECORDING] = false
             // Issue #211: same reasoning as the AudioRecorderException
             // branch — no audio means no transcript to send.
-            pendingSendOnTranscribeSuccess = false
-            pendingSendWithEnter = false
+            clearPendingTranscriptionSend()
             activeProvider = null
             DiagnosticEvents.record(
                 "action",
@@ -1546,8 +1593,7 @@ public class PromptComposerViewModel @Inject constructor(
         // below the conservative speech threshold, queue the recording for
         // retry/export instead of throwing it away as plain silence.
         if (!SpeechAudioGuard.hasSpeechEnergy(audio)) {
-            pendingSendOnTranscribeSuccess = false
-            pendingSendWithEnter = false
+            clearPendingTranscriptionSend()
             val recoverableNoSpeech = SpeechAudioGuard.isRecoverableNoSpeechRejection(audio)
             DiagnosticEvents.record(
                 "action",
@@ -1618,8 +1664,7 @@ public class PromptComposerViewModel @Inject constructor(
                 // and transcribe — drop the queued send for the same
                 // reason the offline path does. No transcript means
                 // nothing to send.
-                pendingSendOnTranscribeSuccess = false
-                pendingSendWithEnter = false
+                clearPendingTranscriptionSend()
                 activeProvider = null
                 DiagnosticEvents.record(
                     "action",
@@ -1682,8 +1727,7 @@ public class PromptComposerViewModel @Inject constructor(
                 // safely on disk, so retry-after-online routes the
                 // transcript back into the draft and the user can tap
                 // Send manually then.
-                pendingSendOnTranscribeSuccess = false
-                pendingSendWithEnter = false
+                clearPendingTranscriptionSend()
                 activeProvider = null
                 DiagnosticEvents.record(
                     "action",
@@ -1722,8 +1766,7 @@ public class PromptComposerViewModel @Inject constructor(
                                 )
                             }
                         }
-                        pendingSendOnTranscribeSuccess = false
-                        pendingSendWithEnter = false
+                        clearPendingTranscriptionSend()
                         activeProvider = null
                         DiagnosticEvents.record(
                             "action",
@@ -1764,8 +1807,7 @@ public class PromptComposerViewModel @Inject constructor(
                                 )
                             }
                         }
-                        pendingSendOnTranscribeSuccess = false
-                        pendingSendWithEnter = false
+                        clearPendingTranscriptionSend()
                         activeProvider = null
                         DiagnosticEvents.record(
                             "action",
@@ -1801,8 +1843,8 @@ public class PromptComposerViewModel @Inject constructor(
                     // and the success block runs after that.
                     val pendingSend = pendingSendOnTranscribeSuccess
                     val pendingWithEnter = pendingSendWithEnter
-                    pendingSendOnTranscribeSuccess = false
-                    pendingSendWithEnter = false
+                    val pendingTarget = pendingSendTarget
+                    clearPendingTranscriptionSend()
 
                     val combinedDraft = _uiState.updateAndReturnDraft { current ->
                         val sep = if (current.isEmpty() || current.endsWith(" ")) "" else " "
@@ -1830,7 +1872,7 @@ public class PromptComposerViewModel @Inject constructor(
                         // freshly-transcribed text). The
                         // [dispatchSendNow] call also clears the draft
                         // so the next composer open starts blank.
-                        dispatchSendNow(pendingWithEnter)
+                        dispatchSendNow(pendingWithEnter, pendingTarget)
                     }
                     activeProvider = null
                 },
@@ -1842,8 +1884,7 @@ public class PromptComposerViewModel @Inject constructor(
                     // queued audio (#180) or type + send manually. The
                     // audio is still in the pending-transcription queue so
                     // the user can retry from the banner.
-                    pendingSendOnTranscribeSuccess = false
-                    pendingSendWithEnter = false
+                    clearPendingTranscriptionSend()
                     activeProvider = null
                     // Issue #587: publish the retryable error state before
                     // updating the pending row. The audio was already queued
@@ -1960,8 +2001,8 @@ public class PromptComposerViewModel @Inject constructor(
         applyLiveSpeechTranscript(text)
         val pendingSend = pendingSendOnTranscribeSuccess
         val pendingWithEnter = pendingSendWithEnter
-        pendingSendOnTranscribeSuccess = false
-        pendingSendWithEnter = false
+        val pendingTarget = pendingSendTarget
+        clearPendingTranscriptionSend()
         clearAndroidSpeechSession()
 
         _uiState.update {
@@ -1976,7 +2017,7 @@ public class PromptComposerViewModel @Inject constructor(
         }
 
         if (pendingSend) {
-            dispatchSendNow(pendingWithEnter)
+            dispatchSendNow(pendingWithEnter, pendingTarget)
         }
         DiagnosticEvents.record(
             "action",
@@ -1993,8 +2034,7 @@ public class PromptComposerViewModel @Inject constructor(
             finishAndroidSpeechRecognition(liveSpeechLastTranscript)
             return
         }
-        pendingSendOnTranscribeSuccess = false
-        pendingSendWithEnter = false
+        clearPendingTranscriptionSend()
         clearAndroidSpeechSession()
         _uiState.update {
             it.copy(
@@ -2017,8 +2057,7 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun cancelAndroidSpeechRecognition() {
         val restoredDraft = liveSpeechBaseDraft
-        pendingSendOnTranscribeSuccess = false
-        pendingSendWithEnter = false
+        clearPendingTranscriptionSend()
         clearAndroidSpeechSession()
         savedStateHandle[KEY_DRAFT] = restoredDraft
         _uiState.update {
@@ -2365,8 +2404,7 @@ public class PromptComposerViewModel @Inject constructor(
         // typed draft is still preserved verbatim below, so the user
         // can re-tap Send manually if they want to send just the typed
         // text without a fresh dictation.
-        pendingSendOnTranscribeSuccess = false
-        pendingSendWithEnter = false
+        clearPendingTranscriptionSend()
         activeProvider = null
 
         // Stop the mic and drop whatever bytes came back. The capture
@@ -2425,8 +2463,7 @@ public class PromptComposerViewModel @Inject constructor(
         }
         transcribeJob?.cancel()
         transcribeJob = null
-        pendingSendOnTranscribeSuccess = false
-        pendingSendWithEnter = false
+        clearPendingTranscriptionSend()
         activeProvider = null
         savedStateHandle[KEY_WAS_RECORDING] = false
         _uiState.update {
@@ -2563,6 +2600,22 @@ public class PromptComposerViewModel @Inject constructor(
         val displayName: String,
         val previewUri: Uri? = null,
         val mimeType: String? = null,
+    )
+
+    /**
+     * Issue #900: tap-time snapshot of the route the Send action targeted.
+     * The composer captures this before any deferred work (dictation finish or
+     * attachment-upload wait) so the eventual [SendRequest] still points at the
+     * pane/session the user committed to when they tapped Send.
+     *
+     * Defaults are intentionally empty/safe so legacy callers can construct
+     * sends without knowing about the outbound queue metadata yet.
+     */
+    public data class SendTargetSnapshot(
+        val sessionKey: String = "",
+        val paneId: String = "",
+        val route: OutboundRoute = OutboundRoute.RawBytes,
+        val agentKind: String? = null,
     )
 
     /**
@@ -2712,6 +2765,13 @@ public class PromptComposerViewModel @Inject constructor(
          */
         val cleanDraft: String = text,
         val attachments: List<StagedAttachment> = emptyList(),
+        /**
+         * Issue #900: route metadata captured at Send tap time. This is not
+         * wired to the durable outbound queue in this slice; it only travels
+         * with the request so later queue wiring can enqueue against the
+         * original target rather than whatever pane is focused after a deferral.
+         */
+        val sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
     )
 
     /**

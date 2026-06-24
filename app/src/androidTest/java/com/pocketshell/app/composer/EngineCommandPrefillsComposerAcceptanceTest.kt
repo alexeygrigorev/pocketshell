@@ -143,7 +143,7 @@ class EngineCommandPrefillsComposerAcceptanceTest {
                     if (showSheet) {
                         PromptComposerSheet(
                             onDismiss = { showSheet = false },
-                            onSend = { _, _ ->
+                            onSend = { _ ->
                                 sendCalled = true
                                 true
                             },

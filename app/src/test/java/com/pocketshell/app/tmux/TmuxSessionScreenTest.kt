@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.layout.imeKeyboardPanOffsetPx
 import com.pocketshell.app.session.AgentConversationUiState
@@ -753,6 +754,71 @@ class TmuxSessionScreenTest {
                 withEnter = false,
             ),
         )
+    }
+
+    @Test
+    fun composerOutboundRouteMapsAllRoutes() {
+        assertEquals(
+            OutboundRoute.AgentConversation,
+            tmuxComposerOutboundRoute(TmuxComposerSendRoute.AgentConversation),
+        )
+        assertEquals(
+            OutboundRoute.AgentPayload,
+            tmuxComposerOutboundRoute(TmuxComposerSendRoute.AgentPayload),
+        )
+        assertEquals(
+            OutboundRoute.RawBytes,
+            tmuxComposerOutboundRoute(TmuxComposerSendRoute.RawBytes),
+        )
+    }
+
+    @Test
+    fun composerSendTargetSnapshotCapturesSessionPaneRouteAndAgentToken() {
+        val snapshot = tmuxComposerSendTargetSnapshot(
+            sessionKey = "host-1/session-a",
+            paneId = "%3",
+            route = TmuxComposerSendRoute.AgentPayload,
+            agentKind = AgentKind.Codex,
+        )
+
+        assertEquals("host-1/session-a", snapshot.sessionKey)
+        assertEquals("%3", snapshot.paneId)
+        assertEquals(OutboundRoute.AgentPayload, snapshot.route)
+        assertEquals("codex", snapshot.agentKind)
+    }
+
+    @Test
+    fun composerSendTargetSnapshotAllowsMissingPane() {
+        val snapshot = tmuxComposerSendTargetSnapshot(
+            sessionKey = "host-1/session-a",
+            paneId = null,
+            route = TmuxComposerSendRoute.RawBytes,
+            agentKind = null,
+        )
+
+        assertEquals("host-1/session-a", snapshot.sessionKey)
+        assertEquals("", snapshot.paneId)
+        assertEquals(OutboundRoute.RawBytes, snapshot.route)
+        assertNull(snapshot.agentKind)
+    }
+
+    @Test
+    fun composerAgentKindFromTokenAcceptsQueueTokens() {
+        assertEquals(AgentKind.ClaudeCode, tmuxComposerAgentKindFromToken("claude"))
+        assertEquals(AgentKind.Codex, tmuxComposerAgentKindFromToken("codex"))
+        assertEquals(AgentKind.OpenCode, tmuxComposerAgentKindFromToken("opencode"))
+    }
+
+    @Test
+    fun composerAgentKindFromTokenAcceptsLegacyEnumTokens() {
+        assertEquals(AgentKind.ClaudeCode, tmuxComposerAgentKindFromToken("claudeCode"))
+        assertEquals(AgentKind.OpenCode, tmuxComposerAgentKindFromToken("open_code"))
+    }
+
+    @Test
+    fun composerAgentKindFromTokenRejectsUnknownToken() {
+        assertNull(tmuxComposerAgentKindFromToken(null))
+        assertNull(tmuxComposerAgentKindFromToken("shell"))
     }
 
     @Test

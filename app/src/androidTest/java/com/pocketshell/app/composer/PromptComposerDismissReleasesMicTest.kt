@@ -155,7 +155,7 @@ class PromptComposerDismissReleasesMicTest {
                 if (sheetVisible) {
                     PromptComposerSheet(
                         onDismiss = { sheetVisible = false },
-                        onSend = { _, _ -> true },
+                        onSend = { _ -> true },
                         viewModel = viewModel,
                     )
                 }
@@ -240,7 +240,7 @@ class PromptComposerDismissReleasesMicTest {
             PocketShellTheme {
                 PromptComposerSheet(
                     onDismiss = {},
-                    onSend = { _, _ -> true },
+                    onSend = { _ -> true },
                     viewModel = viewModel,
                 )
             }

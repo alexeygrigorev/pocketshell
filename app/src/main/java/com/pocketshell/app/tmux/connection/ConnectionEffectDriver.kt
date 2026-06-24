@@ -282,10 +282,11 @@ class ConnectionEffectDriver(
             if (suppressTransportDrops()) {
                 record(Observation.DropSuppressed)
             } else if (shouldSubmitControlChannelDrop(client)) {
+                val wasTargetless = isTargetless()
                 val changed = submitTransport(
                     ConnectionEvent.TransportDropped(reason = "control_channel_disconnected"),
                 )
-                if (changed) {
+                if (changed || wasTargetless) {
                     controlChannelDroppedEffect(client)
                 }
             }
@@ -384,6 +385,9 @@ class ConnectionEffectDriver(
         onControllerTransition()
         return controller.state.value != before
     }
+
+    private fun isTargetless(): Boolean =
+        controller.state.value is ConnectionState.Idle
 
     private fun record(observation: Observation) {
         _observations.value = _observations.value + observation

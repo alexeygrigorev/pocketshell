@@ -195,6 +195,10 @@ class TmuxSessionViewModelTest {
             // the dedicated #877 regression tests override this with a tracking
             // StandardTestDispatcher to assert the hop actually happens.
             it.setPortDetectionDispatcherForTest(testMainDispatcher)
+            // Session-card refreshes use a real IO dispatcher in production.
+            // Pin the card source calls to the test scheduler so card feed
+            // assertions cannot time out before a background continuation runs.
+            it.setSessionCardsDispatcherForTest(testMainDispatcher)
             createdViewModels += it
         }
 

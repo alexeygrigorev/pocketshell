@@ -321,6 +321,18 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Session-card host CLI reads/writes run on real IO in production. Unit
+     * tests pin this to the shared scheduler so card refresh assertions do not
+     * race a background [Dispatchers.IO] continuation.
+     */
+    private var sessionCardsDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setSessionCardsDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        sessionCardsDispatcher = dispatcher
+    }
+
+    /**
      * Issue #793: how long the Conversation tab stays in the
      * [ConversationLoadState.Loading] ("Loading conversation…") state before
      * the load watchdog flips it to [ConversationLoadState.Failed]. Bounds the
@@ -6305,58 +6317,87 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!dead) return@collect
                 val target = activeTarget ?: connectingTarget
                 val disconnectEvent = disconnectEventOrFallback(client)
-                DiagnosticEvents.record(
-                    "connection",
-                    "passive_disconnect",
-                    "source" to "tmux_client_disconnected",
-                    "classification" to "real_tmux_control_channel_closed",
-                    "disconnectReason" to disconnectEvent.reason.logValue,
-                    "disconnectSource" to disconnectEvent.source,
-                    "disconnectIntent" to disconnectEvent.intent,
-                    "commandKind" to disconnectEvent.commandKind,
-                    "timeoutMode" to disconnectEvent.timeoutMode,
-                    "exceptionClass" to disconnectEvent.exceptionClass,
-                    "message" to disconnectEvent.message,
-                    "hostId" to target?.hostId,
-                    "host" to target?.host,
-                    "port" to target?.port,
-                    "user" to target?.user,
-                    "session" to target?.sessionName,
-                    "clientHash" to System.identityHashCode(client),
-                    "generation" to connectGeneration,
-                    "attempt" to activeAttachMilestone?.attempt,
-                    "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
-                    "status" to _connectionStatus.value.javaClass.simpleName,
-                    *shortAppSwitchReconnectFields(
-                        trigger = TmuxConnectTrigger.AutoReconnect,
-                        target = target,
-                        sourceCandidate = "passive_disconnect",
-                    ),
-                )
-                ReconnectCauseTrail.record(
-                    stage = "session_disconnect",
-                    outcome = "passive_disconnect",
-                    cause = disconnectEvent.reason.logValue,
-                    trigger = TmuxConnectTrigger.AutoReconnect.logValue,
-                    "hostId" to target?.hostId,
-                    "generation" to connectGeneration,
-                    "attempt" to activeAttachMilestone?.attempt,
-                    "clientHash" to System.identityHashCode(client),
-                    "status" to _connectionStatus.value.javaClass.simpleName,
-                    "disconnectSource" to disconnectEvent.source,
-                    "disconnectIntent" to disconnectEvent.intent,
-                )
                 // Recovery is fired from [ConnectionEffectDriver.controlChannelDroppedEffect]
                 // after the real current-client drop has moved the controller. This
-                // per-client observer stays as the rich diagnostic trail and as a stale
-                // client guard: an old client's latched close is recorded, but it no
-                // longer feeds the controller or recovery IO.
+                // per-client observer stays only as a stale-client breadcrumb. The
+                // driver-owned handler records the canonical `passive_disconnect`
+                // diagnostic so silent reattach cannot cancel this collector before
+                // observability lands.
+                val decision = classifyPassiveTransportDrop(client)
+                if (decision == ConnectionDecision.Ignore) {
+                    DiagnosticEvents.record(
+                        "connection",
+                        "passive_disconnect_ignored",
+                        "source" to "tmux_client_disconnected",
+                        "classification" to "stale_or_irrelevant_tmux_control_channel_closed",
+                        "disconnectReason" to disconnectEvent.reason.logValue,
+                        "disconnectSource" to disconnectEvent.source,
+                        "disconnectIntent" to disconnectEvent.intent,
+                        "hostId" to target?.hostId,
+                        "host" to target?.host,
+                        "port" to target?.port,
+                        "user" to target?.user,
+                        "session" to target?.sessionName,
+                        "clientHash" to System.identityHashCode(client),
+                        "generation" to connectGeneration,
+                    )
+                } else if (isProcessBackgroundedForGraceOwner()) {
+                    recordPassiveDisconnectDiagnostic(client, target, disconnectEvent)
+                }
             }
         }
     }
 
     private fun onControllerTransportDropped(client: TmuxClient) {
         handlePassiveClientDisconnect(client, disconnectEventOrFallback(client))
+    }
+
+    private fun recordPassiveDisconnectDiagnostic(
+        client: TmuxClient,
+        target: ConnectionTarget?,
+        disconnectEvent: TmuxDisconnectEvent,
+    ) {
+        DiagnosticEvents.record(
+            "connection",
+            "passive_disconnect",
+            "source" to "tmux_client_disconnected",
+            "classification" to "real_tmux_control_channel_closed",
+            "disconnectReason" to disconnectEvent.reason.logValue,
+            "disconnectSource" to disconnectEvent.source,
+            "disconnectIntent" to disconnectEvent.intent,
+            "commandKind" to disconnectEvent.commandKind,
+            "timeoutMode" to disconnectEvent.timeoutMode,
+            "exceptionClass" to disconnectEvent.exceptionClass,
+            "message" to disconnectEvent.message,
+            "hostId" to target?.hostId,
+            "host" to target?.host,
+            "port" to target?.port,
+            "user" to target?.user,
+            "session" to target?.sessionName,
+            "clientHash" to System.identityHashCode(client),
+            "generation" to connectGeneration,
+            "attempt" to activeAttachMilestone?.attempt,
+            "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
+            "status" to _connectionStatus.value.javaClass.simpleName,
+            *shortAppSwitchReconnectFields(
+                trigger = TmuxConnectTrigger.AutoReconnect,
+                target = target,
+                sourceCandidate = "passive_disconnect",
+            ),
+        )
+        ReconnectCauseTrail.record(
+            stage = "session_disconnect",
+            outcome = "passive_disconnect",
+            cause = disconnectEvent.reason.logValue,
+            trigger = TmuxConnectTrigger.AutoReconnect.logValue,
+            "hostId" to target?.hostId,
+            "generation" to connectGeneration,
+            "attempt" to activeAttachMilestone?.attempt,
+            "clientHash" to System.identityHashCode(client),
+            "status" to _connectionStatus.value.javaClass.simpleName,
+            "disconnectSource" to disconnectEvent.source,
+            "disconnectIntent" to disconnectEvent.intent,
+        )
     }
 
     private fun handlePassiveClientDisconnect(
@@ -6377,6 +6418,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // does.
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(target, disconnectEvent)
+        recordPassiveDisconnectDiagnostic(client, target, disconnectEvent)
         // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. A passive
         // `-CC` drop that arrives while the app is BACKGROUNDED is, by construction,
         // inside the App-level background-grace window (#450) — that window is the SOLE
@@ -12764,7 +12806,7 @@ public class TmuxSessionViewModel @Inject constructor(
             loading = true,
         )
         bridgeScope.launch {
-            val feed = withContext(Dispatchers.IO) {
+            val feed = withContext(sessionCardsDispatcher) {
                 sessionCardsRemoteSource.getCards(session, target)
             }
             if (activeTarget?.sessionCardsTargetKey() == targetKey) {
@@ -12789,7 +12831,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val targetKey = active.sessionCardsTargetKey()
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         bridgeScope.launch {
-            val ok = withContext(Dispatchers.IO) {
+            val ok = withContext(sessionCardsDispatcher) {
                 sessionCardsRemoteSource.setChecklistItemChecked(
                     session = session,
                     tmuxSessionName = target,
@@ -12799,7 +12841,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
             if (ok && activeTarget?.sessionCardsTargetKey() == targetKey) {
-                val feed = withContext(Dispatchers.IO) {
+                val feed = withContext(sessionCardsDispatcher) {
                     sessionCardsRemoteSource.getCards(session, target)
                 }
                 if (activeTarget?.sessionCardsTargetKey() == targetKey) {

@@ -346,9 +346,15 @@ class TmuxSessionViewModelTest {
         )
         runCurrent()
 
+        val killed = async { signals.killedSessions.first() }
+        runCurrent()
+
         vm.killCurrentSession()
         advanceUntilIdle()
 
+        val event = killed.await()
+        assertEquals(7L, event.hostId)
+        assertEquals("doomed", event.sessionName)
         assertFalse(
             "confirmed Stop must evict the killed session's parked runtime",
             runtimeCache.contains(doomedRuntime.key),
@@ -6416,6 +6422,13 @@ class TmuxSessionViewModelTest {
         confidence = AgentDetection.Confidence.ProcessConfirmed,
     )
 
+    private fun newOpenCodeDetection(): AgentDetection = AgentDetection(
+        agent = AgentKind.OpenCode,
+        sourcePath = "/home/u/.local/share/opencode/opencode.db#ses_123",
+        sessionId = "ses_123",
+        confidence = AgentDetection.Confidence.ProcessConfirmed,
+    )
+
     // ─── Issue #793: tail-first conversation load + load state machine ───
 
     @Test
@@ -7783,6 +7796,71 @@ class TmuxSessionViewModelTest {
             AgentKind.ClaudeCode,
             vm.agentForWindow("@0"),
         )
+    }
+
+    @Test
+    fun degradedDetectionDoesNotForgetRememberedAgentOrConsumeExitConfirmations() = runTest(scheduler) {
+        val detections = listOf(
+            newClaudeDetection(),
+            newCodexDetection(),
+            newOpenCodeDetection(),
+        )
+
+        detections.forEachIndexed { index, detection ->
+            val windowId = "@$index"
+            val vm = newVm()
+            vm.connectWithPaneForTest(paneId = "%0", windowId = windowId, sessionName = "work-$index")
+            vm.startAgentConversationForTest("%0", detection)
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        "%7",
+                        windowId,
+                        "$0",
+                        "shell",
+                        paneIndex = 0,
+                        sessionName = "work-$index",
+                    ),
+                ),
+            )
+            runCurrent()
+
+            repeat(AGENT_EXIT_CONFIRMATIONS) {
+                val downgraded = vm.handleUnavailableAgentDetectionForTest("%7")
+                runCurrent()
+                assertFalse(
+                    "#897: degraded ${detection.agent} probe must not be treated as agent exit",
+                    downgraded,
+                )
+                val row = vm.agentConversations.value["%7"]
+                assertNotNull("#897: remembered ${detection.agent} row stays visible", row)
+                assertEquals(SessionTab.Conversation, row!!.selectedTab)
+                assertEquals(detection.agent, row.detection?.agent)
+                assertEquals(
+                    "#897: the Conversation tab remains available for the window",
+                    detection.agent,
+                    vm.agentForWindow(windowId),
+                )
+            }
+
+            val firstCleanNull = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            assertFalse(
+                "#897: degraded probes must not consume the clean-null exit confirmation budget",
+                firstCleanNull,
+            )
+            assertEquals(detection.agent, vm.agentConversations.value["%7"]?.detection?.agent)
+
+            val secondCleanNull = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            assertTrue("clean nulls still confirm a genuine ${detection.agent} exit", secondCleanNull)
+            assertNull(vm.agentConversations.value["%7"])
+            assertNull(vm.agentForWindow(windowId))
+            vm.clearForTest()
+        }
     }
 
     /**

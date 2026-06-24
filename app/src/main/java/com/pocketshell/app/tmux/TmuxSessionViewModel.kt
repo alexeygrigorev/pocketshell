@@ -9654,8 +9654,8 @@ public class TmuxSessionViewModel @Inject constructor(
             //      so it skips its own window-read exec.
             val cachedKind = sessionRecordedKindCache[sessionTarget.trim()]
             var prefetchedWindow: ConversationEventsWindow? = null
-            val detection = runCatching {
-                if (cachedKind != null) {
+            val probeResult = try {
+                val detection = if (cachedKind != null) {
                     // Cache HIT — kind already known, no `@ps_agent_kind` exec.
                     val recordedKind = cachedKind.kind
                     if (recordedKind != null) {
@@ -9726,13 +9726,27 @@ public class TmuxSessionViewModel @Inject constructor(
                         }
                     }
                 }
-            }.getOrNull()
+                AgentDetectionProbeResult.Resolved(detection)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Exception) {
+                AgentDetectionProbeResult.Unavailable(t)
+            }
             if (!isCurrentRuntime(guard)) {
                 // Issue #817: a stale runtime never reaches markAgentTailLive, so
                 // drop the open t0 to avoid attributing the next pane's open to it.
                 paneConversationOpenStartedAtMs.remove(paneId)
                 return@launch
             }
+            if (probeResult is AgentDetectionProbeResult.Unavailable) {
+                // Issue #897: a failed/degraded SSH probe is not evidence that
+                // the agent exited. Keep the remembered Conversation row and
+                // retry instead of feeding the clean-null exit confirmation path.
+                paneConversationOpenStartedAtMs.remove(paneId)
+                handleUnavailableAgentDetection(pane, guard)
+                return@launch
+            }
+            val detection = (probeResult as AgentDetectionProbeResult.Resolved).detection
             if (detection == null) {
                 // Issue #817: no detection → no conversation open; clear the t0.
                 paneConversationOpenStartedAtMs.remove(paneId)
@@ -9752,6 +9766,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 prefetchedWindow = prefetchedWindow,
             )
         }
+    }
+
+    private sealed class AgentDetectionProbeResult {
+        data class Resolved(val detection: AgentDetection?) : AgentDetectionProbeResult()
+        data class Unavailable(val cause: Throwable) : AgentDetectionProbeResult()
     }
 
     /**
@@ -9804,6 +9823,34 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentNullDetections.remove(paneId)
         clearAgentDetectionForPane(paneId)
         return true
+    }
+
+    /**
+     * Issue #897: a degraded/unavailable probe is not a clean "no agent"
+     * verdict. It must not increment the exit confirmation counter, clear the
+     * row, or forget [agentSessionMemory]; it only asks detection to retry once
+     * the channel is usable again.
+     */
+    private fun handleUnavailableAgentDetection(pane: TmuxPaneState, guard: RuntimeRefreshGuard): Boolean {
+        val paneId = pane.paneId
+        paneAgentNullDetections.remove(paneId)
+        val row = _agentConversations.value[paneId]
+        if (row?.detection != null) {
+            updateAgentConversation(paneId) { current ->
+                if (current.syncStatus == AgentConversationSyncStatus.LogUnavailable) {
+                    current
+                } else {
+                    current.copy(syncStatus = AgentConversationSyncStatus.LogUnavailable)
+                }
+            }
+            scheduleAgentDetectionRecheck(pane, guard)
+            return false
+        }
+        if (row?.autoSeededPlaceholder == true) {
+            scheduleAgentDetectionRecheck(pane, guard)
+            return false
+        }
+        return false
     }
 
     /**
@@ -11471,6 +11518,21 @@ public class TmuxSessionViewModel @Inject constructor(
             client = clientRef ?: return true,
         )
         return handleNullAgentDetection(pane, guard)
+    }
+
+    /**
+     * Issue #897 test seam: drive the degraded/unavailable detection branch
+     * directly. Unlike [handleNullAgentDetectionForTest], this path represents
+     * an untrustworthy probe and must never confirm agent exit.
+     */
+    internal fun handleUnavailableAgentDetectionForTest(paneId: String): Boolean {
+        val pane = paneRows[paneId] ?: return false
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = activeTarget ?: return false,
+            client = clientRef ?: return false,
+        )
+        return handleUnavailableAgentDetection(pane, guard)
     }
 
     /**

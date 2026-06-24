@@ -27,6 +27,8 @@ class HostTreeModelTest {
         attached: Boolean = false,
         windows: List<FolderSessionWindowEntry> = emptyList(),
         recordedProfile: String? = null,
+        tmuxSessionId: String? = null,
+        sessionCreated: Long? = null,
     ): FolderSessionEntry =
         FolderSessionEntry(
             sessionName = name,
@@ -35,6 +37,8 @@ class HostTreeModelTest {
             agentKind = agentKind,
             windows = windows,
             recordedProfile = recordedProfile,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
         )
 
     private fun window(
@@ -133,6 +137,42 @@ class HostTreeModelTest {
         val order2 = tree.sessionEntries().map { it.sessionName }
         assertEquals(order1, order2)
         assertEquals(listOf("a", "b", "c"), order2)
+    }
+
+    @Test
+    fun reconcileUpdatesDurableTmuxIdentityForSameNameSession() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "alpha",
+                        tmuxSessionId = "\$0",
+                        sessionCreated = 100L,
+                    ),
+                ),
+            ),
+            now = 100L,
+        )
+
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "alpha",
+                        tmuxSessionId = "\$1",
+                        sessionCreated = 200L,
+                    ),
+                ),
+            ),
+            now = 200L,
+        )
+
+        val alpha = tree.sessionEntries().single()
+        assertEquals("alpha", alpha.sessionName)
+        assertEquals("\$1", alpha.tmuxSessionId)
+        assertEquals(200L, alpha.sessionCreated)
     }
 
     // --- Sticky agent-ness (#716) ----------------------------------------

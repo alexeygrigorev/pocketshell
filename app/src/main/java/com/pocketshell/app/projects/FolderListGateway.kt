@@ -95,6 +95,19 @@ data class FolderSessionRow(
      * default session shows the plain kind with no spurious profile chip.
      */
     val recordedProfile: String? = null,
+    /**
+     * Issue #899: tmux's stable session id (`$N`) for this live tmux server.
+     * It is carried with [sessionCreated] so later slices can derive a durable
+     * app identity without relying on the folder-derived [sessionName].
+     * `null` for legacy rows that predate the added column.
+     */
+    val tmuxSessionId: String? = null,
+    /**
+     * Issue #899: tmux `#{session_created}` epoch seconds. This field exists
+     * on legacy rows too; a durable identity requires both this value and
+     * [tmuxSessionId].
+     */
+    val sessionCreated: Long? = null,
 )
 
 /**
@@ -1901,7 +1914,7 @@ class SshFolderListGateway internal constructor(
 
         const val LIST_SESSIONS_COMMAND: String =
             "tmux list-sessions -F " +
-                "'#{session_name}$FIELD_SEP#{session_created}$FIELD_SEP" +
+                "'#{session_name}$FIELD_SEP#{session_id}$FIELD_SEP#{session_created}$FIELD_SEP" +
                 "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP" +
                 "#{@ps_agent_kind}$FIELD_SEP#{@ps_agent_profile}$FIELD_SEP#{session_path}'"
 
@@ -1988,7 +2001,7 @@ class SshFolderListGateway internal constructor(
 
         const val CONTROL_LIST_SESSIONS_COMMAND: String =
             "list-sessions -F " +
-                "'#{session_name}$FIELD_SEP#{session_created}$FIELD_SEP" +
+                "'#{session_name}$FIELD_SEP#{session_id}$FIELD_SEP#{session_created}$FIELD_SEP" +
                 "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP" +
                 "#{@ps_agent_kind}$FIELD_SEP#{@ps_agent_profile}$FIELD_SEP#{session_path}'"
 
@@ -2000,10 +2013,11 @@ class SshFolderListGateway internal constructor(
                 "$FIELD_SEP#{window_id}$FIELD_SEP#{pane_pid}'"
 
         /**
-         * Parse the tab-delimited `list-sessions` output into
-         * [FolderSessionRow]s. Each line carries six fields:
-         * `session_name`, `session_created`, `session_activity`,
-         * `session_attached`, `@ps_agent_kind`, `session_path`. Blank cwd
+         * Parse the delimiter-separated `list-sessions` output into
+         * [FolderSessionRow]s. Each current line carries eight fields:
+         * `session_name`, `session_id`, `session_created`, `session_activity`,
+         * `session_attached`, `@ps_agent_kind`, `@ps_agent_profile`,
+         * `session_path`. Blank cwd
          * surfaces as `null` so the view model can route the row to the
          * "Untracked" group. The `@ps_agent_kind` user option (epic #821
          * Workstream A) is the kind PocketShell recorded at launch; when
@@ -2059,11 +2073,14 @@ class SshFolderListGateway internal constructor(
 
         private fun parseRow(line: String): FolderSessionRow? {
             if (line.isBlank()) return null
-            // Field order (epic #821 + #858): name, created, activity,
-            // attached, @ps_agent_kind, @ps_agent_profile, session_path.
-            // limit=7 so a path containing the rare `::` literal still parses
-            // — the rightmost column (session_path) absorbs any trailing
-            // separators. `@ps_agent_kind` is a controlled value
+            // Field order (#899 + epic #821 + #858): name, session_id,
+            // created, activity, attached, @ps_agent_kind, @ps_agent_profile,
+            // session_path. Use the current 8-column parse only when column 2
+            // has tmux's `$N` session-id shape; legacy rows put
+            // session_created there, and must keep the old 7-column limit so a
+            // path containing the rare `::` literal still parses. The
+            // rightmost column (session_path) absorbs any trailing separators.
+            // `@ps_agent_kind` is a controlled value
             // (claude/codex/opencode) that never contains `::`, and
             // `@ps_agent_profile` is a host-authored profile label, so both
             // sit safely at their fixed columns.
@@ -2072,28 +2089,49 @@ class SshFolderListGateway internal constructor(
             // option set: tmux expands `#{@ps_agent_profile}` to an empty
             // string (NOT a missing column), so the field count is unchanged
             // and the profile parses as `null` — no crash, plain kind.
-            val parts = line.split(FIELD_SEP, limit = 7)
+            val hasCurrentIdentityColumn =
+                line.split(FIELD_SEP, limit = 3).getOrNull(1)?.trim()?.firstOrNull() == '$'
+            val parts = line.split(FIELD_SEP, limit = if (hasCurrentIdentityColumn) 8 else 7)
             if (parts.size < 4) return null
             val name = parts[0].trim()
             if (name.isEmpty()) return null
-            val recordedKind = parts.getOrNull(4)?.let(::recordedKindFromOption)
-            // The new 7-field format puts @ps_agent_profile at index 5 and the
-            // path at index 6. A stale 6-field cache row (pre-#858) has NO
-            // profile column — its index 5 IS the path. Distinguish by part
-            // count so an old row never misreads its path as a profile (and
-            // keeps its cwd): only a row with the full 7 columns carries a
-            // profile; the live client always emits 7, so this only guards a
-            // stale cache.
-            val hasProfileColumn = parts.size >= 7
+            val hasIdentityColumns = hasCurrentIdentityColumn && parts.size >= 8
+            val sessionIdIndex = if (hasIdentityColumns) 1 else null
+            val createdIndex = if (hasIdentityColumns) 2 else 1
+            val activityIndex = if (hasIdentityColumns) 3 else 2
+            val attachedIndex = if (hasIdentityColumns) 4 else 3
+            val kindIndex = if (hasIdentityColumns) 5 else 4
+            val created = parts.getOrNull(createdIndex)?.trim()?.toLongOrNull()
+            val tmuxSessionId = sessionIdIndex
+                ?.let { parts.getOrNull(it)?.trim()?.ifBlank { null } }
+            val recordedKind = parts.getOrNull(kindIndex)?.let(::recordedKindFromOption)
+            // The current 8-field format puts @ps_agent_profile at index 6 and
+            // the path at index 7. The previous 7-field format had profile at
+            // index 5 and path at index 6. A stale 6-field cache row (pre-#858)
+            // has NO profile column — its index 5 IS the path. Distinguish by
+            // part count so an old row never misreads its path as a profile.
+            val hasProfileColumn = hasIdentityColumns || parts.size >= 7
             val recordedProfile =
-                if (hasProfileColumn) parts.getOrNull(5)?.trim()?.ifBlank { null } else null
+                if (hasIdentityColumns) {
+                    parts.getOrNull(6)?.trim()?.ifBlank { null }
+                } else if (hasProfileColumn) {
+                    parts.getOrNull(5)?.trim()?.ifBlank { null }
+                } else {
+                    null
+                }
             val sessionPath =
-                (if (hasProfileColumn) parts.getOrNull(6) else parts.getOrNull(5))
+                (if (hasIdentityColumns) {
+                    parts.getOrNull(7)
+                } else if (hasProfileColumn) {
+                    parts.getOrNull(6)
+                } else {
+                    parts.getOrNull(5)
+                })
                     ?.trim()?.ifBlank { null }
             return FolderSessionRow(
                 sessionName = name,
-                lastActivity = parts[2].trim().toLongOrNull(),
-                attached = (parts[3].trim().toLongOrNull() ?: 0L) > 0L,
+                lastActivity = parts.getOrNull(activityIndex)?.trim()?.toLongOrNull(),
+                attached = (parts.getOrNull(attachedIndex)?.trim()?.toLongOrNull() ?: 0L) > 0L,
                 cwd = sessionPath,
                 // The recorded `@ps_agent_kind` (epic #821) is authoritative
                 // when present. When absent, default to Shell; the gateway
@@ -2105,6 +2143,8 @@ class SshFolderListGateway internal constructor(
                 // Issue #858: a non-default profile label (e.g. z.ai Claude);
                 // null for default / non-profiled / legacy sessions.
                 recordedProfile = recordedProfile,
+                tmuxSessionId = tmuxSessionId,
+                sessionCreated = created,
             )
         }
 

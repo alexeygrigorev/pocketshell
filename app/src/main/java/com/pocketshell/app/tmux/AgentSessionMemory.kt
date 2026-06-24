@@ -26,7 +26,7 @@ import javax.inject.Singleton
  * This memory survives that teardown because it is keyed by a **stable**
  * identity rather than by the rotating tmux pane id:
  *
- *  - `hostId` + `sessionName` + `windowId`.
+ *  - `hostId` + optional durable tmux session key + `sessionName` + `windowId`.
  *
  * `windowId` (tmux `@N`) is assigned by the tmux server and is stable for
  * the lifetime of that server across detach/reattach — exactly the property
@@ -64,8 +64,9 @@ public class AgentSessionMemory @Inject constructor() {
         windowId: String,
         detection: AgentDetection,
         wasOnConversation: Boolean,
+        durableSessionKey: String? = null,
     ) {
-        val key = keyOf(hostId, sessionName, windowId) ?: return
+        val key = keyOf(hostId, sessionName, windowId, durableSessionKey) ?: return
         statuses[key] = RememberedAgentStatus(
             detection = detection,
             wasOnConversation = wasOnConversation,
@@ -81,8 +82,9 @@ public class AgentSessionMemory @Inject constructor() {
         hostId: Long,
         sessionName: String,
         windowId: String,
+        durableSessionKey: String? = null,
     ): RememberedAgentStatus? {
-        val key = keyOf(hostId, sessionName, windowId) ?: return null
+        val key = keyOf(hostId, sessionName, windowId, durableSessionKey) ?: return null
         return statuses[key]
     }
 
@@ -95,8 +97,9 @@ public class AgentSessionMemory @Inject constructor() {
         hostId: Long,
         sessionName: String,
         windowId: String,
+        durableSessionKey: String? = null,
     ) {
-        val key = keyOf(hostId, sessionName, windowId) ?: return
+        val key = keyOf(hostId, sessionName, windowId, durableSessionKey) ?: return
         statuses.remove(key)
     }
 
@@ -113,15 +116,21 @@ public class AgentSessionMemory @Inject constructor() {
         }
     }
 
-    private fun keyOf(hostId: Long, sessionName: String, windowId: String): Key? {
+    private fun keyOf(
+        hostId: Long,
+        sessionName: String,
+        windowId: String,
+        durableSessionKey: String?,
+    ): Key? {
         if (sessionName.isBlank() || windowId.isBlank()) return null
-        return Key(hostId, sessionName, windowId)
+        return Key(hostId, sessionName, windowId, durableSessionKey?.trim()?.ifBlank { null })
     }
 
     private data class Key(
         val hostId: Long,
         val sessionName: String,
         val windowId: String,
+        val durableSessionKey: String?,
     )
 }
 

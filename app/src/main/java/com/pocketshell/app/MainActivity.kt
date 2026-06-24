@@ -1005,7 +1005,7 @@ private fun AppNavigator(
             keyPath = dest.keyPath,
             passphrase = dest.passphrase,
             onBack = ::back,
-            onOpenSession = { sessionName, startDirectory ->
+            onOpenSession = { sessionName, startDirectory, tmuxSessionId, sessionCreated ->
                 navigate(
                     AppDestination.TmuxSession(
                         hostId = dest.hostId,
@@ -1017,10 +1017,12 @@ private fun AppNavigator(
                         passphrase = dest.passphrase,
                         sessionName = sessionName,
                         startDirectory = startDirectory,
+                        tmuxSessionId = tmuxSessionId,
+                        sessionCreated = sessionCreated,
                     ),
                 )
             },
-            onOpenSessionWindow = { sessionName, startDirectory, windowIndex ->
+            onOpenSessionWindow = { sessionName, startDirectory, windowIndex, tmuxSessionId, sessionCreated ->
                 navigate(
                     AppDestination.TmuxSession(
                         hostId = dest.hostId,
@@ -1033,6 +1035,8 @@ private fun AppNavigator(
                         sessionName = sessionName,
                         startDirectory = startDirectory,
                         initialWindowIndex = windowIndex,
+                        tmuxSessionId = tmuxSessionId,
+                        sessionCreated = sessionCreated,
                     ),
                 )
             },
@@ -1341,6 +1345,8 @@ private fun AppNavigator(
             sessionName = dest.sessionName,
             startDirectory = dest.startDirectory,
             initialWindowIndex = dest.initialWindowIndex,
+            tmuxSessionId = dest.tmuxSessionId,
+            sessionCreated = dest.sessionCreated,
             onBack = ::back,
             // Issue #666: the restored/last session no longer exists on the
             // server (killed elsewhere while backgrounded). Clear the persisted
@@ -1356,11 +1362,21 @@ private fun AppNavigator(
                         sessionName = sessionName,
                         startDirectory = startDirectory,
                         initialWindowIndex = null,
+                        tmuxSessionId = null,
+                        sessionCreated = null,
                     ),
                 )
             },
             onReplaceTmuxSession = { sessionName ->
-                replace(dest.copy(sessionName = sessionName, startDirectory = null, initialWindowIndex = null))
+                replace(
+                    dest.copy(
+                        sessionName = sessionName,
+                        startDirectory = null,
+                        initialWindowIndex = null,
+                        tmuxSessionId = null,
+                        sessionCreated = null,
+                    ),
+                )
             },
             onOpenJobs = {
                 navigate(
@@ -1520,6 +1536,8 @@ internal fun resolveLastSessionForStop(
             keyPath = source.keyPath,
             sessionName = source.sessionName,
             startDirectory = source.startDirectory,
+            tmuxSessionId = source.tmuxSessionId,
+            sessionCreated = source.sessionCreated,
             composerDraft = composerDraft,
             savedAtMillis = savedAtMillis,
         )
@@ -1533,6 +1551,8 @@ internal fun resolveLastSessionForStop(
             keyPath = routeDestination.keyPath,
             sessionName = routeDestination.sessionName,
             startDirectory = routeDestination.startDirectory,
+            tmuxSessionId = routeDestination.tmuxSessionId,
+            sessionCreated = routeDestination.sessionCreated,
             composerDraft = composerDraft,
             savedAtMillis = savedAtMillis,
         )
@@ -1549,7 +1569,9 @@ private fun TmuxRestoreIntentSnapshot.sameRestoreIdentity(
         username == destination.username &&
         keyPath == destination.keyPath &&
         sessionName == destination.sessionName &&
-        startDirectory == destination.startDirectory
+        startDirectory == destination.startDirectory &&
+        tmuxSessionId == destination.tmuxSessionId &&
+        sessionCreated == destination.sessionCreated
 
 internal fun initialDestinationFromIntent(intent: Intent?): AppDestination {
     if (intent?.getBooleanExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, false) == true) {

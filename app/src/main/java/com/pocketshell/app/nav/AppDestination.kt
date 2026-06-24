@@ -165,6 +165,8 @@ sealed interface AppDestination {
         val sessionName: String,
         val startDirectory: String? = null,
         val initialWindowIndex: Int? = null,
+        val tmuxSessionId: String? = null,
+        val sessionCreated: Long? = null,
     ) : AppDestination
 
     /**

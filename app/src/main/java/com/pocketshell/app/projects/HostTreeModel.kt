@@ -156,6 +156,17 @@ internal class HostTreeModel {
          */
         var recordedProfile: String?,
         /**
+         * Issue #899: tmux `#{session_id}` (`$N`) carried through the maintained
+         * tree so folder-row navigation can pass durable identity into the tmux
+         * runtime/reveal/memory keys.
+         */
+        var tmuxSessionId: String?,
+        /**
+         * Issue #899: tmux `#{session_created}` epoch seconds paired with
+         * [tmuxSessionId] for durable identity construction.
+         */
+        var sessionCreated: Long?,
+        /**
          * Wall-clock millis this node was inserted optimistically by an
          * app-initiated action (#653/#678), or `null` if it came from a probe.
          * A reconcile must NOT prune a node whose optimistic grace has not yet
@@ -245,6 +256,8 @@ internal class HostTreeModel {
                 // the recorded profile — the first reconcile re-reads it from the
                 // host @ps_agent_profile option (#858).
                 recordedProfile = null,
+                tmuxSessionId = null,
+                sessionCreated = null,
                 // A registry seed is NOT app-inserted: leave it prunable by the
                 // first reconcile if the session is gone.
                 optimisticSince = null,
@@ -460,6 +473,8 @@ internal class HostTreeModel {
                     entry.agentKind.isAuthoritativeRead -> null
                     else -> existing.recordedProfile
                 }
+                existing.tmuxSessionId = entry.tmuxSessionId
+                existing.sessionCreated = entry.sessionCreated
                 existing.windows = mergeWindows(existing.windows, entry.windows.map { it.toState() })
                 // The probe confirmed this node — it is no longer optimistic.
                 existing.optimisticSince = null
@@ -616,6 +631,9 @@ internal class HostTreeModel {
             existing.attached = entry.attached
             existing.agentKind = entry.agentKind
             existing.windows = entry.windows.map { it.toState() }
+            existing.recordedProfile = entry.recordedProfile
+            existing.tmuxSessionId = entry.tmuxSessionId
+            existing.sessionCreated = entry.sessionCreated
             existing.optimisticSince = now
         }
         sessionFolderPaths[entry.sessionName] =
@@ -814,6 +832,8 @@ internal class HostTreeModel {
             agentKind = agentKind,
             windows = windows.map { it.toState() },
             recordedProfile = recordedProfile,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
             optimisticSince = optimisticSince,
         )
 
@@ -824,6 +844,8 @@ internal class HostTreeModel {
             attached = attached,
             agentKind = agentKind,
             recordedProfile = recordedProfile,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
             windows = windows.map { it.toEntry() },
         )
 

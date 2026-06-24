@@ -50,6 +50,40 @@ class AgentSessionMemoryTest {
     }
 
     @Test
+    fun durableIdentityPreventsSameNameWindowRecallAcrossRecreatedSessions() {
+        val memory = AgentSessionMemory()
+        val detection = claude()
+
+        memory.remember(
+            hostId = 7L,
+            sessionName = "work",
+            windowId = "@0",
+            detection = detection,
+            wasOnConversation = true,
+            durableSessionKey = "tmux:7:\$0:100",
+        )
+
+        assertNull(
+            "same-name successor with a new tmux identity must not inherit the killed session's agent row",
+            memory.recall(
+                hostId = 7L,
+                sessionName = "work",
+                windowId = "@0",
+                durableSessionKey = "tmux:7:\$1:200",
+            ),
+        )
+        assertEquals(
+            detection,
+            memory.recall(
+                hostId = 7L,
+                sessionName = "work",
+                windowId = "@0",
+                durableSessionKey = "tmux:7:\$0:100",
+            )?.detection,
+        )
+    }
+
+    @Test
     fun forgetReconcilesAnExitedAgentSoItIsNotRestored() {
         val memory = AgentSessionMemory()
         memory.remember(7L, "work", "@2", claude(), wasOnConversation = true)

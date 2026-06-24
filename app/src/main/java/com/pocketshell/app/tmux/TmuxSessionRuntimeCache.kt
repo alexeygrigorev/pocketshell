@@ -74,15 +74,22 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         val iterator = runtimes.entries.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
-            if (entry.key != key &&
-                entry.key.hostId == key.hostId &&
-                entry.key.sessionName == key.sessionName
-            ) {
+            if (entry.key != key && entry.key.isSameRuntimeSessionAs(key)) {
                 iterator.remove()
                 removed += entry.value.runtime
             }
         }
         return removed
+    }
+
+    private fun TmuxRuntimeKey.isSameRuntimeSessionAs(other: TmuxRuntimeKey): Boolean {
+        if (hostId != other.hostId) return false
+        val leftDurable = durableSessionKey?.trim()?.takeIf { it.isNotEmpty() }
+        val rightDurable = other.durableSessionKey?.trim()?.takeIf { it.isNotEmpty() }
+        if (leftDurable != null && rightDurable != null) {
+            return leftDurable == rightDurable
+        }
+        return leftDurable == null && rightDurable == null && sessionName == other.sessionName
     }
 
     internal fun activate(key: TmuxRuntimeKey): CacheActivation = synchronized(this) {
@@ -248,6 +255,7 @@ internal data class TmuxRuntimeKey(
     val username: String,
     val keyPath: String,
     val sessionName: String,
+    val durableSessionKey: String? = null,
 )
 
 private fun TmuxRuntimeKey.matchesLeaseKey(leaseKey: SshLeaseKey): Boolean =

@@ -37,6 +37,8 @@ class LastSessionStoreTest {
         savedAtMillis: Long = 1_000L,
         draft: String = "deploy the thing",
         startDirectory: String? = "/home/me/project",
+        tmuxSessionId: String? = null,
+        sessionCreated: Long? = null,
     ) = LastSessionStore.LastSession(
         hostId = 7L,
         hostName = "prod box",
@@ -46,6 +48,8 @@ class LastSessionStoreTest {
         keyPath = "/data/keys/id_ed25519",
         sessionName = "claude-main",
         startDirectory = startDirectory,
+        tmuxSessionId = tmuxSessionId,
+        sessionCreated = sessionCreated,
         composerDraft = draft,
         savedAtMillis = savedAtMillis,
     )
@@ -73,8 +77,32 @@ class LastSessionStoreTest {
         assertEquals("/data/keys/id_ed25519", read.keyPath)
         assertEquals("claude-main", read.sessionName)
         assertEquals("/home/me/project", read.startDirectory)
+        assertNull(read.tmuxSessionId)
+        assertNull(read.sessionCreated)
         assertEquals("deploy the thing", read.composerDraft)
         assertEquals(1_000L, read.savedAtMillis)
+    }
+
+    @Test
+    fun `save then read round-trips durable tmux identity`() {
+        val store = LastSessionStore(context)
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = "\$3",
+                sessionCreated = 1700000000L,
+            ),
+        )
+
+        val read = LastSessionStore(context).read(nowMillis = 2_000L)
+
+        assertNotNull(read)
+        requireNotNull(read)
+        assertEquals("\$3", read.tmuxSessionId)
+        assertEquals(1700000000L, read.sessionCreated)
+        val destination = with(store) { read.toDestination() }
+        assertEquals("\$3", destination.tmuxSessionId)
+        assertEquals(1700000000L, destination.sessionCreated)
     }
 
     @Test
@@ -226,6 +254,8 @@ class LastSessionStoreTest {
             keyPath = "/data/keys/id_ed25519",
             sessionName = "session-b",
             startDirectory = "/home/me/project-b",
+            tmuxSessionId = "\$4",
+            sessionCreated = 1700000004L,
             trigger = TmuxConnectTrigger.UserTap,
             generation = 42L,
         )
@@ -244,6 +274,8 @@ class LastSessionStoreTest {
         requireNotNull(restored)
         assertEquals("session-b", restored.sessionName)
         assertEquals("/home/me/project-b", restored.startDirectory)
+        assertEquals("\$4", restored.tmuxSessionId)
+        assertEquals(1700000004L, restored.sessionCreated)
         assertEquals("draft while switching", restored.composerDraft)
         assertEquals(5_000L, restored.savedAtMillis)
     }
@@ -260,6 +292,8 @@ class LastSessionStoreTest {
             passphrase = null,
             sessionName = "session-a",
             startDirectory = null,
+            tmuxSessionId = "\$7",
+            sessionCreated = 1700000007L,
         )
 
         val session = resolveLastSessionForStop(
@@ -272,6 +306,8 @@ class LastSessionStoreTest {
         assertNotNull(session)
         requireNotNull(session)
         assertEquals("session-a", session.sessionName)
+        assertEquals("\$7", session.tmuxSessionId)
+        assertEquals(1700000007L, session.sessionCreated)
         assertEquals("draft", session.composerDraft)
     }
 

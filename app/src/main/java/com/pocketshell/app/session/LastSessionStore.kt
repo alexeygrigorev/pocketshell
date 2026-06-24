@@ -90,6 +90,8 @@ class LastSessionStore @Inject constructor(
         val keyPath: String,
         val sessionName: String,
         val startDirectory: String?,
+        val tmuxSessionId: String? = null,
+        val sessionCreated: Long? = null,
         val composerDraft: String,
         val savedAtMillis: Long,
     )
@@ -122,7 +124,7 @@ class LastSessionStore @Inject constructor(
                 "host=${session.hostname} port=${session.port} user=${session.username} " +
                 "session=${session.sessionName} startDirectory=${session.startDirectory}",
         )
-        prefs.edit()
+        val editor = prefs.edit()
             .putLong(KEY_HOST_ID, session.hostId)
             .putString(KEY_HOST_NAME, session.hostName)
             .putString(KEY_HOSTNAME, session.hostname)
@@ -131,9 +133,15 @@ class LastSessionStore @Inject constructor(
             .putString(KEY_KEY_PATH, session.keyPath)
             .putString(KEY_SESSION_NAME, session.sessionName)
             .putString(KEY_START_DIR, session.startDirectory)
+            .putString(KEY_TMUX_SESSION_ID, session.tmuxSessionId)
             .putString(KEY_COMPOSER_DRAFT, session.composerDraft)
             .putLong(KEY_SAVED_AT, session.savedAtMillis)
-            .apply()
+        if (session.sessionCreated != null) {
+            editor.putLong(KEY_SESSION_CREATED, session.sessionCreated)
+        } else {
+            editor.remove(KEY_SESSION_CREATED)
+        }
+        editor.apply()
     }
 
     /**
@@ -174,6 +182,8 @@ class LastSessionStore @Inject constructor(
             keyPath = keyPath,
             sessionName = sessionName,
             startDirectory = prefs.safeString(KEY_START_DIR, null),
+            tmuxSessionId = prefs.safeString(KEY_TMUX_SESSION_ID, null)?.trim()?.ifBlank { null },
+            sessionCreated = prefs.safeLong(KEY_SESSION_CREATED, 0L)?.takeIf { it > 0L },
             composerDraft = prefs.safeString(KEY_COMPOSER_DRAFT, "") ?: "",
             savedAtMillis = savedAt,
         ).also { session ->
@@ -292,6 +302,8 @@ class LastSessionStore @Inject constructor(
             passphrase = null,
             sessionName = sessionName,
             startDirectory = startDirectory,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
         )
 
     companion object {
@@ -305,6 +317,8 @@ class LastSessionStore @Inject constructor(
         private const val KEY_KEY_PATH = "key_path"
         private const val KEY_SESSION_NAME = "session_name"
         private const val KEY_START_DIR = "start_dir"
+        private const val KEY_TMUX_SESSION_ID = "tmux_session_id"
+        private const val KEY_SESSION_CREATED = "session_created"
         private const val KEY_COMPOSER_DRAFT = "composer_draft"
         private const val KEY_SAVED_AT = "saved_at"
 

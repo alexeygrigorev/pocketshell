@@ -1246,7 +1246,12 @@ public class TmuxSessionViewModel @Inject constructor(
         hostKeyFor(target.toSshLeaseTarget().leaseKey)
 
     private fun controllerSessionId(target: ConnectionTarget): SessionId =
-        SessionId("${target.hostId}/${target.sessionName}")
+        tmuxTargetSessionId(
+            hostId = target.hostId,
+            sessionName = target.sessionName,
+            tmuxSessionId = target.tmuxSessionId,
+            sessionCreated = target.sessionCreated,
+        )
 
     /**
      * EPIC #687 slice 1b: the single emission point — set the VM-internal
@@ -1945,6 +1950,8 @@ public class TmuxSessionViewModel @Inject constructor(
         passphrase: CharArray?,
         sessionName: String,
         startDirectory: String? = null,
+        tmuxSessionId: String? = null,
+        sessionCreated: Long? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
         // Issue #666: internal guard so the ColdRestore preflight (below) can
         // re-enter [connect] once it has confirmed the session is still alive
@@ -1971,6 +1978,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 passphrase = passphrase,
                 sessionName = sessionName,
                 startDirectory = startDirectory,
+                tmuxSessionId = tmuxSessionId,
+                sessionCreated = sessionCreated,
             )
             return
         }
@@ -1991,6 +2000,8 @@ public class TmuxSessionViewModel @Inject constructor(
             passphrase = passphrase,
             sessionName = sessionName,
             startDirectory = startDirectory,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
         )
         if (connectJob?.isActive == true && connectingTarget == target) return
         if (
@@ -2414,14 +2425,26 @@ public class TmuxSessionViewModel @Inject constructor(
             previous.user == target.user &&
             previous.keyPath == target.keyPath
 
-    private fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget): Boolean =
-        left.hostId == right.hostId &&
-            left.host == right.host &&
-            left.port == right.port &&
-            left.user == right.user &&
-            left.keyPath == right.keyPath &&
-            left.sessionName == right.sessionName &&
+    private fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget): Boolean {
+        if (!left.hasSameHostAndCredential(right)) return false
+        val leftDurable = left.durableSessionKey()
+        val rightDurable = right.durableSessionKey()
+        if (leftDurable != null || rightDurable != null) {
+            return leftDurable == rightDurable
+        }
+        return left.sessionName == right.sessionName &&
             left.startDirectory == right.startDirectory
+    }
+
+    private fun ConnectionTarget.hasSameHostAndCredential(other: ConnectionTarget): Boolean =
+        hostId == other.hostId &&
+            host == other.host &&
+            port == other.port &&
+            user == other.user &&
+            keyPath == other.keyPath
+
+    private fun ConnectionTarget.durableSessionKey(): String? =
+        durableTmuxSessionKey(hostId, tmuxSessionId, sessionCreated)
 
     private fun markSuccessfulAttachForNetworkCoalescing(
         target: ConnectionTarget,
@@ -2499,6 +2522,7 @@ public class TmuxSessionViewModel @Inject constructor(
             username = user,
             keyPath = keyPath,
             sessionName = sessionName,
+            durableSessionKey = durableSessionKey(),
         )
 
     private fun nextConnectGeneration(): Long {
@@ -2584,6 +2608,8 @@ public class TmuxSessionViewModel @Inject constructor(
             passphrase = target.passphrase,
             sessionName = target.sessionName,
             startDirectory = target.startDirectory,
+            tmuxSessionId = target.tmuxSessionId,
+            sessionCreated = target.sessionCreated,
             trigger = TmuxConnectTrigger.Reconnect,
         )
         return connectJob
@@ -3427,6 +3453,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 passphrase = target.passphrase,
                 sessionName = target.sessionName,
                 startDirectory = target.startDirectory,
+                tmuxSessionId = target.tmuxSessionId,
+                sessionCreated = target.sessionCreated,
                 trigger = TmuxConnectTrigger.LifecycleReattach,
             )
         }
@@ -3491,6 +3519,8 @@ public class TmuxSessionViewModel @Inject constructor(
             passphrase = target.passphrase,
             sessionName = target.sessionName,
             startDirectory = target.startDirectory,
+            tmuxSessionId = target.tmuxSessionId,
+            sessionCreated = target.sessionCreated,
             trigger = TmuxConnectTrigger.AutoReconnect,
         )
     }
@@ -3557,6 +3587,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 keyPath = intent.target.keyPath,
                 sessionName = intent.target.sessionName,
                 startDirectory = intent.target.startDirectory,
+                tmuxSessionId = intent.target.tmuxSessionId,
+                sessionCreated = intent.target.sessionCreated,
                 trigger = intent.trigger,
                 generation = intent.generation,
             )
@@ -5011,6 +5043,8 @@ public class TmuxSessionViewModel @Inject constructor(
         passphrase: CharArray?,
         sessionName: String,
         startDirectory: String?,
+        tmuxSessionId: String?,
+        sessionCreated: Long?,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -5022,6 +5056,8 @@ public class TmuxSessionViewModel @Inject constructor(
             passphrase = passphrase,
             sessionName = sessionName,
             startDirectory = startDirectory,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
         )
         // Cancel any in-flight connect so the preflight owns the decision, then
         // gate every downstream attach behind it. Mirrors the teardown the
@@ -5054,6 +5090,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     passphrase = passphrase?.copyOf(),
                     sessionName = sessionName,
                     startDirectory = startDirectory,
+                    tmuxSessionId = tmuxSessionId,
+                    sessionCreated = sessionCreated,
                     trigger = TmuxConnectTrigger.ColdRestore,
                     skipColdRestorePreflight = true,
                 )
@@ -5593,6 +5631,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     passphrase = recoverTarget.passphrase,
                     sessionName = recoverTarget.sessionName,
                     startDirectory = recoverTarget.startDirectory,
+                    tmuxSessionId = recoverTarget.tmuxSessionId,
+                    sessionCreated = recoverTarget.sessionCreated,
                     trigger = TmuxConnectTrigger.AutoReconnect,
                 )
             }
@@ -9288,6 +9328,7 @@ public class TmuxSessionViewModel @Inject constructor(
             windowId = windowId,
             detection = detection,
             wasOnConversation = state.selectedTab == SessionTab.Conversation,
+            durableSessionKey = target.durableSessionKey(),
         )
     }
 
@@ -9305,6 +9346,7 @@ public class TmuxSessionViewModel @Inject constructor(
             hostId = target.hostId,
             sessionName = target.sessionName,
             windowId = windowId,
+            durableSessionKey = target.durableSessionKey(),
         )
     }
 
@@ -9329,6 +9371,7 @@ public class TmuxSessionViewModel @Inject constructor(
             hostId = target.hostId,
             sessionName = target.sessionName,
             windowId = pane.windowId,
+            durableSessionKey = target.durableSessionKey(),
         ) ?: return
         setAgentConversation(
             pane.paneId,
@@ -9870,6 +9913,7 @@ public class TmuxSessionViewModel @Inject constructor(
             hostId = target.hostId,
             sessionName = target.sessionName,
             windowId = windowId,
+            durableSessionKey = target.durableSessionKey(),
         ) ?: return false
         // Only defer while the seeded agent UI is actually still showing; once
         // detection has confirmed an exit and the row is gone, there is
@@ -13560,6 +13604,8 @@ public class TmuxSessionViewModel @Inject constructor(
         val passphrase: CharArray?,
         val sessionName: String,
         val startDirectory: String?,
+        val tmuxSessionId: String? = null,
+        val sessionCreated: Long? = null,
     )
 
     private data class ConnectIntent(
@@ -14884,6 +14930,8 @@ public data class TmuxRestoreIntentSnapshot(
     val keyPath: String,
     val sessionName: String,
     val startDirectory: String?,
+    val tmuxSessionId: String? = null,
+    val sessionCreated: Long? = null,
     val trigger: TmuxConnectTrigger,
     val generation: Long,
 )

@@ -139,9 +139,22 @@ fun FolderListScreen(
     keyPath: String,
     passphrase: CharArray?,
     onBack: () -> Unit,
-    onOpenSession: (sessionName: String, startDirectory: String?) -> Unit,
-    onOpenSessionWindow: (sessionName: String, startDirectory: String?, windowIndex: Int?) -> Unit =
-        { sessionName, startDirectory, _ -> onOpenSession(sessionName, startDirectory) },
+    onOpenSession: (
+        sessionName: String,
+        startDirectory: String?,
+        tmuxSessionId: String?,
+        sessionCreated: Long?,
+    ) -> Unit,
+    onOpenSessionWindow: (
+        sessionName: String,
+        startDirectory: String?,
+        windowIndex: Int?,
+        tmuxSessionId: String?,
+        sessionCreated: Long?,
+    ) -> Unit =
+        { sessionName, startDirectory, _, tmuxSessionId, sessionCreated ->
+            onOpenSession(sessionName, startDirectory, tmuxSessionId, sessionCreated)
+        },
     /**
      * Fired after the SessionTypePickerSheet successfully created a
      * session on the remote. The caller (MainActivity) routes to
@@ -350,11 +363,13 @@ fun FolderListScreen(
                     onDismissActionStatus = viewModel::clearActionStatus,
                     onOpenPortForwarding = onOpenPortForwarding,
                     onCreateTopLevelSession = onCreateTopLevelSession,
-                    onSessionClick = { folderPath, sessionName, windowIndex ->
+                    onSessionClick = { folderPath, session, windowIndex ->
                         onOpenSessionWindow(
-                            sessionName,
+                            session.sessionName,
                             folderPath.takeUnless { it == FolderListViewModel.UNTRACKED_PATH },
                             windowIndex,
+                            session.tmuxSessionId,
+                            session.sessionCreated,
                         )
                     },
                     onRenameSession = { sessionName -> renameSessionTarget = sessionName },
@@ -998,7 +1013,7 @@ internal fun FolderListContent(
     onDismissActionStatus: () -> Unit,
     onOpenPortForwarding: () -> Unit,
     onCreateTopLevelSession: () -> Unit,
-    onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
+    onSessionClick: (folderPath: String, session: FolderSessionEntry, windowIndex: Int?) -> Unit,
     onRenameSession: (sessionName: String) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
@@ -1113,7 +1128,7 @@ internal fun FolderListContent(
                                 onSessionClick(
                                     sessionFolderPaths[session.sessionName]
                                         ?: FolderListViewModel.UNTRACKED_PATH,
-                                    session.sessionName,
+                                    session,
                                     null,
                                 )
                             },
@@ -1121,7 +1136,7 @@ internal fun FolderListContent(
                                 onSessionClick(
                                     sessionFolderPaths[session.sessionName]
                                         ?: FolderListViewModel.UNTRACKED_PATH,
-                                    session.sessionName,
+                                    session,
                                     null,
                                 )
                             },
@@ -1150,7 +1165,7 @@ internal fun FolderListContent(
                                 onSessionClick(
                                     sessionFolderPaths[session.sessionName]
                                         ?: FolderListViewModel.UNTRACKED_PATH,
-                                    session.sessionName,
+                                    session,
                                     null,
                                 )
                             },
@@ -1158,7 +1173,7 @@ internal fun FolderListContent(
                                 onSessionClick(
                                     sessionFolderPaths[session.sessionName]
                                         ?: FolderListViewModel.UNTRACKED_PATH,
-                                    session.sessionName,
+                                    session,
                                     null,
                                 )
                             },
@@ -1561,7 +1576,7 @@ private fun FlatEmptyState() {
 private fun FolderTreeRootGroup(
     root: FolderTreeRoot,
     expandedProjectPaths: Set<String>,
-    onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
+    onSessionClick: (folderPath: String, session: FolderSessionEntry, windowIndex: Int?) -> Unit,
     onRenameSession: (sessionName: String) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
@@ -1784,7 +1799,7 @@ private fun EmptyRootHint(rootPath: String, candidateCount: Int, onCreate: () ->
 private fun FolderGroup(
     folder: FolderRow,
     expanded: Boolean,
-    onSessionClick: (folderPath: String, sessionName: String, windowIndex: Int?) -> Unit,
+    onSessionClick: (folderPath: String, session: FolderSessionEntry, windowIndex: Int?) -> Unit,
     onRenameSession: (sessionName: String) -> Unit,
     onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
@@ -1828,7 +1843,7 @@ private fun FolderGroup(
                                 folderPath = folder.path,
                                 session = row.session,
                                 expandedIntoWindows = row.expandedIntoWindows,
-                                onClick = { onSessionClick(folder.path, row.session.sessionName, null) },
+                                onClick = { onSessionClick(folder.path, row.session, null) },
                                 onRename = { onRenameSession(row.session.sessionName) },
                                 onStop = { onStopSession(row.session.sessionName) },
                                 modifier = Modifier.weight(1f),
@@ -1838,7 +1853,7 @@ private fun FolderGroup(
                                 sessionName = row.sessionName,
                                 window = row.window,
                                 onClick = {
-                                    onSessionClick(folder.path, row.sessionName, row.window.index)
+                                    onSessionClick(folder.path, row.session, row.window.index)
                                 },
                                 modifier = Modifier.weight(1f),
                             )
@@ -1966,9 +1981,11 @@ internal sealed interface FolderTreeSessionChildRow {
         val expandedIntoWindows: Boolean = false,
     ) : FolderTreeSessionChildRow
     data class Window(
-        val sessionName: String,
+        val session: FolderSessionEntry,
         val window: FolderSessionWindowEntry,
-    ) : FolderTreeSessionChildRow
+    ) : FolderTreeSessionChildRow {
+        val sessionName: String get() = session.sessionName
+    }
 }
 
 internal fun folderTreeSessionChildRows(
@@ -1982,7 +1999,7 @@ internal fun folderTreeSessionChildRows(
             listOf(FolderTreeSessionChildRow.Session(session, expandedIntoWindows = true)) +
                 windows.map { window ->
                     FolderTreeSessionChildRow.Window(
-                        sessionName = session.sessionName,
+                        session = session,
                         window = window,
                     )
                 }

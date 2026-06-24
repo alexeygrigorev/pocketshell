@@ -17,16 +17,34 @@ import org.junit.Test
  * (blank cwd, malformed row, multiple panes per session with only the
  * active one winning).
  *
- * Epic #821 Workstream A + issue #858: `list-sessions` carries TWO recorded
- * fields between `session_attached` and `session_path` — `@ps_agent_kind`
- * (the agent kind PocketShell recorded at launch) and `@ps_agent_profile`
- * (the non-default profile label, e.g. a z.ai Claude). Field order:
- * `name::created::activity::attached::@ps_agent_kind::@ps_agent_profile::path`.
- * The client always emits this 7-field format; a legacy tmux server with no
+ * Issue #899 + epic #821 Workstream A + issue #858: `list-sessions` carries
+ * tmux `session_id`, then TWO recorded fields between `session_attached` and
+ * `session_path` — `@ps_agent_kind` (the agent kind PocketShell recorded at
+ * launch) and `@ps_agent_profile` (the non-default profile label, e.g. a z.ai
+ * Claude). Field order:
+ * `name::session_id::created::activity::attached::@ps_agent_kind::@ps_agent_profile::path`.
+ * The client emits this 8-field format; a legacy tmux server with no
  * `@ps_agent_profile` set expands that column to an EMPTY string (not a
  * missing column), so the profile parses as null and the path stays last.
  */
 class FolderListGatewayParserTest {
+
+    @Test
+    fun parseListSessionsRowsReadsTmuxIdentityAndKeepsPathLast() {
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "git-pocketshell::\$3::1700000000::1700001000::1::codex::Codex Max::/tmp/a::b\n",
+        )
+
+        assertEquals(1, rows.size)
+        assertEquals("git-pocketshell", rows[0].sessionName)
+        assertEquals("\$3", rows[0].tmuxSessionId)
+        assertEquals(1700000000L, rows[0].sessionCreated)
+        assertEquals(1700001000L, rows[0].lastActivity)
+        assertEquals(true, rows[0].attached)
+        assertEquals(SessionAgentKind.Codex, rows[0].recordedKind)
+        assertEquals("Codex Max", rows[0].recordedProfile)
+        assertEquals("/tmp/a::b", rows[0].cwd)
+    }
 
     @Test
     fun parseListSessionsRowsExtractsAllFields() {

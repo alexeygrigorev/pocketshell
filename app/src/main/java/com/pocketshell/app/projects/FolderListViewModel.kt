@@ -172,6 +172,16 @@ data class FolderSessionEntry(
      * Claude, and shows no spurious chip for a default session.
      */
     val recordedProfile: String? = null,
+    /**
+     * Issue #899: tmux `#{session_id}` (`$N`) carried from discovery into
+     * navigation so runtime/reveal/memory keys can avoid stale name reuse.
+     */
+    val tmuxSessionId: String? = null,
+    /**
+     * Issue #899: tmux `#{session_created}` epoch seconds carried with
+     * [tmuxSessionId] to build the durable session key.
+     */
+    val sessionCreated: Long? = null,
 )
 
 data class FolderSessionWindowEntry(
@@ -2314,6 +2324,8 @@ class FolderListViewModel internal constructor(
             attached = attached,
             agentKind = agentKind,
             recordedProfile = recordedProfile,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
             windows = windows.map { window ->
                 FolderSessionWindowEntry(
                     index = window.index,

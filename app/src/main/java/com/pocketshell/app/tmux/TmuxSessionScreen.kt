@@ -135,7 +135,6 @@ import com.pocketshell.app.session.ConversationSyncStatusRow
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.core.connection.RevealState
-import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.targetIdOrNull
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.conversationLinkAction
@@ -240,6 +239,8 @@ public fun TmuxSessionScreen(
     sessionName: String,
     startDirectory: String? = null,
     initialWindowIndex: Int? = null,
+    tmuxSessionId: String? = null,
+    sessionCreated: Long? = null,
     modifier: Modifier = Modifier,
     sessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
@@ -351,7 +352,20 @@ public fun TmuxSessionScreen(
             "hasStartDirectory" to (startDirectory != null),
         )
     }
-    LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory, connectTrigger) {
+    LaunchedEffect(
+        hostId,
+        hostName,
+        host,
+        port,
+        user,
+        keyPath,
+        passphrase,
+        sessionName,
+        startDirectory,
+        tmuxSessionId,
+        sessionCreated,
+        connectTrigger,
+    ) {
         StartupTiming.mark(
             "tmux-connect-effect-start",
             "hostId" to hostId,
@@ -369,6 +383,8 @@ public fun TmuxSessionScreen(
             passphrase = passphrase,
             sessionName = sessionName,
             startDirectory = startDirectory,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
             trigger = connectTrigger,
         )
     }
@@ -386,11 +402,12 @@ public fun TmuxSessionScreen(
     // the rendered screen state is a pure function of that id (`RevealStateMachine`),
     // so a late/stale frame from the previous session can NEVER paint.
     val revealState by viewModel.revealState.collectAsState()
-    // The id the controller / reveal machine key on for THIS screen's target —
-    // mints the SAME SessionId encoding the VM uses (`shadowSessionId` =
-    // "$hostId/$sessionName"), so the screen's drop-by-id matches the controller's.
-    val targetSessionId = remember(hostId, sessionName) {
-        SessionId("$hostId/$sessionName")
+    // The id the controller / reveal machine key on for THIS screen's target:
+    // durable tmux identity when the folder route provided it, with the legacy
+    // "$hostId/$sessionName" fallback. The screen's drop-by-id and draft scoping
+    // must match the controller's target.
+    val targetSessionId = remember(hostId, sessionName, tmuxSessionId, sessionCreated) {
+        tmuxTargetSessionId(hostId, sessionName, tmuxSessionId, sessionCreated)
     }
     // Hold the terminal (loading placeholder) until the reveal machine confirms
     // RevealState.Live FOR THIS target — never paint the previous session's frame.
@@ -2460,10 +2477,10 @@ public fun TmuxSessionScreen(
             // composer over a freshly-launched agent pane. Null on a shell pane,
             // where the dropdown is never shown.
             agentKind = paletteAgent ?: presumedAgentKind,
-            // Issue #746: scope the shared activity-level composer draft to the
-            // focused session so a "Not sent" draft authored here never bleeds
-            // into another session on a switch.
-            composerTargetKey = "$hostId/$sessionName",
+            // Issue #746/#899: scope the shared activity-level composer draft to
+            // the exact target identity so a "Not sent" draft authored here never
+            // bleeds into another session on a switch or same-name recreation.
+            composerTargetKey = targetSessionId.value,
             onDismiss = { showMicSheet = false },
             // Issue #745: surface the live connection state in the composer so a
             // send while the SSH/tmux link is degraded shows a connection-lost

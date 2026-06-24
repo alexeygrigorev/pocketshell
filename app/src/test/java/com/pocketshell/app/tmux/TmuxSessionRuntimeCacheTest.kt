@@ -65,9 +65,37 @@ class TmuxSessionRuntimeCacheTest {
         assertTrue(cache.contains(otherSession.key))
     }
 
+    @Test
+    fun activateMissesSameNameRuntimeWithDifferentDurableIdentity() {
+        val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
+        val killed = cachedRuntime("work", durableSessionKey = "tmux:1:\$0:100")
+        val successorKey = killed.key.copy(durableSessionKey = "tmux:1:\$1:200")
+
+        cache.put(killed)
+
+        val activation = cache.activate(successorKey)
+
+        assertEquals(CacheActivation(runtime = null, evicted = emptyList()), activation)
+        assertTrue(
+            "different durable identities must not activate each other's cached runtime",
+            cache.contains(killed.key),
+        )
+    }
+
+    @Test
+    fun nullDurableIdentityKeepsLegacyNameKeyedActivation() {
+        val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
+        val runtime = cachedRuntime("work")
+
+        cache.put(runtime)
+
+        assertEquals(CacheActivation(runtime = runtime, evicted = emptyList()), cache.activate(runtime.key))
+    }
+
     private fun cachedRuntime(
         sessionName: String,
         hostId: Long = 1L,
+        durableSessionKey: String? = null,
     ): CachedTmuxRuntime =
         CachedTmuxRuntime(
             key = TmuxRuntimeKey(
@@ -77,6 +105,7 @@ class TmuxSessionRuntimeCacheTest {
                 username = "alex",
                 keyPath = "/keys/a",
                 sessionName = sessionName,
+                durableSessionKey = durableSessionKey,
             ),
             hostName = "alpha",
             startDirectory = null,

@@ -795,6 +795,15 @@ public class TmuxSessionViewModel @Inject constructor(
             // band (the #635 regression). Recovery is deferred to the within-grace
             // foreground heal ([launchForegroundHealWithinGrace]) — the single owner.
             suppressTransportDrops = { shouldSuppressTransportDropsForSingleGraceOwner() },
+            // EPIC #766 Slice 2b: the driver now owns the passive transport-drop edge.
+            // The typed client stream lets the VM reject a late old-client close BEFORE
+            // the driver submits TransportDropped to the controller (#630), while still
+            // keeping the submit itself inside the driver-owned path.
+            controlChannelDrops = connectionTmuxPort.disconnectedClients,
+            shouldSubmitControlChannelDrop = { client ->
+                classifyPassiveTransportDrop(client) != ConnectionDecision.Ignore
+            },
+            controlChannelDroppedEffect = { client -> onControllerTransportDropped(client) },
         ).also { it.start() }
 
     /**
@@ -963,6 +972,11 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun triggerCleanPassiveDropForTest(): Boolean {
         val client = clientRef ?: return false
+        if (classifyPassiveTransportDrop(client) == ConnectionDecision.Ignore) return false
+        connectionManager.submit(
+            CoreConnectionEvent.TransportDropped(reason = "test_clean_outage_seam"),
+        )
+        projectStatusFromController()
         handlePassiveClientDisconnect(
             client = client,
             disconnectEvent = TmuxDisconnectEvent(
@@ -4478,6 +4492,7 @@ public class TmuxSessionViewModel @Inject constructor(
         remoteColumns = runtime.remoteColumns
         remoteRows = runtime.remoteRows
         resetControlClientSizeForAttach()
+        connectionTmuxPort.setClient(runtime.client)
         bindClientObservers(runtime.client)
         rebindRestoredRuntimePaneJobsIfNeeded(runtime.client, runtime.panes)
         _panes.value = runtime.panes
@@ -6291,9 +6306,17 @@ public class TmuxSessionViewModel @Inject constructor(
                     "disconnectSource" to disconnectEvent.source,
                     "disconnectIntent" to disconnectEvent.intent,
                 )
-                handlePassiveClientDisconnect(client, disconnectEvent)
+                // Recovery is fired from [ConnectionEffectDriver.controlChannelDroppedEffect]
+                // after the real current-client drop has moved the controller. This
+                // per-client observer stays as the rich diagnostic trail and as a stale
+                // client guard: an old client's latched close is recorded, but it no
+                // longer feeds the controller or recovery IO.
             }
         }
+    }
+
+    private fun onControllerTransportDropped(client: TmuxClient) {
+        handlePassiveClientDisconnect(client, disconnectEventOrFallback(client))
     }
 
     private fun handlePassiveClientDisconnect(
@@ -6308,9 +6331,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // nothing tappable. A transport drop is real regardless of the display
         // status; the controller's `onTransportDropped` already walks `Attaching`/
         // `Live`/`Reattaching`/`Reconnecting` into the silent-heal ladder, and the
-        // inline `reduceTransportDropped` self-gates the IO arm by client identity
+        // [classifyPassiveTransportDrop] self-gates the IO arm by client identity
         // (a stale-client drop is ignored there). The display status no longer
-        // gates recovery — only the client-identity guard in [reduceTransportDropped]
+        // gates recovery — only the client-identity guard in [classifyPassiveTransportDrop]
         // does.
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(target, disconnectEvent)
@@ -6362,24 +6385,15 @@ public class TmuxSessionViewModel @Inject constructor(
         // Classify the drop FIRST (status-agnostic — #895/#766). `Ignore` means the
         // dropped client is not the current one (a stale `-CC` close on a healthy
         // fast switch, the #635 spurious-band case) — for that we surface NOTHING.
-        val decision = reduceConnection(ConnectionEvent.TransportDropped(client))
+        val decision = classifyPassiveTransportDrop(client)
         if (decision == ConnectionDecision.Ignore) {
             projectStatusFromController()
             return
         }
-        // Issue #895: surface an ESCAPABLE state PROMPTLY. Walk the controller
-        // Live/Attaching/Reattaching/Reconnecting -> Reattaching now, EXACTLY like
-        // [onLivenessProbeDeclaredDrop] does for a silent drop — the controller is
-        // the authority for the connection-lost indicator (band), so the escapable
-        // "Reconnecting…" band appears immediately even if the driver collector is
-        // momentarily starved (the R1 freeze) OR the inline status was `Switching`
-        // (the R1 swallow). The driver's own [CurrentClientTmuxPort.disconnected]
-        // feed for the same real drop walks the SAME calm Reconnecting band (both
-        // project identically); the controller self-gates from a non-live-ish state,
-        // so this never spuriously bands an idle/gone session.
-        connectionManager.submit(
-            CoreConnectionEvent.TransportDropped(reason = "passive_control_channel_disconnected"),
-        )
+        // Issue #895/#766: the driver has already surfaced the ESCAPABLE state by
+        // submitting the real current-client drop to the controller before invoking
+        // this callback. This body now owns only the passive recovery IO under that
+        // controller-owned band.
         projectStatusFromController()
         // The inline effect machinery still owns the actual silent-reattach /
         // reconnect IO until the #766 collapse (gated on the maintainer on-device
@@ -6630,6 +6644,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 disconnectedJob = null
                 runCatching { staleClient.close() }
                 clientRef = replacement
+                connectionTmuxPort.setClient(replacement)
                 bindClientObservers(replacement)
                 replacement.connect()
                 activeAttachMilestone = AttachMilestone(
@@ -6828,6 +6843,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 leaseRef = lease
                 sessionRef = session
                 clientRef = newClient
+                connectionTmuxPort.setClient(newClient)
                 bindClientObservers(newClient)
                 newClient.connect()
                 activeAttachMilestone = AttachMilestone(
@@ -13691,9 +13707,8 @@ public class TmuxSessionViewModel @Inject constructor(
      *
      * The connection-lifecycle DECISIONS used to be inlined at the top of each
      * lifecycle entry point ([onAppBackgrounded], [onAppForegrounded],
-     * [onNetworkChanged], [handlePassiveClientDisconnect], and the
-     * foreground-runtime-probe gate). This sealed event/decision pair plus the
-     * single [reduceConnection] classifier consolidate those branch decisions
+     * [onNetworkChanged], and the foreground-runtime-probe gate). This sealed
+     * event/decision pair plus the single [reduceConnection] classifier consolidate those branch decisions
      * into ONE place. The vocabulary deliberately mirrors
      * `:shared:core-connection`'s `ConnectionController` (an event-in /
      * decision-out reducer) so slice 1c can swap the [reduceConnection] body for
@@ -13716,11 +13731,6 @@ public class TmuxSessionViewModel @Inject constructor(
         /** A network identity change was observed by the terminal observer. */
         data class NetworkChanged(val change: TerminalNetworkChange) : ConnectionEvent
 
-        /**
-         * The active [TmuxClient.disconnected] latch flipped true — the control
-         * channel closed under us (clean EOF, sshj exception, or close()).
-         */
-        data class TransportDropped(val client: TmuxClient) : ConnectionEvent
     }
 
     /**
@@ -13789,7 +13799,6 @@ public class TmuxSessionViewModel @Inject constructor(
             is ConnectionEvent.Background -> reduceBackground()
             is ConnectionEvent.Foreground -> reduceForeground()
             is ConnectionEvent.NetworkChanged -> reduceNetworkChanged(event.change)
-            is ConnectionEvent.TransportDropped -> reduceTransportDropped(event.client)
         }
 
     private fun reduceBackground(): ConnectionDecision {
@@ -13834,7 +13843,7 @@ public class TmuxSessionViewModel @Inject constructor(
         return ConnectionDecision.ScheduleNetworkReconnect
     }
 
-    private fun reduceTransportDropped(client: TmuxClient): ConnectionDecision {
+    private fun classifyPassiveTransportDrop(client: TmuxClient): ConnectionDecision {
         // Issue #895 (#766 down-payment): STATUS-AGNOSTIC. The old
         // `inlineConnectionStatus !is Connected -> Ignore` gate swallowed a drop
         // that landed during the `Switching` (Attaching) window — the R1

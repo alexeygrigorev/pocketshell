@@ -169,4 +169,32 @@ class Issue895SwitchWhileBlackDropTest {
             vm.isEscapableBand(),
         )
     }
+
+    @Test
+    fun switchingDisconnectedSignal_surfacesEscapableBand_viaControllerDriver() = runTest(scheduler) {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val client = FakeTmuxClient()
+        connectVm(vm, client)
+        runCurrent()
+
+        vm.forceAttachingStateForTest("alpha.example", 22, "alex")
+        runCurrent()
+        assertTrue(
+            "precondition: VM is in the Switching window",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Switching,
+        )
+
+        client.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertTrue(
+            "#895/#766: the real disconnected signal must flow through the " +
+                "driver-owned TransportDropped path and surface an escapable band; got " +
+                "${vm.connectionStatus.value}",
+            vm.isEscapableBand(),
+        )
+    }
 }

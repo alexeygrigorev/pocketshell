@@ -18,8 +18,11 @@ import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
 
@@ -215,5 +218,18 @@ class CurrentClientTmuxPort(
     override val disconnected: Flow<Boolean> =
         currentClient.flatMapLatest { client ->
             client?.disconnected ?: flowOf(true)
+        }
+
+    /**
+     * Typed current-client drop stream for the ViewModel-owned stale-client guard.
+     * Unlike [disconnected], this carries the client instance that produced the true
+     * edge, so a late old-client close can be rejected before the controller is moved.
+     */
+    val disconnectedClients: Flow<TmuxClient> =
+        currentClient.flatMapLatest { client ->
+            client?.disconnected
+                ?.filter { it }
+                ?.map { client }
+                ?: emptyFlow()
         }
 }

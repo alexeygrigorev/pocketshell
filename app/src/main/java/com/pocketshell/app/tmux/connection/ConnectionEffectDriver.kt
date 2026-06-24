@@ -9,6 +9,7 @@ import com.pocketshell.core.connection.TransportPort
 import com.pocketshell.core.connection.TransportUpDown
 import com.pocketshell.core.connection.hostOrNull
 import com.pocketshell.core.connection.targetIdOrNull
+import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -142,6 +143,15 @@ import kotlinx.coroutines.launch
  *   the VM re-projects `_connectionStatus` from the controller's state (the controller
  *   is the single status source). Defaults to a no-op (tests read [observations]/
  *   [ConnectionController.state] directly).
+ * @param controlChannelDrops optional typed current-client drop stream. Production passes
+ *   [CurrentClientTmuxPort.disconnectedClients] so the VM can reject stale old-client closes
+ *   before this driver submits [ConnectionEvent.TransportDropped]. Tests that only care about
+ *   the controller feed can omit it and use [TmuxPort.disconnected].
+ * @param shouldSubmitControlChannelDrop stale-client gate for [controlChannelDrops]. Called
+ *   before any controller submit; return false to leave the controller untouched.
+ * @param controlChannelDroppedEffect fired AFTER an accepted, unsuppressed current-control-channel
+ *   drop has moved the controller. This is the typed effect edge for the VM's passive recovery IO;
+ *   suppressed drops, rejected stale drops, and controller no-ops do not fire it.
  * @param sink where every observed transition is recorded. Defaults to logcat.
  */
 class ConnectionEffectDriver(
@@ -153,6 +163,9 @@ class ConnectionEffectDriver(
     private val foregroundReattachEffect: () -> Unit = {},
     private val foregroundReconnectEffect: () -> Unit = {},
     private val onControllerTransition: () -> Unit = {},
+    private val controlChannelDrops: Flow<TmuxClient>? = null,
+    private val shouldSubmitControlChannelDrop: (TmuxClient) -> Boolean = { true },
+    private val controlChannelDroppedEffect: (TmuxClient) -> Unit = {},
     // EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER gate. When this returns true, the
     // driver SUPPRESSES the `TransportDropped` submission for a control-channel drop —
     // i.e. it does NOT walk the controller down the reconnect ladder. The VM supplies a
@@ -202,7 +215,14 @@ class ConnectionEffectDriver(
         if (started) return
         started = true
         jobs += scope.launch { collectStateTransitions(controller.state) }
-        jobs += scope.launch { collectTransportDrops(tmuxPort.disconnected) }
+        val typedDrops = controlChannelDrops
+        jobs += scope.launch {
+            if (typedDrops != null) {
+                collectControlChannelDrops(typedDrops)
+            } else {
+                collectTransportDrops(tmuxPort.disconnected)
+            }
+        }
         jobs += scope.launch { collectTransportEvents(transportPort.transportEvents) }
     }
 
@@ -253,6 +273,22 @@ class ConnectionEffectDriver(
                 foregroundReconnectEffect()
             }
             previous = current
+        }
+    }
+
+    private suspend fun collectControlChannelDrops(drops: Flow<TmuxClient>) {
+        drops.collect { client ->
+            record(Observation.Disconnected(true))
+            if (suppressTransportDrops()) {
+                record(Observation.DropSuppressed)
+            } else if (shouldSubmitControlChannelDrop(client)) {
+                val changed = submitTransport(
+                    ConnectionEvent.TransportDropped(reason = "control_channel_disconnected"),
+                )
+                if (changed) {
+                    controlChannelDroppedEffect(client)
+                }
+            }
         }
     }
 
@@ -342,9 +378,11 @@ class ConnectionEffectDriver(
      * the VM-supplied [onControllerTransition] re-projects `_connectionStatus` from the
      * controller's state — exactly as the deleted mirror feeds did.
      */
-    private fun submitTransport(event: ConnectionEvent) {
+    private fun submitTransport(event: ConnectionEvent): Boolean {
+        val before = controller.state.value
         controller.submit(event)
         onControllerTransition()
+        return controller.state.value != before
     }
 
     private fun record(observation: Observation) {

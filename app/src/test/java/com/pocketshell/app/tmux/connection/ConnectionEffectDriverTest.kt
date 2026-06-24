@@ -598,6 +598,82 @@ class ConnectionEffectDriverTest {
         scope.cancel()
     }
 
+    @Test
+    fun typedControlChannelDropFiresEffectAfterControllerSubmit() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val typedDrops = MutableSharedFlow<FakeTmuxClient>(extraBufferCapacity = 16)
+        val accepted = mutableListOf<FakeTmuxClient>()
+        val effects = mutableListOf<Pair<FakeTmuxClient, ConnectionState>>()
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            controlChannelDrops = typedDrops,
+            shouldSubmitControlChannelDrop = { client ->
+                accepted += client as FakeTmuxClient
+                true
+            },
+            controlChannelDroppedEffect = { client ->
+                effects += Pair(client as FakeTmuxClient, controller.state.value)
+            },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
+
+        val client = FakeTmuxClient()
+        typedDrops.emit(client)
+
+        assertEquals(listOf(client), accepted)
+        assertEquals(
+            "accepted current-client drop walks the controller before the VM recovery effect",
+            listOf("Idle", "Attaching", "Live", "Reattaching"),
+            stateNamesOf(driver),
+        )
+        assertEquals(listOf(client to controller.state.value), effects)
+        assertTrue(controller.state.value is ConnectionState.Reattaching)
+        scope.cancel()
+    }
+
+    @Test
+    fun typedControlChannelDropRejectedAsStaleDoesNotMoveControllerOrFireEffect() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val typedDrops = MutableSharedFlow<FakeTmuxClient>(extraBufferCapacity = 16)
+        val effects = mutableListOf<FakeTmuxClient>()
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            controlChannelDrops = typedDrops,
+            shouldSubmitControlChannelDrop = { false },
+            controlChannelDroppedEffect = { client -> effects += client as FakeTmuxClient },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
+
+        typedDrops.emit(FakeTmuxClient())
+
+        assertEquals(
+            "a stale-client rejection must leave the controller untouched",
+            listOf("Idle", "Attaching", "Live"),
+            stateNamesOf(driver),
+        )
+        assertTrue("stale rejection must not run passive recovery", effects.isEmpty())
+        assertTrue(controller.state.value is ConnectionState.Live)
+        scope.cancel()
+    }
+
     // --- Slice 3 (#766): controller-authoritative RECONNECT LADDER -----------------
     //
     // The lease `Down` edge — deferred since B2 ("its consumer the reconnect loop is a

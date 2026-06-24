@@ -77,7 +77,7 @@ class PromptComposerOutboundQueueTest {
     }
 
     @Test
-    fun outboundQueueFailedRowsExposeRetryCallback() {
+    fun outboundQueueFailedRowsExposeRetryAndDeleteCallbacks() {
         val item = OutboundItem(
             id = "failed-1",
             sessionKey = "1/a",
@@ -86,6 +86,7 @@ class PromptComposerOutboundQueueTest {
             lastError = "connection lost",
             createdAtMs = System.currentTimeMillis(),
         )
+        val deletedIds = mutableListOf<String>()
         val retriedIds = mutableListOf<String>()
 
         compose.setContent {
@@ -98,6 +99,7 @@ class PromptComposerOutboundQueueTest {
                     onSend = {},
                     outboundQueueItems = listOf(item),
                     outboundQueueExpanded = true,
+                    onDeleteOutboundItem = { deletedIds += it },
                     onRetryOutboundItem = { retriedIds += it },
                 )
             }
@@ -106,8 +108,10 @@ class PromptComposerOutboundQueueTest {
         compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(item.id)).assertIsDisplayed()
         compose.onNodeWithText("Failed — connection lost").assertIsDisplayed()
 
+        compose.onNodeWithTag(composerOutboundQueueDeleteTestTag(item.id)).performClick()
         compose.onNodeWithTag(composerOutboundQueueRetryTestTag(item.id)).performClick()
         compose.waitForIdle()
+        assertEquals(listOf(item.id), deletedIds)
         assertEquals(listOf(item.id), retriedIds)
     }
 

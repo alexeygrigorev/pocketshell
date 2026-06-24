@@ -450,23 +450,25 @@ public fun TmuxSessionScreen(
     // "Reconnecting" / "Disconnected" pill instead.
     val sessionLive = status is ConnectionStatus.Connected
     val outboundQueueItems by promptComposerViewModel.outboundQueueItems.collectAsState()
-    var autoRetriedOutboundIds by remember(targetSessionId.value) { mutableStateOf(emptySet<String>()) }
+    val outboundQueueAutoFlushController = remember(targetSessionId.value) {
+        OutboundQueueAutoFlushController()
+    }
     LaunchedEffect(targetSessionId.value) {
         promptComposerViewModel.onComposerTargetChanged(targetSessionId.value)
     }
     LaunchedEffect(sessionLive, targetSessionId.value) {
-        autoRetriedOutboundIds = emptySet()
         promptComposerViewModel.setConnectionDegraded(!sessionLive)
-        if (sessionLive) {
+        outboundQueueAutoFlushController.onConnectionWindowChanged(
+            sessionLive = sessionLive,
+            targetSessionId = targetSessionId.value,
+        ) {
             promptComposerViewModel.requeueStaleOutboundInFlight()
         }
     }
     LaunchedEffect(sessionLive, targetSessionId.value, outboundQueueItems) {
-        if (!sessionLive) return@LaunchedEffect
-        val retriedId = promptComposerViewModel.retryNextOutboundItem(
-            excludingIds = autoRetriedOutboundIds,
-        ) ?: return@LaunchedEffect
-        autoRetriedOutboundIds = autoRetriedOutboundIds + retriedId
+        outboundQueueAutoFlushController.onQueueSnapshotChanged(sessionLive) { excludingIds ->
+            promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
+        }
     }
     val sessionCardsState by viewModel.sessionCards.collectAsState()
     val checklistCards = remember(sessionCardsState, activeSessionCardsTargetKey) {
@@ -3557,6 +3559,39 @@ internal fun handleTmuxSessionSelection(
     if (selectedSessionName == currentSessionName) return
     onDismiss()
     onReplace(selectedSessionName)
+}
+
+/**
+ * Issue #900: state holder for the screen-level outbound queue auto-flush
+ * effects. It resets the per-live-window failure exclusion set when the
+ * connection window changes, requeues stale in-flight rows when a target becomes
+ * live, and retries at most one queue row per queue snapshot.
+ */
+internal class OutboundQueueAutoFlushController {
+    private var windowKey: Pair<Boolean, String>? = null
+    private var autoRetriedIds: Set<String> = emptySet()
+
+    fun onConnectionWindowChanged(
+        sessionLive: Boolean,
+        targetSessionId: String,
+        requeueStaleInFlight: () -> Unit,
+    ) {
+        val nextKey = sessionLive to targetSessionId
+        if (nextKey == windowKey) return
+        windowKey = nextKey
+        autoRetriedIds = emptySet()
+        if (sessionLive) requeueStaleInFlight()
+    }
+
+    fun onQueueSnapshotChanged(
+        sessionLive: Boolean,
+        retryNext: (excludingIds: Set<String>) -> String?,
+    ): String? {
+        if (!sessionLive) return null
+        val retriedId = retryNext(autoRetriedIds) ?: return null
+        autoRetriedIds = autoRetriedIds + retriedId
+        return retriedId
+    }
 }
 
 /**

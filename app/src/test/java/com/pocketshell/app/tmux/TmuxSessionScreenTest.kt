@@ -1462,4 +1462,65 @@ class TmuxSessionScreenTest {
             )
         }
     }
+
+    @Test
+    fun outboundQueueAutoFlushRequeuesOnLiveAndSuppressesSameWindowRetryLoop() {
+        val controller = OutboundQueueAutoFlushController()
+        val requeuedTargets = mutableListOf<String>()
+        val retryExclusions = mutableListOf<Set<String>>()
+
+        controller.onConnectionWindowChanged(
+            sessionLive = false,
+            targetSessionId = "1/session-a",
+        ) {
+            requeuedTargets += "should-not-run"
+        }
+        assertNull(
+            controller.onQueueSnapshotChanged(sessionLive = false) {
+                error("offline queue snapshots must not dispatch")
+            },
+        )
+        assertTrue(requeuedTargets.isEmpty())
+
+        controller.onConnectionWindowChanged(
+            sessionLive = true,
+            targetSessionId = "1/session-a",
+        ) {
+            requeuedTargets += "1/session-a"
+        }
+        val firstRetry = controller.onQueueSnapshotChanged(sessionLive = true) { excludingIds ->
+            retryExclusions += excludingIds
+            "failed-1"
+        }
+        val sameWindowRetry = controller.onQueueSnapshotChanged(sessionLive = true) { excludingIds ->
+            retryExclusions += excludingIds
+            null
+        }
+
+        assertEquals("failed-1", firstRetry)
+        assertNull(sameWindowRetry)
+        assertEquals(listOf("1/session-a"), requeuedTargets)
+        assertEquals(listOf(emptySet<String>(), setOf("failed-1")), retryExclusions)
+
+        controller.onConnectionWindowChanged(
+            sessionLive = false,
+            targetSessionId = "1/session-a",
+        ) {
+            requeuedTargets += "should-not-run"
+        }
+        controller.onConnectionWindowChanged(
+            sessionLive = true,
+            targetSessionId = "1/session-a",
+        ) {
+            requeuedTargets += "1/session-a"
+        }
+        val retryAfterReconnect = controller.onQueueSnapshotChanged(sessionLive = true) { excludingIds ->
+            retryExclusions += excludingIds
+            "failed-1"
+        }
+
+        assertEquals("failed-1", retryAfterReconnect)
+        assertEquals(listOf("1/session-a", "1/session-a"), requeuedTargets)
+        assertEquals(emptySet<String>(), retryExclusions.last())
+    }
 }

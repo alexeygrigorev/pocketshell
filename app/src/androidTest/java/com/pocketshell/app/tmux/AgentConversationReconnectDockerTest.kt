@@ -376,10 +376,6 @@ class AgentConversationReconnectDockerTest {
      */
     @Test
     fun conversationTapIsHonouredBeforeDetectionLands(): Unit = runBlocking {
-        Assume.assumeFalse(
-            "issue-778 connected tap evidence is local-only; CI coverage is the unit layer",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 

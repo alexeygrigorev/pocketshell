@@ -520,6 +520,13 @@ JOURNEY_CLASSES=(
   # and does NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.ComposerAlwaysPresentSwitchJourneyE2eTest"
+  # ADDED (#778/#848): tapping Conversation while live detection is still null
+  # must be honoured, not swallowed. This connected proof uses a plain-shell
+  # pane against the deterministic agents:2222 fixture and asserts the VM records
+  # a detection-less Conversation placeholder row. It has no transport-drop
+  # reconnect step (unlike its sibling local-only reconnect proof), so it is safe
+  # to run per-push after retiring its old C1 self-skip.
+  "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#conversationTapIsHonouredBeforeDetectionLands"
   # ADDED (#818/#815/#878): an agent pane must OPEN on the user's configured
   # default view (Conversation by default; opt-out to Terminal honoured), and
   # detection must NOT YANK the tab mid-session. #878 extends this case with the

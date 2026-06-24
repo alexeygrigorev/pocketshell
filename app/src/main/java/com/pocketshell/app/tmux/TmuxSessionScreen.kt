@@ -6490,9 +6490,14 @@ internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.Hotk
         keys = listOf(
             KeyBinding(label = "Esc", kind = KeyKind.Regular),
             KeyBinding(label = "Tab", kind = KeyKind.Regular),
+            // Issue #893: ⇧Tab (back-tab / Shift+Tab) sends tmux's `BTab` named
+            // key (ESC [ Z) so the maintainer can cycle Claude Code's
+            // permission/plan mode from the phone. 4 columns keep every label
+            // fully readable (Esc / Tab / ⇧Tab / Enter).
+            KeyBinding(label = "⇧Tab", kind = KeyKind.Regular),
             KeyBinding(label = TmuxHotkeyEnterLabel, kind = KeyKind.Regular),
         ),
-        columns = 3,
+        columns = 4,
     ),
     com.pocketshell.uikit.components.HotkeySection(
         title = "CTRL COMBOS",

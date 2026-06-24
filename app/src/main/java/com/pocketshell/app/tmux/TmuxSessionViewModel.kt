@@ -12202,6 +12202,13 @@ public class TmuxSessionViewModel @Inject constructor(
         val named = when (label) {
             "Esc" -> "Escape"
             "Tab" -> "Tab"
+            // Issue #893: ⇧Tab (back-tab / Shift+Tab). tmux's named key `BTab`
+            // emits the back-tab escape sequence `ESC [ Z` (0x1b 0x5b 0x5a),
+            // which Claude Code listens for to cycle its permission/plan mode
+            // ("plan mode on (shift+tab to cycle)"). Routes through the same
+            // named-key `send-keys -t <pane> BTab` path as Esc/Tab — no resize,
+            // no redraw. Send-only (no inbound ESC[Z parsing).
+            "⇧Tab" -> "BTab"
             // Issue #527: the dedicated Enter/Return key. Submits a
             // newline/CR to the pane (runs the typed or pending line) via
             // the tmux named `Enter` key on the `send-keys` control channel

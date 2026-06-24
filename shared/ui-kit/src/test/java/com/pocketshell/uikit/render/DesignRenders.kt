@@ -140,9 +140,13 @@ class DesignRenders {
                         keys = listOf(
                             KeyBinding("Esc", KeyKind.Regular),
                             KeyBinding("Tab", KeyKind.Regular),
+                            // Issue #893: ⇧Tab (back-tab / Shift+Tab) — cycles
+                            // Claude Code plan/permission mode. 4 columns keep
+                            // every label readable (Esc / Tab / ⇧Tab / Enter).
+                            KeyBinding("⇧Tab", KeyKind.Regular),
                             KeyBinding("Enter", KeyKind.Regular),
                         ),
-                        columns = 3,
+                        columns = 4,
                     ),
                     com.pocketshell.uikit.components.HotkeySection(
                         title = "CTRL COMBOS",

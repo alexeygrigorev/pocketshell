@@ -5416,6 +5416,33 @@ class TmuxSessionViewModelTest {
         assertTrue(sent.all { it.contains("-t %0") })
     }
 
+    /**
+     * Issue #893: the ⇧Tab (back-tab / Shift+Tab) hotkey must resolve, through
+     * the real [TmuxSessionViewModel.onKeyBarKey] mapping, to tmux's `BTab`
+     * named key — `send-keys -t <pane> BTab`. tmux emits the back-tab escape
+     * sequence `ESC [ Z` (0x1b 0x5b 0x5a) for `BTab`, which is what Claude Code
+     * listens for to cycle its permission/plan mode. This drives the real
+     * mapping (the panel's exact "⇧Tab" label), not a hand-rolled copy.
+     */
+    @Test
+    fun onKeyBarKeyShiftTabSendsTmuxBackTabNamedKey() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // The label sent here is the EXACT label the KEYS panel renders for the
+        // back-tab key (TmuxHotkeyPanelSections), so this exercises the real
+        // panel→mapping contract.
+        vm.onKeyBarKey("%0", "⇧Tab")
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf("send-keys -t %0 BTab"),
+            sent,
+        )
+    }
+
     @Test
     fun onKeyBarKeyEnterSendsTmuxEnterNamedKeyWithoutReflow() = runTest(scheduler) {
         val vm = newVm()
@@ -5518,13 +5545,17 @@ class TmuxSessionViewModelTest {
         val labels = TmuxHotkeyPanelSections.flatMap { it.keys }.map { it.label }
         assertEquals(
             listOf(
-                "Esc", "Tab", "Enter",
+                // Issue #893: ⇧Tab (back-tab / Shift+Tab) sits between Tab and
+                // Enter in the KEYS section.
+                "Esc", "Tab", "⇧Tab", "Enter",
                 "^A", "^B", "^C", "^D", "^E", "^L", "^R", "^Z",
                 TmuxHotkeyInterruptX2Label, TmuxHotkeyEofX2Label,
                 "←", "↑", "↓", "→",
             ),
             labels,
         )
+        // Issue #893: the back-tab key is present in the KEYS section.
+        assertTrue(labels.contains("⇧Tab"))
         // No duplicates (the maintainer's "/ appears twice" / "Esc duplicated"
         // complaints).
         assertEquals(labels.size, labels.toSet().size)

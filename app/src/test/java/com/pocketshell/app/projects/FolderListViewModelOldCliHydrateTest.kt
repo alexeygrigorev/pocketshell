@@ -17,9 +17,11 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -27,7 +29,6 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -129,30 +130,37 @@ class FolderListViewModelOldCliHydrateTest {
 
     // --- shared assertion ---------------------------------------------------
 
-    private fun TestScope.assertConnectsToLiveTree(session: OldCliTreeSshSession) {
+    private suspend fun TestScope.assertConnectsToLiveTree(session: OldCliTreeSshSession) {
         val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
-        val treeSource = TreeRemoteSource()
+        val treeSource = TreeRemoteSource().apply {
+            remoteExecTimeoutMs = 500L
+            remoteExecDispatcher = UnconfinedTestDispatcher(testScheduler)
+        }
         val vm = newViewModel(gateway, session, treeSource)
 
         bind(vm)
-        // The cold-start reconcile is launched independently of the hydrate, so
-        // draining the scheduler (UnconfinedTestDispatcher pumps each launched
-        // coroutine eagerly; advanceUntilIdle also fires the hydrate-seed timeout
-        // for the wedge case) settles the VM into Ready regardless of the failing
-        // `tree get`.
+        // The source-level exec bound is production-IO by default; this test
+        // routes it through the test dispatcher above, then waits on the visible
+        // Ready state so the assertion follows the UI contract rather than an
+        // implementation-specific launch order.
         advanceUntilIdle()
 
-        val state = vm.state.value
-        assertTrue(
-            "with an old/mismatched host CLI the app must CONNECT and render the live tree, " +
-                "not hang on Loading — was $state",
-            state is FolderListUiState.Ready,
-        )
+        val state = awaitReady(vm)
         assertEquals(
             "the live gateway sessions are shown",
             listOf("alpha", "beta"),
             (state as FolderListUiState.Ready).flatSessions.map { it.sessionName },
         )
+    }
+
+    private suspend fun TestScope.awaitReady(vm: FolderListViewModel): FolderListUiState {
+        withTimeout(2_000L) {
+            while (vm.state.value !is FolderListUiState.Ready) {
+                advanceUntilIdle()
+                delay(10L)
+            }
+        }
+        return vm.state.value
     }
 
     // --- helpers ------------------------------------------------------------

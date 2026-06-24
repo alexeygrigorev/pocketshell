@@ -2,8 +2,14 @@ package com.pocketshell.app.agents
 
 import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import javax.inject.Inject
 
@@ -29,6 +35,11 @@ import javax.inject.Inject
  * byte-for-byte RPC request shape.
  */
 public class AgentKindRemoteSource @Inject constructor() {
+    private var execReadTimeoutMs: Long = EXEC_READ_TIMEOUT_MS
+
+    internal constructor(execReadTimeoutMs: Long) : this() {
+        this.execReadTimeoutMs = execReadTimeoutMs
+    }
 
     /**
      * One pane to classify. [paneId] is the tmux pane id (`%N`) used only to
@@ -87,7 +98,7 @@ public class AgentKindRemoteSource @Inject constructor() {
                 "printf %s ${shellQuote(requestJson)} | { " +
                     PocketshellCommand.wrap("agents kind") +
                     " ; }"
-            val result = session.exec(command)
+            val result = session.execBounded(command) ?: return emptyMap()
             if (result.exitCode != 0) return emptyMap()
             parseEnvelope(result.stdout)
         } catch (e: CancellationException) {
@@ -144,4 +155,29 @@ public class AgentKindRemoteSource @Inject constructor() {
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
+
+    /**
+     * Bound the host-side daemon RPC exec. This mirrors the connect-path remote
+     * source pattern in `SshFolderListGateway`: run the potentially wedged SSH
+     * read in a child IO coroutine, then await that child with a timeout. A
+     * timeout is best-effort "no verdict" for callers, but we still close the
+     * session because cancellation alone cannot interrupt a blocking SSH stream
+     * read.
+     */
+    private suspend fun SshSession.execBounded(command: String): ExecResult? =
+        withContext(Dispatchers.IO) {
+            val deferred = async { exec(command) }
+            withTimeoutOrNull(execReadTimeoutMs) { deferred.await() }
+                ?: run {
+                    deferred.cancel()
+                    withContext(NonCancellable) {
+                        runCatching { close() }
+                    }
+                    null
+                }
+        }
+
+    private companion object {
+        const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
+    }
 }

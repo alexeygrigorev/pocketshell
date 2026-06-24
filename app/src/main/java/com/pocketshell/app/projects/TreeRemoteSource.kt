@@ -1,8 +1,15 @@
 package com.pocketshell.app.projects
 
 import com.pocketshell.app.pocketshell.PocketshellCommand
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -45,6 +52,8 @@ import javax.inject.Inject
  * timer.
  */
 public class TreeRemoteSource @Inject constructor() {
+    internal var remoteExecTimeoutMs: Long = REMOTE_EXEC_TIMEOUT_MS
+    internal var remoteExecDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     /**
      * One persisted tree node. [session] is the tmux session name (the key);
@@ -99,7 +108,7 @@ public class TreeRemoteSource @Inject constructor() {
         return try {
             val request = JSONObject().put("host", host).toString()
             val command = pipeJsonToWrapped(request, "tree get")
-            val result = session.exec(command)
+            val result = session.execTreeRpcBounded(command) ?: return TreeResult.Empty
             if (result.exitCode != 0) return TreeResult.Empty
             parseTreeResult(result.stdout)
         } catch (e: CancellationException) {
@@ -123,7 +132,7 @@ public class TreeRemoteSource @Inject constructor() {
         return try {
             val request = buildUpsertRequest(host, nodes)
             val command = pipeJsonToWrapped(request, "tree upsert")
-            val result = session.exec(command)
+            val result = session.execTreeRpcBounded(command) ?: return false
             if (result.exitCode != 0) return false
             val root = runCatching { JSONObject(result.stdout.trim()) }.getOrNull() ?: return false
             root.optString("status") == "ok"
@@ -144,7 +153,7 @@ public class TreeRemoteSource @Inject constructor() {
         return try {
             val request = JSONObject().put("host", host).toString()
             val command = pipeJsonToWrapped(request, "tree reconcile")
-            val result = session.exec(command)
+            val result = session.execTreeRpcBounded(command) ?: return null
             if (result.exitCode != 0) return null
             parseReconcile(result.stdout)
         } catch (e: CancellationException) {
@@ -219,6 +228,32 @@ public class TreeRemoteSource @Inject constructor() {
         "'" + value.replace("'", "'\"'\"'") + "'"
 
     /**
+     * Bound the tree CLI/RPC exec read itself.
+     *
+     * The connect path already bounds the caller's hydrate/reconcile work, but
+     * `SshSession.exec` can park inside a blocking stdout/stderr read. Run the
+     * exec in a child coroutine and await that child with a timeout so this seam
+     * degrades to its normal empty/no-op result instead of letting `tree get`,
+     * `tree upsert`, or `tree reconcile` pin the warm-session path forever.
+     *
+     * Cancellation alone cannot interrupt that blocking read, so timeout also
+     * closes the session. The warm lease path will discard the disconnected
+     * session and reconnect on the next acquire.
+     */
+    private suspend fun SshSession.execTreeRpcBounded(command: String): ExecResult? =
+        withContext(remoteExecDispatcher) {
+            val deferred = async { exec(command) }
+            withTimeoutOrNull(remoteExecTimeoutMs) { deferred.await() }
+                ?: run {
+                    deferred.cancel()
+                    withContext(NonCancellable) {
+                        runCatching { close() }
+                    }
+                    null
+                }
+        }
+
+    /**
      * Build `printf %s '<json>' | { <wrapped pocketshell <args>> ; }`.
      *
      * Issue #847: [PocketshellCommand.wrap] returns a MULTI-statement shell
@@ -236,4 +271,8 @@ public class TreeRemoteSource @Inject constructor() {
      */
     private fun pipeJsonToWrapped(json: String, args: String): String =
         "printf %s ${shellQuote(json)} | { " + PocketshellCommand.wrap(args) + " ; }"
+
+    private companion object {
+        const val REMOTE_EXEC_TIMEOUT_MS: Long = 12_000L
+    }
 }

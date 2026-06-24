@@ -4,8 +4,10 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -172,6 +174,34 @@ class TreeRemoteSourceTest {
     }
 
     @Test
+    fun wedgedTreeExecsTimeOutCloseSessionAndDegrade() = runBlocking {
+        val timeoutSource = TreeRemoteSource().apply { remoteExecTimeoutMs = 50L }
+
+        val getSession = WedgingSshSession()
+        val tree = timeoutSource.getTree(getSession, host = "h")
+        assertTrue(tree.nodes.isEmpty())
+        assertNull(tree.cliVersion)
+        assertTrue("wedged tree get must close the session", getSession.closed)
+        assertTrue(getSession.recorded.single().contains("tree get"))
+
+        val upsertSession = WedgingSshSession()
+        assertFalse(
+            timeoutSource.upsertTree(
+                upsertSession,
+                host = "h",
+                nodes = listOf(TreeRemoteSource.TreeNode("a", 0, "/p/a", collapsed = false)),
+            ),
+        )
+        assertTrue("wedged tree upsert must close the session", upsertSession.closed)
+        assertTrue(upsertSession.recorded.single().contains("tree upsert"))
+
+        val reconcileSession = WedgingSshSession()
+        assertNull(timeoutSource.reconcileTree(reconcileSession, host = "h"))
+        assertTrue("wedged tree reconcile must close the session", reconcileSession.closed)
+        assertTrue(reconcileSession.recorded.single().contains("tree reconcile"))
+    }
+
+    @Test
     fun cancellationPropagates() = runTest {
         val session = ThrowingSshSession(CancellationException("cancelled"))
         assertThrows(CancellationException::class.java) {
@@ -238,6 +268,35 @@ class TreeRemoteSourceTest {
             remotePath: String,
         ): String = error("unused")
         override fun close() = Unit
+    }
+
+    private class WedgingSshSession : SshSession {
+        val recorded = mutableListOf<String>()
+        @Volatile
+        var closed: Boolean = false
+        override val isConnected: Boolean
+            get() = !closed
+
+        override suspend fun exec(command: String): ExecResult {
+            recorded += command
+            awaitCancellation()
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("unused")
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("unused")
+        override fun startShell(): SshShell = error("unused")
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String = error("unused")
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("unused")
+
+        override fun close() {
+            closed = true
+        }
     }
 
     private class ThrowingSshSession(private val throwable: Throwable) : SshSession {

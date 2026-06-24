@@ -5,8 +5,10 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -124,6 +126,24 @@ class AgentKindRemoteSourceTest {
     }
 
     @Test
+    fun wedgedExecTimesOutToEmptyMapAndClosesSession() = runBlocking {
+        val session = WedgingSshSession()
+        val timedSource = AgentKindRemoteSource(execReadTimeoutMs = 50L)
+
+        val result = timedSource.classify(
+            session = session,
+            panes = listOf(AgentKindRemoteSource.PaneRef("%1", 11)),
+        )
+
+        assertTrue("wedged daemon RPC must degrade to no verdicts", result.isEmpty())
+        assertTrue("exec must have started before the timeout path returned", session.execStarted.isCompleted)
+        assertTrue(
+            "timed-out RPC must close the session so the pooled connection can recover",
+            session.closed,
+        )
+    }
+
+    @Test
     fun cancellationPropagates() {
         val session = ThrowingSshSession(CancellationException("cancelled"))
 
@@ -168,6 +188,42 @@ class AgentKindRemoteSourceTest {
         ): String = error("uploadStream not used")
 
         override fun close() = Unit
+    }
+
+    private class WedgingSshSession : SshSession {
+        val execStarted = CompletableDeferred<Unit>()
+
+        @Volatile
+        var closed: Boolean = false
+
+        override val isConnected: Boolean
+            get() = !closed
+
+        override suspend fun exec(command: String): ExecResult {
+            execStarted.complete(Unit)
+            awaitCancellation()
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("tail not used")
+
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("port forward not used")
+
+        override fun startShell(): SshShell = error("shell not used")
+
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+            error("uploadFile not used")
+
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used")
+
+        override fun close() {
+            closed = true
+        }
     }
 
     private class ThrowingSshSession(private val throwable: Throwable) : SshSession {

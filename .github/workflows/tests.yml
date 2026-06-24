@@ -1,13 +1,14 @@
 name: Tests
 
-# Issue #41: run JVM unit tests and Testcontainers-driven integration tests
-# on every push and pull request. APK builds stay on the tag-only trigger in
-# build.yml.
+# Issue #41: run JVM unit tests and Testcontainers-driven integration tests.
+# Issue #816: protected PRs are the merge gate, so branch pushes no longer run a
+# duplicate full Tests workflow beside the pull_request run. Keep the post-merge
+# push-to-main backstop. APK builds stay on the tag-only trigger in build.yml.
 
 on:
   push:
     branches:
-      - "**"
+      - main
   pull_request:
 
 jobs:

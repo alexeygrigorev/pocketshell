@@ -984,6 +984,19 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef?.let { System.identityHashCode(it) }
 
     /**
+     * Issue #895 (switch-while-black) test seam: force the inline connection
+     * state to [ConnectionState.Attaching] so a regression test can drive a
+     * passive drop while [inlineConnectionStatus] projects to
+     * [ConnectionStatus.Switching]. This mirrors the window a same-host fast
+     * switch holds (`runFastSessionSwitch`/`fastSwitchSessionForTest` set
+     * `Attaching` before the `Live` flip). Used to pin that a drop during the
+     * Switching window still surfaces an escapable band (no swallow gate).
+     */
+    internal fun forceAttachingStateForTest(host: String, port: Int, user: String) {
+        setConnectionState(ConnectionState.Attaching(host, port, user))
+    }
+
+    /**
      * A sustained drop was confirmed by the probe. Submit `TransportDropped` to
      * the controller for an immediate connection-lost indicator, then drive the
      * SINGLE reconnect entrypoint (`scheduleAutoReconnect` → `TransportEffects`,
@@ -6247,9 +6260,20 @@ public class TmuxSessionViewModel @Inject constructor(
         client: TmuxClient,
         disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
     ) {
-        val current = inlineConnectionStatus as? ConnectionStatus.Connected ?: return
+        // Issue #895 (#766 down-payment): the passive-disconnect handler is
+        // STATUS-AGNOSTIC. The old `inlineConnectionStatus as? Connected ?: return`
+        // gate SWALLOWED a drop that landed while the VM was `Switching`
+        // (Attaching) — exactly the switch-while-black freeze (R1): no recovery
+        // ran, no escapable band surfaced, the user was stuck on a black pane with
+        // nothing tappable. A transport drop is real regardless of the display
+        // status; the controller's `onTransportDropped` already walks `Attaching`/
+        // `Live`/`Reattaching`/`Reconnecting` into the silent-heal ladder, and the
+        // inline `reduceTransportDropped` self-gates the IO arm by client identity
+        // (a stale-client drop is ignored there). The display status no longer
+        // gates recovery — only the client-identity guard in [reduceTransportDropped]
+        // does.
         val target = activeTarget ?: connectingTarget
-        val reason = passiveDisconnectMessage(current, disconnectEvent)
+        val reason = passiveDisconnectMessage(target, disconnectEvent)
         // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. A passive
         // `-CC` drop that arrives while the app is BACKGROUNDED is, by construction,
         // inside the App-level background-grace window (#450) — that window is the SOLE
@@ -6295,14 +6319,33 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return
         }
-        // EPIC #687 slice 1c-iv-b-B2 (#742): the controller's TransportDropped input
-        // is now driver-fed from the REAL [CurrentClientTmuxPort.disconnected] oracle
-        // (the SAME `TmuxClient.disconnected` true-edge this passive-disconnect path
-        // observes), so the inline `observeTransportDropped` mirror feed is DELETED
-        // (D22 hard-cut). The inline effect machinery below is UNCHANGED — it still
-        // owns the actual silent-reattach / reconnect IO until a later slice; only the
-        // controller-feed moved to the driver.
-        when (reduceConnection(ConnectionEvent.TransportDropped(client))) {
+        // Classify the drop FIRST (status-agnostic — #895/#766). `Ignore` means the
+        // dropped client is not the current one (a stale `-CC` close on a healthy
+        // fast switch, the #635 spurious-band case) — for that we surface NOTHING.
+        val decision = reduceConnection(ConnectionEvent.TransportDropped(client))
+        if (decision == ConnectionDecision.Ignore) {
+            projectStatusFromController()
+            return
+        }
+        // Issue #895: surface an ESCAPABLE state PROMPTLY. Walk the controller
+        // Live/Attaching/Reattaching/Reconnecting -> Reattaching now, EXACTLY like
+        // [onLivenessProbeDeclaredDrop] does for a silent drop — the controller is
+        // the authority for the connection-lost indicator (band), so the escapable
+        // "Reconnecting…" band appears immediately even if the driver collector is
+        // momentarily starved (the R1 freeze) OR the inline status was `Switching`
+        // (the R1 swallow). The driver's own [CurrentClientTmuxPort.disconnected]
+        // feed for the same real drop walks the SAME calm Reconnecting band (both
+        // project identically); the controller self-gates from a non-live-ish state,
+        // so this never spuriously bands an idle/gone session.
+        connectionManager.submit(
+            CoreConnectionEvent.TransportDropped(reason = "passive_control_channel_disconnected"),
+        )
+        projectStatusFromController()
+        // The inline effect machinery still owns the actual silent-reattach /
+        // reconnect IO until the #766 collapse (gated on the maintainer on-device
+        // checkpoint); the controller-fed band above is the escapable state, this
+        // drives the recovery underneath it.
+        when (decision) {
             ConnectionDecision.SkipPassiveInAppNavigation ->
                 if (target != null) skipPassiveInAppNavigation(target)
             ConnectionDecision.PausePassiveUntilForeground ->
@@ -7015,7 +7058,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
 
     private fun passiveDisconnectMessage(
-        current: ConnectionStatus.Connected,
+        target: ConnectionTarget?,
         disconnectEvent: TmuxDisconnectEvent,
     ): String {
         val prefix = when (disconnectEvent.reason) {
@@ -7026,7 +7069,14 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
             TmuxDisconnectReason.Unknown -> "Disconnected"
         }
-        return "$prefix from ${current.user}@${current.host}:${current.port}. Tap Reconnect to retry."
+        // The user/host/port comes from the target; for the degenerate target-less
+        // path (the `attachClientForTest` seam) fall back to the inline Connected
+        // payload so the message stays identical to the pre-#895 behavior.
+        val connected = inlineConnectionStatus as? ConnectionStatus.Connected
+        val user = target?.user ?: connected?.user.orEmpty()
+        val host = target?.host ?: connected?.host.orEmpty()
+        val port = target?.port ?: connected?.port ?: 0
+        return "$prefix from $user@$host:$port. Tap Reconnect to retry."
     }
 
     private fun passiveAutoReconnectMessage(
@@ -13677,9 +13727,22 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun reduceTransportDropped(client: TmuxClient): ConnectionDecision {
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
+        // Issue #895 (#766 down-payment): STATUS-AGNOSTIC. The old
+        // `inlineConnectionStatus !is Connected -> Ignore` gate swallowed a drop
+        // that landed during the `Switching` (Attaching) window — the R1
+        // switch-while-black freeze. The real protection against acting on the
+        // brief tmux `-CC` close of a NORMAL fast switch (the #635 spurious-band
+        // risk) is the client-identity guard below: during a healthy switch the
+        // old client's `disconnected` edge fires AFTER `clientRef` already points
+        // at the new client, so it is correctly ignored. A drop on the CURRENT
+        // client — whatever the display status — is a real transport loss and
+        // must drive recovery, so it is no longer gated by the status. An
+        // Idle/Gone session has no current client, so the identity guard below
+        // returns Ignore for it; the controller also self-gates a drop from a
+        // non-live-ish state, so no spurious band can surface there.
+        //
         // Only react if this is still THE active client (a fresh connect may have
-        // swapped in a new client whose Connected status this drop must not stomp).
+        // swapped in a new client whose state this drop must not stomp).
         if (clientRef !== client) return ConnectionDecision.Ignore
         val target = activeTarget ?: connectingTarget
         if (target != null && !screenStartedForCleared) {

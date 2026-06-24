@@ -652,6 +652,21 @@ JOURNEY_CLASSES=(
   # NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the load-bearing
   # assertions — process.md F3 / D31). It lives under com.pocketshell.app.proof.
   "$FQCN_PREFIX.CleanOutageReattachResilienceE2eTest"
+  # Issue #895 (switch-while-black freeze): the R1 trigger — a transport drop that
+  # lands while the VM is in the Switching (Attaching) window was SWALLOWED by the
+  # old `inlineConnectionStatus as? Connected ?: return` gate, leaving the user
+  # frozen on a black pane with NO escapable affordance ("it froze, had to
+  # restart"). This journey attaches a real session, drives it into the Switching
+  # window + injects a transport drop DETERMINISTICALLY via two VM seams on the
+  # plain agents:2222 channel (forceAttachingStateForTest enters the Switching
+  # window a same-host fast switch holds; triggerCleanPassiveDropForTest fires the
+  # production passive-disconnect handler), and asserts the USER-VISIBLE contract:
+  # an ESCAPABLE band (Reconnecting band / Reconnect affordance) surfaces promptly
+  # and the session screen stays mounted (no freeze). It drives ONLY the
+  # deterministic agents:2222 fixture tests.yml already brings up, and does NOT
+  # self-skip on CI (no assumeFalse(isRunningOnCi()) on the load-bearing assertion
+  # — process.md F3 / D31). It lives under com.pocketshell.app.proof.
+  "$FQCN_PREFIX.Issue895SwitchWhileBlackBandJourneyE2eTest"
   # Epic #821 Slice 1: manual session classification (Option B + change-kind).
   # The epic exists because agent-kind fixes keep recurring, so the foreign →
   # pick → durable round-trip MUST be gated at PR time (D31). This connected

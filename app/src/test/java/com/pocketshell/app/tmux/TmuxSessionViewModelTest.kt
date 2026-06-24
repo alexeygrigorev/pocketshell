@@ -302,6 +302,126 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ----- Issue #898: the in-session kebab "+ New session" now opens the SAME
+    // rich SessionTypePickerSheet the host screen uses, and its Create routes
+    // through the SAME verified gateway createSession path so the created
+    // session honours the chosen type / CLI / skip-permissions / profile. These
+    // tests assert that the agent-CLI + skip-permissions + profile choices the
+    // picker synthesises into a `startCommand` reach the gateway intact (the old
+    // name+folder dialog path could carry NONE of these — it only had a
+    // startDirectory). Red→green: on base (the old `createSession(name,
+    // startDirectory)` that sent `new-session -d` over the control channel and
+    // had no startCommand/gateway route), these assertions cannot pass.
+
+    @Test
+    fun createSessionRoutesChosenAgentOptionsThroughGateway() = runTest(scheduler) {
+        val gateway = RecordingStopGateway(
+            killSucceeds = true,
+            createResolvedName = "git-claude",
+        )
+        val vm = newVm(
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+
+        // The rich sheet synthesises this startCommand for an Agent=codex,
+        // skip-permissions OFF, profile "work" choice. We pass it straight to
+        // createSession exactly as TmuxSessionScreen does.
+        val startCommand = "pocketshell agent codex --dir '/home/alex/git' " +
+            "--no-skip-permissions --profile 'work'"
+        // The create routes a `dao.getById` over Dispatchers.IO (real IO, not the
+        // virtual clock), so await onResolved deterministically rather than
+        // racing advanceUntilIdle — the kill tests await a signal for the same
+        // reason. `await()` parks the test body until the real-IO continuation
+        // completes the deferred, then runTest unparks and we assert.
+        val resolvedDeferred = CompletableDeferred<String>()
+        vm.createSession(
+            name = "git-codex",
+            cwd = "/home/alex/git",
+            startCommand = startCommand,
+            chosenKind = SessionAgentKind.Codex,
+            onResolved = { resolvedDeferred.complete(it) },
+        )
+        val resolved = resolvedDeferred.await()
+        advanceUntilIdle()
+
+        assertEquals(
+            "expected exactly one gateway createSession call, got ${gateway.createCalls}",
+            1,
+            gateway.createCalls.size,
+        )
+        val call = gateway.createCalls.single()
+        assertEquals("git-codex", call.sessionName)
+        assertEquals("/home/alex/git", call.cwd)
+        // The load-bearing assertion (G6): the chosen CLI / skip-perms / profile
+        // are all encoded in the startCommand that reached the verified gateway.
+        assertEquals(startCommand, call.startCommand)
+        // onResolved fired with the gateway's resolved name so the screen can
+        // navigate/attach to the freshly-created session.
+        assertEquals("git-claude", resolved)
+        // The rich-sheet create must NOT fall back to the control-channel
+        // `new-session -d` (which cannot launch an agent CLI).
+        assertFalse(
+            "rich-sheet create must use the gateway, not control-channel new-session; " +
+                "sent=${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("new-session") },
+        )
+    }
+
+    @Test
+    fun createSessionShellChoiceHasNoStartCommand() = runTest(scheduler) {
+        val gateway = RecordingStopGateway(
+            killSucceeds = true,
+            createResolvedName = "plain",
+        )
+        val vm = newVm(
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+
+        // A Shell choice synthesises a null startCommand. Await onResolved so the
+        // real-IO `dao.getById` hop completes before we assert (see the agent
+        // test above for why advanceUntilIdle alone races the IO).
+        val resolvedDeferred = CompletableDeferred<String>()
+        vm.createSession(
+            name = "plain",
+            cwd = "/srv/app",
+            startCommand = null,
+            chosenKind = null,
+            onResolved = { resolvedDeferred.complete(it) },
+        )
+        resolvedDeferred.await()
+        advanceUntilIdle()
+
+        val call = gateway.createCalls.single()
+        assertEquals("/srv/app", call.cwd)
+        assertNull("shell session must carry no startCommand", call.startCommand)
+    }
+
     @Test
     fun killCurrentSessionDoesNotBroadcastWhenGatewayKillFails() = runTest(scheduler) {
         // Issue #655: a gateway-verified failure (the session is STILL running
@@ -13963,12 +14083,27 @@ class TmuxSessionViewModelTest {
         // sibling window survived; `false` => the session was destroyed.
         private val windowKillSessionSurvived: Boolean? = null,
         private val windowKillSucceeds: Boolean = true,
+        // Issue #898: when set, createSession succeeds returning this resolved
+        // name; otherwise it is "not used" (the kill tests never create).
+        private val createResolvedName: String? = null,
     ) : FolderListGateway {
         val killedSessionNames = mutableListOf<String>()
 
         // Issue #883: records the `<sessionName>:<windowIndex>` window targets
         // killWindow was asked to stop, plus whether kill-session was used.
         val killedWindowTargets = mutableListOf<String>()
+
+        // Issue #898: the exact (sessionName, cwd, startCommand) the in-session
+        // "+ New session" rich-sheet create path passed through to the gateway —
+        // the verified host-screen path. The startCommand encodes the chosen
+        // CLI / skip-permissions / profile, so asserting on it proves every
+        // picked option is honoured end-to-end.
+        data class CreateCall(
+            val sessionName: String,
+            val cwd: String,
+            val startCommand: String?,
+        )
+        val createCalls = mutableListOf<CreateCall>()
 
         override suspend fun listSessionsWithFolder(
             host: com.pocketshell.core.storage.entity.HostEntity,
@@ -13985,7 +14120,10 @@ class TmuxSessionViewModelTest {
             sessionName: String,
             cwd: String,
             startCommand: String?,
-        ): Result<String> = error("not used")
+        ): Result<String> {
+            createCalls += CreateCall(sessionName, cwd, startCommand)
+            return createResolvedName?.let { Result.success(it) } ?: error("not used")
+        }
 
         override suspend fun createEmptyProject(
             host: com.pocketshell.core.storage.entity.HostEntity,

@@ -123,7 +123,10 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.layout.rememberTmuxImeLayoutState
+import com.pocketshell.app.projects.FolderListViewModel
 import com.pocketshell.app.projects.SessionTypePickerSheet
+import com.pocketshell.app.projects.conventionalRemoteHome
+import com.pocketshell.app.projects.derivedSessionName
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.ConversationLoadState
 import com.pocketshell.app.session.AgentConversationUiState
@@ -143,10 +146,6 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
-import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
-import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
-import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
-import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
@@ -422,8 +421,6 @@ public fun TmuxSessionScreen(
     // bottom now shares the unified [PromptComposerSheet], whose draft
     // persists in [PromptComposerViewModel], so there is nothing to seed
     // here on the screen.
-    val startDirectoryAutocompleteController =
-        rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     // Issue #463: the in-session project switcher's sibling list, sourced
@@ -455,6 +452,11 @@ public fun TmuxSessionScreen(
     // Issue #858: the recorded non-default profile (e.g. z.ai Claude), shown in
     // the "What is this session?" sheet so a profiled session is distinguishable.
     val currentSessionRecordedProfile by viewModel.currentSessionRecordedProfile.collectAsState()
+    // Issue #898: the host-discovered agent profiles for the in-session
+    // "+ New session" rich sheet's Profile selector — the SAME flows the host
+    // screen uses. Fetched on demand when the sheet opens.
+    val newSessionClaudeProfiles by viewModel.claudeProfiles.collectAsState()
+    val newSessionCodexProfiles by viewModel.codexProfiles.collectAsState()
     LaunchedEffect(status, canReconnect) {
         recordTmuxReconnectUiStateRendered(
             status = status,
@@ -628,9 +630,14 @@ public fun TmuxSessionScreen(
     var moreExpanded by remember { mutableStateOf(false) }
     var dialogMode by remember { mutableStateOf<TmuxDialogMode?>(null) }
     var dialogText by remember { mutableStateOf("") }
-    var dialogStartDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
     var showSessionSwitcher by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
+    // Issue #898: the in-session "+ New session" now opens the SAME rich
+    // SessionTypePickerSheet the host/session-list screen uses (Session type,
+    // Agent CLI, Skip permissions, Profile) — not the old stripped-down
+    // name+folder dialog (hard-cut D22). The folder pre-fills from the current
+    // session's pane cwd.
+    var showNewSessionSheet by remember { mutableStateOf(false) }
     // Issue #497: in-app file viewer path-entry dialog (kebab "Open file…").
     var showOpenFileDialog by remember { mutableStateOf(false) }
     var openFilePath by remember { mutableStateOf("") }
@@ -945,12 +952,31 @@ public fun TmuxSessionScreen(
     fun openTextDialog(
         mode: TmuxDialogMode,
         initialText: String = "",
-        initialStartDirectory: String = currentPane?.cwd?.takeIf { it.isNotBlank() }
-            ?: DEFAULT_TMUX_START_DIRECTORY,
     ) {
         dialogMode = mode
         dialogText = initialText
-        dialogStartDirectory = initialStartDirectory
+    }
+
+    // Issue #898: the single entry point for opening the rich in-session
+    // "+ New session" SessionTypePickerSheet. ALL three triggers (kebab,
+    // session switcher, session drawer) MUST go through this so they are
+    // provably identical and can't drift (the switcher/drawer used to
+    // `dismiss()` the picker and open the sheet WITHOUT reloading, leaving
+    // `sessionPickerState` Idle so the deriver saw no known names and a
+    // same-folder second session collided onto the existing one via
+    // `new-session -A` — the reviewer's Blocker A). This helper:
+    //  1. refreshes the host-discovered agent profiles so the Profile
+    //     selector matches the host screen, and
+    //  2. (re)loads the host's live tmux session list so `sessionPickerState`
+    //     carries the already-known names by the time the user taps Create —
+    //     the deriver needs those to give a same-folder second session a
+    //     deterministic `-2`/`-3` suffix instead of colliding. The host screen
+    //     gets these names from its always-loaded FolderListUiState; the
+    //     in-session screen must trigger the load itself.
+    fun openNewSessionSheet() {
+        viewModel.fetchProfilesForActiveSession()
+        sessionPickerViewModel.load(sessionPickerRequest)
+        showNewSessionSheet = true
     }
 
     // Issue #782: when a `[wN]` switcher entry is tapped, the host tree
@@ -1149,7 +1175,12 @@ public fun TmuxSessionScreen(
             onDismiss = { moreExpanded = false },
             onCreateSession = {
                 moreExpanded = false
-                openTextDialog(TmuxDialogMode.CreateSession)
+                // Issue #898: open the rich SessionTypePickerSheet (same as the
+                // host screen) instead of the old name+folder dialog, via the
+                // shared helper that also loads the host's known session names
+                // so a same-folder second session disambiguates (see
+                // openNewSessionSheet).
+                openNewSessionSheet()
             },
             onRenameSession = {
                 moreExpanded = false
@@ -2098,19 +2129,9 @@ public fun TmuxSessionScreen(
                 sessionName = sessionName,
                 text = dialogText,
                 onTextChange = { dialogText = it },
-                startDirectory = dialogStartDirectory,
-                onStartDirectoryChange = { dialogStartDirectory = it },
-                startDirectoryAutocompleteController = startDirectoryAutocompleteController,
                 onDismiss = { dialogMode = null },
                 onConfirm = {
                     when (mode) {
-                        TmuxDialogMode.CreateSession -> {
-                            val creation = resolveTmuxSessionCreation(
-                                rawName = dialogText,
-                                rawStartDirectory = dialogStartDirectory,
-                            )
-                            onOpenTmuxSession(creation.sessionName, creation.startDirectory)
-                        }
                         TmuxDialogMode.RenameSession -> {
                             val name = dialogText.trim()
                             viewModel.renameCurrentSession(name)
@@ -2132,6 +2153,63 @@ public fun TmuxSessionScreen(
                         }
                     }
                     dialogMode = null
+                },
+            )
+        }
+
+        // Issue #898: the in-session "+ New session" rich sheet — the SAME
+        // SessionTypePickerSheet the host/session-list screen uses (Session type
+        // Shell/Agent, Agent CLI claude/codex/opencode, Skip permissions,
+        // Profile). The stripped-down name+folder dialog is gone (hard-cut D22 —
+        // one New-session UI). The Start folder defaults to the current
+        // session's pane cwd (preserving the one good behaviour of the old
+        // dialog); Create routes through viewModel.createSession — the SAME
+        // verified gateway path the host screen uses — so the created session
+        // honours type/CLI/skip-perms/profile identically, then navigates to the
+        // new session via onOpenTmuxSession (which attaches to the now-existing
+        // session).
+        if (showNewSessionSheet) {
+            val folderPath = currentPane?.cwd?.takeIf { it.isNotBlank() }
+                ?: DEFAULT_TMUX_START_DIRECTORY
+            SessionTypePickerSheet(
+                folderPath = folderPath,
+                folderLabel = FolderListViewModel.defaultLabelForPath(folderPath),
+                onDismiss = { showNewSessionSheet = false },
+                suggestStartDirectories = suggestStartDirectories,
+                claudeProfiles = newSessionClaudeProfiles,
+                codexProfiles = newSessionCodexProfiles,
+                onCreate = { choice ->
+                    showNewSessionSheet = false
+                    // Issue #898 (Finding 1): pass the host's already-known
+                    // session names into the deriver so a second "New session"
+                    // in the SAME folder gets a deterministic `-2`/`-3` suffix
+                    // instead of colliding with the existing same-named session
+                    // (the gateway/tmux has no server-side de-dupe, so a
+                    // duplicate name fails the create). This mirrors the host
+                    // screen, which passes `knownSessionNames(state)`.
+                    val knownNames =
+                        (sessionPickerState as? HostTmuxSessionPickerState.Ready)
+                            ?.rows
+                            ?.map { it.name }
+                            ?.toSet()
+                            .orEmpty()
+                    val newName = derivedSessionName(
+                        choice = choice,
+                        homeDirectory = conventionalRemoteHome(user),
+                        existingNames = knownNames,
+                    )
+                    viewModel.createSession(
+                        name = newName,
+                        cwd = choice.startDirectory,
+                        startCommand = choice.startCommand(
+                            newSessionClaudeProfiles,
+                            newSessionCodexProfiles,
+                        ),
+                        chosenKind = choice.sessionAgentKind,
+                        onResolved = { resolved ->
+                            onOpenTmuxSession(resolved, choice.startDirectory)
+                        },
+                    )
                 },
             )
         }
@@ -2233,8 +2311,12 @@ public fun TmuxSessionScreen(
             },
             onCreate = {
                 showSessionSwitcher = false
-                sessionPickerViewModel.dismiss()
-                openTextDialog(TmuxDialogMode.CreateSession)
+                // Issue #898 (Blocker A): go through the shared helper so this
+                // entry point loads the host's known session names too —
+                // otherwise the closing switcher's `dismiss()` would leave the
+                // picker Idle and the same-folder create would collide. The
+                // helper's `load()` re-populates the names for the sheet.
+                openNewSessionSheet()
             },
         )
 
@@ -2261,8 +2343,11 @@ public fun TmuxSessionScreen(
             },
             onCreate = {
                 showSessionDrawer = false
-                sessionPickerViewModel.dismiss()
-                openTextDialog(TmuxDialogMode.CreateSession)
+                // Issue #898 (Blocker A): same as the switcher — go through the
+                // shared helper so the drawer's "+ New session" loads the known
+                // session names and a same-folder create disambiguates instead
+                // of colliding via `new-session -A`.
+                openNewSessionSheet()
             },
         )
 
@@ -3562,15 +3647,12 @@ internal fun settleSessionSwitchTarget(
 }
 
 private sealed interface TmuxDialogMode {
-    data object CreateSession : TmuxDialogMode
     data object RenameSession : TmuxDialogMode
     data object StopSession : TmuxDialogMode
 }
 
 private val VerticalSwipeThreshold = 72.dp
 private val SessionDrawerMaxWidth = 360.dp
-internal val TmuxCreateSessionDialogBodyMaxHeight = 360.dp
-internal val TmuxCreateSessionStartFolderSuggestionsMaxHeight = 144.dp
 private const val MotionDurationMs: Int = 200
 private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
 internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
@@ -3905,10 +3987,6 @@ internal const val TMUX_REDRAW_BUTTON_TAG = "tmux:session:redraw-button"
 internal const val TMUX_OPEN_FILE_BUTTON_TAG = "tmux:session:open-file-button"
 internal const val TMUX_OPEN_FILE_DIALOG_FIELD_TAG = "tmux:session:open-file-field"
 internal const val TMUX_OPEN_FILE_DIALOG_CONFIRM_TAG = "tmux:session:open-file-confirm"
-internal const val TMUX_CREATE_SESSION_DIALOG_BODY_TAG = "tmux:session:create-dialog:body"
-internal const val TMUX_CREATE_SESSION_NAME_FIELD_TAG = "tmux:session:create-dialog:name"
-internal const val TMUX_CREATE_SESSION_START_FOLDER_FIELD_TAG =
-    "tmux:session:create-dialog:start-folder"
 internal const val TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG = "tmux:session:lifecycle-dialog:confirm"
 internal const val TMUX_LIFECYCLE_DIALOG_CANCEL_TAG = "tmux:session:lifecycle-dialog:cancel"
 /**
@@ -6180,14 +6258,13 @@ private fun TmuxLifecycleDialog(
     sessionName: String,
     text: String,
     onTextChange: (String) -> Unit,
-    startDirectory: String,
-    onStartDirectoryChange: (String) -> Unit,
-    startDirectoryAutocompleteController: StartDirectoryAutocompleteController? = null,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
+    // Issue #898: the create-session branch is gone — "+ New session" now opens
+    // the rich SessionTypePickerSheet (hard-cut D22). This dialog only handles
+    // the remaining text/confirm lifecycle actions: Rename and Stop.
     val title = when (mode) {
-        TmuxDialogMode.CreateSession -> "New session"
         TmuxDialogMode.RenameSession -> "Rename session"
         TmuxDialogMode.StopSession -> "Stop session"
     }
@@ -6195,9 +6272,7 @@ private fun TmuxLifecycleDialog(
         TmuxDialogMode.StopSession -> "Stop"
         else -> "Save"
     }
-    val isTextMode = mode == TmuxDialogMode.CreateSession ||
-        mode == TmuxDialogMode.RenameSession
-    val isCreateMode = mode == TmuxDialogMode.CreateSession
+    val isTextMode = mode == TmuxDialogMode.RenameSession
     AlertDialog(
         onDismissRequest = onDismiss,
         modifier = Modifier
@@ -6205,35 +6280,7 @@ private fun TmuxLifecycleDialog(
             .imePadding(),
         title = { Text(title) },
         text = {
-            if (isCreateMode) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = TmuxCreateSessionDialogBodyMaxHeight)
-                        .verticalScroll(rememberScrollState())
-                        .testTag(TMUX_CREATE_SESSION_DIALOG_BODY_TAG),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = onTextChange,
-                        singleLine = true,
-                        label = { Text("Session name") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag(TMUX_CREATE_SESSION_NAME_FIELD_TAG),
-                    )
-                    StartDirectoryAutocompleteField(
-                        value = startDirectory,
-                        onValueChange = onStartDirectoryChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Start folder") },
-                        textFieldTestTag = TMUX_CREATE_SESSION_START_FOLDER_FIELD_TAG,
-                        autocompleteController = startDirectoryAutocompleteController,
-                        suggestionsMaxHeight = TmuxCreateSessionStartFolderSuggestionsMaxHeight,
-                    )
-                }
-            } else if (isTextMode) {
+            if (isTextMode) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = onTextChange,
@@ -6251,7 +6298,7 @@ private fun TmuxLifecycleDialog(
         confirmButton = {
             TextButton(
                 onClick = onConfirm,
-                enabled = isCreateMode || !isTextMode || text.trim().isNotEmpty(),
+                enabled = !isTextMode || text.trim().isNotEmpty(),
                 modifier = Modifier.testTag(TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG),
             ) {
                 Text(confirm)

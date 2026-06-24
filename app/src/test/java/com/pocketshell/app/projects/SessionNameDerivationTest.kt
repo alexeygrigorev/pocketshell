@@ -250,6 +250,53 @@ class SessionNameDerivationTest {
         assertEquals("git-pocketshell", a)
     }
 
+    // --- Issue #898 (Finding 1): the public derivedSessionName(choice, …)
+    // wrapper is exactly what BOTH the host screen AND the in-session kebab "+
+    // New session" sheet now call. These pin that the wrapper threads
+    // `existingNames` into the deterministic `-2` suffix so a same-folder second
+    // session does NOT collide (the in-session path previously omitted
+    // `existingNames`, so a second "New session" in the current folder derived
+    // the IDENTICAL name and the `tmux new-session -A` create silently no-op'd
+    // onto the existing session). ---
+
+    @Test
+    fun derivedSessionNameWrapperSuffixesWhenFolderNameIsKnown() {
+        val choice = SessionTypeChoice(
+            type = SessionType.Shell,
+            agent = null,
+            startDirectory = "/tmp/issue898",
+            skipPermissions = false,
+        )
+        // Same folder, but the base name is already taken on the host → the
+        // wrapper must return the `-2` variant, not the colliding base.
+        val name = derivedSessionName(
+            choice = choice,
+            homeDirectory = "/home/testuser",
+            existingNames = setOf("tmp-issue898"),
+        )
+        assertEquals("tmp-issue898-2", name)
+    }
+
+    @Test
+    fun derivedSessionNameWrapperWithoutKnownNamesCollidesOnBase() {
+        // This is the PRE-FIX behaviour the in-session path had: no known names
+        // passed in, so a second session in the same folder derives the SAME
+        // base — which `new-session -A` collapses onto the existing session.
+        // The fix is to pass the known names (the test above); this pins the
+        // contrast so a regression that drops `existingNames` is visible.
+        val choice = SessionTypeChoice(
+            type = SessionType.Shell,
+            agent = null,
+            startDirectory = "/tmp/issue898",
+            skipPermissions = false,
+        )
+        val name = derivedSessionName(
+            choice = choice,
+            homeDirectory = "/home/testuser",
+        )
+        assertEquals("tmp-issue898", name)
+    }
+
     // --- conventionalRemoteHome / knownSessionNames helpers ---
 
     @Test

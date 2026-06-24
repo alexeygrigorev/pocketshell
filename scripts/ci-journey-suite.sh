@@ -172,6 +172,19 @@ JOURNEY_CLASSES=(
   # lives under com.pocketshell.app.projects, not the com.pocketshell.app.proof
   # prefix, so it carries its fully-qualified name directly.
   "com.pocketshell.app.projects.ProfileDiscoveryPickerDockerTest"
+  # PROMOTED (#898, reviewer Blocker B): the in-session "+ New session" rich-sheet
+  # create journey. A second "New session" in the SAME folder as an existing one
+  # must get a deterministic `-2` suffix, not silently collide via `tmux
+  # new-session -A`. The bug lives in the SCREEN wiring (each entry point must
+  # load the host's known session names before opening the sheet) — the per-push
+  # JVM guards only pin the pure `derivedSessionName` wrapper, so a regression
+  # that drops the load on any entry point is per-push-INVISIBLE without this.
+  # The class drives the REAL MainActivity → attach → kebab AND switcher "+ New
+  # session" → Create over the default deterministic `agents` fixture
+  # (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222, or the pool-allocated port under
+  # `--pool`) — no new Docker service/port. It does NOT self-skip on CI. Lives
+  # under com.pocketshell.app.tmux, so it carries its FQCN directly.
+  "com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest"
   # PROMOTED (#736, follow-up to the #567 review): the composer keyboard-up
   # SQUISH regression proof. The maintainer's #1 process complaint area is the
   # composer being crushed when the soft keyboard is up (draft collapsed to one

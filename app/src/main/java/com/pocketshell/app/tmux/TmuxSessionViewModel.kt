@@ -29,8 +29,12 @@ import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.projects.ClaudeProfile
+import com.pocketshell.app.projects.CodexProfile
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.ManualKindWriter
+import com.pocketshell.app.projects.ProfilesResult
+import com.pocketshell.app.projects.RemoteProfile
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import com.pocketshell.app.repos.ReposRemoteSource
@@ -201,6 +205,14 @@ public class TmuxSessionViewModel @Inject constructor(
     private val assistantClientFactory: AssistantLlmClientFactory? = null,
     private val hostDao: HostDao? = null,
     private val folderListGateway: FolderListGateway? = null,
+    // Issue #898: the in-session kebab "+ New session" now opens the SAME rich
+    // SessionTypePickerSheet the host/session-list screen uses. The sheet's
+    // Profile selector is populated from the host-discovered agent profiles, so
+    // this gateway is injected here exactly as it is in FolderListViewModel.
+    // Nullable default keeps the existing unit-test constructors working without
+    // the singleton; when absent the picker shows no profile selector (the safe
+    // default-only behaviour, identical to the host screen with no gateway).
+    private val profilesGateway: com.pocketshell.app.projects.ProfilesGateway? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
     @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
@@ -1610,6 +1622,22 @@ public class TmuxSessionViewModel @Inject constructor(
         MutableStateFlow(null)
     public val currentSessionRecordedKind: StateFlow<SessionAgentKind?> =
         _currentSessionRecordedKind.asStateFlow()
+
+    /**
+     * Issue #898: the host-discovered Claude / Codex agent profiles, projected
+     * for the in-session "+ New session" [com.pocketshell.app.projects.SessionTypePickerSheet]'s
+     * Profile selector. These are the SAME flows [FolderListViewModel] exposes,
+     * fetched the same way (over the warm session / a fresh lease) on demand via
+     * [fetchProfilesForActiveSession] so the in-session rich sheet is identical
+     * to the host-screen one. Empty (no gateway / CLI missing / fetch failure)
+     * means the picker shows no profile selector — the safe default-only path.
+     */
+    private val _claudeProfiles: MutableStateFlow<List<ClaudeProfile>> =
+        MutableStateFlow(emptyList())
+    public val claudeProfiles: StateFlow<List<ClaudeProfile>> = _claudeProfiles.asStateFlow()
+    private val _codexProfiles: MutableStateFlow<List<CodexProfile>> =
+        MutableStateFlow(emptyList())
+    public val codexProfiles: StateFlow<List<CodexProfile>> = _codexProfiles.asStateFlow()
 
     /**
      * Issue #894 (epic #821 "Slice C"): the durable per-session CONFIRMED-SHELL
@@ -12141,18 +12169,133 @@ public class TmuxSessionViewModel @Inject constructor(
                 ?.let { "tmuxError=$it" }
             ?: "tmuxError=unknown"
 
+    /**
+     * Issue #898: create a new tmux session from the in-session kebab's rich
+     * [com.pocketshell.app.projects.SessionTypePickerSheet] — the SAME sheet the
+     * host/session-list screen uses (Session type, Agent CLI, Skip permissions,
+     * Profile). This routes through the EXACT same verified host-screen create
+     * path ([FolderListGateway.createSession]) as
+     * [com.pocketshell.app.projects.FolderListViewModel.createSession], so the
+     * created session honours every chosen option identically: the picker
+     * synthesises [startCommand] (`pocketshell agent <kind> --dir … [--profile …]
+     * [--no-skip-permissions]`) and the gateway `send-keys`-launches it inside
+     * the new pane. On success [onResolved] fires with the resolved session name
+     * so the screen can attach to it via navigation.
+     *
+     * The legacy control-channel `new-session -d` send remains ONLY as a
+     * fallback for the narrow unit-test constructors built without a gateway /
+     * host DAO; production Hilt always injects both, so production always takes
+     * the verified gateway path (same dual-path shape as [killCurrentSession]).
+     */
     public fun createSession(
         name: String,
-        startDirectory: String = DEFAULT_TMUX_START_DIRECTORY,
+        cwd: String = DEFAULT_TMUX_START_DIRECTORY,
+        startCommand: String? = null,
+        chosenKind: SessionAgentKind? = null,
+        onResolved: (sessionName: String) -> Unit = {},
     ) {
         val creation = resolveTmuxSessionCreation(
             rawName = name,
-            rawStartDirectory = startDirectory,
+            rawStartDirectory = cwd,
         )
-        sendLifecycleCommand(
-            "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +
-                "-c '${escapeSingleQuoted(creation.startDirectory)}'",
-        )
+        val gateway = folderListGateway
+        val dao = hostDao
+        val current = activeTarget
+        if (gateway == null || dao == null || current == null) {
+            // No gateway/host DAO/active target (unit-test constructor) —
+            // best-effort `new-session -d` over the control channel. This path
+            // cannot launch a startCommand; it exists only so the legacy unit
+            // tests keep exercising the name/cwd derivation.
+            sendLifecycleCommand(
+                "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +
+                    "-c '${escapeSingleQuoted(creation.startDirectory)}'",
+            )
+            return
+        }
+        bridgeScope.launch {
+            val host = withContext(Dispatchers.IO) { dao.getById(current.hostId) }
+            if (host == null) {
+                Log.w(
+                    ISSUE_464_KILL_TAG,
+                    "create-session-host-missing host=${current.hostId} name=${creation.sessionName}",
+                )
+                return@launch
+            }
+            val result = gateway.createSession(
+                host = host,
+                keyPath = current.keyPath,
+                passphrase = current.passphrase,
+                sessionName = creation.sessionName,
+                cwd = creation.startDirectory,
+                startCommand = startCommand,
+            )
+            result.fold(
+                onSuccess = { resolvedName ->
+                    Log.i(
+                        ISSUE_464_KILL_TAG,
+                        "create-session-ok host=${current.hostId} name=$resolvedName " +
+                            "kind=${chosenKind ?: "shell"}",
+                    )
+                    onResolved(resolvedName)
+                },
+                onFailure = { error ->
+                    Log.w(
+                        ISSUE_464_KILL_TAG,
+                        "create-session-failed host=${current.hostId} name=${creation.sessionName} " +
+                            "err=${error.javaClass.simpleName}: ${error.message}",
+                    )
+                },
+            )
+        }
+    }
+
+    /**
+     * Issue #898: fetch the host-discovered agent profiles for the active
+     * session's host and project them onto [claudeProfiles] / [codexProfiles] so
+     * the in-session "+ New session" rich sheet shows the SAME Profile selector
+     * the host screen does. Mirrors [FolderListViewModel.fetchProfiles]. Called
+     * when the picker is about to open. Any non-success result (no gateway, CLI
+     * missing, connect/parse failure) leaves the flows empty so the picker shows
+     * no profile selector — the safe default-only behaviour.
+     */
+    public fun fetchProfilesForActiveSession() {
+        val gw = profilesGateway
+        val dao = hostDao
+        val current = activeTarget
+        if (gw == null || dao == null || current == null) {
+            _claudeProfiles.value = emptyList()
+            _codexProfiles.value = emptyList()
+            return
+        }
+        val hostId = current.hostId
+        bridgeScope.launch {
+            val host = withContext(Dispatchers.IO) { dao.getById(hostId) } ?: return@launch
+            val result = withContext(Dispatchers.IO) {
+                gw.listProfiles(
+                    host = host,
+                    keyPath = current.keyPath,
+                    passphrase = current.passphrase,
+                )
+            }
+            // Ignore a stale result if the active session changed while fetching.
+            if (activeTarget?.hostId != hostId) return@launch
+            when (result) {
+                is ProfilesResult.Profiles -> applyProfiles(result.profiles)
+                else -> {
+                    _claudeProfiles.value = emptyList()
+                    _codexProfiles.value = emptyList()
+                }
+            }
+        }
+    }
+
+    private fun applyProfiles(profiles: List<RemoteProfile>) {
+        _claudeProfiles.value = profiles
+            .filter { it.engine == RemoteProfile.ENGINE_CLAUDE }
+            .map { ClaudeProfile(name = it.name, default = it.default) }
+        _codexProfiles.value = profiles
+            .filter { it.engine == RemoteProfile.ENGINE_CODEX }
+            .map { CodexProfile(name = it.name, default = it.default) }
     }
 
     public fun renameCurrentSession(newName: String) {

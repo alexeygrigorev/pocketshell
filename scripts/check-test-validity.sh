@@ -134,8 +134,6 @@ A5_BASELINE=(
 # unjustified `assumeFalse(isRunningOnCi())` outside this list hard-fails.
 # --------------------------------------------------------------------------
 C1_BASELINE=(
-  "app/src/androidTest/java/com/pocketshell/app/proof/NetworkFaultProofBase.kt"                       # opt-in toxiproxy fault base
-  "app/src/androidTest/java/com/pocketshell/app/tmux/ConversationOpenLatencyRttDockerTest.kt"         # opt-in network-fault-proxy
   "app/src/androidTest/java/com/pocketshell/app/tmux/AgentConversationReconnectDockerTest.kt"         # issue #495 local-only reconnect evidence
   "app/src/androidTest/java/com/pocketshell/app/proof/EmulatorWorkflowE2eTest.kt"                     # issue #207 CI-flaky stopgap
 )

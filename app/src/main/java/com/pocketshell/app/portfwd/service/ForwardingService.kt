@@ -81,27 +81,40 @@ class ForwardingService : Service() {
         // status" feel: a quiet, persistent, sweep-resistant status — NOT an
         // alert that buzzes or pops a heads-up every time a forward starts.
         //
-        // The genuinely-good fix is FLAG_NO_CLEAR + FLAG_ONGOING_EVENT (set via
-        // setOngoing(true)): that alone blocks the "clear all" sweep at ANY
-        // channel importance. Recorder/Spotify pair that with a SILENT channel
-        // (IMPORTANCE_LOW, no sound, no vibration) so the status is visible and
-        // persistent without ever alerting. A previous round raised the channel
-        // to IMPORTANCE_HIGH for sweep-resistance — that was wrong: it added the
-        // buzz/heads-up the maintainer explicitly didn't want, and HIGH was
-        // never needed for sweep-resistance.
+        // Sweep-resistance is FLAG_NO_CLEAR + FLAG_ONGOING_EVENT (set via
+        // setOngoing(true)); that alone blocks the "clear all" sweep at ANY
+        // channel importance. The QUIET feel is no sound + no vibration +
+        // setSilent(true) + setOnlyAlertOnce(true) — NOT a low importance.
+        //
+        // Issue #752 (REOPENED 2026-06-24, v0.4.14): the maintainer has 18 ports
+        // forwarding but there is NO persistent ⇄ status-bar icon near the clock;
+        // Android has filed the ongoing notification under the "Silent" group.
+        // ROOT CAUSE of the regression: the channel was IMPORTANCE_LOW. On a real
+        // Pixel a below-DEFAULT channel is treated as "Silent" and its persistent
+        // status-bar icon near the clock is suppressed (only the shade row shows).
+        // The earlier #487/#521 emulator validation passed because the swiftshader
+        // AVD status bar renders the LOW icon, but the maintainer's device does
+        // not — the happy-fixture-masks-reality gap (D33/G10). The fix is to raise
+        // the channel to IMPORTANCE_DEFAULT so it leaves the "Silent" group and the
+        // persistent ⇄ icon shows near the clock, while keeping it QUIET (null
+        // sound, no vibration, setSilent(true)) so it never buzzes or pops a
+        // heads-up — visible-but-silent, the Recorder/Spotify contract. DEFAULT
+        // (not HIGH) is deliberate: HIGH would heads-up; DEFAULT only surfaces the
+        // status-bar icon, and setSilent(true) suppresses the DEFAULT sound.
         //
         // Notification-channel importance AND showBadge are IMMUTABLE after first
         // creation, so changing either requires a NEW channel id —
-        // `createNotificationChannel()` is a no-op for an existing channel.
-        // `_v4` shipped with `setShowBadge(false)`, so flipping it to `true`
-        // in-place would be silently ignored on every already-installed app and
-        // the forwarded-port count badge (the whole point of #752) would never
-        // surface. Hard-cut per D22: we create `_v5` at LOW (silent) with
-        // `setShowBadge(true)` and delete the stale `_v4`/`_v3`/`_v2`/legacy
-        // channels so no install keeps the buzzing HIGH presentation, the old
+        // `createNotificationChannel()` is a no-op for an existing channel. `_v5`
+        // already shipped at IMPORTANCE_LOW, so raising the importance in place is
+        // silently ignored on every installed app (the maintainer's included) and
+        // the status-bar icon would still never surface. Hard-cut per D22: we
+        // create `_v6` at IMPORTANCE_DEFAULT (silent) with `setShowBadge(true)` and
+        // delete the stale `_v5`/`_v4`/`_v3`/`_v2`/legacy channels so no install
+        // keeps the silent-group LOW presentation, the buzzing HIGH one, the old
         // swipe-away one, or the no-badge `_v4` channel.
-        private const val CHANNEL_ID = "pocketshell_forwarding_status_v5"
+        private const val CHANNEL_ID = "pocketshell_forwarding_status_v6"
         private val LEGACY_CHANNEL_IDS = listOf(
+            "pocketshell_forwarding_status_v5",
             "pocketshell_forwarding_status_v4",
             "pocketshell_forwarding_status_v3",
             "pocketshell_forwarding_status_v2",
@@ -496,16 +509,20 @@ class ForwardingService : Service() {
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
-            // Silence the notification itself (pre-O priority + sound/vibration)
-            // to match the silent `_v5` channel. The sweep-resistance comes from
-            // the ongoing/NO_CLEAR flags below, not from importance, so there is
-            // no reason to alert — Recorder/Spotify-style quiet persistent status.
+            // Silence the notification itself (no sound/vibration) regardless of
+            // the channel importance. The `_v6` channel is DEFAULT importance so
+            // the persistent status-bar icon shows near the clock (#752), but
+            // setSilent(true) keeps it from buzzing or popping a heads-up — the
+            // Recorder/Spotify quiet-but-visible contract. Sweep-resistance comes
+            // from the ongoing/NO_CLEAR flags below, not importance.
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            // Issue #487 (reopened): LOW priority pairs with the LOW-importance
-            // silent channel so the status is quiet (no heads-up, no buzz) while
-            // staying persistent and sweep-resistant via the NO_CLEAR flag below.
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            // Issue #752 (reopened): DEFAULT pre-O priority pairs with the
+            // DEFAULT-importance channel so the status-bar icon surfaces near the
+            // clock (PRIORITY_LOW kept the icon out of the status bar on real
+            // devices). setSilent(true) above keeps it quiet despite DEFAULT, and
+            // sweep-resistance is the NO_CLEAR/ongoing flags below — not importance.
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
@@ -532,30 +549,37 @@ class ForwardingService : Service() {
     internal fun createNotificationChannel() {
         val manager = getSystemService(NotificationManager::class.java)
         // Hard-cut (D22): drop the stale channels so no install keeps the old
-        // swipe-away (DEFAULT) or buzzing (HIGH) presentation. Channel importance
-        // is immutable once created, which is why the visible channel id is
-        // bumped instead of mutated; deleting the old ids keeps the app's channel
-        // settings list clean and prevents a stale "Port forwarding" entry.
+        // silent-group LOW (no status-bar icon — the #752 regression), the
+        // buzzing HIGH, or the swipe-away presentation. Channel importance is
+        // immutable once created, which is why the visible channel id is bumped
+        // (now `_v6`) instead of mutated; deleting the old ids keeps the app's
+        // channel settings list clean and prevents a stale "Port forwarding" entry.
         LEGACY_CHANNEL_IDS.forEach { runCatching { manager.deleteNotificationChannel(it) } }
         val channel = NotificationChannel(
             CHANNEL_ID,
             "Port forwarding",
-            // Issue #487 (reopened): LOW — a SILENT channel (no sound, no
-            // heads-up, no buzz) so the ongoing status behaves like Recorder's /
-            // Spotify's quiet persistent status. Sweep-resistance is provided by
-            // the NO_CLEAR/ongoing flags on the notification, NOT by importance,
-            // so there is no reason to alert. (HIGH was the wrong fix — it buzzed
-            // and popped a heads-up on every forward-start.)
-            NotificationManager.IMPORTANCE_LOW,
+            // Issue #752 (reopened 2026-06-24): DEFAULT importance so the ongoing
+            // notification leaves the "Silent" group and its persistent ⇄
+            // status-bar icon shows near the clock — the always-on indicator the
+            // maintainer asked for. IMPORTANCE_LOW was the regression: a
+            // below-DEFAULT channel is "Silent" on a real device and its
+            // status-bar icon is suppressed. DEFAULT (not HIGH) only surfaces the
+            // icon — it does NOT pop a heads-up; the channel is then forced silent
+            // below (null sound + no vibration) and the notification sets
+            // setSilent(true), so it is visible-but-quiet (Recorder/Spotify
+            // contract), never buzzing on forward-start. Sweep-resistance is the
+            // NO_CLEAR/ongoing flags on the notification, NOT importance.
+            NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
-            description = "Quiet ongoing status while SSH port forwarding is active"
+            description = "Always-on quiet status while SSH port forwarding is active"
             // Issue #752: allow the channel to badge so the forwarded port
             // count (NotificationCompat.setNumber, set per-build) can surface as
             // the circled count near the status-bar icon / launcher dot, the
             // Google-Recorder-style "icon + number" the maintainer asked for.
-            // This is just the badge COUNT — the channel stays LOW/silent, so it
-            // never buzzes or pops a heads-up; sweep-resistance is still the
-            // FLAG_NO_CLEAR/ongoing flags, not importance.
+            // This is just the badge COUNT — the channel is DEFAULT importance but
+            // forced silent below, so it never buzzes or pops a heads-up;
+            // sweep-resistance is still the FLAG_NO_CLEAR/ongoing flags, not
+            // importance.
             setShowBadge(true)
             // Belt-and-braces: explicitly silence the channel. IMPORTANCE_LOW is
             // already non-alerting, but null sound + vibration off guarantees the

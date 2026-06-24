@@ -185,23 +185,31 @@ class ForwardingNotificationE2eTest {
         val channel = notificationManager.getNotificationChannel(posted.notification.channelId)
         assertEquals(
             "foreground notification should use the upgrade-safe status channel",
-            "pocketshell_forwarding_status_v5",
+            "pocketshell_forwarding_status_v6",
             posted.notification.channelId,
         )
         assertNotNull("foreground notification channel must be registered", channel)
-        // Issue #487 (reopened): LOW importance so the ongoing status is SILENT
-        // (no heads-up, no buzz) — the Recorder/Spotify quiet-status feel the
-        // maintainer asked for. Sweep-resistance comes from FLAG_NO_CLEAR
-        // (asserted above), NOT from importance.
+        // Issue #752 (REOPENED): the channel must be >= DEFAULT importance so the
+        // ongoing notification leaves the "Silent" group and its persistent ⇄
+        // status-bar icon shows near the clock. IMPORTANCE_LOW was the regression
+        // (Silent group, no status-bar icon on a real device). This is the
+        // on-device half of the durable regression proof.
+        assertTrue(
+            "foreground notification channel must be >= DEFAULT importance so the " +
+                "persistent status-bar icon shows near the clock — LOW lands in the " +
+                "Silent group with no icon (issue #752 regression)",
+            requireNotNull(channel).importance >= NotificationManager.IMPORTANCE_DEFAULT,
+        )
         assertEquals(
-            "foreground notification channel must be LOW importance so it is silent " +
-                "(no heads-up, no buzz) like Recorder/Spotify",
-            NotificationManager.IMPORTANCE_LOW,
+            "foreground notification channel must be exactly DEFAULT (not the alerting " +
+                "HIGH) — DEFAULT surfaces the icon without a heads-up; quiet comes from " +
+                "null sound + setSilent",
+            NotificationManager.IMPORTANCE_DEFAULT,
             requireNotNull(channel).importance,
         )
         assertNull(
             "foreground notification channel must be silent — no sound — so it does " +
-                "not buzz when a forward starts",
+                "not buzz when a forward starts (kept under #752's DEFAULT importance)",
             channel.sound,
         )
         assertFalse(
@@ -215,11 +223,19 @@ class ForwardingNotificationE2eTest {
             notificationManager.getNotificationChannel("pocketshell_forwarding_status_v3"),
         )
         // Issue #752: the stale v4 (no-badge) channel must be gone so the
-        // badge-enabled v5 channel is created fresh — showBadge is immutable
+        // badge-enabled channel is created fresh — showBadge is immutable
         // after first creation, so an in-place flip on v4 would be ignored.
         assertNull(
-            "the stale v4 (no-badge) channel must be deleted on upgrade so v5's badge surfaces",
+            "the stale v4 (no-badge) channel must be deleted on upgrade",
             notificationManager.getNotificationChannel("pocketshell_forwarding_status_v4"),
+        )
+        // Issue #752 (reopened): the stale v5 (silent-group LOW, no status-bar
+        // icon) channel must be gone so the visible DEFAULT v6 is created fresh —
+        // importance is immutable, so an in-place flip on v5 would be ignored.
+        assertNull(
+            "the stale v5 (silent-group LOW) channel must be deleted on upgrade so v6's " +
+                "visible status-bar icon surfaces (issue #752 regression)",
+            notificationManager.getNotificationChannel("pocketshell_forwarding_status_v5"),
         )
         // Issue #521: body says it's running in the background + the host +
         // tunnel count (Recorder "Recording now" feel).

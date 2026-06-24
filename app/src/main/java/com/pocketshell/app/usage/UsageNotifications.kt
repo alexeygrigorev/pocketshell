@@ -143,7 +143,14 @@ private fun exceededQuotaLabel(record: UsageProviderRecord): String {
 }
 
 internal object UsageNotifications {
-    private const val CHANNEL_ID: String = "usage_alerts"
+    // Issue #903: usage warnings are an ALERTING notification the maintainer
+    // needs to notice (approaching/critical/exceeded quota), so the channel must
+    // be IMPORTANCE_HIGH (sound + heads-up), not silent/DEFAULT. Channel
+    // importance is immutable after first creation, so the previously-shipped
+    // DEFAULT channel id is bumped (`_v2`) and the stale one deleted (hard-cut
+    // D22) — raising importance in place is silently ignored on the installed app.
+    private const val CHANNEL_ID: String = "usage_alerts_v2"
+    private const val LEGACY_CHANNEL_ID: String = "usage_alerts"
     private const val CHANNEL_NAME: String = "Usage alerts"
 
     fun show(context: Context, event: UsageNotificationEvent) {
@@ -156,6 +163,9 @@ internal object UsageNotifications {
             .setContentTitle(event.title)
             .setContentText(event.text)
             .setAutoCancel(true)
+            // Issue #903: HIGH priority so the alert heads-up on pre-O and matches
+            // the HIGH channel importance — a usage warning should ping.
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(usagePendingIntent(appContext))
             .setDeleteIntent(dismissPendingIntent(appContext, event.key))
             .build()
@@ -205,15 +215,20 @@ internal object UsageNotifications {
                 Manifest.permission.POST_NOTIFICATIONS,
             ) == PackageManager.PERMISSION_GRANTED
 
-    private fun ensureChannel(context: Context) {
+    @androidx.annotation.VisibleForTesting
+    internal fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        context.getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    CHANNEL_NAME,
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ),
-            )
+        val manager = context.getSystemService(NotificationManager::class.java)
+        // Hard-cut (D22): drop the stale DEFAULT channel so the new HIGH channel
+        // (#903) is created fresh — importance is immutable, so an in-place flip
+        // on the old id is ignored on already-installed apps.
+        runCatching { manager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID,
+                CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_HIGH,
+            ),
+        )
     }
 }

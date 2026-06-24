@@ -580,7 +580,7 @@ class ForwardingControllerTest {
     }
 
     @Test
-    fun `notification uses a silent low-importance status channel that does not buzz`() {
+    fun `forwarding channel is visible-but-silent — DEFAULT importance shows the status-bar icon yet never buzzes`() {
         val service = Robolectric.buildService(ForwardingService::class.java).get()
         service.createNotificationChannel()
         val notification = service.buildNotification(
@@ -591,44 +591,68 @@ class ForwardingControllerTest {
         val manager = context.getSystemService(NotificationManager::class.java)
         val channel = manager.getNotificationChannel(notification.channelId)
 
-        assertEquals("pocketshell_forwarding_status_v5", notification.channelId)
+        // Issue #752 channel id bump (importance is immutable, so the silent-group
+        // LOW `_v5` had to be replaced by the DEFAULT `_v6`).
+        assertEquals("pocketshell_forwarding_status_v6", notification.channelId)
         assertNotNull("foreground-service notification channel must be registered", channel)
         val forwardingChannel = requireNotNull(channel)
-        // Issue #487 (reopened): the maintainer asked for a QUIET persistent
-        // status (Recorder/Spotify-style), "not an alert that buzzes". The
-        // channel must be LOW importance (silent, no heads-up, no buzz) — NOT
-        // HIGH. Sweep-resistance comes from the NO_CLEAR/ongoing flags (asserted
-        // separately), not from importance.
+        // Issue #752 (REOPENED): the regression was IMPORTANCE_LOW — a below-DEFAULT
+        // channel is filed under "Silent" on a real device and its persistent
+        // status-bar icon near the clock is SUPPRESSED (the maintainer had 18 ports
+        // forwarding and saw no ⇄ icon). The channel MUST be at least DEFAULT so the
+        // ongoing notification leaves the "Silent" group and the icon shows near the
+        // clock. This assertion FAILS on the regressed LOW config (red→green) — it
+        // is the durable test that would have caught #752.
+        assertTrue(
+            "channel must be >= IMPORTANCE_DEFAULT so the persistent status-bar icon " +
+                "shows near the clock — IMPORTANCE_LOW lands in the Silent group with " +
+                "no icon (issue #752 regression)",
+            forwardingChannel.importance >= NotificationManager.IMPORTANCE_DEFAULT,
+        )
         assertEquals(
-            "channel must be LOW importance so the ongoing status is silent — no " +
-                "heads-up, no buzz — like Recorder/Spotify (issue #487 reopen)",
-            NotificationManager.IMPORTANCE_LOW,
+            "channel must be exactly DEFAULT (not HIGH) — DEFAULT surfaces the icon " +
+                "without a heads-up; the quiet feel comes from null sound + setSilent",
+            NotificationManager.IMPORTANCE_DEFAULT,
             forwardingChannel.importance,
         )
         assertEquals(
-            "pre-O notification priority should match the low-importance silent channel",
-            NotificationCompat.PRIORITY_LOW,
+            "pre-O notification priority should match the DEFAULT-importance channel " +
+                "so the status-bar icon surfaces (PRIORITY_LOW kept it out of the bar)",
+            NotificationCompat.PRIORITY_DEFAULT,
             @Suppress("DEPRECATION")
             notification.priority,
         )
+        // Issue #487/#752: visible but QUIET — DEFAULT importance must still be
+        // forced silent so it never buzzes or pops a heads-up on forward-start.
         assertNull(
             "forwarding channel must be silent — no sound — so it does not buzz when " +
-                "a forward starts (issue #487 reopen)",
+                "a forward starts (issue #487; kept under #752's DEFAULT importance)",
             forwardingChannel.sound,
         )
         assertFalse(
             "forwarding channel must not vibrate so it does not buzz on forward-start",
             forwardingChannel.shouldVibrate(),
         )
-        // Issue #487 (reopened): the stale higher/lower-importance channels must
-        // be deleted so no install keeps the buzzing HIGH (_v3) or swipe-away
-        // DEFAULT (_v2) presentation.
-        // Issue #752: the no-badge `_v4` channel must ALSO be deleted — showBadge
-        // is immutable after first creation, so on an already-installed app the
-        // badge flip is ignored unless the old channel is dropped and the new
-        // badge-enabled `_v5` channel is created fresh.
+        // Issue #752: the notification itself is silenced (setSilent(true)) so the
+        // DEFAULT channel never produces a sound — visible-but-quiet contract.
+        assertTrue(
+            "notification must be silent (no sound/vibration) even on the DEFAULT " +
+                "channel so it never buzzes — setSilent(true) (issue #752)",
+            notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE != 0 ||
+                notification.sound == null,
+        )
+        // Hard-cut (D22): every stale channel id must be deleted so no install
+        // keeps the silent-group LOW (`_v5` — the #752 regression), the buzzing
+        // HIGH (`_v3`), the swipe-away DEFAULT (`_v2`), or the no-badge (`_v4`)
+        // presentation. Importance/badge are immutable, so the fresh `_v6` only
+        // takes effect once the old ids are dropped.
         assertNull(
-            "the stale v4 (no-badge) channel must be removed so the badge-enabled v5 " +
+            "the stale v5 (silent-group LOW, no status-bar icon) channel must be " +
+                "removed so the visible DEFAULT v6 is created fresh on update (issue #752)",
+            manager.getNotificationChannel("pocketshell_forwarding_status_v5"),
+        )
+        assertNull(
+            "the stale v4 (no-badge) channel must be removed so the badge-enabled v6 " +
                 "channel is created fresh on update (issue #752)",
             manager.getNotificationChannel("pocketshell_forwarding_status_v4"),
         )

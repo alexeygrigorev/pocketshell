@@ -193,6 +193,25 @@ public interface OutboundQueueStore {
     ): OutboundItem?
 
     /**
+     * Requeue stale [OutboundState.InFlight] rows for [sessionKey] so a
+     * foreground/reconnect flush can pick them up again after a prior delivery
+     * attempt was abandoned by process death or a lost callback.
+     *
+     * Staleness is intentionally caller-controlled: a row is stale when
+     * `(lastAttemptAtMs ?: createdAtMs) <= cutoffMs`. Rows with no
+     * [OutboundItem.lastAttemptAtMs] fall back to [OutboundItem.createdAtMs]
+     * for older persisted items. This method does not bump attempt counts or
+     * clear error metadata; the next [claimNext] / [claim] records the next
+     * attempt.
+     *
+     * Returns the updated rows, oldest-first by [OutboundItem.createdAtMs].
+     */
+    public fun requeueStaleInFlight(
+        sessionKey: String,
+        cutoffMs: Long,
+    ): List<OutboundItem>
+
+    /**
      * Remove the item with [id] regardless of state — the user explicitly
      * cancelled/deleted a pending item before it sent (AC4). Returns `true` if
      * an item was removed.
@@ -403,6 +422,16 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
             updated
         }
 
+    override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> =
+        synchronized(lock) {
+            val updated = items.values
+                .filter { it.sessionKey == sessionKey && it.isStaleInFlight(cutoffMs) }
+                .sortedBy { it.createdAtMs }
+                .map { it.copy(state = OutboundState.Queued) }
+            updated.forEach { items[it.id] = it }
+            updated
+        }
+
     override fun remove(id: String): Boolean = synchronized(lock) { items.remove(id) != null }
 
     override fun clearSession(sessionKey: String): Unit = synchronized(lock) {
@@ -445,6 +474,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun markUploading(id: String): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
+    override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
     override fun clearSession(sessionKey: String) = Unit
 }
@@ -630,6 +660,18 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             updated
         }
 
+    override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> =
+        synchronized(lock) {
+            val list = loadSession(sessionKey)
+            val updatedById = list
+                .filter { it.isStaleInFlight(cutoffMs) }
+                .associate { it.id to it.copy(state = OutboundState.Queued) }
+            if (updatedById.isEmpty()) return emptyList()
+            val updatedList = list.map { updatedById[it.id] ?: it }
+            storeSession(sessionKey, updatedList.sortedBy { it.createdAtMs })
+            updatedById.values.sortedBy { it.createdAtMs }
+        }
+
     override fun remove(id: String): Boolean = synchronized(lock) {
         val sessionKey = sessionOf(id) ?: return false
         val list = loadSession(sessionKey)
@@ -666,6 +708,9 @@ private fun OutboundItem.claimedForAttempt(): OutboundItem =
             attemptCount = attemptCount + 1,
         )
     }
+
+private fun OutboundItem.isStaleInFlight(cutoffMs: Long): Boolean =
+    state == OutboundState.InFlight && (lastAttemptAtMs ?: createdAtMs) <= cutoffMs
 
 /** Issue #900: prefs key for the item-blob slot of [sessionKey]. */
 internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"

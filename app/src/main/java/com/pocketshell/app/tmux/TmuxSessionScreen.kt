@@ -100,6 +100,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.composer.OutboundRoute
+import com.pocketshell.app.composer.PromptComposerSendDispatcher
 import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.conversation.ConversationImageViewModel
@@ -448,6 +449,25 @@ public fun TmuxSessionScreen(
     // reported. We disable those affordances and surface a visible
     // "Reconnecting" / "Disconnected" pill instead.
     val sessionLive = status is ConnectionStatus.Connected
+    val outboundQueueItems by promptComposerViewModel.outboundQueueItems.collectAsState()
+    var autoRetriedOutboundIds by remember(targetSessionId.value) { mutableStateOf(emptySet<String>()) }
+    LaunchedEffect(targetSessionId.value) {
+        promptComposerViewModel.onComposerTargetChanged(targetSessionId.value)
+    }
+    LaunchedEffect(sessionLive, targetSessionId.value) {
+        autoRetriedOutboundIds = emptySet()
+        promptComposerViewModel.setConnectionDegraded(!sessionLive)
+        if (sessionLive) {
+            promptComposerViewModel.requeueStaleOutboundInFlight()
+        }
+    }
+    LaunchedEffect(sessionLive, targetSessionId.value, outboundQueueItems) {
+        if (!sessionLive) return@LaunchedEffect
+        val retriedId = promptComposerViewModel.retryNextOutboundItem(
+            excludingIds = autoRetriedOutboundIds,
+        ) ?: return@LaunchedEffect
+        autoRetriedOutboundIds = autoRetriedOutboundIds + retriedId
+    }
     val sessionCardsState by viewModel.sessionCards.collectAsState()
     val checklistCards = remember(sessionCardsState, activeSessionCardsTargetKey) {
         if (sessionCardsState.targetKey == activeSessionCardsTargetKey) {
@@ -858,6 +878,53 @@ public fun TmuxSessionScreen(
     } else {
         null
     }
+    val composerSendHandler: suspend (PromptComposerViewModel.SendRequest) -> Boolean = { request ->
+        // Issue #548: send is a connect-on-action path. If the control channel
+        // dropped while the composer was open, let the ViewModel kick/reuse
+        // reconnect and wait for the live client before returning failure to the
+        // composer.
+        //
+        // Issue #797: route the send to the SURFACE (visible) pane, NOT the
+        // active-only `currentPane`. The visible pane IS the user's intended
+        // session (they are parked on it); the promotion-on-settle path has made
+        // it the active runtime's pane, so `paneId`-targeted sends reach it.
+        val target = request.sendTarget
+        if (target.sessionKey.isNotBlank() && target.sessionKey != targetSessionId.value) {
+            false
+        } else {
+            val paneId = target.paneId.ifBlank { surfacePane?.paneId.orEmpty() }
+            val sent = if (paneId.isBlank()) {
+                false
+            } else when (target.route) {
+                OutboundRoute.AgentConversation ->
+                    viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
+                OutboundRoute.AgentPayload ->
+                    tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
+                        viewModel.sendAgentPayloadToPaneResult(
+                            paneId,
+                            request.text,
+                            agentKind,
+                        ).isSuccess
+                    } ?: false
+                OutboundRoute.RawBytes -> {
+                    val payload = if (request.withEnter) request.text + "\r" else request.text
+                    viewModel.writeInputToPaneResult(
+                        paneId,
+                        payload.toByteArray(Charsets.UTF_8),
+                    ).isSuccess
+                }
+            }
+            if (sent) {
+                showMicSheet = false
+            }
+            sent
+        }
+    }
+    PromptComposerSendDispatcher(
+        viewModel = promptComposerViewModel,
+        onSend = composerSendHandler,
+        onDelivered = { showMicSheet = false },
+    )
 
     // Issue #167: intercept system-back so the user returns to the host
     // list instead of exiting the activity. Without this `BackHandler`
@@ -2519,56 +2586,8 @@ public fun TmuxSessionScreen(
                     agentKind = liveAgent ?: presumedAgentKind,
                 )
             },
-            onSend = { request ->
-                // Issue #548: send is a connect-on-action path. If the
-                // control channel dropped while the composer was open, let
-                // the ViewModel kick/reuse reconnect and wait for the live
-                // client before returning failure to the composer.
-                // Issue #797: route the send to the SURFACE (visible) pane, NOT
-                // the active-only `currentPane`. The visible pane IS the user's
-                // intended session (they are parked on it); the promotion-on-
-                // settle path has made it the active runtime's pane, so
-                // `paneId`-targeted sends reach it. This never routes to a stale
-                // leaving session: while a switch hides the terminal `surfacePane`
-                // is null (the composer is itself suppressed), so a send can only
-                // land on the session the user is actually looking at.
-                val target = request.sendTarget
-                if (target.sessionKey.isNotBlank() && target.sessionKey != targetSessionId.value) {
-                    false
-                } else {
-                    val paneId = target.paneId.ifBlank { surfacePane?.paneId.orEmpty() }
-                    val sent = if (paneId.isBlank()) {
-                        false
-                    } else when (target.route) {
-                        // Conversation tab: submit to the agent and echo the
-                        // optimistic user Message into the feed (#459).
-                        OutboundRoute.AgentConversation ->
-                            viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
-                        // Agent payload formatting: the Codex with-Enter case
-                        // (live agent) or a presumed-agent send (#716). The
-                        // agent kind was captured with the route at tap time.
-                        OutboundRoute.AgentPayload ->
-                            tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
-                                viewModel.sendAgentPayloadToPaneResult(
-                                    paneId,
-                                    request.text,
-                                    agentKind,
-                                ).isSuccess
-                            } ?: false
-                        OutboundRoute.RawBytes -> {
-                            val payload = if (request.withEnter) request.text + "\r" else request.text
-                            viewModel.writeInputToPaneResult(
-                                paneId,
-                                payload.toByteArray(Charsets.UTF_8),
-                            ).isSuccess
-                        }
-                    }
-                    if (sent) {
-                        showMicSheet = false
-                    }
-                    sent
-                }
-            },
+            onSend = composerSendHandler,
+            collectSendRequests = false,
             hostId = hostId.takeIf { it != 0L },
             onStageAttachments = { uris ->
                 // Issue #451: Attach connects-on-action like Send. Do NOT

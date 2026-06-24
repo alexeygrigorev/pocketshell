@@ -1259,18 +1259,57 @@ public class PromptComposerViewModel @Inject constructor(
     /**
      * Issue #900: manually retry a durable outbound row without minting a new
      * queue id or reading the current composer draft. The row owns the original
-     * payload and tap-time route; the existing sheet send collector still owns
+     * payload and tap-time route; the active send dispatcher still owns
      * actual delivery and calls [markSendDelivered] / [restoreFailedSend].
      */
     public fun retryOutboundItem(id: String) {
-        if (_uiState.value.sendInFlight) return
-        val active = outboundQueueStore.claim(id) ?: return
+        dispatchOutboundItem(id)
+    }
+
+    /**
+     * Issue #900: foreground/reconnect queue flush. Claim one retryable row for
+     * the current composer target and emit it through the same one-shot send
+     * channel as manual retry. The screen calls this after each queue refresh;
+     * sending one row at a time keeps [UiState.sendInFlight] as the single
+     * delivery gate and prevents a failed row from spinning in a tight loop.
+     */
+    public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? {
+        if (_uiState.value.sendInFlight) return null
+        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
+        val next = outboundQueueStore.itemsFor(target)
+            .firstOrNull { item ->
+                item.id !in excludingIds &&
+                    (item.state == OutboundState.Queued || item.state == OutboundState.Failed)
+            }
+            ?: return null
+        return if (dispatchOutboundItem(next.id)) next.id else null
+    }
+
+    /**
+     * Issue #900: process-death / lost-callback recovery. If a row was left
+     * [OutboundState.InFlight] longer than the send watchdog window, move it
+     * back to [OutboundState.Queued] so the next foreground/reconnect flush can
+     * claim it exactly once.
+     */
+    public fun requeueStaleOutboundInFlight(
+        staleAfterMs: Long = OUTBOUND_IN_FLIGHT_STALE_MS,
+    ): List<OutboundItem> {
+        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val cutoffMs = clock() - staleAfterMs
+        val requeued = outboundQueueStore.requeueStaleInFlight(target, cutoffMs)
+        if (requeued.isNotEmpty()) refreshOutboundQueueItemsFor(target)
+        return requeued
+    }
+
+    private fun dispatchOutboundItem(id: String): Boolean {
+        if (_uiState.value.sendInFlight) return false
+        val active = outboundQueueStore.claim(id) ?: return false
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
         if (text.isEmpty()) {
             outboundQueueStore.markFailed(id, lastError = "Nothing to send")
             refreshOutboundQueueItemsFor(active.sessionKey)
-            return
+            return false
         }
         refreshOutboundQueueItemsFor(active.sessionKey)
         val request = SendRequest(
@@ -1290,7 +1329,9 @@ public class PromptComposerViewModel @Inject constructor(
         armSendWatchdog()
         if (_sendRequests.trySend(request).isFailure) {
             restoreFailedSend(request)
+            return false
         }
+        return true
     }
 
     private fun markOutboundSendDelivered(request: SendRequest?) {
@@ -3152,6 +3193,14 @@ public class PromptComposerViewModel @Inject constructor(
          * state ([restoreFailedSend]) with the draft + attachment preserved.
          */
         public const val OVERALL_SEND_TIMEOUT_MS: Long = 110_000L
+
+        /**
+         * Issue #900: an [OutboundState.InFlight] row older than the whole-send
+         * watchdog was almost certainly abandoned by process death, collector
+         * loss, or a callback that never returned. Requeue it only after that
+         * window so an active foreground send is not duplicated.
+         */
+        public const val OUTBOUND_IN_FLIGHT_STALE_MS: Long = OVERALL_SEND_TIMEOUT_MS
 
         /**
          * Issue #891: the "Send failed — Retry" banner shown when the overall

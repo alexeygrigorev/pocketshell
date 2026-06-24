@@ -197,6 +197,116 @@ class OutboundQueueStoreTest {
     }
 
     @Test
+    fun requeueStaleInFlightOnlyForSessionUsingLastAttemptOrCreatedCutoff() {
+        val store = store()
+        val staleByLastAttempt = OutboundItem(
+            id = "stale-by-last-attempt",
+            sessionKey = "sessA",
+            cleanText = "stale attempt",
+            state = OutboundState.InFlight,
+            createdAtMs = 50L,
+            lastAttemptAtMs = 90L,
+            attemptCount = 2,
+            lastError = "prior failure",
+        )
+        val freshByLastAttempt = OutboundItem(
+            id = "fresh-by-last-attempt",
+            sessionKey = "sessA",
+            cleanText = "fresh attempt",
+            state = OutboundState.InFlight,
+            createdAtMs = 10L,
+            lastAttemptAtMs = 110L,
+            attemptCount = 1,
+        )
+        val staleByCreatedAtFallback = OutboundItem(
+            id = "stale-by-created-at",
+            sessionKey = "sessA",
+            cleanText = "legacy stale attempt",
+            state = OutboundState.InFlight,
+            createdAtMs = 80L,
+            lastAttemptAtMs = null,
+            attemptCount = 1,
+        )
+        val freshByCreatedAtFallback = OutboundItem(
+            id = "fresh-by-created-at",
+            sessionKey = "sessA",
+            cleanText = "legacy fresh attempt",
+            state = OutboundState.InFlight,
+            createdAtMs = 120L,
+            lastAttemptAtMs = null,
+            attemptCount = 1,
+        )
+        val otherSession = OutboundItem(
+            id = "other-session",
+            sessionKey = "sessB",
+            cleanText = "do not touch",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+            lastAttemptAtMs = 1L,
+            attemptCount = 1,
+        )
+        listOf(
+            staleByLastAttempt,
+            freshByLastAttempt,
+            staleByCreatedAtFallback,
+            freshByCreatedAtFallback,
+            otherSession,
+        ).forEach(store::enqueueExisting)
+        val queued = store.enqueue("sessA", "already queued", createdAtMs = 70L)
+
+        val requeued = store.requeueStaleInFlight("sessA", cutoffMs = 100L)
+
+        assertEquals(
+            listOf(staleByLastAttempt.id, staleByCreatedAtFallback.id),
+            requeued.map { it.id },
+        )
+        assertEquals(OutboundState.Queued, store.item(staleByLastAttempt.id)!!.state)
+        assertEquals(2, store.item(staleByLastAttempt.id)!!.attemptCount)
+        assertEquals(90L, store.item(staleByLastAttempt.id)!!.lastAttemptAtMs)
+        assertEquals("prior failure", store.item(staleByLastAttempt.id)!!.lastError)
+        assertEquals(OutboundState.InFlight, store.item(freshByLastAttempt.id)!!.state)
+        assertEquals(OutboundState.Queued, store.item(staleByCreatedAtFallback.id)!!.state)
+        assertEquals(OutboundState.InFlight, store.item(freshByCreatedAtFallback.id)!!.state)
+        assertEquals(OutboundState.InFlight, store.item(otherSession.id)!!.state)
+        assertEquals(OutboundState.Queued, store.item(queued.id)!!.state)
+    }
+
+    @Test
+    fun requeuedStaleInFlightRowsAreClaimableAgainInOldestFirstOrder() {
+        val store = store()
+        val first = OutboundItem(
+            id = "first",
+            sessionKey = "sessA",
+            cleanText = "first",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+            lastAttemptAtMs = 10L,
+            attemptCount = 1,
+        )
+        val second = OutboundItem(
+            id = "second",
+            sessionKey = "sessA",
+            cleanText = "second",
+            state = OutboundState.InFlight,
+            createdAtMs = 2L,
+            lastAttemptAtMs = 10L,
+            attemptCount = 1,
+        )
+        store.enqueueExisting(second)
+        store.enqueueExisting(first)
+
+        store.requeueStaleInFlight("sessA", cutoffMs = 10L)
+
+        val claimedFirst = store.claimNext("sessA")!!
+        val claimedSecond = store.claimNext("sessA")!!
+        assertEquals(first.id, claimedFirst.id)
+        assertEquals(2, claimedFirst.attemptCount)
+        assertEquals(second.id, claimedSecond.id)
+        assertEquals(2, claimedSecond.attemptCount)
+        assertNull(store.claimNext("sessA"))
+    }
+
+    @Test
     fun markDeliveredIsExactlyOnce_lateDuplicateAckIsNoOp() {
         val store = store()
         val item = store.enqueue("sessA", "deliver once")

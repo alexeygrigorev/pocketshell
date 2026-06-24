@@ -3309,6 +3309,102 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun retryNextOutboundItemClaimsOldestCurrentTargetAndHonorsLiveWindowExclusions() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val first = queue.enqueue(
+            sessionKey = "1/session-a",
+            cleanText = "first retry",
+            createdAtMs = 1L,
+            paneId = "%1",
+        )
+        val second = queue.enqueue(
+            sessionKey = "1/session-a",
+            cleanText = "second retry",
+            createdAtMs = 2L,
+            paneId = "%2",
+        )
+        val otherSession = queue.enqueue(
+            sessionKey = "1/session-b",
+            cleanText = "other session",
+            createdAtMs = 0L,
+        )
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        val retriedFirst = vm.retryNextOutboundItem()
+        advanceUntilIdle()
+
+        assertEquals(first.id, retriedFirst)
+        assertEquals(first.id, sent.single().outboundQueueItemId)
+        assertEquals(OutboundState.InFlight, queue.item(first.id)!!.state)
+        assertEquals(OutboundState.Queued, queue.item(second.id)!!.state)
+        assertEquals(OutboundState.Queued, queue.item(otherSession.id)!!.state)
+
+        vm.restoreFailedSend(sent.single(), message = "still disconnected")
+
+        val retriedSecond = vm.retryNextOutboundItem(excludingIds = setOf(first.id))
+        advanceUntilIdle()
+        runCurrent()
+
+        assertEquals(second.id, retriedSecond)
+        assertEquals(2, sent.size)
+        assertEquals(second.id, sent.last().outboundQueueItemId)
+        assertEquals(OutboundState.InFlight, queue.item(second.id)!!.state)
+        assertEquals(OutboundState.Queued, queue.item(otherSession.id)!!.state)
+    }
+
+    @Test
+    fun requeueStaleOutboundInFlightUsesWatchdogCutoffBeforeRetryNext() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val now = 500_000L
+        val stale = OutboundItem(
+            id = "stale-send",
+            sessionKey = "1/session-a",
+            cleanText = "recover me",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+            lastAttemptAtMs = now - PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS - 1L,
+            attemptCount = 1,
+            paneId = "%7",
+            route = OutboundRoute.RawBytes,
+        )
+        val fresh = OutboundItem(
+            id = "fresh-send",
+            sessionKey = "1/session-a",
+            cleanText = "leave active",
+            state = OutboundState.InFlight,
+            createdAtMs = 2L,
+            lastAttemptAtMs = now - PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS + 1L,
+            attemptCount = 1,
+        )
+        queue.enqueueExisting(stale)
+        queue.enqueueExisting(fresh)
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            clock = { now },
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        val recovered = vm.requeueStaleOutboundInFlight()
+        val retried = vm.retryNextOutboundItem()
+        advanceUntilIdle()
+
+        assertEquals(listOf(stale.id), recovered.map { it.id })
+        assertEquals(stale.id, retried)
+        assertEquals(stale.id, sent.single().outboundQueueItemId)
+        assertEquals(OutboundState.InFlight, queue.item(stale.id)!!.state)
+        assertEquals(2, queue.item(stale.id)!!.attemptCount)
+        assertEquals(OutboundState.InFlight, queue.item(fresh.id)!!.state)
+        assertEquals(listOf(stale.id, fresh.id), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
     fun requestSendWhileRecordingPreservesOriginalSendTargetSnapshot() = runTest {
         // Issue #900: a Send tap during Recording first stops the recorder and
         // transcribes. The eventual request must keep the target captured from

@@ -216,6 +216,10 @@ public fun PromptComposerSheet(
         PromptComposerViewModel.SendTargetSnapshot()
     },
     viewModel: PromptComposerViewModel = hiltViewModel(),
+    // Issue #900: production tmux screens mount the one-shot send dispatcher at
+    // screen scope so durable queue flushes can deliver while this sheet is
+    // closed. Standalone harnesses keep the legacy in-sheet collector.
+    collectSendRequests: Boolean = true,
     // Issue #234: the composer is partial-expand by default so the terminal
     // viewport behind it stays visible. With `skipPartiallyExpanded = false`,
     // Material 3 lands the sheet at `SheetValue.PartiallyExpanded` (≈ half the
@@ -317,33 +321,14 @@ public fun PromptComposerSheet(
     // Transcribing). Using `rememberUpdatedState` so a recomposition
     // that changes the host's `onSend` reference does not lose
     // already-queued sends.
-    val currentOnSend by rememberUpdatedState(onSend)
     val currentOnDismiss by rememberUpdatedState(onDismiss)
     val currentSendTargetSnapshotProvider by rememberUpdatedState(sendTargetSnapshotProvider)
-    LaunchedEffect(viewModel) {
-        viewModel.sendRequests.collect { request ->
-            // Issue #745: bound the send so the in-flight state can never hang.
-            // The host `onSend` is a connect-on-action call (#548) that may kick
-            // a reconnect and await the live client; cap it at [SEND_TIMEOUT_MS]
-            // so a truly dead link resolves to the "Not sent" banner promptly
-            // instead of leaving the composer stuck on "Sending…". A null
-            // (timeout) is treated exactly like a `false` (failed) send.
-            val delivered = runCatching {
-                withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
-                    currentOnSend(request)
-                } == true
-            }.getOrDefault(false)
-            if (delivered) {
-                // Issue #745: only NOW clear the draft + staged attachments —
-                // the bytes are confirmed delivered, so there is no flicker of
-                // an optimistically-emptied field. Then dismiss the sheet so
-                // the user lands back on the terminal.
-                viewModel.markSendDelivered(request)
-                currentOnDismiss()
-            } else {
-                viewModel.restoreFailedSend(request)
-            }
-        }
+    if (collectSendRequests) {
+        PromptComposerSendDispatcher(
+            viewModel = viewModel,
+            onSend = onSend,
+            onDelivered = { currentOnDismiss() },
+        )
     }
 
     // Issue #745: keep the ViewModel's connection-degraded flag in sync with
@@ -1345,6 +1330,47 @@ internal fun SheetContent(
                 }
             }
         }
+        }
+    }
+}
+
+/**
+ * Issue #900: single-consumer dispatcher for the composer's one-shot
+ * [PromptComposerViewModel.sendRequests] channel. Production tmux screens mount
+ * this at screen scope so reconnect/foreground queue flushes can deliver while
+ * the sheet is closed; standalone sheet tests/previews can still mount it from
+ * [PromptComposerSheet].
+ */
+@Composable
+public fun PromptComposerSendDispatcher(
+    viewModel: PromptComposerViewModel,
+    onSend: suspend (PromptComposerViewModel.SendRequest) -> Boolean,
+    onDelivered: () -> Unit = {},
+) {
+    val currentOnSend by rememberUpdatedState(onSend)
+    val currentOnDelivered by rememberUpdatedState(onDelivered)
+    LaunchedEffect(viewModel) {
+        viewModel.sendRequests.collect { request ->
+            // Issue #745: bound the send so the in-flight state can never hang.
+            // The host `onSend` is a connect-on-action call (#548) that may kick
+            // a reconnect and await the live client; cap it at [SEND_TIMEOUT_MS]
+            // so a truly dead link resolves to the "Not sent" banner promptly
+            // instead of leaving the composer stuck on "Sending...". A null
+            // (timeout) is treated exactly like a `false` (failed) send.
+            val delivered = runCatching {
+                withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
+                    currentOnSend(request)
+                } == true
+            }.getOrDefault(false)
+            if (delivered) {
+                // Issue #745: only NOW clear the draft + staged attachments.
+                // The bytes are confirmed delivered, so there is no flicker of
+                // an optimistically-emptied field.
+                viewModel.markSendDelivered(request)
+                currentOnDelivered()
+            } else {
+                viewModel.restoreFailedSend(request)
+            }
         }
     }
 }

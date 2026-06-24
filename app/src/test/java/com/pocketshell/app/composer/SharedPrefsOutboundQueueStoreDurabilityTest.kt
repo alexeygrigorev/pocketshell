@@ -75,6 +75,61 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
     }
 
     @Test
+    fun requeueStaleInFlightSurvivesRestartAndLeavesFreshRowsInFlight() {
+        val first = newStore()
+        val stale = OutboundItem(
+            id = "durable-stale-in-flight",
+            sessionKey = "sessA-requeue",
+            cleanText = "retry after restart",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+            lastAttemptAtMs = 10L,
+            attemptCount = 1,
+            lastError = "previous timeout",
+        )
+        val fresh = OutboundItem(
+            id = "durable-fresh-in-flight",
+            sessionKey = "sessA-requeue",
+            cleanText = "still active",
+            state = OutboundState.InFlight,
+            createdAtMs = 2L,
+            lastAttemptAtMs = 50L,
+            attemptCount = 1,
+        )
+        val otherSession = OutboundItem(
+            id = "durable-other-session",
+            sessionKey = "sessB-requeue",
+            cleanText = "do not touch",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+            lastAttemptAtMs = 10L,
+            attemptCount = 1,
+        )
+        first.enqueueExisting(stale)
+        first.enqueueExisting(fresh)
+        first.enqueueExisting(otherSession)
+
+        val afterRestart = newStore()
+        val requeued = afterRestart.requeueStaleInFlight("sessA-requeue", cutoffMs = 10L)
+        assertEquals(listOf(stale.id), requeued.map { it.id })
+
+        val afterRecoveryRestart = newStore()
+        val recovered = afterRecoveryRestart.item(stale.id)!!
+        assertEquals(OutboundState.Queued, recovered.state)
+        assertEquals(1, recovered.attemptCount)
+        assertEquals(10L, recovered.lastAttemptAtMs)
+        assertEquals("previous timeout", recovered.lastError)
+        assertEquals(OutboundState.InFlight, afterRecoveryRestart.item(fresh.id)!!.state)
+        assertEquals(OutboundState.InFlight, afterRecoveryRestart.item(otherSession.id)!!.state)
+
+        val claimed = afterRecoveryRestart.claimNext("sessA-requeue")!!
+        assertEquals(stale.id, claimed.id)
+        assertEquals(OutboundState.InFlight, claimed.state)
+        assertEquals(2, claimed.attemptCount)
+        assertNull(afterRecoveryRestart.claimNext("sessA-requeue"))
+    }
+
+    @Test
     fun targetedMarkInFlightSurvivesRestartWithoutClaimingOlderRows() {
         val first = newStore()
         val older = first.enqueue("sessA", "older", createdAtMs = 1L)

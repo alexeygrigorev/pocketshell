@@ -500,6 +500,64 @@ class OutboundQueueStoreTest {
     }
 
     @Test
+    fun markAttachmentsUploadedUpdatesRefsAndRearmsWithoutBumpingAttemptCount() {
+        val store = store()
+        val item = store.enqueue(
+            sessionKey = "sessA",
+            cleanText = "send with attachment",
+            createdAtMs = 10L,
+            paneId = "%1",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+        store.markUploading(item.id)
+
+        val attachments = listOf(
+            DurableAttachmentRef(
+                remotePath = "~/.pocketshell/attachments/sess/report.txt",
+                displayName = "report.txt",
+                mimeType = "text/plain",
+            ),
+        )
+        val updated = store.markAttachmentsUploaded(item.id, attachments)!!
+
+        assertEquals(OutboundState.Queued, updated.state)
+        assertEquals(attachments, updated.attachments)
+        assertEquals(0, updated.attemptCount)
+        assertEquals("%1", updated.paneId)
+        assertEquals(OutboundRoute.AgentPayload, updated.route)
+        assertEquals("codex", updated.agentKind)
+
+        val claimed = store.claimNext("sessA")!!
+        assertEquals(item.id, claimed.id)
+        assertEquals(1, claimed.attemptCount)
+        assertEquals(attachments, claimed.attachments)
+    }
+
+    @Test
+    fun lateAttachmentUploadCannotRewriteInFlightFailedOrDeliveredRows() {
+        val store = store()
+        val attachments = listOf(DurableAttachmentRef("~/late.txt", "late.txt", "text/plain"))
+
+        val inFlight = store.enqueue("sessA", "in flight")
+        store.claimNext("sessA")
+        val inFlightAfterLateUpload = store.markAttachmentsUploaded(inFlight.id, attachments)!!
+        assertEquals(OutboundState.InFlight, inFlightAfterLateUpload.state)
+        assertTrue(inFlightAfterLateUpload.attachments.isEmpty())
+
+        val failed = store.enqueue("sessA", "failed")
+        store.markFailed(failed.id, "upload failed")
+        val failedAfterLateUpload = store.markAttachmentsUploaded(failed.id, attachments)!!
+        assertEquals(OutboundState.Failed, failedAfterLateUpload.state)
+        assertEquals("upload failed", failedAfterLateUpload.lastError)
+        assertTrue(failedAfterLateUpload.attachments.isEmpty())
+
+        val delivered = store.enqueue("sessA", "delivered")
+        store.markDelivered(delivered.id)
+        assertNull(store.markAttachmentsUploaded(delivered.id, attachments))
+    }
+
+    @Test
     fun markFailedKeepsItemVisibleAndPreservesClaimAttemptCount() {
         val store = store()
         val item = store.enqueue("sessA", "keep me on failure")

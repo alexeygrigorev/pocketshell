@@ -170,6 +170,42 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
     }
 
     @Test
+    fun uploadedAttachmentsSurviveRestartAndRemainClaimable() {
+        val first = newStore()
+        val item = first.enqueue(
+            sessionKey = "sessA",
+            cleanText = "queued attachment",
+            createdAtMs = 7L,
+            paneId = "%2",
+            route = OutboundRoute.AgentConversation,
+            agentKind = "claude",
+        )
+        first.markUploading(item.id)
+        val attachments = listOf(
+            DurableAttachmentRef(
+                remotePath = "~/.pocketshell/attachments/sess/log.txt",
+                displayName = "log.txt",
+                mimeType = "text/plain",
+            ),
+        )
+        first.markAttachmentsUploaded(item.id, attachments)
+
+        val afterRestart = newStore()
+        val reloaded = afterRestart.item(item.id)!!
+        assertEquals(OutboundState.Queued, reloaded.state)
+        assertEquals(attachments, reloaded.attachments)
+        assertEquals(0, reloaded.attemptCount)
+        assertEquals("%2", reloaded.paneId)
+        assertEquals(OutboundRoute.AgentConversation, reloaded.route)
+        assertEquals("claude", reloaded.agentKind)
+
+        val claimed = afterRestart.claimNext("sessA")!!
+        assertEquals(item.id, claimed.id)
+        assertEquals(1, claimed.attemptCount)
+        assertEquals(attachments, claimed.attachments)
+    }
+
+    @Test
     fun sendOnceContractHoldsOnSharedPrefsImpl() {
         val store = newStore()
         val item = store.enqueue("sessA", "once")

@@ -168,6 +168,22 @@ public interface OutboundQueueStore {
     public fun markUploading(id: String): OutboundItem?
 
     /**
+     * Replace [id]'s attachment refs after a queued attachment upload has
+     * completed, then re-arm the row to [OutboundState.Queued] so the normal
+     * exactly-once claim path can deliver it. This does NOT bump
+     * [OutboundItem.attemptCount]; upload preparation is separate from a paste
+     * attempt.
+     *
+     * Only `Queued`/`Uploading` rows are mutable here. Unknown rows return
+     * `null`; `InFlight`/`Delivered`/`Failed` rows are returned unchanged so a
+     * late upload callback cannot rewrite or resurrect an active/terminal send.
+     */
+    public fun markAttachmentsUploaded(
+        id: String,
+        attachments: List<DurableAttachmentRef>,
+    ): OutboundItem?
+
+    /**
      * Complete delivery of the item with [id]: the ack confirmed the paste was
      * ingested and Enter pressed. The row is transitioned to
      * [OutboundState.Delivered] and **pruned** so it never grows unbounded and
@@ -401,6 +417,23 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
         updated
     }
 
+    override fun markAttachmentsUploaded(
+        id: String,
+        attachments: List<DurableAttachmentRef>,
+    ): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return null
+        if (existing.state != OutboundState.Queued && existing.state != OutboundState.Uploading) {
+            return existing
+        }
+        val updated = existing.copy(
+            attachments = attachments,
+            state = OutboundState.Queued,
+            lastError = null,
+        )
+        items[updated.id] = updated
+        updated
+    }
+
     override fun markDelivered(id: String): Boolean = synchronized(lock) {
         val existing = items[id] ?: return false
         if (existing.state == OutboundState.Delivered) return false
@@ -472,6 +505,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun claim(id: String): OutboundItem? = null
     override fun markInFlight(id: String): OutboundItem? = null
     override fun markUploading(id: String): OutboundItem? = null
+    override fun markAttachmentsUploaded(id: String, attachments: List<DurableAttachmentRef>): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
@@ -630,6 +664,25 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             return existing
         }
         val updated = existing.copy(state = OutboundState.Uploading)
+        replaceAndStore(sessionKey, list, updated)
+        updated
+    }
+
+    override fun markAttachmentsUploaded(
+        id: String,
+        attachments: List<DurableAttachmentRef>,
+    ): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return null
+        val list = loadSession(sessionKey)
+        val existing = list.firstOrNull { it.id == id } ?: return null
+        if (existing.state != OutboundState.Queued && existing.state != OutboundState.Uploading) {
+            return existing
+        }
+        val updated = existing.copy(
+            attachments = attachments,
+            state = OutboundState.Queued,
+            lastError = null,
+        )
         replaceAndStore(sessionKey, list, updated)
         updated
     }

@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
-import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -210,8 +209,10 @@ class PreExistingMultiWindowSeedE2eTest {
     }
 
     private fun pressBack() {
-        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        launchedActivity?.onActivity { activity ->
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        compose.waitForIdle()
     }
 
     private fun readFixtureKey(): String =

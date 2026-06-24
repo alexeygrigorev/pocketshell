@@ -18,6 +18,8 @@
 #   (d) the suite still exits NON-ZERO (a stall is red, never silently green),
 #   (e) the workflow classifier grep that distinguishes a #470 timeout from a
 #       genuine failure / infra abort routes this summary to the timeout label.
+#   (f) a cancelled retry is classified before any `Failed BOTH attempts`
+#       summary, because summary.md can be stale from the first cold boot.
 #
 # It runs entirely on the JVM-free shell layer — NO emulator, NO Docker, NO
 # gradle — so it can run as a fast unit check on any box and in the Unit CI job.
@@ -112,6 +114,19 @@ pass "(d) suite exited non-zero (rc=$rc) on a budget timeout"
 #     not infra-abort.
 classify() {
   local s="$1"
+  local first_outcome="${2:-failure}"
+  local retry_outcome="${3:-failure}"
+  local first_concl="${4:-failure}"
+  local retry_concl="${5:-failure}"
+  if [[ "$first_outcome" == "success" ]]; then
+    echo "PASS_FIRST"; return
+  fi
+  if [[ "$retry_outcome" == "success" ]]; then
+    echo "PASS_RETRY"; return
+  fi
+  if [[ "$first_outcome" == "cancelled" || "$retry_outcome" == "cancelled" || "$first_concl" == "cancelled" || "$retry_concl" == "cancelled" ]]; then
+    echo "STEP_CANCELLED"; return
+  fi
   if [[ -f "$s" ]] && grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$s"; then
     echo "GENUINE_FAILURE"; return
   fi
@@ -124,6 +139,21 @@ verdict="$(classify "$summary")"
 [[ "$verdict" == "JOURNEY_TIMEOUT" ]] \
   || fail "(e) classifier routed to '$verdict', expected JOURNEY_TIMEOUT"
 pass "(e) workflow classifier grep ladder routes this summary to JOURNEY_TIMEOUT"
+
+# (f) stale-summary guard: the two cold-boot attempts share the same summary.md
+#     path. If the retry is cancelled, an old `Failed BOTH attempts` summary
+#     from the first attempt must NOT be used to report the retry as a genuine
+#     failed-on-both-cold-boots verdict.
+stale_summary="$SANDBOX/stale-summary.md"
+printf '%s\n' \
+  '# Per-push CI journey suite — summary' \
+  'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
+  '- `com.pocketshell.app.StaleFirstAttemptTest`' \
+  > "$stale_summary"
+stale_verdict="$(classify "$stale_summary" failure cancelled failure cancelled)"
+[[ "$stale_verdict" == "STEP_CANCELLED" ]] \
+  || fail "(f) cancelled retry with stale Failed BOTH summary routed to '$stale_verdict', expected STEP_CANCELLED"
+pass "(f) cancelled retry takes precedence over stale Failed BOTH summary"
 
 # ---------------------------------------------------------------------------
 # Negative control: a clean PASS run (generous budget, fast gradle stub) must

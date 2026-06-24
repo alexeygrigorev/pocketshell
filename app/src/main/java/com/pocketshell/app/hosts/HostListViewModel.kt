@@ -1119,7 +1119,6 @@ class HostListViewModel internal constructor(
                 closeBootstrapSession()
                 setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
                 _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
-                @Suppress("UNUSED_VARIABLE") val reason = status.reason
             }
         }
     }

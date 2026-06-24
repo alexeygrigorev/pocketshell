@@ -13,9 +13,10 @@ isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
 
 - **Per-issue worktrees** (`.worktrees/issue-<N>/` off current `origin/main`)
   isolate each piece of work; see "Agent Worktrees" below for mechanics.
-- **One merge to `main` at a time.** Rebase the integration worktree on the
-  latest `origin/main`, run the verification gate, push, then monitor CI. Never
-  blind-apply a stale-based patch.
+- **One integration PR to `main` at a time.** Rebase the integration worktree on
+  the latest `origin/main`, run the verification gate, push the issue branch,
+  and merge only after the required GitHub checks are green. Never blind-apply a
+  stale-based patch.
 - **Integrate in a clean worktree**, not the polluted root, when assembling and
   testing a merge.
 - **The orchestrator stays on a synced `main`.** Fast-forward the local `main`
@@ -170,12 +171,15 @@ The standing test-suite reliability program (find tests that don't trigger /
 pass vacuously / miss their criteria, then fix) is tracked under the test-audit
 epic; follow-up issues are filed from its findings.
 
+**Adopted:**
+- **G7 — pre-merge CI-green enforcement (#816).** `main` is protected by a
+  PR-to-main flow. The required `Tests` checks are blocking before a slice
+  reaches `main`: `Unit tests`, `Python utility tests (pocketshell)`,
+  `Integration tests (Docker)`, and
+  `Emulator journey subset (load-bearing, Docker agents)`. A red required check
+  stops the merge; do not bypass it as a normal workflow.
+
 **Pending maintainer sign-off (higher-cost, NOT yet adopted):**
-- **G7 — pre-merge CI-green enforcement (#816).** `main` currently has no branch
-  protection, and the orchestrator merges via `git apply`+push, so the per-push
-  `emulator-journey` gate reports red *after* the commit lands. G7 makes the
-  journey/Unit/Integration checks required+blocking before a slice reaches
-  `main`. This reshapes the merge mechanic — maintainer call.
 - **G8 — second adversarial reviewer** for the worst-reopen areas
   (connection/reconnect/lease, conversation-source/agent-detection, terminal
   render/ANR): a second pass whose only job is to attack the root-cause
@@ -265,8 +269,8 @@ a proxy and call it done. This is locked decision **D33** in `docs/decisions.md`
 
 GitHub Actions is the release backstop, not the first test runner. The
 orchestrator must not push a slice to `main` just to see what CI says and then
-iterate from red CI. Before any push to `main`, the local evidence must make it
-reasonable to expect CI to pass.
+iterate from red CI. Before any issue branch is pushed for PR review, the local
+evidence must make it reasonable to expect CI to pass.
 
 Minimum pre-push gate:
 
@@ -276,7 +280,7 @@ Minimum pre-push gate:
 - A verifier/reviewer agent independently inspects the diff and reruns the
   relevant local checks from the implementer's worktree before the orchestrator
   integrates it. Treat this verifier as a required local gatekeeper before any
-  push to `main`, not as a post-push CI triage role.
+  issue-branch push, not as a post-push CI triage role.
 - The orchestrator runs a final local gate in the integration worktree after
   applying the reviewed patch. The gate must include `git diff --check`,
   compile for touched Android/Kotlin modules, and the focused unit/instrumented
@@ -288,7 +292,7 @@ Minimum pre-push gate:
 - If a local focused check is infeasible, the orchestrator must write down why
   and what narrower evidence was used. That exception should be rare.
 
-CI policy after push:
+CI policy after issue-branch push:
 
 - After pushing, monitor CI for that slice, but do not treat waiting as the main
   activity if other independent backlog work is available. Continue issue
@@ -302,6 +306,25 @@ CI policy after push:
   fix through the implementer/reviewer loop.
 - Release cuts may still require waiting for full CI/release workflows; feature
   development should not collapse into idle CI watching.
+
+### Protected `main` checks
+
+`main` uses branch protection / a repository ruleset to require PR-based merges
+and these exact `Tests` workflow check names:
+
+- `Unit tests`
+- `Python utility tests (pocketshell)`
+- `Integration tests (Docker)`
+- `Emulator journey subset (load-bearing, Docker agents)`
+
+The required checks must be strict against the latest `main`, so a PR is updated
+or rebased before merge when `main` moves. The orchestrator must inspect a red or
+cancelled required check before rerunning anything; no blind CI reruns.
+
+The repository owner may keep an admin/emergency bypass outside the normal
+workflow so a solo-maintainer release blocker cannot deadlock. Any bypassed push
+must be documented on the relevant issue with the reason, the missing check
+state, and the follow-up run that restored green `main`.
 
 ## Issue Comment Authority
 
@@ -498,7 +521,8 @@ untrusted third party.
    - Repeat until approval.
 7. If `APPROVED`:
    - Orchestrator runs the verification checklist one last time.
-   - Orchestrator commits with `Closes #N`, pushes, and lets GitHub close the issue.
+   - Orchestrator commits on the issue branch, opens/updates the PR, waits for
+     required checks, merges through GitHub, and lets the PR close the issue.
 
 ## Parallel Work
 
@@ -678,9 +702,9 @@ the same as one created by the raw commands above.
 ### Merge back to `main`
 
 Only the orchestrator merges. After reviewer `APPROVED` and the pre-merge
-verification checklist passes, from `~/git/pocketshell` on `main`:
+verification checklist passes, merge through a protected PR:
 
-1. Confirm `git status` is clean.
+1. Confirm `git status` is clean in the issue worktree and the main checkout.
 2. Capture the implementer's diff from the worktree. If the implementer
    left changes uncommitted in the worktree (default for our implementer
    role):
@@ -712,21 +736,35 @@ verification checklist passes, from `~/git/pocketshell` on `main`:
      > /tmp/issue-<N>.patch
    ```
 
-3. Apply in `main` and inspect before staging:
+3. If the implementer left uncommitted work, commit it on the issue branch, not
+   on `main`, after inspecting the patch:
 
    ```bash
-   git apply /tmp/issue-<N>.patch
    git status
    git diff
+   git add <reviewed-files>
+   git commit -m "<area>: <summary> (#<N>)"
    ```
 
-4. Run the final verification checklist commands in `main`.
-5. Commit with `Closes #N`, push, and let GitHub close the issue.
-6. Clean up the worktree and branch:
+4. Push the issue branch and open a PR against `main`. The PR title or body must
+   include `Closes #N` only when the issue is fully complete.
+5. Wait for the four required `Tests` checks to complete on the PR head:
+   `Unit tests`, `Python utility tests (pocketshell)`,
+   `Integration tests (Docker)`, and
+   `Emulator journey subset (load-bearing, Docker agents)`. A red or cancelled
+   required check blocks merge until classified and fixed through the same
+   implementer/reviewer loop.
+6. Merge the PR only after the reviewer approval, final local verification, and
+   required checks are green. Then fast-forward local `main` and clean up the
+   worktree and branch:
 
    ```bash
+   gh pr merge <PR> --squash --delete-branch
+   git fetch origin main
+   git switch main
+   git merge --ff-only origin/main
    git worktree remove .worktrees/issue-<N>
-   git branch -D issue-<N>   # already merged via patch; safe to drop
+   git branch -D issue-<N>   # already merged via PR; safe to drop
    ```
 
    For Claude-Code-dispatched worktrees the harness auto-cleans empty or
@@ -844,7 +882,8 @@ If any verification check fails, do not commit. Send the failure back to an impl
 ## Commit Cadence
 
 After an issue is reviewer-approved and the orchestrator verification checklist
-passes, commit and push that finished task before moving on to unrelated work.
+passes, commit that finished task on its issue branch, open/update its PR, and
+carry it through required green checks before moving on to unrelated work.
 Prefer one small commit per approved issue or tightly coupled issue group so
 rollback remains practical.
 
@@ -1132,9 +1171,11 @@ Release build steps:
    - `versionName` must equal the tag without the leading `v`.
    - `versionCode` must increase monotonically.
 4. Run the normal verification gate before committing the version bump.
-5. Commit the version bump on `main` and push `main` first. Confirm the
-   checkout is clean and `HEAD` equals `origin/main` before creating or pushing
-   any tag.
+5. Commit the version bump on a release branch, open a PR to `main`, and merge
+   only after the required protected-`main` checks are green. Then fast-forward
+   local `main` and confirm the checkout is clean and `HEAD` equals
+   `origin/main` before creating or pushing any tag. A direct `main` push here
+   is only allowed through the documented admin/emergency bypass.
 6. From that stable pushed `main`, run the emulator-only release validation:
    - `scripts/pre-release-confidence-gate.sh`
    - `scripts/phone-walkthrough.sh terminal-lab`

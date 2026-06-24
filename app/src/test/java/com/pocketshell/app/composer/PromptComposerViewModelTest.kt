@@ -207,6 +207,7 @@ class PromptComposerViewModelTest {
         speechRecognitionProvider: PromptComposerViewModel.SpeechRecognitionProvider =
             UnavailableSpeechRecognitionProvider,
         composerDraftStore: ComposerDraftStore = DisabledComposerDraftStore,
+        outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
         savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
@@ -217,6 +218,7 @@ class PromptComposerViewModelTest {
             voiceSettings = voiceSettings,
             speechRecognitionProvider = speechRecognitionProvider,
             composerDraftStore = composerDraftStore,
+            outboundQueueStore = outboundQueueStore,
             savedStateHandle = savedStateHandle,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
@@ -3889,6 +3891,94 @@ class PromptComposerViewModelTest {
 
         vm.onComposerTargetChanged("1/a")
         assertEquals("draft for A", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun composerTargetChangedRefreshesOutboundQueueForCurrentSession() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val a1 = queue.enqueue(
+            sessionKey = "1/a",
+            cleanText = "first A",
+            createdAtMs = 1L,
+        )
+        val b1 = queue.enqueue(
+            sessionKey = "1/b",
+            cleanText = "only B",
+            createdAtMs = 2L,
+        )
+        val a2 = queue.enqueue(
+            sessionKey = "1/a",
+            cleanText = "second A",
+            createdAtMs = 3L,
+        )
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+
+        vm.onComposerTargetChanged("1/a")
+        assertEquals(listOf(a1.id, a2.id), vm.outboundQueueItems.value.map { it.id })
+
+        vm.onComposerTargetChanged("1/b")
+        assertEquals(listOf(b1.id), vm.outboundQueueItems.value.map { it.id })
+
+        vm.onComposerTargetChanged(null)
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+    }
+
+    @Test
+    fun discardOutboundItemRemovesQueuedAndFailedButKeepsActiveRows() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val inFlight = queue.enqueue(
+            sessionKey = "1/a",
+            cleanText = "in flight",
+            createdAtMs = 1L,
+        ).let { queue.claimNext("1/a")!! }
+        val queued = queue.enqueue(
+            sessionKey = "1/a",
+            cleanText = "queued",
+            createdAtMs = 2L,
+        )
+        val failed = queue.enqueue(
+            sessionKey = "1/a",
+            cleanText = "failed",
+            createdAtMs = 3L,
+        ).let { queue.markFailed(it.id, lastError = "lost", lastAttemptAtMs = 10L)!! }
+        val uploading = queue.enqueue(
+            sessionKey = "1/a",
+            cleanText = "uploading",
+            createdAtMs = 4L,
+        ).let { queue.markUploading(it.id)!! }
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        vm.onComposerTargetChanged("1/a")
+        assertEquals(
+            listOf(inFlight.id, queued.id, failed.id, uploading.id),
+            vm.outboundQueueItems.value.map { it.id },
+        )
+
+        vm.discardOutboundItem(uploading.id)
+        vm.discardOutboundItem(inFlight.id)
+        assertNotNull(queue.item(uploading.id))
+        assertNotNull(queue.item(inFlight.id))
+
+        vm.discardOutboundItem(queued.id)
+        assertNull(queue.item(queued.id))
+        assertEquals(
+            listOf(inFlight.id, failed.id, uploading.id),
+            vm.outboundQueueItems.value.map { it.id },
+        )
+
+        vm.discardOutboundItem(failed.id)
+        assertNull(queue.item(failed.id))
+        assertEquals(
+            listOf(inFlight.id, uploading.id),
+            vm.outboundQueueItems.value.map { it.id },
+        )
     }
 
     @Test

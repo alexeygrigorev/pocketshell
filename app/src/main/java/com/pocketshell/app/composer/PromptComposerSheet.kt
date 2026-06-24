@@ -228,6 +228,7 @@ public fun PromptComposerSheet(
 ) {
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
+    val outboundQueueItems by viewModel.outboundQueueItems.collectAsState()
     val context = LocalContext.current
 
     var showApiKeyDialog by remember { mutableStateOf(false) }
@@ -240,6 +241,7 @@ public fun PromptComposerSheet(
     // expand the per-item list. Default collapsed so the banner stays
     // compact when multiple items are queued.
     var pendingListExpanded by remember { mutableStateOf(false) }
+    var outboundQueueExpanded by remember { mutableStateOf(false) }
 
     // Issue #180: foreground-resume auto-retry. The composer is the
     // only surface that owns this queue today; observing the sheet's
@@ -463,6 +465,10 @@ public fun PromptComposerSheet(
             onDiscardPending = viewModel::discardPending,
             onSavePendingAsAudio = viewModel::savePendingAsAudioFile,
             onAcknowledgeSavedAudio = viewModel::clearSavedAudioConfirmation,
+            outboundQueueItems = outboundQueueItems,
+            outboundQueueExpanded = outboundQueueExpanded,
+            onToggleOutboundQueue = { outboundQueueExpanded = !outboundQueueExpanded },
+            onDeleteOutboundItem = viewModel::discardOutboundItem,
             agentKind = agentKind,
         )
     }
@@ -567,6 +573,12 @@ internal fun SheetContent(
     onDiscardPending: (String) -> Unit = {},
     onSavePendingAsAudio: (String) -> Unit = {},
     onAcknowledgeSavedAudio: () -> Unit = {},
+    // Issue #900: visible committed-send queue for the current composer target.
+    // Defaults keep previews and older render tests source-compatible.
+    outboundQueueItems: List<OutboundItem> = emptyList(),
+    outboundQueueExpanded: Boolean = false,
+    onToggleOutboundQueue: () -> Unit = {},
+    onDeleteOutboundItem: (String) -> Unit = {},
     // Issue #767: detected engine for the focused pane — selects the
     // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
     // shell pane / preview, where the dropdown is never shown.
@@ -1096,6 +1108,19 @@ internal fun SheetContent(
                     onRetry = onRetryPending,
                     onDiscard = onDiscardPending,
                     onSaveAsAudio = onSavePendingAsAudio,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            // Issue #900: queued outbound prompts must be visible before send
+            // is wired to enqueue. This read/delete surface is intentionally
+            // foreground-only and scoped to the current composer target.
+            if (outboundQueueItems.isNotEmpty()) {
+                OutboundQueueBanner(
+                    items = outboundQueueItems,
+                    expanded = outboundQueueExpanded,
+                    onToggle = onToggleOutboundQueue,
+                    onDelete = onDeleteOutboundItem,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -2478,6 +2503,137 @@ internal fun barEnvelopeHeightDp(index: Int): Float {
 }
 
 /**
+ * Issue #900: committed outbound prompts for the current session. This is a
+ * visibility/delete surface only; delivery and retry wiring lands in the next
+ * queue slice.
+ */
+@Composable
+private fun OutboundQueueBanner(
+    items: List<OutboundItem>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .testTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onToggle)
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .testTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = outboundQueueHeadline(items),
+                    color = PocketShellColors.Text,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = outboundQueueSubline(items),
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            DisclosureIcon(
+                expanded = expanded,
+                tint = PocketShellColors.TextSecondary,
+            )
+        }
+
+        if (expanded) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .height(1.dp)
+                    .background(PocketShellColors.BorderSoft),
+            )
+            items.forEach { item ->
+                OutboundQueueRow(
+                    item = item,
+                    onDelete = { onDelete(item.id) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OutboundQueueRow(
+    item: OutboundItem,
+    onDelete: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag(composerOutboundQueueItemRowTestTag(item.id)),
+    ) {
+        Text(
+            text = formatRelativeTimestamp(item.createdAtMs, System.currentTimeMillis()),
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = outboundQueueStateLabel(item),
+            color = PocketShellColors.TextSecondary,
+            fontSize = 11.sp,
+        )
+        if (item.cleanText.isNotBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = item.cleanText,
+                color = PocketShellColors.Text,
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (item.attachments.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = outboundAttachmentCountLabel(item.attachments.size),
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+            )
+        }
+        if (item.state == OutboundState.Queued || item.state == OutboundState.Failed) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                PendingActionButton(
+                    label = "Delete",
+                    primary = false,
+                    onClick = onDelete,
+                    modifier = Modifier.testTag(composerOutboundQueueDeleteTestTag(item.id)),
+                )
+            }
+        }
+    }
+}
+
+/**
  * Issue #180: banner + expandable list rendered above the mic row when
  * the failed/offline-queued transcription list is non-empty.
  *
@@ -2744,6 +2900,33 @@ internal fun pendingSummarySubline(items: List<PendingTranscriptionItem>): Strin
         else -> "Tap to retry"
     }
 }
+
+internal fun outboundQueueHeadline(items: List<OutboundItem>): String = when (items.size) {
+    0 -> ""
+    1 -> "1 unsent prompt"
+    else -> "${items.size} unsent prompts"
+}
+
+internal fun outboundQueueSubline(items: List<OutboundItem>): String {
+    val first = items.firstOrNull() ?: return ""
+    val preview = first.cleanText.trim().lineSequence().firstOrNull().orEmpty()
+    val status = outboundQueueStateLabel(first)
+    return when {
+        preview.isBlank() -> status
+        else -> "$status — $preview"
+    }
+}
+
+internal fun outboundQueueStateLabel(item: OutboundItem): String = when (item.state) {
+    OutboundState.Queued -> "Queued"
+    OutboundState.Uploading -> "Uploading attachments"
+    OutboundState.InFlight -> "Sending"
+    OutboundState.Delivered -> "Delivered"
+    OutboundState.Failed -> item.lastError?.takeIf { it.isNotBlank() }?.let { "Failed — $it" } ?: "Failed"
+}
+
+internal fun outboundAttachmentCountLabel(count: Int): String =
+    "$count attachment${if (count == 1) "" else "s"}"
 
 /**
  * Issue #180 helper: humanise an epoch-millis timestamp into "Just now"
@@ -3122,6 +3305,8 @@ private val SLASH_DROPDOWN_MAX_HEIGHT = 196.dp
 internal const val COMPOSER_PENDING_BANNER_TAG = "prompt-composer-pending-banner"
 internal const val COMPOSER_PENDING_TOGGLE_TAG = "prompt-composer-pending-toggle"
 internal const val COMPOSER_PENDING_SAVED_BANNER_TAG = "prompt-composer-pending-saved"
+internal const val COMPOSER_OUTBOUND_QUEUE_BANNER_TAG = "prompt-composer-outbound-queue"
+internal const val COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG = "prompt-composer-outbound-queue-toggle"
 
 /**
  * Issue #688: status text shown on a pending row while its retry round-trip
@@ -3141,6 +3326,12 @@ internal fun composerPendingDiscardTestTag(id: String): String =
 
 internal fun composerPendingSaveTestTag(id: String): String =
     "prompt-composer-pending-save:$id"
+
+internal fun composerOutboundQueueItemRowTestTag(id: String): String =
+    "prompt-composer-outbound-queue-row:$id"
+
+internal fun composerOutboundQueueDeleteTestTag(id: String): String =
+    "prompt-composer-outbound-queue-delete:$id"
 
 // -- Previews -----------------------------------------------------------------
 

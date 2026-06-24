@@ -4,8 +4,10 @@ import android.Manifest
 import android.content.Context
 import androidx.annotation.RequiresPermission
 import com.pocketshell.app.composer.ComposerDraftStore
+import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.SharedPrefsComposerDraftStore
+import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.settings.VoiceTranscriptionProvider
@@ -205,6 +207,18 @@ object VoiceModule {
     fun provideComposerDraftStore(
         store: SharedPrefsComposerDraftStore,
     ): ComposerDraftStore = store
+
+    /**
+     * Issue #900: bind the durable outbound send queue onto the
+     * SharedPreferences-backed [SharedPrefsOutboundQueueStore]. Singleton so
+     * every activity-scoped composer observes and deletes from the same queue
+     * file for the focused session.
+     */
+    @Provides
+    @Singleton
+    fun provideOutboundQueueStore(
+        store: SharedPrefsOutboundQueueStore,
+    ): OutboundQueueStore = store
 }
 
 /**

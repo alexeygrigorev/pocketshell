@@ -109,6 +109,10 @@ public class PromptComposerViewModel @Inject constructor(
     // draft survives a session switch (and a process-death recreate) keyed
     // by the session it was authored in. See [ComposerDraftStore].
     private val composerDraftStore: ComposerDraftStore = DisabledComposerDraftStore,
+    // Issue #900: durable outbound queue surface. Defaults to a no-op store so
+    // direct unit/connected constructors stay source-compatible; production
+    // Hilt wiring provides the SharedPreferences-backed store.
+    private val outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
     private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
@@ -153,6 +157,17 @@ public class PromptComposerViewModel @Inject constructor(
      * the error banner.
      */
     public val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    private val _outboundQueueItems: MutableStateFlow<List<OutboundItem>> =
+        MutableStateFlow(emptyList())
+
+    /**
+     * Issue #900: visible committed-send queue for the currently targeted
+     * session. The store is intentionally synchronous/non-reactive, so this
+     * StateFlow is refreshed at explicit session-change and delete boundaries.
+     */
+    public val outboundQueueItems: StateFlow<List<OutboundItem>> =
+        _outboundQueueItems.asStateFlow()
 
     private var recordingJob: Job? = null
     private var transcribeJob: Job? = null
@@ -1127,6 +1142,7 @@ public class PromptComposerViewModel @Inject constructor(
     public fun onComposerTargetChanged(targetKey: String?) {
         val previousTarget = composerTarget
         composerTarget = targetKey
+        refreshOutboundQueueItems()
         if (targetKey == null || targetKey == previousTarget) return
         val draftOwner = savedStateHandle.get<String>(KEY_DRAFT_OWNER)
         val hasDraft = _uiState.value.draft.isNotEmpty() ||
@@ -1194,6 +1210,25 @@ public class PromptComposerViewModel @Inject constructor(
                 error = null,
             )
         }
+    }
+
+    /**
+     * Issue #900: user-visible queue cleanup. Only idle retryable rows can be
+     * deleted from the composer surface; upload/in-flight rows stay visible and
+     * owned by the delivery worker.
+     */
+    public fun discardOutboundItem(id: String) {
+        val item = outboundQueueStore.item(id) ?: return
+        if (item.state != OutboundState.Queued && item.state != OutboundState.Failed) return
+        outboundQueueStore.remove(id)
+        refreshOutboundQueueItems()
+    }
+
+    private fun refreshOutboundQueueItems() {
+        _outboundQueueItems.value = composerTarget
+            ?.takeIf { it.isNotBlank() }
+            ?.let { outboundQueueStore.itemsFor(it) }
+            .orEmpty()
     }
 
     /**

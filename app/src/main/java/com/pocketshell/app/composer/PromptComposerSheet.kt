@@ -2626,7 +2626,7 @@ private fun OutboundQueueRow(
         Text(
             text = formatRelativeTimestamp(item.createdAtMs, System.currentTimeMillis()),
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(2.dp))
@@ -2640,7 +2640,7 @@ private fun OutboundQueueRow(
             Text(
                 text = item.cleanText,
                 color = PocketShellColors.Text,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyDense,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )

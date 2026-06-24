@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -482,6 +483,17 @@ class FolderListViewModelWindowCloseTest {
                 },
                 scope = this,
                 idleTtlMillis = 0L,
+                // Issue #888 (was flaky under full-suite contention): pin the
+                // lease manager's connect-bound + clock to the SAME virtual clock
+                // as `runTest`. Without this the cold-bind reconcile's warm
+                // connect ran `boundedConnect` on the REAL `Dispatchers.IO` with a
+                // REAL wall-clock `withTimeoutOrNull` — a real-thread hop the
+                // test's `runCurrent()` calls could not drain deterministically.
+                // Isolated, the IO thread was fast enough to settle before the
+                // emit; under contention it raced the scheduler and the wiring
+                // assertion flaked. Mirrors `FolderListViewModelKillSessionTest`.
+                connectTimeoutContext = dispatcher,
+                nowMillis = { testScheduler.currentTime },
             ),
             applicationContext = context,
             forwardingController = ForwardingController(context),
@@ -494,21 +506,21 @@ class FolderListViewModelWindowCloseTest {
         }
         try {
             bind(vm)
-            // Settle the cold-bind reconcile until Ready (bounded; heartbeat off).
-            repeat(50) {
-                if (vm.state.value is FolderListUiState.Ready) return@repeat
-                testScheduler.advanceTimeBy(50)
-                runCurrent()
-            }
+            // #888: the whole graph (VM scope, ioDispatcher, lease connect-bound)
+            // now runs on the single virtual clock, so the cold-bind reconcile
+            // drains deterministically — no real-clock settle loop needed.
+            advanceUntilIdle()
             check(vm.state.value is FolderListUiState.Ready) {
                 "tree never reached Ready; state=${vm.state.value}"
             }
             vm.stopPolling()
-            runCurrent()
+            advanceUntilIdle()
 
-            // Emit on the SHARED signals bus — must reach onWindowClosed.
+            // Emit on the SHARED signals bus — the init collector is already
+            // subscribed (advanceUntilIdle drained the launch), so the no-replay
+            // SharedFlow event deterministically reaches onWindowClosed.
             signals.emitWindowClosed(HOST.id, "@50")
-            repeat(10) { runCurrent() }
+            advanceUntilIdle()
 
             assertEquals(
                 "the ClosedWindow signal must be wired to prune the window row",

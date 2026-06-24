@@ -8989,7 +8989,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-reveal-gate-active-pane-blank pane=${activePane.paneId} " +
                     "attempt=$attempt session=${activeTarget?.sessionName}",
             )
-            seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = false)
+            seedPaneFromCapture(
+                client = client,
+                pane = activePane,
+                refreshGuard = refreshGuard,
+                recordMilestone = false,
+                maxAttempts = 1,
+            )
             if (!activePane.terminalState.visibleScreenIsBlank()) return true
             attempt += 1
             if (attempt >= ACTIVE_PANE_REVEAL_SEED_ATTEMPTS) {
@@ -9205,6 +9211,7 @@ public class TmuxSessionViewModel @Inject constructor(
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
         recordMilestone: Boolean,
+        maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
     ): Boolean {
         // Issue #830: publish "a seed for this pane is in flight" BEFORE the first
         // round-trip so a concurrent reseed net (the pager-settle
@@ -9221,7 +9228,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     return true
                 }
                 attempt += 1
-                if (attempt >= SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS) return false
+                if (attempt >= maxAttempts) return false
                 // Short backoff so a flaky-link empty capture is re-tried after the
                 // channel has a moment to recover, without stalling a genuinely
                 // empty pane's reveal for long. The guard re-check at the top of the

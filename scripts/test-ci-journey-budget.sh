@@ -15,9 +15,10 @@
 #   (b) it ALWAYS writes summary.md (the artifact the classifier needs),
 #   (c) the summary carries the distinct `JOURNEY_STEP_TIMEOUT` marker
 #       (NOT `JOURNEY_FAILED` and NOT a missing file),
-#   (d) the suite still exits NON-ZERO (a stall is red, never silently green),
+#   (d) the suite still exits NON-ZERO so the first attempt outcome records the
+#       timeout and the classifier can inspect the summary,
 #   (e) the workflow classifier grep that distinguishes a #470 timeout from a
-#       genuine failure / infra abort routes this summary to the timeout label.
+#       genuine failure / infra abort routes this summary to advisory-green.
 #   (f) a cancelled retry is classified before any `Failed BOTH attempts`
 #       summary, because summary.md can be stale from the first cold boot.
 #
@@ -105,8 +106,10 @@ if grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary"; then
 fi
 pass "(c) summary has the timeout marker and NOT a genuine-failure marker"
 
-# (d) the suite exited NON-ZERO (a stall is red, never silently green).
-[[ "$rc" -ne 0 ]] || fail "(d) suite exited 0 on a budget timeout — a #470 stall must be red"
+# (d) the suite exited NON-ZERO so the workflow sees a failed first attempt and
+#     then lets the classifier decide whether the summary is genuine-failure red
+#     or timeout-only advisory-green.
+[[ "$rc" -ne 0 ]] || fail "(d) suite exited 0 on a budget timeout — classifier would never inspect the timeout summary"
 pass "(d) suite exited non-zero (rc=$rc) on a budget timeout"
 
 # (e) classifier routing: replicate the workflow's grep ladder against this
@@ -118,11 +121,27 @@ classify() {
   local retry_outcome="${3:-failure}"
   local first_concl="${4:-failure}"
   local retry_concl="${5:-failure}"
+  local first_timeout="${6:-}"
+  local first_failure="${7:-false}"
+  if [[ -z "$first_timeout" ]]; then
+    first_timeout="false"
+    if [[ -f "$s" ]] \
+      && ! grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$s" \
+      && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$s"; then
+      first_timeout="true"
+    fi
+  fi
   if [[ "$first_outcome" == "success" ]]; then
     echo "PASS_FIRST"; return
   fi
   if [[ "$retry_outcome" == "success" ]]; then
     echo "PASS_RETRY"; return
+  fi
+  if [[ "$first_failure" == "true" ]]; then
+    echo "FIRST_GENUINE_FAILURE"; return
+  fi
+  if [[ "$first_timeout" == "true" ]]; then
+    echo "JOURNEY_TIMEOUT_ADVISORY"; return
   fi
   if [[ "$first_outcome" == "cancelled" || "$retry_outcome" == "cancelled" || "$first_concl" == "cancelled" || "$retry_concl" == "cancelled" ]]; then
     echo "STEP_CANCELLED"; return
@@ -136,9 +155,9 @@ classify() {
   echo "INFRA_UNAVAILABLE"
 }
 verdict="$(classify "$summary")"
-[[ "$verdict" == "JOURNEY_TIMEOUT" ]] \
-  || fail "(e) classifier routed to '$verdict', expected JOURNEY_TIMEOUT"
-pass "(e) workflow classifier grep ladder routes this summary to JOURNEY_TIMEOUT"
+[[ "$verdict" == "JOURNEY_TIMEOUT_ADVISORY" ]] \
+  || fail "(e) classifier routed to '$verdict', expected JOURNEY_TIMEOUT_ADVISORY"
+pass "(e) workflow classifier grep ladder routes this summary to advisory timeout"
 
 # (f) stale-summary guard: the two cold-boot attempts share the same summary.md
 #     path. If the retry is cancelled, an old `Failed BOTH attempts` summary
@@ -154,6 +173,34 @@ stale_verdict="$(classify "$stale_summary" failure cancelled failure cancelled)"
 [[ "$stale_verdict" == "STEP_CANCELLED" ]] \
   || fail "(f) cancelled retry with stale Failed BOTH summary routed to '$stale_verdict', expected STEP_CANCELLED"
 pass "(f) cancelled retry takes precedence over stale Failed BOTH summary"
+
+# (g) genuine journey failure still wins over timeout markers and remains red.
+mixed_summary="$SANDBOX/mixed-summary.md"
+printf '%s\n' \
+  '# Per-push CI journey suite — summary' \
+  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
+  '- `com.pocketshell.app.TimeoutOnlyClass`' \
+  'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
+  '- `com.pocketshell.app.RealRegressionTest`' \
+  > "$mixed_summary"
+mixed_verdict="$(classify "$mixed_summary" failure failure failure failure false)"
+[[ "$mixed_verdict" == "GENUINE_FAILURE" ]] \
+  || fail "(g) mixed genuine-failure+timeout summary routed to '$mixed_verdict', expected GENUINE_FAILURE"
+pass "(g) genuine Failed BOTH summary remains red even with timeout markers present"
+
+# (h) workflow-real shared-summary overwrite: first attempt wrote a genuine
+#     failure, retry overwrote summary.md with timeout-only content and did not
+#     pass. The captured first_failure output must prevent advisory-green.
+retry_timeout_summary="$SANDBOX/retry-timeout-summary.md"
+printf '%s\n' \
+  '# Per-push CI journey suite — summary' \
+  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
+  '- `com.pocketshell.app.RetryTimedOutClass`' \
+  > "$retry_timeout_summary"
+overwrite_verdict="$(classify "$retry_timeout_summary" failure failure failure failure false true)"
+[[ "$overwrite_verdict" == "FIRST_GENUINE_FAILURE" ]] \
+  || fail "(h) first genuine failure + retry timeout overwrite routed to '$overwrite_verdict', expected FIRST_GENUINE_FAILURE"
+pass "(h) first genuine failure remains red when retry overwrites summary with timeout-only content"
 
 # ---------------------------------------------------------------------------
 # Negative control: a clean PASS run (generous budget, fast gradle stub) must

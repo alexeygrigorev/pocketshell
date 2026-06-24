@@ -52,6 +52,24 @@ class OutboundQueueStoreTest {
     }
 
     @Test
+    fun enqueuePersistsRouteMetadata() {
+        val store = store()
+        val item = store.enqueue(
+            sessionKey = "sessA",
+            cleanText = "agent payload",
+            createdAtMs = 123,
+            paneId = "%1",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+
+        assertEquals("%1", item.paneId)
+        assertEquals(OutboundRoute.AgentPayload, item.route)
+        assertEquals("codex", item.agentKind)
+        assertEquals(item, store.item(item.id))
+    }
+
+    @Test
     fun twoSeparateEnqueuesGetDistinctIdsAndAreTwoItems() {
         val store = store()
         val a = store.enqueue("sessA", "one")
@@ -356,6 +374,9 @@ class OutboundQueueStoreTest {
                 lastAttemptAtMs = 2_000,
                 attemptCount = 3,
                 lastError = "ack timeout\tdetail",
+                paneId = "%0",
+                route = OutboundRoute.AgentConversation,
+                agentKind = "claude",
             ),
             OutboundItem(
                 id = "id-2",
@@ -366,6 +387,9 @@ class OutboundQueueStoreTest {
                 createdAtMs = 500,
                 attemptCount = 1,
                 lastError = null,
+                paneId = "%1",
+                route = OutboundRoute.RawBytes,
+                agentKind = null,
             ),
         )
         val reloaded = decodeOutboundItems("sessA", encodeOutboundItems(original))
@@ -374,5 +398,17 @@ class OutboundQueueStoreTest {
         val byId = reloaded.associateBy { it.id }
         assertEquals(original[0], byId["id-1"])
         assertEquals(original[1], byId["id-2"])
+    }
+
+    @Test
+    fun decodeLegacyRowsDefaultsRouteMetadataSafely() {
+        // Old rows ended at attachmentsBlob and had no paneId/route/agentKind.
+        val raw = "legacy-id\tlegacy text\t1\tQueued\t123\t\t0\t\t"
+        val decoded = decodeOutboundItems("sessA", raw).single()
+
+        assertEquals("legacy-id", decoded.id)
+        assertEquals("", decoded.paneId)
+        assertEquals(OutboundRoute.RawBytes, decoded.route)
+        assertNull(decoded.agentKind)
     }
 }

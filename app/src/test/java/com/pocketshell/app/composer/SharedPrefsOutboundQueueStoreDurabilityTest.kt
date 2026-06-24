@@ -45,6 +45,9 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
             attachments = listOf(DurableAttachmentRef("~/a.png", "a.png", "image/png")),
             withEnter = true,
             createdAtMs = 1_700_000_000_000,
+            paneId = "%1",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
         )
 
         // Simulate a process restart: a brand-new store instance over the same

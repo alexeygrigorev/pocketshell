@@ -31,6 +31,9 @@ class OutboundQueueStoreEncodingTest {
                 lastAttemptAtMs = 1_700_000_005_000,
                 attemptCount = 2,
                 lastError = "ack timeout",
+                paneId = "%0",
+                route = OutboundRoute.AgentConversation,
+                agentKind = "claude",
             ),
             OutboundItem(
                 id = "22222222-2222-2222-2222-222222222222",
@@ -39,6 +42,9 @@ class OutboundQueueStoreEncodingTest {
                 withEnter = false,
                 state = OutboundState.Queued,
                 createdAtMs = 1_700_000_001_000,
+                paneId = "%1",
+                route = OutboundRoute.AgentPayload,
+                agentKind = "codex",
             ),
         )
         val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
@@ -55,6 +61,9 @@ class OutboundQueueStoreEncodingTest {
                 state = OutboundState.Failed,
                 createdAtMs = 1L,
                 lastError = "failed:\tdetail\nmore",
+                paneId = "%0\tpane\nsuffix",
+                route = OutboundRoute.RawBytes,
+                agentKind = "open\tcode",
             ),
         )
         val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
@@ -82,6 +91,27 @@ class OutboundQueueStoreEncodingTest {
         )
         val decoded = decodeOutboundItems("realSession", encodeOutboundItems(items))
         assertEquals("realSession", decoded.single().sessionKey)
+    }
+
+    @Test
+    fun decodeLegacyRowsDefaultsMissingRouteMetadata() {
+        // Pre-route rows ended at attachmentsBlob.
+        val raw = "id-legacy\tlegacy text\t1\tQueued\t100\t\t0\t\t"
+        val decoded = decodeOutboundItems("sessA", raw).single()
+
+        assertEquals("", decoded.paneId)
+        assertEquals(OutboundRoute.RawBytes, decoded.route)
+        assertEquals(null, decoded.agentKind)
+    }
+
+    @Test
+    fun decodeUnknownRouteDefaultsToRawBytes() {
+        val raw = "id-unknown\tx\t1\tQueued\t100\t\t0\t\t\t%0\tFutureRoute\tclaude"
+        val decoded = decodeOutboundItems("sessA", raw).single()
+
+        assertEquals("%0", decoded.paneId)
+        assertEquals(OutboundRoute.RawBytes, decoded.route)
+        assertEquals("claude", decoded.agentKind)
     }
 
     @Test

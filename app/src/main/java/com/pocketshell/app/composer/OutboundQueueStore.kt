@@ -93,6 +93,9 @@ public interface OutboundQueueStore {
         attachments: List<DurableAttachmentRef> = emptyList(),
         withEnter: Boolean = true,
         createdAtMs: Long = System.currentTimeMillis(),
+        paneId: String = "",
+        route: OutboundRoute = OutboundRoute.RawBytes,
+        agentKind: String? = null,
     ): OutboundItem
 
     /**
@@ -191,6 +194,10 @@ public interface OutboundQueueStore {
  * @property lastAttemptAtMs time of the last delivery attempt, or `null`.
  * @property attemptCount number of delivery attempts so far.
  * @property lastError the last delivery error, or `null`.
+ * @property paneId pane targeted by the original send action. Empty for legacy
+ *   rows that were persisted before route metadata existed.
+ * @property route the delivery path selected when the item was enqueued.
+ * @property agentKind optional agent token captured with agent-routed sends.
  */
 public data class OutboundItem(
     val id: String,
@@ -203,7 +210,17 @@ public data class OutboundItem(
     val lastAttemptAtMs: Long? = null,
     val attemptCount: Int = 0,
     val lastError: String? = null,
+    val paneId: String = "",
+    val route: OutboundRoute = OutboundRoute.RawBytes,
+    val agentKind: String? = null,
 )
+
+/** Issue #900: persisted send route selected before an item entered the durable queue. */
+public enum class OutboundRoute {
+    AgentConversation,
+    AgentPayload,
+    RawBytes,
+}
 
 /**
  * Issue #900: the per-item state machine.
@@ -254,6 +271,9 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
         attachments: List<DurableAttachmentRef>,
         withEnter: Boolean,
         createdAtMs: Long,
+        paneId: String,
+        route: OutboundRoute,
+        agentKind: String?,
     ): OutboundItem = synchronized(lock) {
         val item = OutboundItem(
             id = UUID.randomUUID().toString(),
@@ -263,6 +283,9 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
             withEnter = withEnter,
             state = OutboundState.Queued,
             createdAtMs = createdAtMs,
+            paneId = paneId,
+            route = route,
+            agentKind = agentKind,
         )
         items[item.id] = item
         item
@@ -357,6 +380,9 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         attachments: List<DurableAttachmentRef>,
         withEnter: Boolean,
         createdAtMs: Long,
+        paneId: String,
+        route: OutboundRoute,
+        agentKind: String?,
     ): OutboundItem = OutboundItem(
         id = UUID.randomUUID().toString(),
         sessionKey = sessionKey,
@@ -364,6 +390,9 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         attachments = attachments,
         withEnter = withEnter,
         createdAtMs = createdAtMs,
+        paneId = paneId,
+        route = route,
+        agentKind = agentKind,
     )
 
     override fun enqueueExisting(item: OutboundItem): OutboundItem = item
@@ -438,6 +467,9 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         attachments: List<DurableAttachmentRef>,
         withEnter: Boolean,
         createdAtMs: Long,
+        paneId: String,
+        route: OutboundRoute,
+        agentKind: String?,
     ): OutboundItem = synchronized(lock) {
         val item = OutboundItem(
             id = UUID.randomUUID().toString(),
@@ -447,6 +479,9 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             withEnter = withEnter,
             state = OutboundState.Queued,
             createdAtMs = createdAtMs,
+            paneId = paneId,
+            route = route,
+            agentKind = agentKind,
         )
         val list = loadSession(sessionKey)
         list.add(item)
@@ -561,7 +596,7 @@ internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"
 /**
  * Issue #900: encode a session's outbound items as newline-separated rows.
  * Each row is tab-delimited:
- * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob`
+ * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind`
  * with the same `\`-escaping [ComposerDraftStore] uses so text/paths containing
  * tabs/newlines round-trip losslessly. The attachments field reuses
  * [encodeAttachments], itself escaped as a single field.
@@ -578,6 +613,9 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
             item.attemptCount.toString(),
             item.lastError.orEmpty(),
             encodeAttachments(item.attachments),
+            item.paneId,
+            item.route.name,
+            item.agentKind.orEmpty(),
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -602,6 +640,10 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
             attemptCount = f.getOrNull(6)?.toIntOrNull() ?: 0,
             lastError = f.getOrNull(7)?.takeIf { it.isNotEmpty() },
             attachments = decodeAttachments(f.getOrNull(8).orEmpty()),
+            paneId = f.getOrNull(9).orEmpty(),
+            route = runCatching { OutboundRoute.valueOf(f.getOrNull(10).orEmpty()) }
+                .getOrDefault(OutboundRoute.RawBytes),
+            agentKind = f.getOrNull(11)?.takeIf { it.isNotEmpty() },
         )
     }
 }

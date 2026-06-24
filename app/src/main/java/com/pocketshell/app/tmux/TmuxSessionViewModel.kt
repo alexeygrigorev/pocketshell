@@ -151,6 +151,33 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
+internal fun sessionCardsTargetKey(
+    hostId: Long,
+    host: String,
+    port: Int,
+    user: String,
+    keyPath: String,
+    sessionName: String,
+): String = buildString {
+    append(hostId)
+    append('|')
+    append(port)
+    append('|')
+    appendKeyPart(host)
+    append('|')
+    appendKeyPart(user)
+    append('|')
+    appendKeyPart(keyPath)
+    append('|')
+    appendKeyPart(sessionName.trim())
+}
+
+private fun StringBuilder.appendKeyPart(value: String) {
+    append(value.length)
+    append(':')
+    append(value)
+}
+
 /**
  * Holds the live `tmux -CC` control channel for a single SSH host /
  * session-name pair, and surfaces the resulting list of panes as
@@ -562,6 +589,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     public data class SessionCardsUiState(
         val sessionName: String? = null,
+        val targetKey: String? = null,
         val loading: Boolean = false,
         val feed: SessionCardsRemoteSource.Feed = SessionCardsRemoteSource.Feed.Empty,
     )
@@ -12713,22 +12741,29 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public fun refreshActiveSessionCards(): Boolean {
-        val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: run {
+        val active = activeTarget ?: run {
             _sessionCards.value = SessionCardsUiState()
             return false
         }
+        val target = active.sessionName.trim().takeIf { it.isNotEmpty() } ?: run {
+            _sessionCards.value = SessionCardsUiState()
+            return false
+        }
+        val targetKey = active.sessionCardsTargetKey()
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         _sessionCards.value = _sessionCards.value.copy(
             sessionName = target,
+            targetKey = targetKey,
             loading = true,
         )
         bridgeScope.launch {
             val feed = withContext(Dispatchers.IO) {
                 sessionCardsRemoteSource.getCards(session, target)
             }
-            if (activeTarget?.sessionName?.trim() == target) {
+            if (activeTarget?.sessionCardsTargetKey() == targetKey) {
                 _sessionCards.value = SessionCardsUiState(
                     sessionName = target,
+                    targetKey = targetKey,
                     loading = false,
                     feed = feed,
                 )
@@ -12742,7 +12777,9 @@ public class TmuxSessionViewModel @Inject constructor(
         itemId: String,
         checked: Boolean,
     ): Boolean {
-        val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        val active = activeTarget ?: return false
+        val target = active.sessionName.trim().takeIf { it.isNotEmpty() } ?: return false
+        val targetKey = active.sessionCardsTargetKey()
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         bridgeScope.launch {
             val ok = withContext(Dispatchers.IO) {
@@ -12754,13 +12791,14 @@ public class TmuxSessionViewModel @Inject constructor(
                     checked = checked,
                 )
             }
-            if (ok && activeTarget?.sessionName?.trim() == target) {
+            if (ok && activeTarget?.sessionCardsTargetKey() == targetKey) {
                 val feed = withContext(Dispatchers.IO) {
                     sessionCardsRemoteSource.getCards(session, target)
                 }
-                if (activeTarget?.sessionName?.trim() == target) {
+                if (activeTarget?.sessionCardsTargetKey() == targetKey) {
                     _sessionCards.value = SessionCardsUiState(
                         sessionName = target,
+                        targetKey = targetKey,
                         loading = false,
                         feed = feed,
                     )
@@ -13693,6 +13731,16 @@ public class TmuxSessionViewModel @Inject constructor(
         val tmuxSessionId: String? = null,
         val sessionCreated: Long? = null,
     )
+
+    private fun ConnectionTarget.sessionCardsTargetKey(): String =
+        sessionCardsTargetKey(
+            hostId = hostId,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            sessionName = sessionName,
+        )
 
     private data class ConnectIntent(
         val target: ConnectionTarget,

@@ -12030,6 +12030,50 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun refreshActiveSessionCardsDropsLateFeedWhenHostChangesButSessionNameMatches() = runTest(scheduler) {
+        val gate = CompletableDeferred<Unit>()
+        val oldSession = FakeSshSession(
+            execGate = gate,
+            cardGetStdouts = listOf(checklistFeedJson("work", checkedIds = listOf("build-0"))),
+        )
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = oldSession,
+        )
+
+        assertTrue(vm.refreshActiveSessionCards())
+        awaitCondition { oldSession.execCommands.any { it.contains("push get") } }
+
+        vm.replaceClientForTest(
+            hostId = 2L,
+            hostName = "beta",
+            host = "beta.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/b",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+        gate.complete(Unit)
+        runCurrent()
+        advanceUntilIdle()
+
+        assertTrue(
+            "late card feed from old host must not publish after switching to same-named session",
+            vm.sessionCards.value.feed.cards.isEmpty(),
+        )
+    }
+
+    @Test
     fun refreshActiveSessionCardsReturnsFalseWithoutWarmSession() = runTest(scheduler) {
         val vm = newVm()
         vm.replaceClientForTest(
@@ -12076,6 +12120,51 @@ class TmuxSessionViewModelTest {
         assertTrue(checkCommand.contains("--session 'work'"))
         val card = vm.sessionCards.value.feed.cards.single() as SessionCardsRemoteSource.ChecklistCard
         assertEquals(setOf("build-0"), card.checkedIds)
+    }
+
+    @Test
+    fun toggleChecklistItemDropsPostWriteRefreshWhenHostChangesButSessionNameMatches() = runTest(scheduler) {
+        val gate = CompletableDeferred<Unit>()
+        val oldSession = FakeSshSession(
+            execGate = gate,
+            cardGetStdouts = listOf(checklistFeedJson("work", checkedIds = listOf("build-0"))),
+        )
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = oldSession,
+        )
+
+        assertTrue(vm.toggleChecklistItem(cardId = "release", itemId = "build-0", checked = true))
+        awaitCondition { oldSession.execCommands.any { it.contains("push check") } }
+
+        vm.replaceClientForTest(
+            hostId = 2L,
+            hostName = "beta",
+            host = "beta.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/b",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+        gate.complete(Unit)
+        runCurrent()
+        advanceUntilIdle()
+
+        assertTrue(oldSession.execCommands.none { it.contains("push get") })
+        assertTrue(
+            "post-write refresh from old host must not publish after switching to same-named session",
+            vm.sessionCards.value.feed.cards.isEmpty(),
+        )
     }
 
     @Test

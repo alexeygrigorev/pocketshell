@@ -414,6 +414,16 @@ public fun TmuxSessionScreen(
     val targetSessionId = remember(hostId, sessionName, tmuxSessionId, sessionCreated) {
         tmuxTargetSessionId(hostId, sessionName, tmuxSessionId, sessionCreated)
     }
+    val activeSessionCardsTargetKey = remember(hostId, host, port, user, keyPath, sessionName) {
+        sessionCardsTargetKey(
+            hostId = hostId,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            sessionName = sessionName,
+        )
+    }
     // Hold the terminal (loading placeholder) until the reveal machine confirms
     // RevealState.Live FOR THIS target — never paint the previous session's frame.
     val revealHoldsTerminal =
@@ -439,8 +449,8 @@ public fun TmuxSessionScreen(
     // "Reconnecting" / "Disconnected" pill instead.
     val sessionLive = status is ConnectionStatus.Connected
     val sessionCardsState by viewModel.sessionCards.collectAsState()
-    val checklistCards = remember(sessionCardsState, sessionName) {
-        if (sessionCardsState.sessionName == sessionName) {
+    val checklistCards = remember(sessionCardsState, activeSessionCardsTargetKey) {
+        if (sessionCardsState.targetKey == activeSessionCardsTargetKey) {
             sessionCardsState.feed.cards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>()
         } else {
             emptyList()
@@ -449,7 +459,7 @@ public fun TmuxSessionScreen(
     val sessionChecklistChipState = remember(checklistCards) {
         checklistChipState(checklistCards)
     }
-    LaunchedEffect(sessionLive, sessionName) {
+    LaunchedEffect(sessionLive, activeSessionCardsTargetKey) {
         if (sessionLive) viewModel.refreshActiveSessionCards()
     }
     // Issue #459: the per-screen restored-draft holder used to seed the
@@ -686,7 +696,7 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
-    var showChecklistSheet by remember { mutableStateOf(false) }
+    var showChecklistSheet by remember(activeSessionCardsTargetKey) { mutableStateOf(false) }
 
     // Issue #560: a share-into-session launch carries staged remote
     // attachment path(s). Seed them into the shared composer VM as #544

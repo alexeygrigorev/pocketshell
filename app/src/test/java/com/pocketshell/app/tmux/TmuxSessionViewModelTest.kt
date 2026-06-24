@@ -4269,40 +4269,129 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun foregroundReplayArmIsDrivenByControllerForegroundEdge() = runTest(scheduler) {
-        val vm = newVm()
-        var foregroundReattachCount = 0
-        vm.setForegroundReattachForTest { foregroundReattachCount += 1 }
-        val client = FakeTmuxClient()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = client,
-        )
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            var foregroundReattachCount = 0
+            vm.setForegroundReattachForTest { foregroundReattachCount += 1 }
+            val client = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+            )
 
-        vm.onAppBackgrounded()
-        advanceUntilIdle()
-        assertTrue("background must stash a pending reattach", vm.hasPendingReattachForTest())
+            vm.onAppBackgrounded()
+            advanceUntilIdle()
+            assertTrue("background must stash a pending reattach", vm.hasPendingReattachForTest())
+            assertTrue(
+                "background detach must not emit foreground_reattach",
+                diagnostics.eventsNamed("foreground_reattach").isEmpty(),
+            )
 
-        // Beyond grace (the lease was evicted on the detach teardown -> controller's grace
-        // predicate is not-warm), the controller walks Backgrounded -> Reconnecting, which
-        // fires the re-homed foreground arm (ConnectionDecision.ReplayPendingReattach).
-        vm.onAppForegrounded()
-        advanceUntilIdle()
+            // Beyond grace (the lease was evicted on the detach teardown -> controller's grace
+            // predicate is not-warm), the controller walks Backgrounded -> Reconnecting, which
+            // fires the re-homed foreground arm (ConnectionDecision.ReplayPendingReattach).
+            vm.onAppForegrounded()
+            assertFalse(
+                "app foreground hook must arm post-grace reattach without waiting on a later driver turn",
+                vm.hasPendingReattachForTest(),
+            )
+            assertEquals(
+                "app foreground hook must drive the replay reattach exactly once",
+                1,
+                foregroundReattachCount,
+            )
+            val reattach = diagnostics.eventsNamed("foreground_reattach").single()
+            assertEquals("connection", reattach.category)
+            assertEquals("app_lifecycle", reattach.fields["source"])
+            assertEquals(TmuxConnectTrigger.LifecycleReattach.logValue, reattach.fields["trigger"])
+            assertEquals(1L, reattach.fields["hostId"])
+            assertEquals("work", reattach.fields["session"])
+            advanceUntilIdle()
 
-        assertFalse(
-            "controller foreground edge must consume the pending reattach",
-            vm.hasPendingReattachForTest(),
-        )
-        assertEquals(
-            "controller foreground edge must drive the replay reattach exactly once",
-            1,
-            foregroundReattachCount,
-        )
+            assertFalse(
+                "controller foreground edge must consume the pending reattach",
+                vm.hasPendingReattachForTest(),
+            )
+            assertEquals(
+                "controller foreground edge must drive the replay reattach exactly once",
+                1,
+                foregroundReattachCount,
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
+    fun postGraceForegroundReplaysPendingReattachEvenWhenControllerStillSeesWarmLease() = runTest(scheduler) {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val connector = QueueLeaseConnector(FakeSshSession())
+            val leaseManager = testLeaseManager(
+                connector = connector,
+                scope = this,
+                idleTtlMillis = 60_000L,
+            )
+            val vm = newVm(sshLeaseManager = leaseManager)
+            runCurrent()
+
+            val warmLease = leaseManager.acquire(testLeaseTarget()).getOrThrow()
+            warmLease.release()
+            runCurrent()
+            assertTrue(
+                "precondition: controller warm snapshot must still see a live lease",
+                leaseManager.hasLiveLease(testLeaseTarget().leaseKey),
+            )
+
+            var foregroundReattachCount = 0
+            vm.setForegroundReattachForTest { foregroundReattachCount += 1 }
+            val client = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+            )
+
+            vm.onAppBackgrounded()
+            runCurrent()
+            assertTrue("background must detach the control client", client.detachCleanlyCalled)
+            assertTrue("background must stash a pending reattach", vm.hasPendingReattachForTest())
+            assertTrue(
+                "warm lease should survive background control-client teardown",
+                leaseManager.hasLiveLease(testLeaseTarget().leaseKey),
+            )
+
+            vm.onAppForegrounded(resumedWithinGrace = false)
+
+            assertFalse(
+                "post-grace foreground must consume pending reattach even if controller picks warm reseed",
+                vm.hasPendingReattachForTest(),
+            )
+            assertEquals(
+                "post-grace foreground must replay exactly once",
+                1,
+                foregroundReattachCount,
+            )
+            assertEquals(
+                "VM-level foreground diagnostic must be emitted for the Android wait",
+                1,
+                diagnostics.eventsNamed("foreground_reattach").size,
+            )
+        } finally {
+            diagnostics.close()
+        }
     }
 
     @Test

@@ -3090,12 +3090,28 @@ public class TmuxSessionViewModel @Inject constructor(
         // predicate the gate). The inline `reduceConnection(Foreground)` arm is no longer
         // consulted (Slice 2a).
         connectionManager.observeForeground()
+        dispatchPostGraceForegroundArmIfPending()
         // The controller's single grace predicate decided reattach-vs-reconnect:
         // within grace (warm lease) it is Reattaching and the active-pane reseed will
         // land it back to Live → Connected (the approved #685 Bug-A divergence — NO
         // probe churn); beyond grace it is Reconnecting (matches inline). Re-project
         // after the driver-fired effects ran.
         projectStatusFromController()
+    }
+
+    /**
+     * App-level post-grace is authoritative for the VM-owned replay arm. Emulator #904
+     * showed App grace expiring while the controller could still see a warm lease and
+     * choose its Backgrounded→Reattaching reseed edge; after the App grace teardown there is
+     * no control client left to reseed, so that edge cannot consume [pendingReattach]. The
+     * controller still receives Foreground for state projection, but an already-stashed
+     * replay/resume arm is dispatched from this lifecycle hook before it returns. If the
+     * driver observes a Reconnecting edge too, [replayPendingReattach] has already consumed
+     * [pendingReattach] and the duplicate callback is a no-op.
+     */
+    private fun dispatchPostGraceForegroundArmIfPending() {
+        if (pendingReattach == null && pausedAutoReconnect == null) return
+        onControllerForegrounded()
     }
 
     /**

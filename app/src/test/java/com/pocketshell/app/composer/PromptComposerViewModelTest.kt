@@ -3123,6 +3123,92 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun requestSendEnqueuesOutboundItemAndCarriesQueueId() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            paneId = "%7",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("ship it")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        val request = sent.single()
+        val queueId = request.outboundQueueItemId
+        assertNotNull(queueId)
+        val item = requireNotNull(queue.item(queueId!!))
+        assertEquals("1/session-a", item.sessionKey)
+        assertEquals("ship it", item.cleanText)
+        assertEquals("%7", item.paneId)
+        assertEquals(OutboundRoute.AgentPayload, item.route)
+        assertEquals("codex", item.agentKind)
+        assertEquals(listOf(queueId), vm.outboundQueueItems.value.map { it.id })
+
+        vm.discardOutboundItem(queueId)
+        assertNull(queue.item(queueId))
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+    }
+
+    @Test
+    fun deliveredSendMarksQueuedOutboundItemDeliveredAndRefreshesRows() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("send once")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+
+        val request = sent.single()
+        assertEquals(1, vm.outboundQueueItems.value.size)
+
+        vm.markSendDelivered(request)
+
+        assertNull(queue.item(request.outboundQueueItemId!!))
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+    }
+
+    @Test
+    fun failedSendMarksOutboundItemFailedAndKeepsItVisible() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("retry me")
+        vm.requestSend(withEnter = false, sendTarget = target)
+        advanceUntilIdle()
+
+        val request = sent.single()
+        vm.restoreFailedSend(request, message = "host send failed")
+
+        val failed = requireNotNull(queue.item(request.outboundQueueItemId!!))
+        assertEquals(OutboundState.Failed, failed.state)
+        assertEquals("host send failed", failed.lastError)
+        assertEquals(1, failed.attemptCount)
+        assertEquals(listOf(failed.id), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
     fun requestSendWhileRecordingPreservesOriginalSendTargetSnapshot() = runTest {
         // Issue #900: a Send tap during Recording first stops the recorder and
         // transcribes. The eventual request must keep the target captured from

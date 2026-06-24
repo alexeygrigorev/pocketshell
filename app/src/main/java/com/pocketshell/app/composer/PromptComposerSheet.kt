@@ -325,9 +325,11 @@ public fun PromptComposerSheet(
             // so a truly dead link resolves to the "Not sent" banner promptly
             // instead of leaving the composer stuck on "Sending…". A null
             // (timeout) is treated exactly like a `false` (failed) send.
-            val delivered = withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
-                currentOnSend(request)
-            } == true
+            val delivered = runCatching {
+                withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
+                    currentOnSend(request)
+                } == true
+            }.getOrDefault(false)
             if (delivered) {
                 // Issue #745: only NOW clear the draft + staged attachments —
                 // the bytes are confirmed delivered, so there is no flicker of

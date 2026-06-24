@@ -860,6 +860,12 @@ public class PromptComposerViewModel @Inject constructor(
         // Send when there is either typed text or at least one attachment.
         // (A pure-attachment send still has a non-empty composed `text`.)
         if (text.isEmpty()) return
+        val outboundItem = enqueueOutboundSend(
+            cleanDraft = draft,
+            attachments = attachments,
+            withEnter = withEnter,
+            sendTarget = sendTarget,
+        )
         DiagnosticEvents.record(
             "action",
             "composer_send",
@@ -883,18 +889,41 @@ public class PromptComposerViewModel @Inject constructor(
         // collector consumes it, so a send dispatched while the sheet's
         // collector is mid-recreate (dismiss → re-open) is delivered to
         // the next collector instead of being dropped.
-        _sendRequests.trySend(
-            SendRequest(
-                text = text,
-                withEnter = withEnter,
-                // Issue #872: carry the clean draft + staged tiles so a failed
-                // send restores the original text + the actual attachment tiles,
-                // not the paths-folded-into-text proxy.
-                cleanDraft = draft,
-                attachments = attachments,
-                sendTarget = sendTarget,
-            ),
+        val request = SendRequest(
+            text = text,
+            withEnter = withEnter,
+            // Issue #872: carry the clean draft + staged tiles so a failed
+            // send restores the original text + the actual attachment tiles,
+            // not the paths-folded-into-text proxy.
+            cleanDraft = draft,
+            attachments = attachments,
+            sendTarget = sendTarget,
+            outboundQueueItemId = outboundItem?.id,
         )
+        if (_sendRequests.trySend(request).isFailure) {
+            restoreFailedSend(request)
+        }
+    }
+
+    private fun enqueueOutboundSend(
+        cleanDraft: String,
+        attachments: List<StagedAttachment>,
+        withEnter: Boolean,
+        sendTarget: SendTargetSnapshot,
+    ): OutboundItem? {
+        if (outboundQueueStore === DisabledOutboundQueueStore) return null
+        val sessionKey = sendTarget.sessionKey.takeIf { it.isNotBlank() } ?: return null
+        val item = outboundQueueStore.enqueue(
+            sessionKey = sessionKey,
+            cleanText = cleanDraft,
+            attachments = attachments.toDurableRefs(),
+            withEnter = withEnter,
+            paneId = sendTarget.paneId,
+            route = sendTarget.route,
+            agentKind = sendTarget.agentKind,
+        )
+        refreshOutboundQueueItemsFor(sessionKey)
+        return item
     }
 
     /**
@@ -910,6 +939,7 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #891: the send resolved successfully — disarm the overall-send
         // watchdog so it cannot fire a spurious "Send failed" afterwards.
         disarmSendWatchdog()
+        markOutboundSendDelivered(request)
         val deliveryTarget = request?.sendTarget?.sessionKey?.takeIf { it.isNotBlank() } ?: composerTarget
         if (deliveryTarget != null && deliveryTarget != composerTarget) {
             composerDraftStore.clear(deliveryTarget)
@@ -963,6 +993,7 @@ public class PromptComposerViewModel @Inject constructor(
         // watchdog so the retryable failed state we are about to set is not
         // immediately re-stamped by a late watchdog firing.
         disarmSendWatchdog()
+        markOutboundSendFailed(request, message)
         // Issue #872: restore the CLEAN draft (no appended "Attached files:"
         // block) so the editable text is not polluted with raw remote paths and
         // the tiles are NOT double-appended on Retry. Fall back to the composed
@@ -1224,11 +1255,31 @@ public class PromptComposerViewModel @Inject constructor(
         refreshOutboundQueueItems()
     }
 
+    private fun markOutboundSendDelivered(request: SendRequest?) {
+        val id = request?.outboundQueueItemId ?: return
+        outboundQueueStore.markDelivered(id)
+        request.sendTarget.sessionKey
+            .takeIf { it.isNotBlank() }
+            ?.let { refreshOutboundQueueItemsFor(it) }
+    }
+
+    private fun markOutboundSendFailed(request: SendRequest, message: String) {
+        val id = request.outboundQueueItemId ?: return
+        outboundQueueStore.markFailed(id, lastError = message)
+        request.sendTarget.sessionKey
+            .takeIf { it.isNotBlank() }
+            ?.let { refreshOutboundQueueItemsFor(it) }
+    }
+
     private fun refreshOutboundQueueItems() {
         _outboundQueueItems.value = composerTarget
             ?.takeIf { it.isNotBlank() }
             ?.let { outboundQueueStore.itemsFor(it) }
             .orEmpty()
+    }
+
+    private fun refreshOutboundQueueItemsFor(sessionKey: String) {
+        if (composerTarget == sessionKey) refreshOutboundQueueItems()
     }
 
     /**
@@ -2802,11 +2853,12 @@ public class PromptComposerViewModel @Inject constructor(
         val attachments: List<StagedAttachment> = emptyList(),
         /**
          * Issue #900: route metadata captured at Send tap time. This is not
-         * wired to the durable outbound queue in this slice; it only travels
-         * with the request so later queue wiring can enqueue against the
-         * original target rather than whatever pane is focused after a deferral.
+         * used to deliver the item in this slice, but it lets the durable queue
+         * row and legacy host send path agree on the original tap-time target
+         * rather than whatever pane is focused after a deferral.
          */
         val sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
+        val outboundQueueItemId: String? = null,
     )
 
     /**

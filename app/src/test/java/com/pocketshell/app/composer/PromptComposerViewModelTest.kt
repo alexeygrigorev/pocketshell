@@ -3214,6 +3214,101 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun retryOutboundItemReemitsExistingFailedItemWithSameIdPayloadAndTarget() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val item = queue.enqueue(
+            sessionKey = "1/session-a",
+            cleanText = "ship with context",
+            attachments = listOf(DurableAttachmentRef("/tmp/build.log", "build.log", "text/plain")),
+            withEnter = true,
+            paneId = "%7",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+            createdAtMs = 1L,
+        )
+        queue.claim(item.id)
+        queue.markFailed(item.id, lastError = "connection lost")
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        vm.retryOutboundItem(item.id)
+        advanceUntilIdle()
+
+        val request = sent.single()
+        assertEquals(item.id, request.outboundQueueItemId)
+        assertEquals("ship with context", request.cleanDraft)
+        assertEquals(
+            appendAttachmentPaths("ship with context", listOf("/tmp/build.log")),
+            request.text,
+        )
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = "/tmp/build.log",
+                    displayName = "build.log",
+                    mimeType = "text/plain",
+                ),
+            ),
+            request.attachments,
+        )
+        assertTrue(request.withEnter)
+        assertEquals("1/session-a", request.sendTarget.sessionKey)
+        assertEquals("%7", request.sendTarget.paneId)
+        assertEquals(OutboundRoute.AgentPayload, request.sendTarget.route)
+        assertEquals("codex", request.sendTarget.agentKind)
+        val inFlight = requireNotNull(queue.item(item.id))
+        assertEquals(OutboundState.InFlight, inFlight.state)
+        assertEquals(2, inFlight.attemptCount)
+        assertEquals(listOf(item.id), vm.outboundQueueItems.value.map { it.id })
+
+        vm.restoreFailedSend(request, message = "still down")
+        val failedAgain = requireNotNull(queue.item(item.id))
+        assertEquals(OutboundState.Failed, failedAgain.state)
+        assertEquals("still down", failedAgain.lastError)
+        assertEquals(2, failedAgain.attemptCount)
+
+        vm.retryOutboundItem(item.id)
+        advanceUntilIdle()
+        val secondRequest = sent.last()
+        vm.markSendDelivered(secondRequest)
+
+        assertNull(queue.item(item.id))
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+    }
+
+    @Test
+    fun retryOutboundItemDoesNotDoubleRetryWhileInFlight() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val item = queue.enqueue(
+            sessionKey = "1/session-a",
+            cleanText = "retry once",
+            withEnter = false,
+        )
+        queue.claim(item.id)
+        queue.markFailed(item.id, lastError = "lost")
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        vm.retryOutboundItem(item.id)
+        vm.retryOutboundItem(item.id)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        assertEquals(item.id, sent.single().outboundQueueItemId)
+        assertEquals(OutboundState.InFlight, queue.item(item.id)!!.state)
+        assertEquals(2, queue.item(item.id)!!.attemptCount)
+        assertEquals(listOf(item.id), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
     fun requestSendWhileRecordingPreservesOriginalSendTargetSnapshot() = runTest {
         // Issue #900: a Send tap during Recording first stops the recorder and
         // transcribes. The eventual request must keep the target captured from

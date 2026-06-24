@@ -121,8 +121,9 @@ public interface OutboundQueueStore {
 
     /**
      * Atomically claim the oldest `Queued` item for [sessionKey], transition it
-     * to [OutboundState.InFlight], persist that, and return it. Returns `null`
-     * when there is no `Queued` item for that session.
+     * to [OutboundState.InFlight], bump [OutboundItem.attemptCount], persist
+     * that, and return it. Returns `null` when there is no `Queued` item for
+     * that session.
      *
      * **Exactly-once guarantee:** the claim is serialized so two concurrent
      * callers for the same [sessionKey] can never both receive the same item.
@@ -138,10 +139,23 @@ public interface OutboundQueueStore {
     public fun claimNext(sessionKey: String): OutboundItem?
 
     /**
+     * Atomically claim the exact `Queued`/`Failed` item with [id], transition it
+     * to [OutboundState.InFlight], bump [OutboundItem.attemptCount], persist
+     * that, and return it. Unlike [claimNext], this never picks an older row:
+     * it is the manual retry/clicked-row primitive.
+     *
+     * Returns `null` when [id] is unknown, already delivered/pruned, already
+     * [OutboundState.InFlight], [OutboundState.Uploading], or otherwise not
+     * claimable.
+     */
+    public fun claim(id: String): OutboundItem?
+
+    /**
      * Mark the item with [id] [OutboundState.InFlight] for a send attempt that
      * already knows its durable id. Unlike [claimNext], this does not pick the
      * oldest queued row; it transitions exactly the row that the caller just
-     * enqueued. No-op for unknown, delivered, or failed rows.
+     * enqueued and bumps [OutboundItem.attemptCount]. No-op for unknown,
+     * delivered, or failed rows.
      */
     public fun markInFlight(id: String): OutboundItem?
 
@@ -165,10 +179,12 @@ public interface OutboundQueueStore {
     public fun markDelivered(id: String): Boolean
 
     /**
-     * Mark the item with [id] [OutboundState.Failed] with [lastError], bump
-     * its attempt count, and stamp [lastAttemptAtMs]. The row is KEPT (visible,
-     * retryable) — never silently dropped. No-op for an unknown/already-
-     * delivered id. Returns the updated item or `null`.
+     * Mark the item with [id] [OutboundState.Failed] with [lastError] and stamp
+     * [lastAttemptAtMs]. Attempt counts are bumped when a row is claimed for an
+     * attempt ([claimNext], [claim], [markInFlight]), not when the failure is
+     * recorded. The row is KEPT (visible, retryable) — never silently dropped.
+     * No-op for an unknown/already-delivered id. Returns the updated item or
+     * `null`.
      */
     public fun markFailed(
         id: String,
@@ -333,7 +349,15 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
             .filter { it.sessionKey == sessionKey && it.state == OutboundState.Queued }
             .minByOrNull { it.createdAtMs }
             ?: return null
-        val claimed = next.copy(state = OutboundState.InFlight)
+        val claimed = next.claimedForAttempt()
+        items[claimed.id] = claimed
+        claimed
+    }
+
+    override fun claim(id: String): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return null
+        if (!existing.state.isExactClaimable) return null
+        val claimed = existing.claimedForAttempt()
         items[claimed.id] = claimed
         claimed
     }
@@ -343,7 +367,7 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
         if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
             return existing
         }
-        val updated = existing.copy(state = OutboundState.InFlight)
+        val updated = existing.claimedForAttempt()
         items[updated.id] = updated
         updated
     }
@@ -374,7 +398,6 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
                 state = OutboundState.Failed,
                 lastError = lastError,
                 lastAttemptAtMs = lastAttemptAtMs,
-                attemptCount = existing.attemptCount + 1,
             )
             items[updated.id] = updated
             updated
@@ -417,6 +440,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun itemsFor(sessionKey: String): List<OutboundItem> = emptyList()
     override fun item(id: String): OutboundItem? = null
     override fun claimNext(sessionKey: String): OutboundItem? = null
+    override fun claim(id: String): OutboundItem? = null
     override fun markInFlight(id: String): OutboundItem? = null
     override fun markUploading(id: String): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
@@ -541,7 +565,17 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             .filter { it.state == OutboundState.Queued }
             .minByOrNull { it.createdAtMs }
             ?: return null
-        val claimed = next.copy(state = OutboundState.InFlight)
+        val claimed = next.claimedForAttempt()
+        replaceAndStore(sessionKey, list, claimed)
+        claimed
+    }
+
+    override fun claim(id: String): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return null
+        val list = loadSession(sessionKey)
+        val existing = list.firstOrNull { it.id == id } ?: return null
+        if (!existing.state.isExactClaimable) return null
+        val claimed = existing.claimedForAttempt()
         replaceAndStore(sessionKey, list, claimed)
         claimed
     }
@@ -553,7 +587,7 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
             return existing
         }
-        val updated = existing.copy(state = OutboundState.InFlight)
+        val updated = existing.claimedForAttempt()
         replaceAndStore(sessionKey, list, updated)
         updated
     }
@@ -591,7 +625,6 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
                 state = OutboundState.Failed,
                 lastError = lastError,
                 lastAttemptAtMs = lastAttemptAtMs,
-                attemptCount = existing.attemptCount + 1,
             )
             replaceAndStore(sessionKey, list, updated)
             updated
@@ -620,6 +653,19 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         const val SESSION_INDEX_KEY = "@sessions"
     }
 }
+
+private val OutboundState.isExactClaimable: Boolean
+    get() = this == OutboundState.Queued || this == OutboundState.Failed
+
+private fun OutboundItem.claimedForAttempt(): OutboundItem =
+    if (state == OutboundState.InFlight) {
+        this
+    } else {
+        copy(
+            state = OutboundState.InFlight,
+            attemptCount = attemptCount + 1,
+        )
+    }
 
 /** Issue #900: prefs key for the item-blob slot of [sessionKey]. */
 internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"

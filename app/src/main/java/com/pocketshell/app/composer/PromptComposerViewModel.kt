@@ -1256,6 +1256,43 @@ public class PromptComposerViewModel @Inject constructor(
         refreshOutboundQueueItems()
     }
 
+    /**
+     * Issue #900: manually retry a durable outbound row without minting a new
+     * queue id or reading the current composer draft. The row owns the original
+     * payload and tap-time route; the existing sheet send collector still owns
+     * actual delivery and calls [markSendDelivered] / [restoreFailedSend].
+     */
+    public fun retryOutboundItem(id: String) {
+        if (_uiState.value.sendInFlight) return
+        val active = outboundQueueStore.claim(id) ?: return
+        val attachments = active.attachments.toStagedAttachments()
+        val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
+        if (text.isEmpty()) {
+            outboundQueueStore.markFailed(id, lastError = "Nothing to send")
+            refreshOutboundQueueItemsFor(active.sessionKey)
+            return
+        }
+        refreshOutboundQueueItemsFor(active.sessionKey)
+        val request = SendRequest(
+            text = text,
+            withEnter = active.withEnter,
+            cleanDraft = active.cleanText,
+            attachments = attachments,
+            sendTarget = SendTargetSnapshot(
+                sessionKey = active.sessionKey,
+                paneId = active.paneId,
+                route = active.route,
+                agentKind = active.agentKind,
+            ),
+            outboundQueueItemId = active.id,
+        )
+        _uiState.update { it.copy(sendInFlight = true, error = null) }
+        armSendWatchdog()
+        if (_sendRequests.trySend(request).isFailure) {
+            restoreFailedSend(request)
+        }
+    }
+
     private fun markOutboundSendDelivered(request: SendRequest?) {
         val id = request?.outboundQueueItemId ?: return
         outboundQueueStore.markDelivered(id)

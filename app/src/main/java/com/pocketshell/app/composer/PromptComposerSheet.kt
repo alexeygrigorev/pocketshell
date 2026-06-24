@@ -225,6 +225,9 @@ public fun PromptComposerSheet(
     // and routes back through the host's `onDismiss` lambda — that is the
     // "tap outside to dismiss" affordance D22 / #191 asked for.
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
+    // Issue #900: UI/API plumbing for manual outbound retry. Tests may override
+    // this seam, while production defaults to the owning VM.
+    onRetryOutboundItem: ((String) -> Unit)? = null,
 ) {
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
@@ -471,6 +474,7 @@ public fun PromptComposerSheet(
             outboundQueueExpanded = outboundQueueExpanded,
             onToggleOutboundQueue = { outboundQueueExpanded = !outboundQueueExpanded },
             onDeleteOutboundItem = viewModel::discardOutboundItem,
+            onRetryOutboundItem = onRetryOutboundItem ?: viewModel::retryOutboundItem,
             agentKind = agentKind,
         )
     }
@@ -581,6 +585,7 @@ internal fun SheetContent(
     outboundQueueExpanded: Boolean = false,
     onToggleOutboundQueue: () -> Unit = {},
     onDeleteOutboundItem: (String) -> Unit = {},
+    onRetryOutboundItem: (String) -> Unit = {},
     // Issue #767: detected engine for the focused pane — selects the
     // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
     // shell pane / preview, where the dropdown is never shown.
@@ -1123,6 +1128,7 @@ internal fun SheetContent(
                     expanded = outboundQueueExpanded,
                     onToggle = onToggleOutboundQueue,
                     onDelete = onDeleteOutboundItem,
+                    onRetry = onRetryOutboundItem,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -2506,8 +2512,8 @@ internal fun barEnvelopeHeightDp(index: Int): Float {
 
 /**
  * Issue #900: committed outbound prompts for the current session. This is a
- * visibility/delete surface only; delivery and retry wiring lands in the next
- * queue slice.
+ * foreground visibility/action surface only; durable retry behavior lands in
+ * the owning VM/store slice.
  */
 @Composable
 private fun OutboundQueueBanner(
@@ -2515,6 +2521,7 @@ private fun OutboundQueueBanner(
     expanded: Boolean,
     onToggle: () -> Unit,
     onDelete: (String) -> Unit,
+    onRetry: (String) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -2571,6 +2578,7 @@ private fun OutboundQueueBanner(
                 OutboundQueueRow(
                     item = item,
                     onDelete = { onDelete(item.id) },
+                    onRetry = { onRetry(item.id) },
                 )
             }
         }
@@ -2581,6 +2589,7 @@ private fun OutboundQueueBanner(
 private fun OutboundQueueRow(
     item: OutboundItem,
     onDelete: () -> Unit,
+    onRetry: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -2629,6 +2638,12 @@ private fun OutboundQueueRow(
                     primary = false,
                     onClick = onDelete,
                     modifier = Modifier.testTag(composerOutboundQueueDeleteTestTag(item.id)),
+                )
+                PendingActionButton(
+                    label = "Retry",
+                    primary = true,
+                    onClick = onRetry,
+                    modifier = Modifier.testTag(composerOutboundQueueRetryTestTag(item.id)),
                 )
             }
         }
@@ -3334,6 +3349,9 @@ internal fun composerOutboundQueueItemRowTestTag(id: String): String =
 
 internal fun composerOutboundQueueDeleteTestTag(id: String): String =
     "prompt-composer-outbound-queue-delete:$id"
+
+internal fun composerOutboundQueueRetryTestTag(id: String): String =
+    "prompt-composer-outbound-queue-retry:$id"
 
 // -- Previews -----------------------------------------------------------------
 

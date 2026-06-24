@@ -296,6 +296,7 @@ class OutboundQueueStoreTest {
         val claimed = store.claimNext("sessA")!!
         assertEquals(item.id, claimed.id)
         assertEquals(OutboundState.InFlight, claimed.state)
+        assertEquals(1, claimed.attemptCount)
         assertEquals(OutboundState.InFlight, store.item(item.id)!!.state)
 
         // Ack confirms delivery → pruned.
@@ -314,9 +315,64 @@ class OutboundQueueStoreTest {
 
         assertEquals(current.id, marked.id)
         assertEquals(OutboundState.InFlight, marked.state)
+        assertEquals(1, marked.attemptCount)
         assertEquals(OutboundState.Queued, store.item(older.id)!!.state)
         assertEquals(older.id, store.claimNext("sessA")!!.id)
         assertNull(store.claimNext("sessA"))
+    }
+
+    @Test
+    fun claimTargetsExactQueuedItemWithoutClaimingOlderQueuedRows() {
+        val store = store()
+        val older = store.enqueue("sessA", "older", createdAtMs = 1L)
+        val clicked = store.enqueue("sessA", "clicked", createdAtMs = 2L)
+
+        val claimed = store.claim(clicked.id)!!
+
+        assertEquals(clicked.id, claimed.id)
+        assertEquals(OutboundState.InFlight, claimed.state)
+        assertEquals(1, claimed.attemptCount)
+        assertEquals(OutboundState.Queued, store.item(older.id)!!.state)
+        assertEquals(older.id, store.claimNext("sessA")!!.id)
+        assertNull(store.claimNext("sessA"))
+    }
+
+    @Test
+    fun claimTargetsExactFailedItemWithoutClaimingOlderQueuedRows() {
+        val store = store()
+        val older = store.enqueue("sessA", "older", createdAtMs = 1L)
+        val clicked = store.enqueue("sessA", "clicked", createdAtMs = 2L)
+        store.claim(clicked.id)
+        val failed = store.markFailed(clicked.id, "lost")!!
+        assertEquals(1, failed.attemptCount)
+
+        val retry = store.claim(clicked.id)!!
+
+        assertEquals(clicked.id, retry.id)
+        assertEquals(OutboundState.InFlight, retry.state)
+        assertEquals(2, retry.attemptCount)
+        assertEquals(OutboundState.Queued, store.item(older.id)!!.state)
+        assertEquals(older.id, store.claimNext("sessA")!!.id)
+        assertNull(store.claimNext("sessA"))
+    }
+
+    @Test
+    fun claimReturnsNullForUnknownDeliveredUploadingAndInFlightItems() {
+        val store = store()
+        assertNull(store.claim("missing"))
+
+        val delivered = store.enqueue("sessA", "delivered")
+        store.claim(delivered.id)
+        store.markDelivered(delivered.id)
+        assertNull(store.claim(delivered.id))
+
+        val uploading = store.enqueue("sessA", "uploading")
+        store.markUploading(uploading.id)
+        assertNull(store.claim(uploading.id))
+
+        val inFlight = store.enqueue("sessA", "in flight")
+        store.claim(inFlight.id)
+        assertNull(store.claim(inFlight.id))
     }
 
     @Test
@@ -334,10 +390,10 @@ class OutboundQueueStoreTest {
     }
 
     @Test
-    fun markFailedKeepsItemVisibleAndBumpsAttemptCount() {
+    fun markFailedKeepsItemVisibleAndPreservesClaimAttemptCount() {
         val store = store()
         val item = store.enqueue("sessA", "keep me on failure")
-        store.claimNext("sessA")
+        assertEquals(1, store.claimNext("sessA")!!.attemptCount)
 
         val failed = store.markFailed(item.id, "ack timeout")!!
         assertEquals(OutboundState.Failed, failed.state)
@@ -347,10 +403,11 @@ class OutboundQueueStoreTest {
         // Still present (never silently dropped).
         assertEquals(1, store.itemsFor("sessA").size)
 
-        // A second failure bumps the attempt count again.
+        // A second claimed attempt bumps the attempt count again; recording the
+        // failure does not double-count that same attempt.
         store.claimNext("sessA") // nothing queued now, so re-arm first
         store.enqueueExisting(store.item(item.id)!!) // Failed → Queued
-        store.claimNext("sessA")
+        assertEquals(2, store.claimNext("sessA")!!.attemptCount)
         val failedAgain = store.markFailed(item.id, "dropped")!!
         assertEquals(2, failedAgain.attemptCount)
     }

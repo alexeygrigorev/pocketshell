@@ -20,7 +20,8 @@ import org.junit.runner.RunWith
 /**
  * Issue #900: connected proof for the foreground outbound queue surface.
  * The store/VM tests own persistence and target filtering; this test pins the
- * actual composer UI affordances: collapsed count, expanded rows, and delete.
+ * actual composer UI affordances: collapsed count, expanded rows, delete, and
+ * manual retry callbacks.
  */
 @RunWith(AndroidJUnit4::class)
 class PromptComposerOutboundQueueTest {
@@ -29,7 +30,7 @@ class PromptComposerOutboundQueueTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun outboundQueueRendersExpandedRowsAndDeleteCallback() {
+    fun outboundQueueRendersExpandedRowsAndDeleteRetryCallbacks() {
         val item = OutboundItem(
             id = "queued-1",
             sessionKey = "1/a",
@@ -39,6 +40,7 @@ class PromptComposerOutboundQueueTest {
             createdAtMs = System.currentTimeMillis(),
         )
         val deletedIds = mutableListOf<String>()
+        val retriedIds = mutableListOf<String>()
 
         compose.setContent {
             PocketShellTheme {
@@ -53,6 +55,7 @@ class PromptComposerOutboundQueueTest {
                     outboundQueueExpanded = expanded,
                     onToggleOutboundQueue = { expanded = !expanded },
                     onDeleteOutboundItem = { deletedIds += it },
+                    onRetryOutboundItem = { retriedIds += it },
                 )
             }
         }
@@ -67,17 +70,61 @@ class PromptComposerOutboundQueueTest {
         compose.onNodeWithText("1 attachment").assertIsDisplayed()
 
         compose.onNodeWithTag(composerOutboundQueueDeleteTestTag(item.id)).performClick()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(item.id)).performClick()
         compose.waitForIdle()
         assertEquals(listOf(item.id), deletedIds)
+        assertEquals(listOf(item.id), retriedIds)
     }
 
     @Test
-    fun outboundQueueActiveRowsStayVisibleWithoutDeleteControl() {
+    fun outboundQueueFailedRowsExposeRetryCallback() {
+        val item = OutboundItem(
+            id = "failed-1",
+            sessionKey = "1/a",
+            cleanText = "send after reconnect",
+            state = OutboundState.Failed,
+            lastError = "connection lost",
+            createdAtMs = System.currentTimeMillis(),
+        )
+        val retriedIds = mutableListOf<String>()
+
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(),
+                    onClose = {},
+                    onDraftChange = {},
+                    onMicTap = {},
+                    onSend = {},
+                    outboundQueueItems = listOf(item),
+                    outboundQueueExpanded = true,
+                    onRetryOutboundItem = { retriedIds += it },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(item.id)).assertIsDisplayed()
+        compose.onNodeWithText("Failed — connection lost").assertIsDisplayed()
+
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(item.id)).performClick()
+        compose.waitForIdle()
+        assertEquals(listOf(item.id), retriedIds)
+    }
+
+    @Test
+    fun outboundQueueActiveRowsStayVisibleWithoutRetryOrDeleteControls() {
         val inFlight = OutboundItem(
             id = "in-flight-1",
             sessionKey = "1/a",
             cleanText = "already sending",
             state = OutboundState.InFlight,
+            createdAtMs = System.currentTimeMillis(),
+        )
+        val uploading = OutboundItem(
+            id = "uploading-1",
+            sessionKey = "1/a",
+            cleanText = "uploading first",
+            state = OutboundState.Uploading,
             createdAtMs = System.currentTimeMillis(),
         )
 
@@ -89,7 +136,7 @@ class PromptComposerOutboundQueueTest {
                     onDraftChange = {},
                     onMicTap = {},
                     onSend = {},
-                    outboundQueueItems = listOf(inFlight),
+                    outboundQueueItems = listOf(inFlight, uploading),
                     outboundQueueExpanded = true,
                 )
             }
@@ -98,5 +145,11 @@ class PromptComposerOutboundQueueTest {
         compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(inFlight.id)).assertIsDisplayed()
         compose.onNodeWithText("Sending").assertIsDisplayed()
         compose.onNodeWithTag(composerOutboundQueueDeleteTestTag(inFlight.id)).assertDoesNotExist()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(inFlight.id)).assertDoesNotExist()
+
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(uploading.id)).assertIsDisplayed()
+        compose.onNodeWithText("Uploading attachments").assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueDeleteTestTag(uploading.id)).assertDoesNotExist()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(uploading.id)).assertDoesNotExist()
     }
 }

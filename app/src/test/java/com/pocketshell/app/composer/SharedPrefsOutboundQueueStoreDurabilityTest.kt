@@ -69,6 +69,7 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
         val afterRestart = newStore()
         val reloaded = afterRestart.item(item.id)!!
         assertEquals(OutboundState.InFlight, reloaded.state)
+        assertEquals(1, reloaded.attemptCount)
         // A reconnect-triggered flush after restart must NOT re-claim it.
         assertNull(afterRestart.claimNext("sessA"))
     }
@@ -83,9 +84,34 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
 
         val afterRestart = newStore()
         assertEquals(OutboundState.Queued, afterRestart.item(older.id)!!.state)
-        assertEquals(OutboundState.InFlight, afterRestart.item(current.id)!!.state)
+        val currentAfterRestart = afterRestart.item(current.id)!!
+        assertEquals(OutboundState.InFlight, currentAfterRestart.state)
+        assertEquals(1, currentAfterRestart.attemptCount)
         assertEquals(older.id, afterRestart.claimNext("sessA")!!.id)
         assertNull(afterRestart.claimNext("sessA"))
+    }
+
+    @Test
+    fun exactClaimOfFailedItemSurvivesRestartWithoutClaimingOlderRows() {
+        val first = newStore()
+        val older = first.enqueue("sessA", "older", createdAtMs = 1L)
+        val clicked = first.enqueue("sessA", "clicked failed", createdAtMs = 2L)
+        first.claim(clicked.id)
+        first.markFailed(clicked.id, "link dropped")
+
+        val afterFailureRestart = newStore()
+        val retried = afterFailureRestart.claim(clicked.id)!!
+        assertEquals(clicked.id, retried.id)
+        assertEquals(OutboundState.InFlight, retried.state)
+        assertEquals(2, retried.attemptCount)
+        assertEquals(OutboundState.Queued, afterFailureRestart.item(older.id)!!.state)
+
+        val afterClaimRestart = newStore()
+        val persistedRetry = afterClaimRestart.item(clicked.id)!!
+        assertEquals(OutboundState.InFlight, persistedRetry.state)
+        assertEquals(2, persistedRetry.attemptCount)
+        assertEquals(older.id, afterClaimRestart.claimNext("sessA")!!.id)
+        assertNull(afterClaimRestart.claim(clicked.id))
     }
 
     @Test

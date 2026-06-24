@@ -34,7 +34,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -87,18 +86,6 @@ class EmulatorWorkflowE2eTest {
 
     @Test
     fun realAppTmuxJourneyAttachesSessionAndAcceptsTerminalInput() = runBlocking {
-        // STOPGAP — tracked in #207. The CI emulator has been failing this
-        // tmux-attach journey on every push since recent merges. Symptom
-        // is an assertion failure ("expected visible terminal text for
-        // tmux input effect, got: ...") rather than a crash, and the
-        // test still passes locally. Gate the test on CI so the main
-        // branch CI signal returns to green while the real root cause is
-        // investigated in parallel under #207. Same skip pattern as #132
-        // (a4ccbff).
-        Assume.assumeFalse(
-            "STOPGAP for #207 — passes locally, fails intermittently on CI; root cause under investigation.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
         // #134 / #139: this test was previously skipped on CI because the typed
         // command in sendCommandThroughTerminalInput() wraps at the Compose
         // grid width after #102's resize-window propagation, breaking the

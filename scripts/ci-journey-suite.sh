@@ -520,6 +520,13 @@ JOURNEY_CLASSES=(
   # and does NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.ComposerAlwaysPresentSwitchJourneyE2eTest"
+  # ADDED (#848): the real-app tmux workflow attach/input proof. The old #207
+  # CI stopgap is stale: this method already uses the wrap-tolerant terminal
+  # matcher added for #134/#139, so its typed-command assertion no longer needs a
+  # CI self-skip. It uses ONLY the deterministic agents:2222 fixture that
+  # tests.yml already starts and is targeted by method so this historical
+  # workflow proof becomes per-push evidence without broadening the class.
+  "$FQCN_PREFIX.EmulatorWorkflowE2eTest#realAppTmuxJourneyAttachesSessionAndAcceptsTerminalInput"
   # ADDED (#778/#848): tapping Conversation while live detection is still null
   # must be honoured, not swallowed. This connected proof uses a plain-shell
   # pane against the deterministic agents:2222 fixture and asserts the VM records
